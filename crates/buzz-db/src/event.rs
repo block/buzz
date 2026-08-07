@@ -789,7 +789,8 @@ pub async fn soft_delete_event(
 }
 
 /// Soft-delete the live row for an addressable coordinate
-/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key.
+/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
+/// newer than the deletion request.
 ///
 /// Used by `handle_a_tag_deletion` to honour NIP-09 a-tag deletions for any
 /// parameterized-replaceable kind. The WHERE clause mirrors
@@ -797,23 +798,45 @@ pub async fn soft_delete_event(
 /// `channel_id` is intentionally NOT in the key (NIP-33 replacement is global
 /// per the spec — `channel_id` is stored for query scoping, not identity).
 ///
+/// `deletion_created_at_secs` is the deletion event's own `created_at`. NIP-09
+/// scopes an `a`-tag deletion to versions at or before that instant, so a
+/// delayed or replayed tombstone signed between two versions must not erase the
+/// newer replacement. `events.created_at` is immutable per row, so the predicate
+/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
+/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
+/// the deletion and lands with a later `created_at` is always spared.
+///
+/// This does NOT guarantee deletion completeness when a same-coordinate
+/// replacement races the deletion: the deletion may evaluate its predicate before
+/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
+/// outcome is state-identical to the deletion having arrived first (old head
+/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
+/// the order of concurrent writes from different signers, and even same-signer
+/// ordering is advisory. The return value feeds only a debug log, not a
+/// correctness gate.
+///
 /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
-/// (already deleted, or never existed).
+/// (already deleted, never existed, or strictly newer than the deletion).
 pub async fn soft_delete_by_coordinate(
     pool: &PgPool,
     community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
     d_tag: &str,
+    deletion_created_at_secs: i64,
 ) -> Result<bool> {
+    let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+         AND created_at <= $5",
     )
     .bind(community_id.as_uuid())
     .bind(kind)
     .bind(pubkey)
     .bind(d_tag)
+    .bind(deletion_created_at)
     .execute(pool)
     .await?;
 
@@ -1518,7 +1541,7 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1918,6 +1941,42 @@ mod tests {
             ])
             .sign_with_keys(keys)
             .expect("sign reaction event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_stores_wrapped_max_shortcode() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("long custom emoji target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let emoji = format!(":{}:", "a".repeat(64));
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), &emoji);
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor.public_key().to_bytes(),
+            &emoji,
+        )
+        .await
+        .expect("store wrapped 64-character shortcode");
+
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+        assert_eq!(emoji.chars().count(), 66);
     }
 
     #[tokio::test]

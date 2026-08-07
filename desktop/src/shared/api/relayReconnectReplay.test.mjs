@@ -3,11 +3,13 @@ import test from "node:test";
 
 import {
   buildReconnectReplayFilter,
+  PAGE_REPLAY_MAX_ATTEMPTS,
   replayLiveSubscriptions,
   REPLAY_BATCH_SIZE,
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
+import { prepareSubscriptionEvent } from "./relayClosedRecovery.ts";
 
 // ── Fake-timer + Date.now setup for gate tests ────────────────────────────────
 
@@ -597,6 +599,254 @@ test("batch-1 arms gate mid-replay: batch-2 is withheld until gate expires", asy
     batch2Ids.length,
     1,
     "batch 2 must send the remaining sub after the gate expires",
+  );
+});
+
+// ── Backfill failure containment ─────────────────────────────────────────────
+
+test("history backfill rejection never escapes replayLiveSubscriptions", async () => {
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter,
+        onEvent: () => {},
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+  ]);
+
+  let historyCalls = 0;
+  // Must resolve — a rejection here is the socket-killing flap regression.
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      historyCalls++;
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+
+  assert.equal(
+    historyCalls,
+    PAGE_REPLAY_MAX_ATTEMPTS,
+    "backfill must retry a bounded number of times, then degrade",
+  );
+});
+
+test("backfill retry waits out the armed gate, then succeeds", async () => {
+  resetGate(0);
+  const delivered = [];
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter,
+        onEvent: (event) => delivered.push(event),
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+  ]);
+
+  const attemptAtMs = [];
+  let armGate;
+  const gateArmed = new Promise((resolve) => {
+    armGate = resolve;
+  });
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      attemptAtMs.push(fakeNow);
+      if (attemptAtMs.length === 1) {
+        // Mirror relayClosedRecovery: the CLOSED handler arms the gate
+        // before rejecting the history promise.
+        activateRateLimit(4);
+        armGate();
+        throw new Error("rate-limited: quota exceeded; retry in 4s");
+      }
+      return [event("recovered", 1500)];
+    },
+  });
+
+  // Wait until the gate is actually armed, then expire it. The retry loop is
+  // (or will be) suspended in waitForRateLimit; expiring the gate releases it.
+  await gateArmed;
+  tickTo(4_001);
+  await replayPromise;
+
+  assert.equal(attemptAtMs.length, 2, "one failure, one retry");
+  assert.ok(
+    attemptAtMs[1] >= 4_001,
+    "retry must not fire before the rate-limit gate expires",
+  );
+  assert.deepEqual(
+    delivered.map((e) => e.id),
+    ["recovered"],
+    "the retried backfill must deliver its events",
+  );
+});
+
+test("backfill retry aborts when the subscription was replaced", async () => {
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  let historyCalls = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      historyCalls++;
+      // Simulate the subscription being torn down while the REQ is in flight.
+      subscriptions.delete("live-1");
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+
+  assert.equal(
+    historyCalls,
+    1,
+    "no retry may target a subscription that no longer exists",
+  );
+});
+
+test("exhausted backfill pins the floor: next replay still requests the original window after live events advance the cursor", async () => {
+  // The blocking review scenario on PR #4990: cursor=1000, all backfill
+  // attempts fail, a live event at 2100 then advances lastSeenCreatedAt via
+  // prepareSubscriptionEvent. Without the pinned floor, the next reconnect
+  // would start near 2095 and silently skip 1001..1999.
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  // Reconnect 1: every backfill attempt is rate-limited.
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+  assert.equal(
+    subscription.pendingReplaySince,
+    995,
+    "exhausted backfill must pin the unresolved window's lower bound",
+  );
+
+  // A live event arrives through the normal cursor path.
+  prepareSubscriptionEvent(subscription, event("live-newer", 2100));
+  assert.equal(subscription.lastSeenCreatedAt, 2100);
+
+  // Reconnect 2: backfill now succeeds. It must request the ORIGINAL window.
+  const historyFilters = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2200,
+    sendRaw: async () => {},
+    requestHistory: async (filter) => {
+      historyFilters.push(filter);
+      return [];
+    },
+  });
+
+  assert.equal(historyFilters.length, 1);
+  assert.equal(
+    historyFilters[0].since,
+    995,
+    "replay must start from the pinned floor, not the advanced cursor",
+  );
+  assert.equal(
+    subscription.pendingReplaySince,
+    undefined,
+    "a completed backfill must clear the pinned floor",
+  );
+
+  // Reconnect 3: with the floor cleared, replay returns to the cursor.
+  const laterFilters = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2300,
+    sendRaw: async () => {},
+    requestHistory: async (filter) => {
+      laterFilters.push(filter);
+      return [];
+    },
+  });
+  assert.equal(
+    laterFilters[0].since,
+    2095,
+    "after recovery the cursor governs again",
+  );
+});
+
+test("in-flight stale abort keeps the pinned floor for the superseding connection", async () => {
+  // Race from re-review of b70a6716d/c493d378b: production supersession bumps
+  // the connection GENERATION while the same subscription key and object
+  // survive in the map. The identity guard alone stays true, so only the
+  // combined guard (outer isActive && identity) aborts the stale pass. That
+  // abort must NOT count as completion — the pinned floor belongs to the
+  // superseding connection's replay.
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  let generationActive = true;
+  let historyCalls = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    isActive: () => generationActive,
+    requestHistory: async () => {
+      historyCalls++;
+      // Connection A is superseded while the REQ is in flight: the generation
+      // advances, but the subscription keeps its key AND object identity —
+      // exactly what production supersession does.
+      generationActive = false;
+      // A full page would otherwise continue paging — the post-await
+      // combined guard must abort instead.
+      return eventRange("full", 1001, 500);
+    },
+  });
+
+  assert.equal(historyCalls, 1, "stale generation must stop paging");
+  assert.equal(
+    subscriptions.get("live-1"),
+    subscription,
+    "precondition: key and object survive supersession untouched",
+  );
+  assert.equal(
+    subscription.pendingReplaySince,
+    995,
+    "a stale-generation abort must not clear the floor the new connection needs",
   );
 });
 

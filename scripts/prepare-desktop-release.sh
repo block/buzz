@@ -71,9 +71,9 @@ cat >"$body" <<EOF
 - **Previous desktop release:** \`$previous_tag\`
 - **Proposed immutable tag:** \`desktop-v$version\`
 
-This PR must be merged with **Create a merge commit**. Squash/rebase, stale-head approval, incomplete notes, or a candidate mismatch produce no tag.
+This PR may be **squash merged** after the Desktop Release Candidate check and all protected-branch checks pass. Merging authorizes publication of the exact reviewed candidate; later or unrelated changes on \`main\` cannot alter it.
 
-The checked-in changelog accounts for every non-merge commit in the release range. Publication remains bound to the immutable candidate tag.
+The checked-in changelog accounts for every non-merge commit in the release range. The Desktop tag points to the reviewed candidate commit, not the later squash commit. Publication remains bound to that immutable candidate tag.
 EOF
 if existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" && [[ -n "$existing" ]]; then
   gh pr edit "$existing" --title "chore(release): release Buzz Desktop version $version" --body-file "$body"

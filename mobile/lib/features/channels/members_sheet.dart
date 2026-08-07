@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../profile/user_status.dart';
@@ -50,7 +51,7 @@ class MembersSheet extends HookConsumerWidget {
       navigator.pop();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!navigator.mounted) return;
-        showModalBottomSheet<void>(
+        showBuzzModalBottomSheet<void>(
           context: navigator.context,
           isScrollControlled: true,
           showDragHandle: true,
@@ -302,7 +303,7 @@ class _MemberTile extends ConsumerWidget {
               ? profile!.displayName!.trim()
               : member.labelFor(currentPubkey));
     final canChangeRole = showManagementActions && !member.isBot;
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
@@ -360,7 +361,7 @@ class _MemberTile extends ConsumerWidget {
                 ),
                 onTap: () async {
                   Navigator.of(context).pop();
-                  final confirmed = await showDialog<bool>(
+                  final confirmed = await showBuzzDialog<bool>(
                     context: context,
                     builder: (context) => AlertDialog(
                       title: const Text('Remove member'),

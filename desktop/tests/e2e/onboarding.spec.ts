@@ -202,8 +202,23 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   const bannerBox = await banner.boundingBox();
   const personaMentionBox = await personaMention.boundingBox();
   const composerBox = await composer.boundingBox();
+  const dockBackdropBox = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .boundingBox();
+  const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const guidanceBackdrop = page.getByTestId(
+    "welcome-composer-guidance-backdrop",
+  );
+  const guidanceBackdropBox = await guidanceBackdrop.boundingBox();
 
-  if (!bannerBox || !personaMentionBox || !composerBox) {
+  if (
+    !bannerBox ||
+    !personaMentionBox ||
+    !composerBox ||
+    !dockBackdropBox ||
+    !guidanceBackdropBox
+  ) {
     throw new Error("Could not measure welcome composer banner layout");
   }
 
@@ -212,20 +227,72 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
   expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
+  expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
+  expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
+  expect(
+    Math.abs(
+      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
+    ),
+  ).toBeLessThanOrEqual(1);
+  const [guidanceZIndex, backdropZIndex] = await Promise.all([
+    guidanceLayer.evaluate((element) =>
+      Number(window.getComputedStyle(element).zIndex),
+    ),
+    page
+      .getByTestId("composer-dock-backdrop")
+      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
+  ]);
+  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  expect(
+    await page
+      .getByTestId("channel-composer-overlay")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(1);
+  expect(
+    await page
+      .getByTestId("composer-dock-backdrop")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(0);
 
   const radii = await banner.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
+      backdropFilter: styles.backdropFilter,
+      backgroundColor: styles.backgroundColor,
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
+      filter: styles.filter,
+      zIndex: styles.zIndex,
       topLeft: styles.borderTopLeftRadius,
       topRight: styles.borderTopRightRadius,
+      transform: styles.transform,
+      willChange: styles.willChange,
     };
   });
+  const composerBackgroundColor = await composer.evaluate(
+    (element) => window.getComputedStyle(element).backgroundColor,
+  );
+  const dockBackdropFilter = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .evaluate((element) => window.getComputedStyle(element).backdropFilter);
+  const guidanceBackdropFilter = await guidanceBackdrop.evaluate(
+    (element) => window.getComputedStyle(element).backdropFilter,
+  );
 
   expect(radii.topLeft).toBe(radii.topRight);
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
+  expect(radii.backdropFilter).toBe("none");
+  expect(radii.backgroundColor).not.toBe(composerBackgroundColor);
+  expect(dockBackdropFilter).not.toBe("none");
+  expect(guidanceBackdropFilter).toBe(dockBackdropFilter);
+  expect(radii.filter).toBe("none");
+  expect(radii.transform).toBe("none");
+  expect(radii.willChange).toBe("auto");
+  expect(radii.zIndex).toBe("1");
   expect(personaMentionBox.width).toBeGreaterThan(0);
 }
 
@@ -250,6 +317,12 @@ async function expectWelcomePersonaMention(page: Page) {
       .getByTestId("welcome-composer-persona-character")
       .count(),
   ).toBeGreaterThanOrEqual(4);
+  expect(
+    await personaMention
+      .getByTestId("welcome-composer-persona-character")
+      .first()
+      .evaluate((element) => window.getComputedStyle(element).filter),
+  ).toBe("none");
 
   const transition = await personaMention.evaluate((element) => {
     const styles = window.getComputedStyle(element);
@@ -369,6 +442,11 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
 ) {
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const channelIntro = page.getByTestId("message-channel-intro");
+  const composer = page.getByTestId("message-composer");
+  const initialComposerBox = await composer.boundingBox();
+  if (!initialComposerBox) {
+    throw new Error("Could not measure the Welcome composer");
+  }
 
   await page.getByTestId("message-input").fill("Thanks @Fizz");
   await page.getByTestId("send-message").click();
@@ -387,6 +465,17 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
   await expect(channelIntro).toBeVisible();
+  const completeComposerBox = await composer.boundingBox();
+  expect(completeComposerBox).not.toBeNull();
+  expect(
+    Math.abs((completeComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
+  await expect(banner).toHaveCount(0, { timeout: 6_000 });
+  const hiddenComposerBox = await composer.boundingBox();
+  expect(hiddenComposerBox).not.toBeNull();
+  expect(
+    Math.abs((hiddenComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
 }
 
 async function getMockChannels(page: Page) {
@@ -604,6 +693,99 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
+test("fresh existing-identity path leads with private-key recovery", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Paste your private key to sign in to Buzz."),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-file-button")).toHaveText(
+    "backup file",
+  );
+  await expect(page.getByTestId("nostr-import-phone-link")).toHaveText(
+    "recover from your phone",
+  );
+  await expect(page.getByTestId("identity-recovery-pairing")).toHaveCount(0);
+
+  await page.getByTestId("nostr-import-file-button").click();
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  await expect(backupDialog).toBeVisible();
+  await expect(
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+  const unlockPreview = backupDialog.getByTestId("backup-file-unlock-preview");
+  await expect(unlockPreview).toBeVisible();
+  await expect(unlockPreview.locator("span")).toHaveCount(17);
+  await expect(
+    unlockPreview.getByTestId("backup-file-key-dots").locator("span"),
+  ).toHaveCount(9);
+  await expect(
+    unlockPreview.getByTestId("backup-file-unlock-preview-icon"),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-drop"),
+  ).toHaveCount(0);
+  await backupDialog
+    .getByTestId("nostr-import-backup-picker")
+    .evaluate((element) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(
+        new File(["backup"], "identity.ncryptsec", { type: "text/plain" }),
+      );
+      element.dispatchEvent(
+        new DragEvent("dragenter", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        }),
+      );
+    });
+  const backupDrop = backupDialog.getByTestId("nostr-import-backup-drop");
+  await expect(backupDrop).toHaveAttribute("data-dragging", "true");
+  await expect(backupDrop).toContainText("Drop your backup file here");
+  const [backupDropBox, backupFileSectionBox] = await Promise.all([
+    backupDrop.boundingBox(),
+    unlockPreview.boundingBox(),
+  ]);
+  expect(backupDropBox?.width).toBeGreaterThan(
+    backupFileSectionBox?.width ?? 0,
+  );
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+  await backupDrop.evaluate((element) => {
+    element.dispatchEvent(
+      new DragEvent("dragleave", { bubbles: true, cancelable: true }),
+    );
+  });
+  await expect(backupDrop).toHaveCount(0);
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await backupDialog.getByRole("button", { name: "Close" }).click();
+
+  await page.getByTestId("nostr-import-phone-link").click();
+  const phoneDialog = page.getByTestId("phone-recovery-dialog");
+  await expect(phoneDialog).toBeVisible();
+  await expect(
+    phoneDialog.getByRole("heading", { name: "Use your Buzz identity" }),
+  ).toBeVisible();
+  await expect(phoneDialog.getByTestId("identity-recovery-qr")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+});
+
 test("first-launch key import continues to machine setup", async ({ page }) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
@@ -691,8 +873,10 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   // exactly the identity.ncryptsec our own save dialog produced. The accept
   // attribute is asserted explicitly because setInputFiles bypasses it — the
   // OS picker is what filters on it in real use.
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  const fileInput = page.getByTestId("nostr-import-file-input");
+  await page.getByTestId("nostr-import-file-button").click();
+  const fileInput = page
+    .getByTestId("backup-recovery-dialog")
+    .getByTestId("nostr-import-file-input");
   await expect(fileInput).toHaveAttribute(
     "accept",
     ".key,.ncryptsec,text/plain",
@@ -703,44 +887,87 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     mimeType: "text/plain",
     name: "not-a-backup.txt",
   });
-  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
-    /too large to be a key backup/i,
-  );
+  await expect(
+    page
+      .getByTestId("backup-recovery-dialog")
+      .getByTestId("nostr-import-feedback"),
+  ).toContainText(/too large to be a key backup/i);
 
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+  // File contents advance to the password stage inside the same dialog.
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  const backupFileSection = backupDialog.getByTestId(
+    "nostr-import-backup-file-section",
+  );
+  const backupFileSectionHeight = await backupFileSection.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).height),
+  );
+  expect(backupFileSectionHeight).toBe(312);
+  const backupPicker = backupDialog.getByTestId("nostr-import-backup-picker");
+  await backupPicker.evaluate((element) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["backup"], "identity.ncryptsec", { type: "text/plain" }),
+    );
+    element.dispatchEvent(
+      new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  });
+  const backupDrop = backupDialog.getByTestId("nostr-import-backup-drop");
+  await expect(backupDrop).toBeVisible();
+  await backupDrop.evaluate((element, contents) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File([contents], "identity.ncryptsec", { type: "text/plain" }),
+    );
+    element.dispatchEvent(
+      new DragEvent("drop", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  }, `${mockNcryptsec}\n`);
+
+  await expect(
+    backupDialog.getByTestId("backup-password-timeline"),
+  ).toBeVisible();
+  const passphraseSection = backupDialog.getByTestId(
+    "nostr-import-passphrase-section",
+  );
+  await expect(passphraseSection).toBeVisible();
+  const passphraseSectionHeight = await passphraseSection.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).height),
+  );
+  expect(passphraseSectionHeight).toBe(backupFileSectionHeight);
+  await expect(
+    backupDialog.getByTestId("nostr-import-passphrase"),
+  ).toBeFocused();
+
+  // Back first returns to backup-file selection instead of closing the dialog.
+  await backupDialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+
   await fileInput.setInputFiles({
     buffer: Buffer.from(`${mockNcryptsec}\n`),
     mimeType: "text/plain",
     name: "identity.ncryptsec",
   });
-
-  // File contents advance to the same focused password stage as manual input.
-  await expect(
-    page.getByRole("heading", { name: "Unlock your account" }),
-  ).toBeVisible();
-  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
-
-  // Back first returns to key/file selection instead of leaving import.
-  await page.getByRole("button", { name: "Back", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
-  ).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-nsec-input")).toHaveValue("");
-
-  await fileInput.setInputFiles({
-    buffer: Buffer.from(`${mockNcryptsec}\n`),
-    mimeType: "text/plain",
-    name: "identity.ncryptsec",
-  });
-  await page
+  await backupDialog
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
-  await page.getByTestId("nostr-import-submit").click();
+  await backupDialog.getByTestId("nostr-import-submit").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
@@ -2758,27 +2985,6 @@ test("first-run onboarding keeps the shell hidden and lands on private Welcome a
   await expectWelcomeGuideIntro(page);
 });
 
-function retryToast(page: Page, title: string) {
-  return page
-    .locator("[data-sonner-toast][data-removed='false']")
-    .filter({ hasText: title });
-}
-
-async function retryToastAction(
-  page: Page,
-  { command, title }: { command: string; title: string },
-) {
-  const activeToast = retryToast(page, title);
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-  const before = await commandCount(page, command);
-  await activeToast
-    .getByRole("button", { name: "Retry" })
-    .dispatchEvent("click");
-  await expect.poll(() => commandCount(page, command)).toBeGreaterThan(before);
-}
-
 async function commandCount(page: Page, command: string) {
   return page.evaluate(
     (target) =>
@@ -2788,16 +2994,14 @@ async function commandCount(page: Page, command: string) {
   );
 }
 
-test("failed starter channel retries recreate actionable toasts", async ({
+test("failed public starter channel setup does not show a retry toast", async ({
   page,
 }) => {
   const starterError = "Mock starter channel setup failed.";
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError, starterError],
-    },
+    { ensureStarterChannelsErrors: [starterError, starterError] },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -2806,45 +3010,12 @@ test("failed starter channel retries recreate actionable toasts", async ({
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
-  const title = "Couldn't set up starter channels";
-  const activeToast = retryToast(page, title);
-  await expect(activeToast).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(activeToast).toContainText(starterError);
   await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-});
-
-test("successful starter channel retry clears its actionable toast", async ({
-  page,
-}) => {
-  const starterError = "Mock starter channel setup failed.";
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError],
-    },
-    { skipOnboardingSeed: true },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await completeProfileOnboarding(page);
-
-  const title = "Couldn't set up starter channels";
-  await expect(retryToast(page, title)).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(retryToast(page, title)).toHaveCount(0);
-  await expectWelcomeView(page);
-  await expectStarterChannels(page);
+    page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Couldn't set up starter channels" }),
+  ).toHaveCount(0);
+  expect(await commandCount(page, "ensure_starter_channels")).toBe(2);
 });
 
 test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {

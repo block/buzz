@@ -39,7 +39,7 @@ class _MembersButton extends ConsumerWidget {
     return IconButton(
       color: context.colors.primary,
       onPressed: () {
-        showModalBottomSheet<void>(
+        showBuzzModalBottomSheet<void>(
           context: context,
           isScrollControlled: true,
           showDragHandle: true,

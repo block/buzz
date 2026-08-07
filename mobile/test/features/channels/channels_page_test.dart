@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
@@ -12,7 +14,7 @@ import 'package:buzz/features/channels/channel_sections/channel_sections_provide
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -22,6 +24,8 @@ import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 void main() {
@@ -34,6 +38,9 @@ void main() {
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
+    Gradient? topSectionGradient,
+    ValueChanged<double>? onSettingsTransitionProgress,
+    ValueListenable<int>? tabReselection,
   }) {
     return ProviderScope(
       overrides: [
@@ -50,7 +57,7 @@ void main() {
         ...overrides,
       ],
       child: MaterialApp(
-        theme: AppTheme.light(),
+        theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
@@ -60,10 +67,15 @@ void main() {
           ),
           child: child!,
         ),
-        home: const Stack(
+        home: Stack(
           children: [
-            ChannelsPage(settingsPageBuilder: _buildSettingsPage),
-            Positioned.fill(
+            ChannelsPage(
+              settingsPageBuilder: _buildSettingsPage,
+              onSettingsTransitionProgress:
+                  onSettingsTransitionProgress ?? (_) {},
+              tabReselection: tabReselection,
+            ),
+            const Positioned.fill(
               child: ChannelQuickActionsLauncher(
                 visible: true,
                 navigationBarHeight: 60,
@@ -135,15 +147,89 @@ void main() {
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+    expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
+    expect(find.byTooltip('DMs options'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Channels options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sort: Recent'), findsOneWidget);
+    expect(find.text('Sort: A–Z'), findsOneWidget);
+    final popover = find.byKey(const ValueKey('sort-popover-Channels'));
+    expect(popover, findsOneWidget);
+    expect(
+      find.descendant(of: popover, matching: find.byType(PopupMenuDivider)),
+      findsNothing,
+    );
+    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
+    expect(selectedCheck, findsOneWidget);
+    expect(
+      tester.getCenter(selectedCheck).dx,
+      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
+    );
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));
       expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
       expect(text.style?.height, contentListTitleTextStyle.height);
+      expect(
+        text.style?.color,
+        Theme.of(
+          tester.element(find.text(label)),
+        ).colorScheme.onSurface.withValues(alpha: 0.8),
+      );
     }
+    final channelIcon = tester.widget<Icon>(
+      find.byKey(const ValueKey('channel-icon-1')),
+    );
+    expect(
+      channelIcon.color,
+      Theme.of(
+        tester.element(find.byKey(const ValueKey('channel-icon-1'))),
+      ).colorScheme.onSurface.withValues(alpha: 0.8),
+    );
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('sizes the community header for accessible text', (tester) async {
+    await tester.pumpWidget(
+      buildTestable(
+        textScaler: const TextScaler.linear(2),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester
+          .getSize(
+            find.descendant(
+              of: find.byType(FrostedAppBar).last,
+              matching: find.byType(ClipRect),
+            ),
+          )
+          .height,
+      closeTo(
+        frostedAppBarHeight(
+              tester.element(find.byType(FrostedAppBar).last),
+              titleStyle: titleStyle,
+              bottomHeight: appBar.bottomHeight,
+            ) -
+            1,
+        0.01,
+      ),
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('keeps the last channel above the floating tab bar', (
@@ -167,6 +253,149 @@ void main() {
       ),
     );
     expect((padding.padding as EdgeInsets).bottom, footerClearance);
+  });
+
+  testWidgets('balances an expanded section around its following divider', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final lastChannel = tester.getRect(find.text('general'));
+    final divider = tester.getRect(find.byType(Divider).last);
+    final nextSectionHeader = tester.getRect(find.text('DMs'));
+
+    expect(
+      divider.top - lastChannel.bottom,
+      closeTo(nextSectionHeader.top - divider.bottom, 0.01),
+    );
+  });
+
+  testWidgets('keeps the Buzz background fixed behind the channels list', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        topSectionGradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.yellow, Colors.blue],
+        ),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+      findsOneWidget,
+    );
+    expect(find.byType(DecoratedSliver), findsNothing);
+    final gradientBackground = tester.widget<DecoratedBox>(
+      find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+    );
+    final gradient =
+        (gradientBackground.decoration as BoxDecoration).gradient
+            as LinearGradient;
+    expect(gradient.end, Alignment.bottomCenter);
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    expect(appBar.frosted, isFalse);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, 0);
+    expect(appBar.showBottomDivider, isFalse);
+    expect(appBar.bottomHeight, Grid.xxs);
+  });
+
+  testWidgets('builds Home header frost progressively while scrolling', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 160);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      buildTestable(
+        topSectionGradient: const LinearGradient(
+          colors: [Colors.yellow, Colors.blue],
+        ),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThanOrEqualTo(Grid.xxl));
+
+    scrollable.position.jumpTo(Grid.xl / 2);
+    await tester.pump();
+    var appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, closeTo(8.67, 0.001));
+
+    scrollable.position.jumpTo(Grid.xxl);
+    await tester.pump();
+    appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, 23.12);
+  });
+
+  testWidgets('scrolls Home to the top when its tab is selected again', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 160);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      buildTestable(
+        tabReselection: tabReselection,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+
+    expect(
+      scrollable.position.pixels,
+      lessThan(scrollable.position.maxScrollExtent),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
   });
 
   testWidgets('truncates long custom section names beside the menu', (
@@ -200,6 +429,89 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('section menu matches desktop labels, icons, and inset', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(
+              const ChannelSectionStore(
+                sections: [
+                  ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('section-menu-section-1')));
+    await tester.pumpAndSettle();
+
+    final popover = find.byKey(const Key('section-popover-section-1'));
+    expect(popover, findsOneWidget);
+    for (final label in [
+      'Rename section',
+      'Move up',
+      'Move down',
+      'Delete section',
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.text(label)),
+        findsOne,
+      );
+    }
+    for (final icon in [
+      LucideIcons.pencil,
+      LucideIcons.arrowUp,
+      LucideIcons.arrowDown,
+      LucideIcons.trash2,
+    ]) {
+      expect(
+        find.descendant(of: popover, matching: find.byIcon(icon)),
+        findsOne,
+      );
+    }
+
+    final actionMenuItems = tester
+        .widgetList<PopupMenuItem<String>>(
+          find.descendant(
+            of: popover,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is PopupMenuItem<String>,
+            ),
+          ),
+        )
+        .where(
+          (item) => const {
+            'rename',
+            'move_up',
+            'move_down',
+            'delete',
+          }.contains(item.value),
+        );
+    expect(actionMenuItems, hasLength(4));
+    for (final item in actionMenuItems) {
+      expect(
+        item.padding,
+        const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
+      );
+    }
+
+    final error = Theme.of(tester.element(popover)).colorScheme.error;
+    final deleteText = tester.widget<Text>(find.text('Delete section'));
+    final deleteIcon = tester.widget<Icon>(
+      find.descendant(of: popover, matching: find.byIcon(LucideIcons.trash2)),
+    );
+    expect(deleteText.style?.color, error);
+    expect(deleteIcon.color, error);
+  });
+
   testWidgets('aligns the top, section, row, and skeleton label columns', (
     tester,
   ) async {
@@ -218,7 +530,9 @@ void main() {
     final topLabelX = tester.getTopLeft(find.text('Community')).dx;
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    expect(topLabelX, sectionLabelX);
+    // The community title shares the leading row with its avatar. Channel
+    // labels stay aligned below it.
+    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
     expect(sectionLabelX, rowLabelX);
 
     relaySession.setReconnecting();
@@ -238,6 +552,32 @@ void main() {
         .dx;
     expect(skeletonSectionLabelX, skeletonRowLabelX);
     expect(skeletonSectionLabelX, sectionLabelX);
+  });
+
+  testWidgets('matches the community and profile avatar circle sizes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = find.byType(FrostedAppBar).last;
+    final communityAvatar = find.descendant(
+      of: appBar,
+      matching: find.byType(AvatarImage),
+    );
+    final profileAvatar = find.descendant(
+      of: appBar,
+      matching: find.byType(MaskedAvatarBadge),
+    );
+
+    expect(tester.getSize(communityAvatar), const Size.square(40));
+    expect(tester.getSize(profileAvatar), const Size.square(40));
   });
 
   testWidgets('reveals channel content from same-slot reconnect skeletons', (
@@ -347,10 +687,128 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.byType(Hero), findsNothing);
     await tester.tap(find.byType(ProfileAvatar));
     await tester.pumpAndSettle();
 
     expect(find.text('Injected settings'), findsOneWidget);
+    final route = ModalRoute.of(tester.element(find.text('Injected settings')));
+    expect(route, isNot(isA<MaterialPageRoute<void>>()));
+    expect(route?.opaque, isFalse);
+  });
+
+  testWidgets('reports Settings progress in both directions', (tester) async {
+    final progress = <double>[];
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+        onSettingsTransitionProgress: progress.add,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pumpAndSettle();
+    expect(progress.any((value) => value > 0 && value < 1), isTrue);
+    expect(progress.last, 1);
+
+    final reverseStart = progress.length;
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      progress.skip(reverseStart).any((value) => value > 0 && value < 1),
+      isTrue,
+    );
+    expect(progress.last, 0);
+  });
+
+  testWidgets('paints Settings content with its surface from the first frame', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+
+    final transition = find.byKey(
+      const ValueKey('settings-transition-opacity'),
+      skipOffstage: false,
+    );
+    expect(transition, findsOneWidget);
+    expect(
+      find.descendant(
+        of: transition,
+        matching: find.byKey(
+          const ValueKey('settings-transition-layer'),
+          skipOffstage: false,
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.widget<FadeTransition>(transition).opacity.value, 0.8);
+
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(
+      tester.widget<FadeTransition>(transition).opacity.value,
+      inExclusiveRange(0.8, 1),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<FadeTransition>(transition).opacity.value, 1);
+
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(
+      tester.widget<FadeTransition>(transition).opacity.value,
+      inExclusiveRange(0, 1),
+      reason: 'The complete Settings layer still fades out on exit.',
+    );
+  });
+
+  testWidgets('gives feedback for the profile and community controls', (
+    tester,
+  ) async {
+    final hapticCalls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pumpAndSettle();
+    expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
+
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pumpAndSettle();
+    final communityAvatar = find.descendant(
+      of: find.byType(FrostedAppBar).last,
+      matching: find.byType(AvatarImage),
+    );
+    await tester.tap(communityAvatar);
+    await tester.pump();
+    expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
   });
 
   testWidgets('community switcher separates selection from edit removal', (
@@ -410,7 +868,13 @@ void main() {
     expect(find.text('alpha.example.com'), findsOneWidget);
     expect(find.text('bravo.example.com'), findsOneWidget);
     expect(find.text('Rename'), findsNothing);
-    expect(find.byIcon(LucideIcons.ellipsisVertical), findsNothing);
+    expect(
+      find.descendant(
+        of: options,
+        matching: find.byIcon(LucideIcons.ellipsisVertical),
+      ),
+      findsNothing,
+    );
     expect(find.text('Edit'), findsOneWidget);
     expect(find.byIcon(LucideIcons.trash2), findsNothing);
     expect(
@@ -1202,7 +1666,7 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
-  testWidgets('renders and clears unread dot indicator', (tester) async {
+  testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
         id: '1',
@@ -1246,15 +1710,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
+    expect(
+      tester.widget<Text>(find.text('general')).style?.color,
+      Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
+    );
 
     readState.markContextRead('1', 20);
     await tester.pump();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
-  testWidgets('renders numeric unread count for counted events', (
+  testWidgets('bolds channels with unread thread activity without a badge', (
     tester,
   ) async {
     final channels = [
@@ -1313,9 +1787,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-1')), findsOneWidget);
-    expect(find.text('2'), findsOneWidget);
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
   });
 
   testWidgets('seeds first loaded channels as read', (tester) async {
@@ -1357,7 +1832,10 @@ void main() {
 
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
-    expect(find.byKey(const Key('channel-unread-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
   testWidgets('waits for read-state readiness before initial seeding', (

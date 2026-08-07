@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -12,17 +14,19 @@ import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/message_author_meta.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channels_provider.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
-import '../channels/read_state/read_state_format.dart';
-import '../channels/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'activity_provider.dart';
@@ -37,6 +41,18 @@ part 'activity_page/inbox_row.dart';
 part 'activity_page/lists.dart';
 part 'activity_page/status_views.dart';
 
+EdgeInsets _activityScrollPadding(
+  BuildContext context, {
+  double horizontal = 0,
+  double top = Grid.xxs,
+  double bottom = Grid.xxs,
+}) => EdgeInsets.fromLTRB(
+  horizontal,
+  top,
+  horizontal,
+  MediaQuery.paddingOf(context).bottom + bottom,
+);
+
 /// Conversation-oriented Activity inbox.
 ///
 /// Matches desktop's Home inbox item design and semantics (see
@@ -46,7 +62,10 @@ part 'activity_page/status_views.dart';
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
 class ActivityPage extends HookConsumerWidget {
-  const ActivityPage({super.key});
+  const ActivityPage({this.tabReselection, super.key});
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -54,9 +73,41 @@ class ActivityPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(InboxFilter.all);
     final unreadOnly = useState(false);
+    final scrollController = useScrollController();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void scrollToTop() {
+        if (!scrollController.hasClients) return;
+        final position = scrollController.position;
+        if (position.pixels <= position.minScrollExtent + 0.5) return;
+        if (reducedMotion) {
+          scrollController.jumpTo(position.minScrollExtent);
+          return;
+        }
+        unawaited(
+          scrollController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+
+      tabReselection.addListener(scrollToTop);
+      return () => tabReselection.removeListener(scrollToTop);
+    }, [tabReselection, scrollController, reducedMotion]);
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
       fontWeight: FontWeight.w600,
+      color: navigationPrimaryForeground(context),
+    );
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      titleStyle: headerTitleStyle,
+      bottomHeight: Grid.xxs,
     );
 
     final readState = ref.watch(readStateProvider);
@@ -231,12 +282,18 @@ class ActivityPage extends HookConsumerWidget {
       ]);
     }
 
-    final Widget body;
+    late final Widget body;
+    var bodyRidesOverTopSection = false;
     if (filter.value == InboxFilter.reminders) {
-      body = _RemindersList(onOpen: openReminder, onRefresh: refresh);
+      body = _RemindersList(
+        scrollController: scrollController,
+        onOpen: openReminder,
+        onRefresh: refresh,
+      );
     } else if (filter.value == InboxFilter.drafts) {
       body = _DraftsList(
         drafts: drafts,
+        scrollController: scrollController,
         channelById: channelById,
         myPubkey: myPk,
         onOpen: openDraft,
@@ -246,7 +303,7 @@ class ActivityPage extends HookConsumerWidget {
     } else if (feedAsync.hasError && allItems.isEmpty) {
       body = _ErrorView(onRetry: refresh);
     } else if (!hasLoadedOnce.value && allItems.isEmpty) {
-      body = const _LoadingSkeleton();
+      body = _LoadingSkeleton(scrollController: scrollController);
     } else if (visibleItems.isEmpty) {
       body = _EmptyFilterState(
         filter: filter.value,
@@ -261,53 +318,73 @@ class ActivityPage extends HookConsumerWidget {
           ? firstReadIndex
           : -1;
 
-      body = RefreshIndicator(
+      bodyRidesOverTopSection = true;
+      body = BeeRefreshIndicator(
+        edgeOffset: topSectionHeight,
         onRefresh: refresh,
-        child: ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: visibleItems.length,
-          itemBuilder: (context, index) {
-            final item = visibleItems[index];
-            final channel = item.item.channelId != null
-                ? channelById[item.item.channelId]
-                : null;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (index == newBoundaryIndex) const _NewBoundaryDivider(),
-                _InboxRow(
-                  item: item,
-                  channel: channel,
-                  currentPubkey: myPk,
-                  isDone: isDone(item),
-                  onTap: () => openItem(item),
-                  onMarkRead: () => markItemRead(item),
-                  onMarkUnread: () => markItemUnread(item),
+        child: CustomScrollView(
+          controller: scrollController,
+          slivers: [
+            SliverToBoxAdapter(child: SizedBox(height: topSectionHeight)),
+            DecoratedSliver(
+              decoration: BoxDecoration(
+                color: context.colors.surface,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(Radii.dialog),
                 ),
-              ],
-            );
-          },
+              ),
+              sliver: SliverPadding(
+                padding: _activityScrollPadding(context),
+                sliver: SliverList.builder(
+                  itemCount: visibleItems.length,
+                  itemBuilder: (context, index) {
+                    final item = visibleItems[index];
+                    final channel = item.item.channelId != null
+                        ? channelById[item.item.channelId]
+                        : null;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (index == newBoundaryIndex)
+                          const _NewBoundaryDivider(),
+                        _InboxRow(
+                          key: ValueKey(item.id),
+                          item: item,
+                          channel: channel,
+                          currentPubkey: myPk,
+                          isDone: isDone(item),
+                          onTap: () => openItem(item),
+                          onMarkRead: () => markItemRead(item),
+                          onMarkUnread: () => markItemUnread(item),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }
 
     return FrostedScaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
-        gradient: context.appColors.topSectionGradient,
         automaticallyImplyLeading: false,
-        title: const Text('Activity'),
+        horizontalInset: Grid.gutter,
+        showBottomDivider: true,
+        bottomDividerOpacity: 0.06,
+        title: Text('Activity', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [
-          _FilterMenuButton(
+          _ActivityActionsPill(
             filter: filter.value,
             dueReminderCount: dueReminderCount,
             draftCount: drafts.length,
-            onChanged: (f) => filter.value = f,
-          ),
-          _InboxOptionsButton(
             unreadOnly: unreadOnly.value,
             unreadCount: unreadVisibleCount,
+            onFilterChanged: (f) => filter.value = f,
             onUnreadOnlyChanged: (v) => unreadOnly.value = v,
             onMarkAllRead: () {
               for (final item in visibleItems) {
@@ -316,15 +393,19 @@ class ActivityPage extends HookConsumerWidget {
             },
           ),
         ],
+        bottomHeight: Grid.xxs,
+        bottom: const SizedBox.expand(),
       ),
       body: SafeArea(
+        key: const ValueKey('activity-content-safe-area'),
         top: false,
-        child: Padding(
-          padding: EdgeInsets.only(
-            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
-          ),
-          child: body,
-        ),
+        bottom: false,
+        child: bodyRidesOverTopSection
+            ? body
+            : Padding(
+                padding: EdgeInsets.only(top: topSectionHeight),
+                child: body,
+              ),
       ),
     );
   }

@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import UIKit
 import XCTest
@@ -5,6 +6,48 @@ import XCTest
 @testable import Buzz
 
 class RunnerTests: XCTestCase {
+
+  func testRelativeTrackInsertionTimesPreserveAudioDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 1, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1.5, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.audio ?? .invalid,
+        CMTime(seconds: 0.5, preferredTimescale: 600)
+      ),
+      0
+    )
+  }
+
+  func testRelativeTrackInsertionTimesPreserveVideoDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 2, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.video,
+        CMTime(seconds: 1, preferredTimescale: 600)
+      ),
+      0
+    )
+    XCTAssertEqual(CMTimeCompare(times.audio ?? .invalid, .zero), 0)
+  }
+
+  func testRelativeTrackInsertionTimesZeroBasesVideoWithoutAudio() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 3, preferredTimescale: 600),
+      audioStart: nil
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertNil(times.audio)
+  }
 
   @MainActor
   func testExpandedAttachmentSurfaceDismissesKeyboard() {
@@ -127,19 +170,6 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testEmbeddedPhotoPickerAppliesOneZoomInStepWithoutAnimation() {
-    var zoomInCalls = 0
-    var animationsWereEnabled = true
-
-    EmbeddedPhotoPickerLayout.applyPreferredScale {
-      zoomInCalls += 1
-      animationsWereEnabled = UIView.areAnimationsEnabled
-    }
-
-    XCTAssertEqual(zoomInCalls, 1)
-    XCTAssertFalse(animationsWereEnabled)
-  }
-
   func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
     let traits = UITraitCollection(preferredContentSizeCategory: .large)
     let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
@@ -153,6 +183,28 @@ class RunnerTests: XCTestCase {
     )
     XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
     XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
+  func testNativeAttachmentMenuUsesInterAndSharedPopoverChrome() {
+    let font = NativeAttachmentMenuTypography.font(
+      forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
+    )
+    var didSelect = false
+    let button = makeNativeAttachmentMenuButton(
+      title: "Photos",
+      symbol: "photo",
+      action: { didSelect = true }
+    )
+    let titleLabel = button.subviews.compactMap { $0 as? UILabel }.first
+
+    XCTAssertTrue(font.fontName.hasPrefix("Inter"))
+    XCTAssertTrue(titleLabel?.font.fontName.hasPrefix("Inter") == true)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.cornerRadius, 20)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.borderWidth, 1)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.shadowOpacity, 0.18)
+
+    button.sendActions(for: .primaryActionTriggered)
+    XCTAssertTrue(didSelect)
   }
 
   func testNativeAttachmentMenuGrowsAndScrollsForAccessibilityText() {

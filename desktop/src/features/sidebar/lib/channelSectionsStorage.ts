@@ -1,4 +1,4 @@
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 

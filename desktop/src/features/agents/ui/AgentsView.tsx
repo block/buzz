@@ -16,7 +16,6 @@ import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
 import { TeamShareDialog } from "./TeamShareDialog";
-import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
@@ -225,6 +224,7 @@ export function AgentsView() {
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
+              restartingAgentPubkey={agents.restartingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
@@ -234,6 +234,9 @@ export function AgentsView() {
               }}
               onStartAgent={(pubkey) => {
                 void agents.handleStart(pubkey);
+              }}
+              onRestartAgent={(pubkey) => {
+                void agents.handleRestart(pubkey);
               }}
               onStartPersona={(persona) => {
                 void agents.handleStartPersona(persona);
@@ -319,7 +322,13 @@ export function AgentsView() {
           }}
           onSubmitDefinition={personas.handleSubmit}
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
         />
       ) : null}
       {agents.agentToAddToChannel ? (
@@ -332,24 +341,6 @@ export function AgentsView() {
             }
           }}
           open={agents.agentToAddToChannel !== null}
-        />
-      ) : null}
-      {agents.createdAgent ? (
-        <SecretRevealDialog
-          created={agents.createdAgent}
-          onOpenChange={(open) => {
-            if (!open) {
-              agents.setCreatedAgent(null);
-            }
-          }}
-        />
-      ) : null}
-      {personas.createdAgent ? (
-        <SecretRevealDialog
-          created={personas.createdAgent}
-          onOpenChange={(open) => {
-            if (!open) personas.dismissCreatedAgent();
-          }}
         />
       ) : null}
       {personas.personaDialogState ? (
@@ -368,7 +359,13 @@ export function AgentsView() {
           isPending={personas.isPending}
           mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaDialogState(null);
