@@ -5,7 +5,10 @@ import { z } from "zod";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
-import { KIND_STREAM_DECISION_RESPONSE } from "@/shared/constants/kinds";
+import {
+  KIND_STREAM_DECISION_CARD,
+  KIND_STREAM_DECISION_RESPONSE,
+} from "@/shared/constants/kinds";
 
 export const DECISION_CARD_CHOICES = [
   "approve",
@@ -59,6 +62,81 @@ export type ParsedDecisionCard = {
   payload: DecisionCardPayload;
   payloadHash: string;
 };
+
+function encodeDecisionCardPayload(payload: DecisionCardPayload): {
+  encoded: string;
+  payloadHash: string;
+} {
+  const parsed = decisionCardPayloadSchema.parse(payload);
+  if (new Set(parsed.choices).size !== parsed.choices.length) {
+    throw new Error("Decision card choices must be unique.");
+  }
+  const encoded = JSON.stringify(parsed);
+  return {
+    encoded,
+    payloadHash: bytesToHex(sha256(new TextEncoder().encode(encoded))),
+  };
+}
+
+export function buildDecisionCardTags(input: {
+  channelId: string;
+  payload: DecisionCardPayload;
+  recipientPubkeys?: string[];
+  rootEventId?: string | null;
+  parentEventId?: string | null;
+}): string[][] {
+  const { encoded, payloadHash } = encodeDecisionCardPayload(input.payload);
+  const tags: string[][] = [["h", input.channelId]];
+  for (const pubkey of new Set(input.recipientPubkeys ?? [])) {
+    if (pubkey) tags.push(["p", pubkey]);
+  }
+  if (input.rootEventId && input.parentEventId) {
+    if (input.rootEventId !== input.parentEventId) {
+      tags.push(["e", input.rootEventId, "", "root"]);
+    }
+    tags.push(["e", input.parentEventId, "", "reply"]);
+  }
+  tags.push(
+    ["decision_card", encoded],
+    ["payload_hash", payloadHash],
+    ["shadow", input.payload.shadow ? "1" : "0"],
+  );
+  if (input.payload.expires_at !== undefined) {
+    tags.push(["expiration", String(input.payload.expires_at)]);
+  }
+  return tags;
+}
+
+export function buildDecisionCardContent(payload: DecisionCardPayload): string {
+  decisionCardPayloadSchema.parse(payload);
+  return [
+    `## ${payload.title}`,
+    payload.situation,
+    `**Recommendation:** ${payload.recommendation}`,
+    `**Exact action:** ${payload.proposed_action}`,
+    `**Risk:** ${payload.risk}`,
+    "**SHADOW / NOT DELIVERED**",
+  ].join("\n\n");
+}
+
+export async function publishDecisionCard(input: {
+  channelId: string;
+  payload: DecisionCardPayload;
+  recipientPubkeys?: string[];
+  rootEventId?: string | null;
+  parentEventId?: string | null;
+}): Promise<RelayEvent> {
+  const event = await signRelayEvent({
+    kind: KIND_STREAM_DECISION_CARD,
+    content: buildDecisionCardContent(input.payload),
+    tags: buildDecisionCardTags(input),
+  });
+  return relayClient.publishEvent(
+    event,
+    "Timed out while publishing the decision card.",
+    "Failed to publish the decision card.",
+  );
+}
 
 function findTag(tags: string[][], name: string): string | undefined {
   return tags.find((tag) => tag[0] === name)?.[1];

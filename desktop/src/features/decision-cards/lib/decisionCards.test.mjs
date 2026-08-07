@@ -5,6 +5,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
 import {
+  buildDecisionCardContent,
+  buildDecisionCardTags,
   buildDecisionResponseContent,
   buildDecisionResponseTags,
   parseDecisionCard,
@@ -102,4 +104,37 @@ test("response fallback is explicit about shadow delivery state", () => {
     buildDecisionResponseContent("approve", "Shadow only."),
     "✅ Approved — SHADOW / NOT DELIVERED\n\n> Shadow only.",
   );
+});
+
+test("builds a native shadow card envelope with a matching payload hash", () => {
+  const tags = buildDecisionCardTags({
+    channelId: CHANNEL_ID,
+    payload: card,
+  });
+
+  assert.deepEqual(tags[0], ["h", CHANNEL_ID]);
+  assert.equal(tags.find(([name]) => name === "shadow")?.[1], "1");
+  const encoded = tags.find(([name]) => name === "decision_card")?.[1];
+  const payloadHash = tags.find(([name]) => name === "payload_hash")?.[1];
+  assert.equal(encoded, ENCODED_CARD);
+  assert.equal(payloadHash, PAYLOAD_HASH);
+  assert.deepEqual(parseDecisionCard(tags), {
+    payload: card,
+    payloadHash: PAYLOAD_HASH,
+  });
+  assert.match(buildDecisionCardContent(card), /SHADOW \/ NOT DELIVERED/);
+});
+
+test("adds DM recipients so the relay can route a native card", () => {
+  const tags = buildDecisionCardTags({
+    channelId: CHANNEL_ID,
+    payload: card,
+    recipientPubkeys: ["c".repeat(64), "c".repeat(64)],
+  });
+
+  assert.deepEqual(tags.slice(0, 2), [
+    ["h", CHANNEL_ID],
+    ["p", "c".repeat(64)],
+  ]);
+  assert.equal(tags.filter(([name]) => name === "p").length, 1);
 });
