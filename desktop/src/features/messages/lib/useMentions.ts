@@ -255,7 +255,15 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
+      // Allowed-list gate applies to *non-member* agent identities (global
+      // search / directory noise). Channel members still pass through so
+      // `shouldHideAgentFromMentions` can decide invocability (Option B:
+      // member bots with unknown/allowed invocability stay mentionable —
+      // e.g. self-hosted ACP agents added as role=bot).
+      if (
+        !isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys) &&
+        candidate.isMember !== true
+      ) {
         return;
       }
       if (
