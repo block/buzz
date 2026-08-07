@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
-  CLI_ACP_INTERNAL_ERROR_COPY,
+  ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
@@ -215,17 +215,18 @@ test("friendlyTurnErrorCopy: garbage string code coerces to NaN → string path"
   );
 });
 
-// --- -32603 internal error (Fix #2: CLI-ACP unsupported model hint) ---
+// --- -32603 internal error ---
 
-test("code -32603 bare 'Internal error' → cli-acp internal error hint (severity: generic)", () => {
+test("code -32603 bare 'Internal error' → harness-neutral internal error hint (severity: generic)", () => {
   const result = friendlyAgentLastError("Internal error", -32603);
   assert.deepEqual(result, {
     severity: "generic",
-    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+    copy: ACP_INTERNAL_ERROR_COPY,
   });
+  assert.doesNotMatch(result.copy, /codex/i);
 });
 
-test("code -32603 bare Internal error (wrapped) → cli-acp internal error hint", () => {
+test("code -32603 bare Internal error (wrapped) → harness-neutral internal error hint", () => {
   // The ACP wrapper form "Agent reported error (code -32603): Internal error"
   // is treated as bare — the remainder after stripping the prefix is
   // "Internal error", which maps to the hint.
@@ -235,13 +236,13 @@ test("code -32603 bare Internal error (wrapped) → cli-acp internal error hint"
   );
   assert.deepEqual(result, {
     severity: "generic",
-    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+    copy: ACP_INTERNAL_ERROR_COPY,
   });
 });
 
 test("code -32603 with specific message → original message preserved, NOT hint", () => {
   // If the adapter provides detail beyond "Internal error", preserve it —
-  // don't bury actionable information with a broad codex-specific hint.
+  // don't bury actionable information with a generic hint.
   const result = friendlyAgentLastError(
     "Internal error: model gpt-5.6-sol rejected by adapter",
     -32603,
@@ -259,7 +260,7 @@ test("embedded code -32603 recovered from message when code param is null", () =
   );
   assert.deepEqual(result, {
     severity: "generic",
-    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+    copy: ACP_INTERNAL_ERROR_COPY,
   });
 });
 
@@ -299,10 +300,10 @@ test("friendlyTurnErrorCopy: -32603 structured param + wrapped specific detail �
   );
 });
 
-test("friendlyTurnErrorCopy: code -32603 bare Internal error → cli-acp internal error hint", () => {
+test("friendlyTurnErrorCopy: code -32603 bare Internal error → harness-neutral internal error hint", () => {
   assert.equal(
     friendlyTurnErrorCopy("Internal error", -32603),
-    CLI_ACP_INTERNAL_ERROR_COPY,
+    ACP_INTERNAL_ERROR_COPY,
   );
 });
 
