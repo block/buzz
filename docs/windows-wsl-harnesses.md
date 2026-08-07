@@ -27,10 +27,20 @@ Buzz bridges this automatically.
    `HERMES_ACP_SKIP_CONFIGURED_MCP`, persona env such as `GOOSE_PROVIDER`) so
    they arrive inside the Linux process. A pre-existing `WSLENV` (including
    flagged entries like `GOPATH/p`) is preserved and merged.
+4. **Session cwd translation.** The desktop spawns `buzz-acp` from
+   `~/.buzz`, so the `cwd` carried into `session/new` is a Windows drive path
+   that does not exist inside the distro — agents use it as the root for
+   edit-approval policies and workspace grounding. For WSL-targeted agents,
+   `buzz-acp` translates drive-letter paths to their `/mnt/<drive>/…` form
+   (`C:\Users\x\.buzz` → `/mnt/c/Users/x/.buzz`); UNC, relative, and already
+   POSIX paths pass through untouched.
 
 `BUZZ_ACP_AGENT_COMMAND` keeps the original bare command identity
 (`hermes-acp`), so all per-runtime defaults keyed on the command name keep
-working unchanged.
+working unchanged. Together these close the four WSL boundary breaks
+catalogued in [block/buzz#3122](https://github.com/block/buzz/issues/3122)
+(env, cwd, and — via discovery — the missing-harness path; skill placement
+and teardown reaping remain follow-ups, see the issue's item list).
 
 ## Verifying
 
