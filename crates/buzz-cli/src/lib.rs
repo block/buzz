@@ -324,10 +324,10 @@ buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
-        /// Send without owner-auth attestation (relay-admin path). Use only
-        /// when your key is a relay admin; ordinary owners do not need this
-        /// flag. Without it, auth-extraction failure after one automatic
-        /// retry is a hard error rather than a silent bare send.
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
         #[arg(long, default_value_t = false)]
         admin: bool,
     },
@@ -348,10 +348,10 @@ buzz agents unarchive <PUBKEY> --reason returned"
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
-        /// Send without owner-auth attestation (relay-admin path). Use only
-        /// when your key is a relay admin; ordinary owners do not need this
-        /// flag. Without it, auth-extraction failure after one automatic
-        /// retry is a hard error rather than a silent bare send.
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
         #[arg(long, default_value_t = false)]
         admin: bool,
     },
