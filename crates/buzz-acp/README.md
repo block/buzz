@@ -338,3 +338,12 @@ See the [root TESTING.md](../../TESTING.md) for the full integration testing gui
 ## License
 
 Apache-2.0
+
+## Always-on agents (any client)
+
+For **server-side `buzz-acp`** with Desktop, web, mobile, or CLI as thin clients
+(agents stay up when devices sleep or disconnect), see:
+
+- **Full framework:** [docs/self-host-backend-framework.md](../../docs/self-host-backend-framework.md)
+- **Quick start:** [docs/self-host-always-on-agents.md](../../docs/self-host-always-on-agents.md)
+- **systemd:** [deploy/systemd/](../../deploy/systemd/)
