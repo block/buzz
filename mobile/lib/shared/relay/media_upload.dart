@@ -984,7 +984,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final config = ref.watch(relayConfigProvider);
   final picker = ImagePicker();
   final service = MediaUploadService(
-    baseUrl: config.baseUrl,
+    baseUrl: config.httpUrl,
     nsec: config.nsec,
     pickGalleryImage: () => picker.pickImage(
       source: ImageSource.gallery,
