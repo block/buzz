@@ -22,7 +22,7 @@ import {
   getDmHuddleMemberPubkeys,
   hasOtherDmParticipant,
 } from "@/features/channels/lib/dmHuddleMembers";
-import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
@@ -42,7 +42,7 @@ import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
-  WelcomeComposerBanner,
+  WelcomeComposerGuidanceLayer,
   WELCOME_COMPOSER_BANNER_DISMISS_DURATION_SECONDS,
   WELCOME_COMPOSER_BANNER_HIDE_BUFFER_MS,
   WELCOME_COMPOSER_BANNER_SUCCESS_SETTLE_MS,
@@ -464,7 +464,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const activeVideoReviewCommentSender = activeChannel?.archivedAt
     ? undefined
     : onSendVideoReviewComment;
-  const threadVideoReviewContextsByMessageId = React.useMemo(() => {
+  const threadVideoReviewPresentation = React.useMemo(() => {
     const messagesById = new Map(
       messages.map((message) => [message.id, message]),
     );
@@ -475,7 +475,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       messagesById.set(message.id, message);
     }
 
-    return buildVideoReviewContextsByMessageId({
+    return buildVideoReviewPresentationByMessageId({
       channelId: activeChannel?.id ?? null,
       channelName: activeChannel?.name,
       channelType: activeChannel?.channelType ?? null,
@@ -737,18 +737,18 @@ export const ChannelPane = React.memo(function ChannelPane({
                   hasComposerBottomActivity && "composer-dock--with-activity",
                 )}
               >
+                {isActiveWelcomeChannel && !timeoutState.active ? (
+                  <WelcomeComposerGuidanceLayer
+                    settingUp={welcomeKickoffSettingUp}
+                    state={welcomeComposerBannerState}
+                  >
+                    {welcomeKickoffStage}
+                  </WelcomeComposerGuidanceLayer>
+                ) : null}
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
-                ) : isActiveWelcomeChannel ? (
-                  <div className="relative">
-                    {welcomeKickoffStage}
-                    <WelcomeComposerBanner
-                      settingUp={welcomeKickoffSettingUp}
-                      state={welcomeComposerBannerState}
-                    />
-                  </div>
                 ) : null}
                 <ComposerDockBackdrop gutterClassName="inset-x-5" />
                 <MessageComposer
@@ -883,9 +883,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
-                videoReviewContextsByMessageId={
-                  threadVideoReviewContextsByMessageId
-                }
+                videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadRepliesPending={threadMessagesPending}

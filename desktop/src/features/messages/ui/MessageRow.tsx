@@ -40,6 +40,9 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { useOpenVideoReviewAt } from "@/shared/ui/VideoReviewNavigation";
+import { parseVideoReviewTimecode } from "@/shared/ui/videoReviewTimecode";
+import { VideoReviewTimecodeButton } from "@/shared/ui/VideoReviewTimecodeButton";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
@@ -98,6 +101,7 @@ export const MessageRow = React.memo(
     profiles,
     searchQuery,
     showDepthGuides = true,
+    videoReviewCommentRootId,
     videoReviewContext,
   }: {
     channelId?: string | null;
@@ -146,6 +150,7 @@ export const MessageRow = React.memo(
     profiles?: UserProfileLookup;
     searchQuery?: string;
     showDepthGuides?: boolean;
+    videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
     // Keep the transient send state with its timestamp rather than collapsing
@@ -270,6 +275,7 @@ export const MessageRow = React.memo(
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
+    const openVideoReviewAt = useOpenVideoReviewAt();
 
     const indentRem = getThreadReplyIndentRem(message.depth);
     const descendantGuideOffsetRem = connectDescendants
@@ -366,22 +372,24 @@ export const MessageRow = React.memo(
               message={message}
             />
           );
-        default:
-          {
-            const waveMessage = parseWaveMessageContent(message.body);
-            if (waveMessage) {
-              return (
-                <WaveMessageAttachment
-                  channelId={channelId}
-                  fallbackText={waveMessage.fallbackText}
-                  huddleMemberPubkeys={huddleMemberPubkeys}
-                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                />
-              );
-            }
+        default: {
+          const waveMessage = parseWaveMessageContent(message.body);
+          if (waveMessage) {
+            return (
+              <WaveMessageAttachment
+                channelId={channelId}
+                fallbackText={waveMessage.fallbackText}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              />
+            );
           }
 
-          return (
+          const reviewRootEventId = videoReviewCommentRootId;
+          const reviewTimecode = reviewRootEventId
+            ? parseVideoReviewTimecode(message.body)
+            : null;
+          const markdown = (
             <Markdown
               channelNames={channelNames}
               className={cn(
@@ -397,7 +405,7 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
-              content={message.body}
+              content={reviewTimecode?.text ?? message.body}
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
               linkPreviewTags={message.tags}
@@ -412,6 +420,24 @@ export const MessageRow = React.memo(
               videoReviewContext={videoReviewContext}
             />
           );
+          if (!reviewRootEventId || !reviewTimecode || !openVideoReviewAt) {
+            return markdown;
+          }
+
+          return (
+            <div className="flex min-w-0 items-start gap-1.5">
+              <VideoReviewTimecodeButton
+                surface="message"
+                timecode={reviewTimecode.timecode}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openVideoReviewAt(reviewRootEventId, reviewTimecode.seconds);
+                }}
+              />
+              <div className="min-w-0 flex-1">{markdown}</div>
+            </div>
+          );
+        }
       }
     };
 
@@ -923,6 +949,7 @@ export const MessageRow = React.memo(
     prev.playEntrance === next.playEntrance &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
+    prev.videoReviewCommentRootId === next.videoReviewCommentRootId &&
     prev.videoReviewContext === next.videoReviewContext,
 );
 
