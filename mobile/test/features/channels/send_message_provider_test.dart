@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -39,6 +41,59 @@ void main() {
       await result;
       expect(completedIds, [localMessages.single.id]);
       expect(removedIds, isEmpty);
+    },
+  );
+
+  test(
+    'tags every candidate when a display name is ambiguous',
+    () async {
+      // Two channel members share the display name "Neuromancer": a stale
+      // identity left behind by a re-key, and the live one. The stale entry is
+      // deliberately first in the cache — resolution used to take the first
+      // match and stop, so the `p` tag landed on the dead identity and the
+      // real agent was never notified. Nothing surfaced to the sender.
+      const staleP = 'f1a06b925f6705ef530932138664e2dda35fd5d743991f49e96';
+      const liveP = '1667bcebe81f2e5af1e5561a385f1c8a91b84d8d19c5d9c3f1b';
+
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => [
+          ChannelMember(
+            pubkey: staleP,
+            role: 'bot',
+            joinedAt: DateTime.utc(2020),
+          ),
+          ChannelMember(
+            pubkey: liveP,
+            role: 'bot',
+            joinedAt: DateTime.utc(2020),
+          ),
+        ],
+        readUserCache: () => const {
+          staleP: UserProfile(pubkey: staleP, displayName: 'Neuromancer'),
+          liveP: UserProfile(pubkey: liveP, displayName: 'Neuromancer'),
+        },
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(channelId: _channelId, content: '@Neuromancer hi');
+      await session.published;
+      session.accept();
+      await result;
+
+      final tagged = session.event.tags
+          .where((t) => t.isNotEmpty && t.first == 'p')
+          .map((t) => t[1])
+          .toSet();
+
+      // Both must be tagged; tagging only one is a coin flip on map ordering.
+      expect(tagged, containsAll(<String>[staleP, liveP]));
     },
   );
 
