@@ -1083,7 +1083,7 @@ mod tests {
             return;
         };
 
-        for _ in 0..buzz_db::relay_members::MAX_COMMUNITIES_PER_OWNER {
+        for _ in 0..buzz_db::relay_members::max_communities_per_owner() {
             let host = format!("community-{}.example", Uuid::new_v4().simple());
             assert_eq!(
                 provision_community(state.clone(), &operator, &host, &owner)

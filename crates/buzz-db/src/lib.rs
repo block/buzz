@@ -6110,8 +6110,11 @@ mod tests {
         let db = setup_db().await;
         let owner = format!("{:064x}", Uuid::new_v4().as_u128());
 
-        // Create 3 communities for this owner (the max).
-        for i in 0..3 {
+        // Create the maximum number of communities for this owner. Seed from
+        // the same limit the code enforces so this test tracks the configured
+        // value instead of a literal (#3829 raised the default and broke the
+        // hardcoded 3).
+        for i in 0..relay_members::max_communities_per_owner() {
             let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
             assert!(matches!(
                 db.create_community_with_owner(&host, &owner)
@@ -6121,7 +6124,7 @@ mod tests {
             ));
         }
 
-        let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
+        let host = format!("limit-test-over-{}.example", Uuid::new_v4().simple());
         assert_eq!(
             db.create_community_with_owner(&host, &owner)
                 .await
@@ -7505,6 +7508,87 @@ mod tests {
                 .await
                 .expect("entry too old"),
             "an over-budget entry must fail closed to the writer"
+        );
+
+        // A reader session proving an OLDER entry than the ring's newest —
+        // the real replication-lag case, and the only shape that pins the
+        // verdict stage. A single injected entry cannot express it: it is
+        // simultaneously the newest AND the one proved, so the cheap
+        // precheck alone fails the read closed and the verdict guard can be
+        // deleted with byte-identical metrics (asserting `reason == "stale"`
+        // on the leg above therefore proves neither guard).
+        //
+        // Two entries separate them. The reader observes token 100, so
+        // `resolve` returns the greatest entry with `token <= 100` — the
+        // stale token-50 one — while `newest` (token 999, just committed)
+        // passes the precheck. Only the per-session re-evaluation can catch
+        // that, so deleting it serves a stale replica answer, which the
+        // divergent fixture sees as the replica's row.
+        let epoch: Uuid = sqlx::query_scalar("SELECT epoch FROM replica_heartbeat WHERE id = 1")
+            .fetch_one(&replica)
+            .await
+            .expect("read the replica's heartbeat epoch");
+        sqlx::query("UPDATE replica_heartbeat SET token = 100 WHERE id = 1")
+            .execute(&replica)
+            .await
+            .expect("pin the observable reader token");
+        db.fence().close();
+        // Proved-but-stale: observable (token <= 100), committed long ago.
+        db.fence().record(
+            50,
+            epoch,
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+            chrono::Utc::now(),
+        );
+        // Newest-and-fresh, but unobservable (token > 100): passes the
+        // precheck, cannot be proved by this reader.
+        db.fence()
+            .record(999, epoch, std::time::Instant::now(), chrono::Utc::now());
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        // Thread-local recorder must stay installed across the await, hence
+        // the guard form; `current_thread` keeps the emit on this thread.
+        let served = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.is_relay_member(cid, &writer_only).await
+        }
+        .expect("a stale proof must still answer, on the writer");
+        assert!(
+            served,
+            "proving an entry older than the budget must fail closed to the \
+             writer even when the ring's newest entry is fresh"
+        );
+        let routes: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_db_route_decision must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let label = |name: &str| {
+                    labels
+                        .iter()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default()
+                };
+                ((label("decision"), label("reason")), n)
+            })
+            .collect();
+        assert_eq!(
+            routes.get(&("writer".to_owned(), "stale".to_owned())),
+            Some(&1),
+            "the proved entry is over budget, so this must record \
+             writer/stale; got {routes:?}"
+        );
+        assert!(
+            !routes.keys().any(|(decision, _)| decision == "replica"),
+            "no replica answer may be recorded when the proved entry is \
+             over budget; got {routes:?}"
         );
 
         drop_scratch_db(&admin, replica, &rname).await;
