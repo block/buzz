@@ -596,7 +596,9 @@ impl GitStore {
         // -- Phase 1: sequential --------------------------------------------------
         for round in 0..cfg.race_rounds {
             let body = format!("probe-sequential-{nonce}-{round}").into_bytes();
-            let key = self.put_pack(&body).await?;
+            let key = self
+                .put_immutable("probe/pack", &body, "application/x-git-pack")
+                .await?;
             let got = self
                 .get_verified(&key, &Self::digest_hex(&body))
                 .await
