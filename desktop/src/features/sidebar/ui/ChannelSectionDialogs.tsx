@@ -1,8 +1,10 @@
 import * as React from "react";
 
-import { X } from "lucide-react";
+import { ChevronDown, Plus, X } from "lucide-react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
+import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
+import { TemplateFormDialog } from "@/features/settings/ui/ChannelTemplatesSettingsCard";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,8 +26,17 @@ import {
 } from "@/shared/ui/dialog";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Input } from "@/shared/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, ChannelTemplate } from "@/shared/api/types";
 import {
   useDeleteChannelMutation,
   useLeaveChannelMutation,
@@ -35,7 +46,10 @@ import { ChannelDeleteConfirmationDialog } from "@/features/channels/ui/ChannelM
 export type SectionDialogValue = {
   name: string;
   icon?: string;
+  templateId?: string;
 };
+
+const NO_TEMPLATE_VALUE = "__no-template__";
 
 type SectionNameDialogProps = {
   open: boolean;
@@ -44,8 +58,15 @@ type SectionNameDialogProps = {
   description: string;
   initialValue: string;
   initialIcon?: string;
+  initialTemplateId?: string;
+  templates?: ChannelTemplate[];
+  allowTemplateCreation?: boolean;
   confirmLabel: string;
-  isConfirmDisabled: (trimmed: string, icon: string) => boolean;
+  isConfirmDisabled: (
+    trimmed: string,
+    icon: string,
+    templateId: string,
+  ) => boolean;
   onConfirm: (value: SectionDialogValue) => void;
 };
 
@@ -56,6 +77,9 @@ function SectionNameDialog({
   description,
   initialValue,
   initialIcon = "",
+  initialTemplateId = "",
+  templates,
+  allowTemplateCreation = false,
   confirmLabel,
   isConfirmDisabled,
   onConfirm,
@@ -63,21 +87,25 @@ function SectionNameDialog({
   const [name, setName] = React.useState(initialValue);
   const [icon, setIcon] = React.useState(initialIcon);
   const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [isCreateTemplateOpen, setIsCreateTemplateOpen] = React.useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = React.useState("");
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
     if (!open) {
       setPickerOpen(false);
+      setIsCreateTemplateOpen(false);
       return;
     }
     setName(initialValue);
     setIcon(initialIcon);
+    setSelectedTemplateId(initialTemplateId);
     // Small delay to let dialog animation start before focusing
     const timerId = globalThis.setTimeout(() => {
       inputRef.current?.focus();
     }, 50);
     return () => globalThis.clearTimeout(timerId);
-  }, [open, initialValue, initialIcon]);
+  }, [open, initialValue, initialIcon, initialTemplateId]);
 
   function handleIconSelect(selectedIcon: string) {
     setIcon(selectedIcon);
@@ -88,10 +116,11 @@ function SectionNameDialog({
     event.preventDefault();
     const trimmed = name.trim();
     const trimmedIcon = icon.trim();
-    if (isConfirmDisabled(trimmed, trimmedIcon)) return;
+    if (isConfirmDisabled(trimmed, trimmedIcon, selectedTemplateId)) return;
     onConfirm({
       name: trimmed,
       ...(trimmedIcon ? { icon: trimmedIcon } : {}),
+      ...(selectedTemplateId ? { templateId: selectedTemplateId } : {}),
     });
   }
 
@@ -153,6 +182,71 @@ function SectionNameDialog({
               value={name}
             />
           </div>
+          {templates ? (
+            <div className="mt-3 flex min-h-11 items-center justify-between gap-4 rounded-xl border border-input bg-background px-3">
+              <span className="text-sm font-medium text-foreground">
+                Template
+                <span className="ml-1 text-xs font-normal text-muted-foreground/50">
+                  Optional
+                </span>
+              </span>
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={`Section template: ${
+                      templates.find(
+                        (template) => template.id === selectedTemplateId,
+                      )?.name ?? "None"
+                    }`}
+                    className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium"
+                    data-testid="create-section-template"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <span className="truncate">
+                      {templates.find(
+                        (template) => template.id === selectedTemplateId,
+                      )?.name ?? "None"}
+                    </span>
+                    <ChevronDown className="size-4 shrink-0 text-muted-foreground/70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuRadioGroup
+                    onValueChange={(value) =>
+                      setSelectedTemplateId(
+                        value === NO_TEMPLATE_VALUE ? "" : value,
+                      )
+                    }
+                    value={selectedTemplateId || NO_TEMPLATE_VALUE}
+                  >
+                    <DropdownMenuRadioItem value={NO_TEMPLATE_VALUE}>
+                      None
+                    </DropdownMenuRadioItem>
+                    {templates.map((template) => (
+                      <DropdownMenuRadioItem
+                        key={template.id}
+                        value={template.id}
+                      >
+                        {template.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                  {allowTemplateCreation ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => setIsCreateTemplateOpen(true)}
+                      >
+                        <Plus className="size-4" />
+                        Create new section template
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          ) : null}
           <div className="flex justify-end gap-2 mt-4">
             <DialogClose asChild>
               <Button variant="ghost" type="button">
@@ -161,13 +255,26 @@ function SectionNameDialog({
             </DialogClose>
             <Button
               type="submit"
-              disabled={isConfirmDisabled(name.trim(), icon.trim())}
+              disabled={isConfirmDisabled(
+                name.trim(),
+                icon.trim(),
+                selectedTemplateId,
+              )}
             >
               {confirmLabel}
             </Button>
           </div>
         </form>
       </DialogContent>
+      {allowTemplateCreation ? (
+        <TemplateFormDialog
+          fixedTemplateType="section"
+          onCreated={(template) => setSelectedTemplateId(template.id)}
+          onOpenChange={setIsCreateTemplateOpen}
+          open={isCreateTemplateOpen}
+          template={null}
+        />
+      ) : null}
     </Dialog>
   );
 }
@@ -183,6 +290,11 @@ export function CreateSectionDialog({
   onOpenChange,
   onConfirm,
 }: CreateSectionDialogProps) {
+  const templatesQuery = useChannelTemplatesQuery();
+  const sectionTemplates = (templatesQuery.data ?? []).filter(
+    (template) => template.templateType === "section",
+  );
+
   return (
     <SectionNameDialog
       open={open}
@@ -190,6 +302,8 @@ export function CreateSectionDialog({
       title="Create section"
       description="Sections let you group related channels in the sidebar."
       initialValue=""
+      templates={sectionTemplates}
+      allowTemplateCreation
       confirmLabel="Create"
       isConfirmDisabled={(trimmed) => trimmed.length === 0}
       onConfirm={onConfirm}
@@ -202,6 +316,7 @@ export type RenameSectionDialogProps = {
   onOpenChange: (open: boolean) => void;
   sectionName: string;
   sectionIcon?: string;
+  sectionTemplateId?: string;
   onConfirm: (value: SectionDialogValue) => void;
 };
 
@@ -210,20 +325,30 @@ export function RenameSectionDialog({
   onOpenChange,
   sectionName,
   sectionIcon,
+  sectionTemplateId,
   onConfirm,
 }: RenameSectionDialogProps) {
+  const templatesQuery = useChannelTemplatesQuery();
+  const sectionTemplates = (templatesQuery.data ?? []).filter(
+    (template) => template.templateType === "section",
+  );
+
   return (
     <SectionNameDialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Rename section"
-      description="Enter a new name for this section."
+      title="Edit section"
+      description="Update the section name and defaults for future channels."
       initialValue={sectionName}
       initialIcon={sectionIcon}
+      initialTemplateId={sectionTemplateId}
+      templates={sectionTemplates}
       confirmLabel="Save"
-      isConfirmDisabled={(trimmed, icon) =>
+      isConfirmDisabled={(trimmed, icon, templateId) =>
         trimmed.length === 0 ||
-        (trimmed === sectionName && icon === (sectionIcon ?? ""))
+        (trimmed === sectionName &&
+          icon === (sectionIcon ?? "") &&
+          templateId === (sectionTemplateId ?? ""))
       }
       onConfirm={onConfirm}
     />

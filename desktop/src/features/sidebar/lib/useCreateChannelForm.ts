@@ -22,6 +22,7 @@ type UseCreateChannelFormOptions = {
    */
   active: boolean;
   initialName?: string;
+  initialTemplateId?: string;
   isCreating: boolean;
   onCreate: (input: CreateChannelInput) => Promise<void>;
   onCreated?: () => void;
@@ -48,6 +49,7 @@ export type CreateChannelFormState = {
   handleTemplateChange: (templateId: string) => void;
   handleTemplateCreated: (template: ChannelTemplate) => void;
   templates: ChannelTemplate[];
+  sectionDefaultTemplateId: string | null;
   nameInputRef: React.RefObject<HTMLInputElement | null>;
   isCreating: boolean;
   canSubmit: boolean;
@@ -63,6 +65,7 @@ export function useCreateChannelForm({
   channelKind,
   active,
   initialName,
+  initialTemplateId,
   isCreating,
   onCreate,
   onCreated,
@@ -78,10 +81,11 @@ export function useCreateChannelForm({
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
-  >(null);
+  >(initialTemplateId ?? null);
   const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
   const visibilityTouchedRef = React.useRef(false);
+  const initialTemplateAppliedRef = React.useRef<string | null>(null);
 
   const templatesQuery = useChannelTemplatesQuery();
   const templates = templatesQuery.data ?? [];
@@ -96,9 +100,10 @@ export function useCreateChannelForm({
     setEphemeral(false);
     setTtlSeconds(DEFAULT_EPHEMERAL_TTL_SECONDS);
     setErrorMessage(null);
-    setSelectedTemplateId(null);
+    setSelectedTemplateId(initialTemplateId ?? null);
     setTypePopoverOpen(false);
     visibilityTouchedRef.current = false;
+    initialTemplateAppliedRef.current = null;
 
     if (!autoFocusName) return;
 
@@ -119,7 +124,7 @@ export function useCreateChannelForm({
       input.setSelectionRange(end, end);
     }, 50);
     return () => globalThis.clearTimeout(timerId);
-  }, [active, autoFocusName, initialName]);
+  }, [active, autoFocusName, initialName, initialTemplateId]);
 
   const applyTemplate = React.useCallback((template: ChannelTemplate) => {
     setSelectedTemplateId(template.id);
@@ -127,6 +132,30 @@ export function useCreateChannelForm({
     if (!visibilityTouchedRef.current) setVisibility(template.visibility);
     setErrorMessage(null);
   }, []);
+
+  React.useEffect(() => {
+    if (
+      !active ||
+      !initialTemplateId ||
+      initialTemplateAppliedRef.current === initialTemplateId
+    ) {
+      return;
+    }
+    const template = templates.find(
+      (candidate) => candidate.id === initialTemplateId,
+    );
+    if (!template) return;
+    initialTemplateAppliedRef.current = initialTemplateId;
+    applyTemplate(template);
+  }, [active, applyTemplate, initialTemplateId, templates]);
+
+  const handleTemplateCreated = React.useCallback(
+    (template: ChannelTemplate) => {
+      if (template.templateType !== "channel") return;
+      applyTemplate(template);
+    },
+    [applyTemplate],
+  );
 
   const handleTemplateChange = React.useCallback(
     (templateId: string) => {
@@ -216,8 +245,9 @@ export function useCreateChannelForm({
     errorMessage,
     selectedTemplateId,
     handleTemplateChange,
-    handleTemplateCreated: applyTemplate,
+    handleTemplateCreated,
     templates,
+    sectionDefaultTemplateId: initialTemplateId ?? null,
     nameInputRef,
     isCreating,
     canSubmit: name.trim().length > 0 && !isCreating,

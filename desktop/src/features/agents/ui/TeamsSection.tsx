@@ -36,7 +36,6 @@ type TeamsSectionProps = {
   onDelete: (team: AgentTeam) => void;
   onAddToChannel: (team: AgentTeam) => void;
   onShare: (team: AgentTeam) => void;
-  onImport: () => void;
 };
 
 export function TeamsSection({
@@ -51,7 +50,6 @@ export function TeamsSection({
   onDelete,
   onAddToChannel,
   onShare,
-  onImport,
 }: TeamsSectionProps) {
   return (
     <section className="relative space-y-4" data-testid="agents-library-teams">
@@ -169,10 +167,11 @@ export function TeamsSection({
               </TeamIdentityCard>
             );
           })}
-          <NewTeamCard
-            isPending={isPending}
-            onCreate={onCreate}
-            onImport={onImport}
+          <CreateIdentityCard
+            ariaLabel="New team"
+            dataTestId="new-team-card"
+            disabled={isPending}
+            onClick={onCreate}
           />
         </div>
       ) : null}
@@ -185,34 +184,5 @@ export function TeamsSection({
         </p>
       ) : null}
     </section>
-  );
-}
-
-function NewTeamCard({
-  isPending,
-  onCreate,
-  onImport,
-}: {
-  isPending: boolean;
-  onCreate: () => void;
-  onImport: () => void;
-}) {
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <CreateIdentityCard ariaLabel="New team" dataTestId="new-team-card" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        onCloseAutoFocus={(event) => event.preventDefault()}
-      >
-        <DropdownMenuItem disabled={isPending} onClick={onCreate}>
-          Create team
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={isPending} onClick={onImport}>
-          Import
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }

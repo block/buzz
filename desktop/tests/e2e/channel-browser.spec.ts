@@ -5,7 +5,25 @@ import { installMockBridge, openChannelBrowser } from "../helpers/bridge";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const CUSTOM_SECTION = { id: "sec-projects", name: "Projects", order: 0 };
 
-async function seedCustomSection(page: Page) {
+async function readCommandPayloadLog(page: Page) {
+  return page.evaluate(() => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    );
+  });
+}
+
+async function seedCustomSection(
+  page: Page,
+  section: typeof CUSTOM_SECTION & { templateId?: string } = CUSTOM_SECTION,
+) {
   await page.addInitScript(
     ({ pubkey, section }) => {
       window.localStorage.setItem(
@@ -13,16 +31,70 @@ async function seedCustomSection(page: Page) {
         JSON.stringify({ version: 1, sections: [section], assignments: {} }),
       );
     },
-    { pubkey: MOCK_PUBKEY, section: CUSTOM_SECTION },
+    { pubkey: MOCK_PUBKEY, section },
   );
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
+  const templateConfig = testInfo.title.includes("section template")
+    ? {
+        channelTemplates: [
+          {
+            id: "engineering-defaults",
+            name: "Engineering defaults",
+            templateType: "section" as const,
+            description: "Inherited section channel",
+            channelType: "stream" as const,
+            visibility: "private" as const,
+            canvasTemplate: "# {channel.name}\n\nEngineering context",
+            projectFolders: [],
+            projectFolder: null,
+            worktree: null,
+            agents: { personas: [], teams: [] },
+            isBuiltin: false,
+            createdAt: "2026-08-07T00:00:00Z",
+            updatedAt: "2026-08-07T00:00:00Z",
+          },
+          {
+            id: "channel-only",
+            name: "Channel only",
+            templateType: "channel" as const,
+            description: null,
+            channelType: "stream" as const,
+            visibility: "open" as const,
+            canvasTemplate: null,
+            projectFolders: [],
+            projectFolder: null,
+            worktree: null,
+            agents: { personas: [], teams: [] },
+            isBuiltin: false,
+            createdAt: "2026-08-07T00:00:00Z",
+            updatedAt: "2026-08-07T00:00:00Z",
+          },
+          {
+            id: "product-defaults",
+            name: "Product defaults",
+            templateType: "section" as const,
+            description: "Inherited product channel",
+            channelType: "stream" as const,
+            visibility: "open" as const,
+            canvasTemplate: "# {channel.name}\n\nProduct context",
+            projectFolders: [],
+            projectFolder: null,
+            worktree: null,
+            agents: { personas: [], teams: [] },
+            isBuiltin: false,
+            createdAt: "2026-08-07T00:00:00Z",
+            updatedAt: "2026-08-07T00:00:00Z",
+          },
+        ],
+      }
+    : undefined;
   await installMockBridge(
     page,
     testInfo.title.includes("failed section create")
       ? { createChannelErrors: ["Create failed"] }
-      : undefined,
+      : templateConfig,
   );
 });
 
@@ -255,6 +327,261 @@ test("custom section add button creates directly into that section", async ({
   ).toBeVisible();
   await expect(page.getByTestId(`channel-${channelName}`)).toBeVisible();
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
+});
+
+test("new-section flow stores a section template selection", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Move to section" }).hover();
+  await page.getByRole("menuitem", { name: "New section..." }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Create section" });
+  await dialog.getByPlaceholder("Section name").fill("Engineering");
+  const templateControl = dialog.getByTestId("create-section-template");
+  await expect(templateControl).toHaveText("None");
+  await templateControl.click();
+  await page
+    .getByRole("menuitemradio", { name: "Engineering defaults" })
+    .click();
+  await expect(templateControl).toHaveText("Engineering defaults");
+  await dialog.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(page.getByText("Engineering", { exact: true })).toBeVisible();
+  const storedTemplateId = await page.evaluate(() => {
+    for (const key of Object.keys(window.localStorage)) {
+      if (!key.startsWith("buzz-channel-sections.v1:")) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as {
+        sections?: Array<{ name?: string; templateId?: string }>;
+      };
+      const section = parsed.sections?.find(
+        (candidate) => candidate.name === "Engineering",
+      );
+      if (section) return section.templateId ?? null;
+    }
+    return null;
+  });
+  expect(storedTemplateId).toBe("engineering-defaults");
+});
+
+test("create-section flow creates and preselects a new section template", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Move to section" }).hover();
+  await page.getByRole("menuitem", { name: "New section..." }).click();
+
+  const sectionDialog = page.getByRole("dialog", { name: "Create section" });
+  await sectionDialog.getByPlaceholder("Section name").fill("Product");
+  const templateControl = sectionDialog.getByTestId("create-section-template");
+  await templateControl.click();
+  await page
+    .getByRole("menuitem", { name: "Create new section template" })
+    .click();
+
+  const templateDialog = page.getByTestId("channel-template-dialog");
+  await expect(
+    templateDialog.getByRole("heading", {
+      name: "Create section template",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(templateDialog.getByTestId("template-type-page")).toHaveCount(0);
+  await templateDialog.locator("#template-name").fill("Product launch");
+  await templateDialog
+    .getByRole("button", { name: "Next", exact: true })
+    .click();
+  await templateDialog
+    .getByRole("button", { name: "Create", exact: true })
+    .click();
+
+  await expect(templateDialog).not.toBeVisible();
+  await expect(sectionDialog).toBeVisible();
+  await expect(templateControl).toHaveText("Product launch");
+  const createTemplateCall = (await readCommandPayloadLog(page)).findLast(
+    (entry) => entry.command === "create_channel_template",
+  );
+  expect(createTemplateCall?.payload).toEqual(
+    expect.objectContaining({
+      input: expect.objectContaining({ templateType: "section" }),
+    }),
+  );
+  await sectionDialog
+    .getByRole("button", { name: "Create", exact: true })
+    .click();
+
+  const storedTemplateId = await page.evaluate(() => {
+    for (const key of Object.keys(window.localStorage)) {
+      if (!key.startsWith("buzz-channel-sections.v1:")) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as {
+        sections?: Array<{ name?: string; templateId?: string }>;
+      };
+      const section = parsed.sections?.find(
+        (candidate) => candidate.name === "Product",
+      );
+      if (section) return section.templateId ?? null;
+    }
+    return null;
+  });
+  expect(storedTemplateId).toMatch(/^template-/);
+});
+
+test("custom section inherits section template defaults for new channels", async ({
+  page,
+}) => {
+  await seedCustomSection(page, {
+    ...CUSTOM_SECTION,
+    templateId: "engineering-defaults",
+  });
+  await page.goto("/");
+
+  await page
+    .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
+    .click();
+  const channelName = `templated-section-${Date.now()}`;
+  await page.getByTestId("channel-browser-search").fill(channelName);
+  await page.getByTestId("channel-browser-create-row").click();
+
+  const templateContext = page.getByTestId(
+    "create-channel-section-template-context",
+  );
+  await expect(templateContext).toHaveText("Engineering defaults");
+  const templateContainerBox = await page
+    .getByTestId("create-channel-template-container")
+    .boundingBox();
+  const permissionsContainerBox = await page
+    .getByTestId("create-channel-permissions-container")
+    .boundingBox();
+  expect(templateContainerBox?.height).toBe(permissionsContainerBox?.height);
+  await expect(page.getByTestId("create-channel-template")).toHaveCount(0);
+  await expect(
+    page.getByTestId("create-channel-template-container"),
+  ).not.toContainText("Optional");
+  await expect(
+    page.getByRole("menuitem", { name: "Create new template" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Create new section template" }),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Inherited section channel",
+  );
+  await expect(page.getByTestId("create-channel-permissions")).toContainText(
+    "Private",
+  );
+  const channelNameInput = page.getByTestId("create-channel-name");
+  await channelNameInput.evaluate((element) => element.blur());
+  const channelNameColors = await channelNameInput.evaluate((element) => ({
+    placeholder: getComputedStyle(element, "::placeholder").color,
+    value: getComputedStyle(element).color,
+  }));
+  expect(channelNameColors.value).not.toBe(channelNameColors.placeholder);
+  await page.getByTestId("create-channel-submit").click();
+
+  await expect(page.getByTestId(`channel-${channelName}`)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const call = (await readCommandPayloadLog(page)).findLast(
+        (entry) => entry.command === "set_canvas",
+      );
+      return (call?.payload as { content?: string } | undefined)?.content;
+    })
+    .toBe(`# ${channelName}\n\nEngineering context`);
+});
+
+test("edit section renames it and reassigns the section template for future channel defaults", async ({
+  page,
+}) => {
+  await seedCustomSection(page, {
+    ...CUSTOM_SECTION,
+    templateId: "engineering-defaults",
+  });
+  await page.goto("/");
+
+  await page.getByTestId(`section-actions-${CUSTOM_SECTION.id}`).click();
+  await expect(
+    page.getByRole("menuitem", { name: "Rename section" }),
+  ).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Edit section" }).click();
+
+  const editDialog = page.getByRole("dialog", { name: "Edit section" });
+  const sectionName = editDialog.getByPlaceholder("Section name");
+  await expect(sectionName).toHaveValue("Projects");
+  const templateControl = editDialog.getByTestId("create-section-template");
+  await expect(templateControl).toHaveText("Engineering defaults");
+  await templateControl.click();
+  await page.getByRole("menuitemradio", { name: "Product defaults" }).click();
+  await sectionName.fill("Delivery");
+  await editDialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(
+    page.getByTestId(`section-title-${CUSTOM_SECTION.id}`),
+  ).toHaveText("Delivery");
+  const storedSection = await page.evaluate(() => {
+    for (const key of Object.keys(window.localStorage)) {
+      if (!key.startsWith("buzz-channel-sections.v1:")) continue;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as {
+        sections?: Array<{
+          id?: string;
+          name?: string;
+          templateId?: string;
+        }>;
+      };
+      const section = parsed.sections?.find(
+        (candidate) => candidate.id === "sec-projects",
+      );
+      if (section) return section;
+    }
+    return null;
+  });
+  expect(storedSection).toEqual(
+    expect.objectContaining({
+      name: "Delivery",
+      templateId: "product-defaults",
+    }),
+  );
+
+  await page
+    .getByTestId(`section-actions-${CUSTOM_SECTION.id}-quick-create`)
+    .click();
+  await page.getByTestId("channel-browser-search").fill("future-product");
+  await page.getByTestId("channel-browser-create-row").click();
+  await expect(
+    page.getByTestId("create-channel-section-template-context"),
+  ).toHaveText("Product defaults");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Inherited product channel",
+  );
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("channel-browser-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
+
+  await page.getByTestId(`section-actions-${CUSTOM_SECTION.id}`).click();
+  await page.getByRole("menuitem", { name: "Edit section" }).click();
+  const clearDialog = page.getByRole("dialog", { name: "Edit section" });
+  const clearTemplateControl = clearDialog.getByTestId(
+    "create-section-template",
+  );
+  await expect(clearTemplateControl).toHaveText("Product defaults");
+  await clearTemplateControl.click();
+  await page.getByRole("menuitemradio", { name: "None" }).click();
+  await clearDialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  await page.getByTestId(`section-actions-${CUSTOM_SECTION.id}`).click();
+  await page.getByRole("menuitem", { name: "Edit section" }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Edit section" })
+      .getByTestId("create-section-template"),
+  ).toHaveText("None");
 });
 
 test("canceling section create does not affect the next global create", async ({

@@ -26,6 +26,35 @@ function toManagedBackend(
   return { type: "provider", id: backend.id, config: {} };
 }
 
+export function buildProjectFolderCanvas(
+  projectFolders: string | readonly string[],
+): string {
+  const folders =
+    typeof projectFolders === "string" ? [projectFolders] : projectFolders;
+  const heading = folders.length === 1 ? "Project folder" : "Project folders";
+  const rows = folders.map((folder) => `- \`${folder}\``).join("\n");
+  return `## ${heading}\n\n${rows}`;
+}
+
+export function buildWorktreeCanvas(
+  projectFolders: string | readonly string[],
+  worktree: NonNullable<ChannelTemplate["worktree"]>,
+): string {
+  const folders =
+    typeof projectFolders === "string" ? [projectFolders] : projectFolders;
+  return [
+    "## Workspace instructions",
+    "",
+    ...folders.map(
+      (folder) =>
+        `- Use \`${folder}\` for review only. Do not make changes directly in it.`,
+    ),
+    `- Before starting new work in any repository, fetch its latest \`${worktree.baseBranch}\` branch from origin.`,
+    `- For each repository that needs changes, create a new worktree under \`${worktree.location}\` based on the latest \`origin/${worktree.baseBranch}\`.`,
+    "- Make all changes in that new worktree.",
+  ].join("\n");
+}
+
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
   const channelTemplatesQuery = useChannelTemplatesQuery();
@@ -43,10 +72,28 @@ export function useApplyTemplate() {
     const template = channelTemplatesQuery.data?.find(
       (t) => t.id === templateId,
     );
-    if (!template?.canvasTemplate) return;
-    const content = template.canvasTemplate
-      .replace(/\{channel\.name\}/g, channelName)
-      .replace(/\{template\.name\}/g, template.name);
+    if (!template) return;
+    const projectFolders =
+      template.projectFolders.length > 0
+        ? template.projectFolders
+        : template.projectFolder
+          ? [template.projectFolder]
+          : [];
+    const sections: string[] = [];
+    if (projectFolders.length > 0 && template.worktree) {
+      sections.push(buildWorktreeCanvas(projectFolders, template.worktree));
+    } else if (projectFolders.length > 0) {
+      sections.push(buildProjectFolderCanvas(projectFolders));
+    }
+    if (template.canvasTemplate) {
+      sections.push(
+        template.canvasTemplate
+          .replace(/\{channel\.name\}/g, channelName)
+          .replace(/\{template\.name\}/g, template.name),
+      );
+    }
+    if (sections.length === 0) return;
+    const content = sections.join("\n\n");
     try {
       await setCanvas({ channelId, content });
     } catch {

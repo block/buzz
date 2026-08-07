@@ -1,21 +1,20 @@
 import * as React from "react";
+import { Upload } from "lucide-react";
 
+import {
+  CHANNEL_FORM_FIELD_CONTROL_CLASS,
+  CHANNEL_FORM_FIELD_SHELL_CLASS,
+} from "@/features/channels/ui/channelFormStyles";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
   AgentPersona,
   CreateTeamInput,
   UpdateTeamInput,
 } from "@/shared/api/types";
-import { Badge } from "@/shared/ui/badge";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Checkbox } from "@/shared/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
+import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { personaCatalogCopy } from "./personaLibraryCopy";
@@ -27,6 +26,10 @@ import {
   orderPersonasByInitiallySelected,
 } from "./teamDialogSelection";
 
+const TEAM_FORM_ID = "team-form";
+const TEAM_ROW_INSET_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
+
 type TeamDialogProps = {
   open: boolean;
   title: string;
@@ -37,6 +40,7 @@ type TeamDialogProps = {
   error: Error | null;
   isPending: boolean;
   onOpenChange: (open: boolean) => void;
+  onImport?: () => void;
   onSubmit: (input: CreateTeamInput | UpdateTeamInput) => Promise<void>;
   onDeleteRemovedPersonas?: (personaIds: string[]) => Promise<void>;
 };
@@ -51,6 +55,7 @@ export function TeamDialog({
   error,
   isPending,
   onOpenChange,
+  onImport,
   onSubmit,
   onDeleteRemovedPersonas,
 }: TeamDialogProps) {
@@ -128,13 +133,16 @@ export function TeamDialog({
   function buildSubmitInput(): CreateTeamInput | UpdateTeamInput {
     const baseInput = {
       name,
-      description: teamDescription.trim() || undefined,
-      instructions: instructions.trim() || undefined,
       personaIds: filterAvailablePersonaIds(selectedPersonaIds, personas),
     };
 
     if (initialValues && "id" in initialValues) {
-      return { id: initialValues.id, ...baseInput };
+      return {
+        id: initialValues.id,
+        ...baseInput,
+        description: teamDescription.trim() || undefined,
+        instructions: instructions.trim() || undefined,
+      };
     }
     return baseInput;
   }
@@ -174,172 +182,233 @@ export function TeamDialog({
 
   return (
     <>
-      <Dialog onOpenChange={handleOpenChange} open={open}>
-        <DialogContent className="max-w-2xl overflow-hidden p-0">
-          <div className="flex max-h-[85vh] flex-col">
-            <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
-              <DialogTitle>{title}</DialogTitle>
-              {description.trim().length > 0 ? (
-                <DialogDescription>{description}</DialogDescription>
+      <Dialog
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && isPending) return;
+          handleOpenChange(nextOpen);
+        }}
+        open={open}
+      >
+        <ChooserDialogContent
+          className="max-w-xl"
+          contentClassName="pt-3"
+          data-testid="team-dialog"
+          description={description}
+          footer={
+            <div
+              className={cn(
+                "flex w-full items-center gap-3",
+                onImport ? "justify-between" : "justify-end",
+              )}
+            >
+              {onImport ? (
+                <Button
+                  data-testid="team-import"
+                  disabled={isPending}
+                  onClick={onImport}
+                  type="button"
+                  variant="outline"
+                >
+                  <Upload className="h-4 w-4" />
+                  Import
+                </Button>
               ) : null}
-            </DialogHeader>
-
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-              <div className="space-y-1.5">
-                <label className="text-sm font-medium" htmlFor="team-name">
-                  Name
-                </label>
+              <Button
+                data-testid="team-submit"
+                disabled={
+                  name.trim().length === 0 ||
+                  selectedPersonaIds.length === 0 ||
+                  isPending
+                }
+                form={TEAM_FORM_ID}
+                type="submit"
+              >
+                {isPending ? "Saving..." : submitLabel}
+              </Button>
+            </div>
+          }
+          footerClassName="border-t-0 pt-0"
+          headerClassName="pb-2"
+          title={title}
+        >
+          <form
+            className="space-y-5"
+            id={TEAM_FORM_ID}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSubmit();
+            }}
+          >
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="team-name"
+              >
+                Name
+              </label>
+              <div
+                className={cn(
+                  "flex min-h-11 items-center px-3",
+                  CHANNEL_FORM_FIELD_SHELL_CLASS,
+                )}
+              >
                 <Input
+                  autoComplete="off"
                   autoCorrect="off"
+                  className={cn(
+                    "h-8 px-0 py-0 leading-6",
+                    CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                  )}
                   disabled={isPending}
                   id="team-name"
                   onChange={(event) => setName(event.target.value)}
-                  placeholder="Engineering Squad"
+                  placeholder="Enter a team name."
+                  spellCheck={false}
                   value={name}
                 />
               </div>
+            </div>
 
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium"
-                  htmlFor="team-description"
-                >
-                  Description
-                </label>
-                <Textarea
-                  className="min-h-20"
-                  disabled={isPending}
-                  id="team-description"
-                  onChange={(event) => setTeamDescription(event.target.value)}
-                  placeholder="Optional description for this team."
-                  value={teamDescription}
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium"
-                  htmlFor="team-instructions"
-                >
-                  Team Instructions
-                </label>
-                <Textarea
-                  className="min-h-24"
-                  disabled={isPending}
-                  id="team-instructions"
-                  onChange={(event) => setInstructions(event.target.value)}
-                  placeholder="Optional instructions applied to every deployed team member."
-                  value={instructions}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <span className="text-sm font-medium">Agents</span>
-                <p className="text-xs text-muted-foreground">
-                  Select the agents to include in this team.
-                </p>
-                {missingInitialPersonaCount > 0 ? (
-                  <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                    This team references {missingInitialPersonaCount} agent
-                    {missingInitialPersonaCount === 1 ? "" : "s"} that{" "}
-                    {missingInitialPersonaCount === 1 ? "is" : "are"} no longer
-                    in My Agents. Save to remove them, or add them back to My
-                    Agents first.
-                  </p>
-                ) : null}
-                {personas.length === 0 ? (
-                  <p className="py-4 text-center text-sm text-muted-foreground">
-                    {personaCatalogCopy.teamEmptyState}
-                  </p>
-                ) : (
-                  <div
-                    className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-border/70 p-2"
-                    role="listbox"
-                    aria-label="Agents"
-                    aria-multiselectable="true"
+            {isEditMode ? (
+              <>
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="team-description"
                   >
-                    {orderedPersonas.map((persona) => {
-                      const isSelected = selectedPersonaIds.includes(
-                        persona.id,
-                      );
+                    Description
+                  </label>
+                  <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
+                    <Textarea
+                      className={cn(
+                        "min-h-20 resize-none px-3 py-3 leading-5",
+                        CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                      )}
+                      disabled={isPending}
+                      id="team-description"
+                      onChange={(event) =>
+                        setTeamDescription(event.target.value)
+                      }
+                      placeholder="Optional description for this team."
+                      value={teamDescription}
+                    />
+                  </div>
+                </div>
 
-                      return (
-                        <div
-                          className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-muted/50"
-                          key={persona.id}
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="team-instructions"
+                  >
+                    Team Instructions
+                  </label>
+                  <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
+                    <Textarea
+                      className={cn(
+                        "min-h-24 resize-none px-3 py-3 leading-5",
+                        CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                      )}
+                      disabled={isPending}
+                      id="team-instructions"
+                      onChange={(event) => setInstructions(event.target.value)}
+                      placeholder="Optional instructions applied to every deployed team member."
+                      value={instructions}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            <div className="space-y-2">
+              <span className="text-sm font-medium text-foreground">
+                Agents
+              </span>
+              <p className="text-xs text-muted-foreground">
+                Select the agents to include in this team.
+              </p>
+              {missingInitialPersonaCount > 0 ? (
+                <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                  This team references {missingInitialPersonaCount} agent
+                  {missingInitialPersonaCount === 1 ? "" : "s"} that{" "}
+                  {missingInitialPersonaCount === 1 ? "is" : "are"} no longer in
+                  My Agents. Save to remove them, or add them back to My Agents
+                  first.
+                </p>
+              ) : null}
+              {personas.length === 0 ? (
+                <p
+                  className={cn(
+                    "py-4 text-center text-sm text-muted-foreground",
+                    CHANNEL_FORM_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  {personaCatalogCopy.teamEmptyState}
+                </p>
+              ) : (
+                <div
+                  className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
+                  data-testid="team-agent-picker"
+                >
+                  {orderedPersonas.map((persona) => {
+                    const isSelected = selectedPersonaIds.includes(persona.id);
+
+                    return (
+                      <div
+                        className={cn(
+                          "group/add-result relative isolate flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+                          TEAM_ROW_INSET_DIVIDER_CLASS,
+                          isSelected && "bg-muted/40",
+                        )}
+                        data-testid={`team-agent-row-${persona.id}`}
+                        key={persona.id}
+                      >
+                        <button
+                          aria-label={`${isSelected ? "Remove" : "Add"} ${persona.displayName}`}
+                          className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                          disabled={isPending}
                           onClick={() => {
                             if (!isPending) {
                               togglePersona(persona.id);
                             }
                           }}
-                          onKeyDown={(event) => {
-                            if (
-                              !isPending &&
-                              (event.key === "Enter" || event.key === " ")
-                            ) {
-                              event.preventDefault();
-                              togglePersona(persona.id);
-                            }
-                          }}
-                          role="option"
-                          aria-selected={isSelected}
-                          tabIndex={0}
-                        >
-                          <Checkbox
-                            checked={isSelected}
-                            className="pointer-events-none"
-                            disabled={isPending}
-                            tabIndex={-1}
-                          />
-                          <ProfileAvatar
-                            avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 text-2xs"
-                            label={persona.displayName}
-                          />
-                          <span className="text-sm">{persona.displayName}</span>
-                          {persona.isBuiltIn ? (
-                            <Badge variant="secondary">Built-in</Badge>
-                          ) : null}
+                          type="button"
+                        />
+                        <ProfileAvatar
+                          avatarUrl={persona.avatarUrl}
+                          className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
+                          label={persona.displayName}
+                        />
+                        <div className="pointer-events-none relative z-10 min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium tracking-tight">
+                            {persona.displayName}
+                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {error ? (
-                <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                  {error.message}
-                </p>
-              ) : null}
+                        <Button
+                          aria-label={isSelected ? "Remove" : "Add"}
+                          className="relative z-20 shrink-0"
+                          disabled={isPending}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            togglePersona(persona.id);
+                          }}
+                          size="sm"
+                          type="button"
+                          variant={isSelected ? "outline" : "default"}
+                        >
+                          {isSelected ? "Remove" : "Add"}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            <div className="flex shrink-0 items-center justify-end gap-3 border-t border-border/60 px-6 py-4">
-              <div className="flex items-center gap-2">
-                <Button
-                  onClick={() => handleOpenChange(false)}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  disabled={
-                    name.trim().length === 0 ||
-                    selectedPersonaIds.length === 0 ||
-                    isPending
-                  }
-                  onClick={() => void handleSubmit()}
-                  size="sm"
-                  type="button"
-                >
-                  {isPending ? "Saving..." : submitLabel}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </DialogContent>
+            {error ? (
+              <p className="text-sm text-destructive">{error.message}</p>
+            ) : null}
+          </form>
+        </ChooserDialogContent>
       </Dialog>
 
       <RemoveMembersConfirmDialog

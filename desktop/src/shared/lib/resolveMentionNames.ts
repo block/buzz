@@ -1,6 +1,7 @@
 import type { UserProfileSummary } from "@/shared/api/types";
 
 export const MENTION_REFERENCE_TAG = "mention";
+export const TEAM_MENTION_TAG = "team_mention";
 
 export function getMentionTagPubkey(tag: string[]): string | null {
   if ((tag[0] !== "p" && tag[0] !== MENTION_REFERENCE_TAG) || !tag[1]) {
@@ -46,6 +47,7 @@ function collectProfileAliases(
 }
 
 export type ResolvedMentionProps = {
+  agentMentionNames: string[] | undefined;
   mentionNames: string[] | undefined;
   mentionPubkeysByName: Record<string, string> | undefined;
 };
@@ -65,16 +67,30 @@ export function resolveMentionProps(
   tags: string[][] | undefined,
   profiles: Record<string, UserProfileSummary> | undefined,
 ): ResolvedMentionProps {
-  if (!profiles || !tags) {
-    return { mentionNames: undefined, mentionPubkeysByName: undefined };
+  if (!tags) {
+    return {
+      agentMentionNames: undefined,
+      mentionNames: undefined,
+      mentionPubkeysByName: undefined,
+    };
   }
 
   const names = new Set<string>();
+  const agentNames = new Set<string>();
   const pubkeysByName: Record<string, string> = {};
 
   for (const tag of tags) {
+    if (tag[0] === TEAM_MENTION_TAG) {
+      const teamName = tag[2]?.trim();
+      if (teamName) {
+        names.add(teamName);
+        agentNames.add(teamName);
+      }
+      continue;
+    }
+
     const pubkey = getMentionTagPubkey(tag);
-    if (!pubkey) {
+    if (!pubkey || !profiles) {
       continue;
     }
 
@@ -85,6 +101,7 @@ export function resolveMentionProps(
   }
 
   return {
+    agentMentionNames: agentNames.size > 0 ? [...agentNames] : undefined,
     mentionNames: names.size > 0 ? [...names] : undefined,
     mentionPubkeysByName:
       Object.keys(pubkeysByName).length > 0 ? pubkeysByName : undefined,

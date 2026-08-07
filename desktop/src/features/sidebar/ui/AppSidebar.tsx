@@ -133,7 +133,10 @@ type AppSidebarProps = {
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkAllChannelsRead: () => void;
-  onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
+  onBrowseChannels?: (
+    onCreated?: (channelId: string) => void,
+    initialTemplateId?: string,
+  ) => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateCommunity: (
     id: string,
@@ -148,11 +151,6 @@ type AppSidebarProps = {
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit) => void;
-  /**
-   * Full channel set used for global search. Unlike `channels` (which is
-   * scoped to the viewer's joined sidebar list), this includes open channels
-   * the viewer hasn't joined, so search can surface them.
-   */
   searchChannels: Channel[];
   searchFocusRequest: number;
   onSelectSettings: (section?: SettingsSection) => void;
@@ -311,11 +309,6 @@ export function AppSidebar({
     }
   }, [canShowSidebarUpdateCard]);
 
-  // Allow the create-channel dialog to be opened from outside (e.g. the
-  // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
-  // When the external flag flips on, open the "stream" create dialog; the
-  // close direction is reported back via `onCreateChannelOpenChange` in the
-  // dialog's `onOpenChange` below.
   React.useEffect(() => {
     if (isCreateChannelOpenProp) {
       openCreateDialog("stream");
@@ -411,8 +404,6 @@ export function AppSidebar({
         unassigned.push(channel);
       }
     }
-    // Apply each grouping's own sort preference; section membership itself
-    // is untouched.
     for (const sectionId of Object.keys(bySection)) {
       bySection[sectionId] = sortChannelsForSidebar(
         bySection[sectionId],
@@ -448,7 +439,7 @@ export function AppSidebar({
 
   const handleCreateSectionConfirm = React.useCallback(
     (value: SectionDialogValue) => {
-      const section = createSection(value.name, value.icon);
+      const section = createSection(value.name, value.icon, value.templateId);
       if (!section) {
         return;
       }
@@ -543,11 +534,16 @@ export function AppSidebar({
 
   const handleCreateChannelInSection = React.useCallback(
     (sectionId: string) => {
-      onBrowseChannels?.((channelId) => assignChannel(channelId, sectionId));
+      const section = channelSections.find(
+        (candidate) => candidate.id === sectionId,
+      );
+      onBrowseChannels?.(
+        (channelId) => assignChannel(channelId, sectionId),
+        section?.templateId,
+      );
     },
-    [assignChannel, onBrowseChannels],
+    [assignChannel, channelSections, onBrowseChannels],
   );
-
   return (
     <Sidebar
       className="!z-[100] !border-r-0"
@@ -925,8 +921,6 @@ export function AppSidebar({
         isCreating={isCreatingAny}
         onOpenChange={(open) => {
           if (!open) {
-            // If a "stream" dialog driven by the external controller is
-            // closing, report it back so AppShell's open state resets.
             if (createDialogKind === "stream") {
               onCreateChannelOpenChange?.(false);
             }
@@ -960,9 +954,15 @@ export function AppSidebar({
         }}
         sectionName={renameSectionTarget?.name ?? ""}
         sectionIcon={renameSectionTarget?.icon}
+        sectionTemplateId={renameSectionTarget?.templateId}
         onConfirm={(value) => {
           if (renameSectionTarget) {
-            renameSection(renameSectionTarget.id, value.name, value.icon);
+            renameSection(
+              renameSectionTarget.id,
+              value.name,
+              value.icon,
+              value.templateId,
+            );
           }
           setRenameSectionTarget(null);
         }}

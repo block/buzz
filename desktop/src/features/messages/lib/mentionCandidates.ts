@@ -1,8 +1,11 @@
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import type { AgentPersona, AgentTeam, ChannelRole } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { TEAM_MENTION_TAG } from "@/shared/lib/resolveMentionNames";
+import { hasMention } from "./hasMention";
 
 export type TeamMentionMember = {
+  avatarUrl?: string | null;
   displayName: string;
   kind: "identity" | "persona";
   personaId?: string;
@@ -71,6 +74,7 @@ function findTeamMemberTarget(
 
   if (linked) {
     return {
+      avatarUrl: linked.avatarUrl ?? persona.avatarUrl,
       displayName: linked.displayName?.trim() || persona.displayName,
       kind: linked.kind === "identity" ? "identity" : "persona",
       personaId: linked.personaId,
@@ -80,6 +84,7 @@ function findTeamMemberTarget(
 
   return persona.isActive
     ? {
+        avatarUrl: persona.avatarUrl,
         displayName: persona.displayName,
         kind: "persona",
         personaId: persona.id,
@@ -126,7 +131,48 @@ export function buildTeamMentionCandidates(
 
 export function formatTeamMention(
   teamName: string,
-  members: readonly TeamMentionMember[],
+  _members?: readonly TeamMentionMember[],
 ) {
-  return `${teamName}(${members.map((member) => `@${member.displayName}`).join(" ")}) `;
+  return `@${teamName} `;
+}
+
+export function resolveTeamMentions(
+  text: string,
+  candidates: readonly MentionCandidate[],
+): {
+  personaMembers: TeamMentionMember[];
+  pubkeys: string[];
+  tags: string[][];
+} {
+  const personaMembers: TeamMentionMember[] = [];
+  const pubkeys = new Set<string>();
+  const seenPersonaIds = new Set<string>();
+  const tags: string[][] = [];
+
+  for (const candidate of candidates) {
+    if (
+      candidate.kind !== "team" ||
+      !candidate.teamId ||
+      !candidate.displayName ||
+      !hasMention(text, candidate.displayName)
+    ) {
+      continue;
+    }
+
+    tags.push([TEAM_MENTION_TAG, candidate.teamId, candidate.displayName]);
+    for (const member of candidate.teamMembers ?? []) {
+      if (member.pubkey) {
+        pubkeys.add(member.pubkey);
+      } else if (
+        member.kind === "persona" &&
+        member.personaId &&
+        !seenPersonaIds.has(member.personaId)
+      ) {
+        personaMembers.push(member);
+        seenPersonaIds.add(member.personaId);
+      }
+    }
+  }
+
+  return { personaMembers, pubkeys: [...pubkeys], tags };
 }

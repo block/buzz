@@ -12,6 +12,8 @@ import {
   openCreateChannelDialog,
   openNewMessagePage,
 } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
+import { openSettings } from "../helpers/settings";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
@@ -1374,10 +1376,20 @@ test("create channel template selector matches the lifecycle controls", async ({
       {
         id: "project-kickoff",
         name: "Project kickoff",
+        templateType: "channel",
         description: "Coordinate a new project from planning through launch.",
         channelType: "stream",
         visibility: "private",
-        canvasTemplate: "# {channel.name}\n\nKickoff notes",
+        canvasTemplate: null,
+        projectFolders: [
+          "/Users/dev/projects/kickoff",
+          "/Users/dev/projects/shared-docs",
+        ],
+        projectFolder: "/Users/dev/projects/kickoff",
+        worktree: {
+          location: "~/.buzz/worktrees",
+          baseBranch: "main",
+        },
         agents: {
           personas: [
             {
@@ -1401,6 +1413,42 @@ test("create channel template selector matches the lifecycle controls", async ({
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
       },
+      {
+        id: "engineering-section",
+        name: "Engineering section",
+        templateType: "section",
+        description: null,
+        channelType: "stream",
+        visibility: "open",
+        canvasTemplate: "# Engineering work",
+        projectFolders: [],
+        projectFolder: null,
+        worktree: null,
+        agents: { personas: [], teams: [] },
+        isBuiltin: false,
+        createdAt: "2026-07-24T00:00:00Z",
+        updatedAt: "2026-07-24T00:00:00Z",
+      },
+    ],
+    personas: [
+      {
+        displayName: "Planner",
+        id: "planner",
+        systemPrompt: "Plans project work.",
+      },
+      {
+        displayName: "Reviewer",
+        id: "reviewer",
+        systemPrompt: "Reviews project work.",
+      },
+    ],
+    teams: [
+      {
+        description: "Researches project context.",
+        id: "research-team",
+        name: "Research Team",
+        personaIds: ["planner"],
+      },
     ],
   });
 
@@ -1412,13 +1460,16 @@ test("create channel template selector matches the lifecycle controls", async ({
   await expect(templateControl).toHaveText("None");
   await templateControl.click();
   await expect(
-    page.getByRole("menuitem", { name: "Create new channel template…" }),
+    page.getByRole("menuitem", { name: "Create new template" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("menuitemradio", { name: "Engineering section" }),
+  ).toHaveCount(0);
   await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
 
   await expect(templateControl).toHaveText("Project kickoff");
-  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
-    "Private · Canvas included · 1 agent · 1 team",
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveCount(
+    0,
   );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
@@ -1428,15 +1479,306 @@ test("create channel template selector matches the lifecycle controls", async ({
   );
   await page.getByTestId("create-channel-permissions").click();
   await page.getByTestId("create-channel-permissions-option-open").click();
-  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
-    "Open · Canvas included · 1 agent · 1 team",
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveCount(
+    0,
+  );
+
+  await page.getByTestId("create-channel-name").fill("Project launch");
+  const channelNameInput = page.getByTestId("create-channel-name");
+  await channelNameInput.evaluate((element) => element.blur());
+  const channelNameColors = await channelNameInput.evaluate((element) => ({
+    placeholder: getComputedStyle(element, "::placeholder").color,
+    value: getComputedStyle(element).color,
+  }));
+  expect(channelNameColors.value).not.toBe(channelNameColors.placeholder);
+  await page.getByTestId("create-channel-submit").click();
+  await expect
+    .poll(async () => {
+      const setCanvasCall = (await readCommandPayloadLog(page)).findLast(
+        (entry) => entry.command === "set_canvas",
+      );
+      return (setCanvasCall?.payload as { content?: string } | undefined)
+        ?.content;
+    })
+    .toBe(
+      [
+        "## Workspace instructions",
+        "",
+        "- Use `/Users/dev/projects/kickoff` for review only. Do not make changes directly in it.",
+        "- Use `/Users/dev/projects/shared-docs` for review only. Do not make changes directly in it.",
+        "- Before starting new work in any repository, fetch its latest `main` branch from origin.",
+        "- For each repository that needs changes, create a new worktree under `~/.buzz/worktrees` based on the latest `origin/main`.",
+        "- Make all changes in that new worktree.",
+      ].join("\n"),
+    );
+});
+
+test("channel template settings use structured cards with visible actions", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    channelTemplates: [
+      {
+        id: "project-kickoff",
+        name: "Project kickoff",
+        templateType: "channel",
+        description: "Legacy description that is no longer presented.",
+        channelType: "stream",
+        visibility: "private",
+        canvasTemplate: "# Kickoff",
+        projectFolders: ["/Users/dev/projects/kickoff"],
+        projectFolder: "/Users/dev/projects/kickoff",
+        worktree: {
+          location: "~/.buzz/worktrees",
+          baseBranch: "main",
+        },
+        agents: {
+          personas: [
+            {
+              personaId: "planner",
+              runtime: null,
+              model: null,
+              role: null,
+              backend: null,
+            },
+          ],
+          teams: [
+            {
+              teamId: "research-team",
+              runtime: null,
+              model: null,
+              backend: null,
+            },
+          ],
+        },
+        isBuiltin: false,
+        createdAt: "2026-07-23T00:00:00Z",
+        updatedAt: "2026-07-23T00:00:00Z",
+      },
+      {
+        id: "engineering-section",
+        name: "Engineering section",
+        templateType: "section",
+        description: null,
+        channelType: "stream",
+        visibility: "open",
+        canvasTemplate: "# Engineering work",
+        projectFolders: [],
+        projectFolder: null,
+        worktree: null,
+        agents: { personas: [], teams: [] },
+        isBuiltin: false,
+        createdAt: "2026-07-24T00:00:00Z",
+        updatedAt: "2026-07-24T00:00:00Z",
+      },
+    ],
+    personas: [
+      {
+        displayName: "Planner",
+        id: "planner",
+        systemPrompt: "Plans project work.",
+      },
+      {
+        displayName: "Reviewer",
+        id: "reviewer",
+        systemPrompt: "Reviews project work.",
+      },
+    ],
+    teams: [
+      {
+        description: "Researches project context.",
+        id: "research-team",
+        name: "Research Team",
+        personaIds: ["planner"],
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await openSettings(page, "channel-templates");
+
+  await expect(
+    page.getByRole("heading", { name: "Templates", exact: true }),
+  ).toBeVisible();
+  const channelTemplateList = page.getByTestId("channel-templates-list");
+  const sectionTemplateList = page.getByTestId("section-templates-list");
+  await expect(channelTemplateList).toContainText("Project kickoff");
+  await expect(channelTemplateList).not.toContainText("Engineering section");
+  await expect(sectionTemplateList).toContainText("Engineering section");
+  await expect(sectionTemplateList).not.toContainText("Project kickoff");
+
+  const row = page.getByTestId("channel-template-row-project-kickoff");
+  await expect(row).toBeVisible();
+  await expect(row).toHaveCSS("border-top-style", "solid");
+  await expect(row).not.toContainText("Legacy description");
+  await expect(
+    row.getByTestId("channel-template-detail-agent-project-kickoff-planner"),
+  ).toContainText("Planner");
+  await expect(
+    row.getByTestId(
+      "channel-template-detail-team-project-kickoff-research-team",
+    ),
+  ).toContainText("Research Team");
+  await expect(
+    row.getByTestId("channel-template-agent-avatar-project-kickoff-planner"),
+  ).toBeVisible();
+  await expect(
+    row
+      .getByTestId("channel-template-detail-team-project-kickoff-research-team")
+      .getByTestId("compact-team-avatar-stack"),
+  ).toBeVisible();
+  await expect(row).not.toContainText("selected");
+  await expect(
+    row.getByTestId("channel-template-detail-folder-project-kickoff"),
+  ).toHaveText("Project folder/Users/dev/projects/kickoff");
+  await expect(
+    row.getByTestId("channel-template-detail-worktree-project-kickoff"),
+  ).toHaveText("Worktree~/.buzz/worktrees · main");
+  await expect(
+    row.getByTestId("channel-template-detail-canvas-project-kickoff"),
+  ).toHaveText("CanvasIncluded");
+
+  const menu = row.getByTestId("channel-template-menu-project-kickoff");
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveCSS("opacity", "1");
+  await menu.click();
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Duplicate" })).toBeVisible();
+
+  const commandPayloadBaseline = (await readCommandPayloadLog(page)).length;
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  const editDialog = page.getByTestId("channel-template-dialog");
+  await expect(editDialog.locator("#template-description")).toHaveCount(0);
+  const canvasToggle = editDialog.getByTestId("channel-template-canvas-toggle");
+  await expect(canvasToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(editDialog.locator("#template-canvas")).toHaveCount(0);
+  const agentSummary = editDialog.getByTestId("channel-template-agent-summary");
+  await expect(agentSummary).toBeVisible();
+  await expect(
+    agentSummary.getByTestId("channel-template-summary-team-research-team"),
+  ).toContainText("Research Team");
+  await expect(
+    agentSummary.getByTestId("channel-template-summary-member-planner"),
+  ).toContainText("Planner");
+  await expect(
+    agentSummary.getByTestId("channel-template-summary-teams-header"),
+  ).toHaveCount(0);
+  await expect(
+    agentSummary.getByTestId("channel-template-summary-members-header"),
+  ).toHaveCount(0);
+  await expect(
+    editDialog.getByTestId("channel-template-agent-picker"),
+  ).toHaveCount(0);
+  await editDialog.getByTestId("channel-template-edit-agents").click();
+  await expect(
+    editDialog.getByTestId("channel-template-agents-page"),
+  ).toBeVisible();
+  await expect(
+    editDialog.getByTestId("channel-template-details-page"),
+  ).toHaveCount(0);
+  await expect(
+    editDialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    editDialog.getByRole("button", { name: "Back", exact: true }),
+  ).toBeVisible();
+  await expect(
+    editDialog.getByRole("button", { name: "Done", exact: true }),
+  ).toBeVisible();
+  await expect(
+    editDialog.getByText(/\d+ agent teams? · \d+ agents included/),
+  ).toHaveCount(0);
+  const researchTeamRow = editDialog.getByTestId(
+    "channel-template-team-row-research-team",
+  );
+  await expect(
+    researchTeamRow.getByRole("button", { name: "Remove", exact: true }),
+  ).toBeVisible();
+  await researchTeamRow
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  const reviewerRow = editDialog.getByTestId(
+    "channel-template-member-row-reviewer",
+  );
+  await reviewerRow.getByRole("button", { name: "Add", exact: true }).click();
+  await editDialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    editDialog.getByTestId("channel-template-agent-summary"),
+  ).toBeVisible();
+  await expect(
+    editDialog.getByTestId("channel-template-summary-team-research-team"),
+  ).toHaveCount(0);
+  await expect(
+    editDialog.getByTestId("channel-template-summary-member-reviewer"),
+  ).toContainText("Reviewer");
+  await canvasToggle.click();
+  await expect(editDialog.getByTestId("channel-template-canvas")).toHaveValue(
+    "# Kickoff",
+  );
+  await editDialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  const updateTemplateCall = (await readCommandPayloadLog(page))
+    .slice(commandPayloadBaseline)
+    .find((entry) => entry.command === "update_channel_template");
+  expect(updateTemplateCall?.payload).toEqual(
+    expect.objectContaining({
+      input: expect.objectContaining({
+        canvasTemplate: "# Kickoff",
+        description: "Legacy description that is no longer presented.",
+        worktree: {
+          location: "~/.buzz/worktrees",
+          baseBranch: "main",
+        },
+        agents: expect.objectContaining({
+          personas: expect.arrayContaining([
+            expect.objectContaining({ personaId: "planner" }),
+            expect.objectContaining({ personaId: "reviewer" }),
+          ]),
+          teams: [],
+        }),
+      }),
+    }),
   );
 });
 
-test("create channel exposes templates when the library is empty", async ({
+test("create channel template uses the grouped agent team and agent picker", async ({
   page,
 }) => {
-  await installMockBridge(page, { channelTemplates: [] });
+  await installMockBridge(page, {
+    channelTemplates: [],
+    channelTemplateProjectFolderPicks: [
+      ["/Users/dev/projects/sprout", "/Users/dev/projects/buzz-docs"],
+      ["/Users/dev/projects/buzz-docs", "/Users/dev/projects/tools"],
+    ],
+    personas: [
+      {
+        avatarUrl:
+          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        displayName: "Template Writer",
+        id: "template-writer",
+        systemPrompt: "Writes concise planning notes.",
+      },
+      {
+        displayName: "Template Researcher",
+        id: "template-researcher",
+        systemPrompt: "Researches context for the channel.",
+      },
+    ],
+    teams: [
+      {
+        description: "Plans and researches upcoming work",
+        id: "template-planning-team",
+        name: "Planning Team",
+        personaIds: [
+          "template-writer",
+          "template-researcher",
+          "builtin:fizz",
+          "builtin:honey",
+          "builtin:bumble",
+        ],
+      },
+    ],
+  });
   await page.goto("/");
   await openCreateChannelDialog(page);
 
@@ -1459,24 +1801,512 @@ test("create channel exposes templates when the library is empty", async ({
   expect(typeBox?.y ?? 0).toBeLessThan(visibilityBox?.y ?? 0);
   expect(visibilityBox?.y ?? 0).toBeLessThan(templateBox?.y ?? 0);
 
-  const templateControl = page.getByTestId("create-channel-template");
-  await expect(templateControl).toHaveText("None");
-  await templateControl.click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("create-channel-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("dialog-overlay")).toHaveCount(0);
+  await openSettings(page, "channel-templates");
   await page
-    .getByRole("menuitem", { name: "Create new channel template…" })
+    .getByTestId("settings-channel-templates")
+    .getByRole("button", { name: "Create", exact: true })
     .click();
 
+  const dialog = page.getByTestId("channel-template-dialog");
+  const expectFilledTemplateNameForeground = async () => {
+    const input = dialog.locator("#template-name");
+    await input.evaluate((element) => element.blur());
+    const colors = await input.evaluate((element) => ({
+      placeholder: getComputedStyle(element, "::placeholder").color,
+      value: getComputedStyle(element).color,
+    }));
+    expect(colors.value).not.toBe(colors.placeholder);
+  };
+  await expect(dialog).toBeVisible();
   await expect(
-    page.getByText("Create template", { exact: true }),
+    dialog.getByRole("heading", {
+      name: "Create template",
+      exact: true,
+    }),
   ).toBeVisible();
+  const stepIndicator = dialog.getByTestId("template-step-indicator");
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "1");
+  await expect(stepIndicator.locator('[data-state="active"]')).toHaveCount(1);
+  await expect(stepIndicator.locator('[data-state="future"]')).toHaveCount(2);
+  await expect(dialog.getByTestId("template-type-page")).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toHaveCount(0);
+  const channelType = dialog.getByTestId("template-type-channel");
+  const sectionType = dialog.getByTestId("template-type-section");
+  const channelTypeCard = channelType.locator("..");
+  await expect(channelType).toBeChecked();
+  await expect(sectionType).not.toBeChecked();
+  await expect(dialog).toBeFocused();
+  await expect(channelTypeCard).toHaveCSS("box-shadow", "none");
+  await page.keyboard.press("Tab");
+  await expect(channelType).toBeFocused();
+  await expect(channelTypeCard).not.toHaveCSS("box-shadow", "none");
+  await expect(
+    dialog.getByText("Choose what this template configures.", { exact: true }),
+  ).toHaveCount(0);
+  await waitForAnimations(page);
+  const channelTypeBox = await channelTypeCard.boundingBox();
+  const sectionTypeBox = await sectionType.locator("..").boundingBox();
+  const typeDialogBox = await dialog.boundingBox();
+  expect(channelTypeBox).not.toBeNull();
+  expect(sectionTypeBox).not.toBeNull();
+  expect(typeDialogBox?.width ?? 0).toBeGreaterThanOrEqual(640);
+  expect(channelTypeBox?.height ?? 0).toBeGreaterThanOrEqual(192);
+  expect(channelTypeBox?.y).toBe(sectionTypeBox?.y);
+  expect(channelTypeBox?.x ?? 0).toBeLessThan(sectionTypeBox?.x ?? 0);
+  await expect(
+    dialog.getByText("Set defaults for one new channel.", { exact: true }),
+  ).toHaveClass(/text-muted-foreground/);
+  await expect(dialog.getByTestId("template-type-copy-channel")).toHaveClass(
+    /mt-auto/,
+  );
+  const neutralColors = await dialog.evaluate(() => {
+    const channelInput = document.querySelector(
+      '[data-testid="template-type-channel"]',
+    );
+    const sectionInput = document.querySelector(
+      '[data-testid="template-type-section"]',
+    );
+    const channelIcon = document.querySelector(
+      '[data-testid="template-type-icon-channel"]',
+    );
+    const sectionIcon = document.querySelector(
+      '[data-testid="template-type-icon-section"]',
+    );
+    return {
+      selectedCard: channelInput?.parentElement
+        ? getComputedStyle(channelInput.parentElement).backgroundColor
+        : null,
+      unselectedCard: sectionInput?.parentElement
+        ? getComputedStyle(sectionInput.parentElement).backgroundColor
+        : null,
+      selectedIcon: channelIcon
+        ? getComputedStyle(channelIcon).backgroundColor
+        : null,
+      unselectedIcon: sectionIcon
+        ? getComputedStyle(sectionIcon).backgroundColor
+        : null,
+    };
+  });
+  expect(neutralColors.selectedCard).toBe(neutralColors.unselectedCard);
+  expect(neutralColors.selectedIcon).toBe(neutralColors.unselectedIcon);
+  await expect(sectionType.locator("..")).toHaveClass(/hover:bg-input\/30/);
+  await expect(dialog).toHaveCSS("transition-property", "height, max-width");
+  await expect(dialog).toHaveCSS("transition-duration", "0.22s");
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(27rem, 85vh)",
+  );
+  await sectionType.locator("..").click();
+  await expect(sectionType).toBeChecked();
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(
+    dialog.getByRole("heading", {
+      name: "Create section template",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toHaveCount(0);
+  await dialog.locator("#template-name").fill("Section defaults");
+  await expectFilledTemplateNameForeground();
+  await dialog.locator("#template-name").fill("");
+  await dialog.getByRole("button", { name: "Back", exact: true }).click();
+  await channelType.locator("..").click();
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "2");
+  await expect(
+    dialog.getByRole("heading", {
+      name: "Create channel template",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toHaveCount(0);
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(31rem, 85vh)",
+  );
+  await dialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "1");
+  await expect(dialog.getByTestId("template-type-page")).toBeVisible();
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(27rem, 85vh)",
+  );
+  await expect(
+    dialog.getByRole("heading", { name: "Create template", exact: true }),
+  ).toBeVisible();
+  const typePageMetrics = await dialog
+    .getByTestId("template-type-page")
+    .evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+  expect(typePageMetrics.scrollHeight).toBeLessThanOrEqual(
+    typePageMetrics.clientHeight + 1,
+  );
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "2");
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByText("Configure the defaults this template applies."),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("channel-template-details-page"),
+  ).toBeVisible();
+  await expect(dialog.locator('label[for="template-name"]')).toHaveText(
+    "Template name",
+  );
+  await expect(dialog.locator("#template-name")).toHaveAttribute(
+    "placeholder",
+    "Template name",
+  );
+  await expect(dialog.getByTestId("channel-template-agent-picker")).toHaveCount(
+    0,
+  );
+  await expect(
+    dialog.getByRole("button", { name: "Next", exact: true }),
+  ).toBeDisabled();
+  await expect(dialog.locator("#template-description")).toHaveCount(0);
+  await expect(dialog.locator("#template-canvas")).toHaveCount(0);
+  const canvasToggle = dialog.getByTestId("channel-template-canvas-toggle");
+  await expect(canvasToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(canvasToggle).toContainText("CanvasOptional");
+  await expect(canvasToggle).toContainText(
+    "Add instructions and context that agents can consult while working in a channel created from this template.",
+  );
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(31rem, 85vh)",
+  );
+  await waitForAnimations(page);
+  const collapsedCanvasDialogBox = await dialog.boundingBox();
+  expect(collapsedCanvasDialogBox).not.toBeNull();
+  await canvasToggle.click();
+  await expect(canvasToggle).toHaveAttribute("aria-expanded", "true");
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(42rem, 85vh)",
+  );
+  const canvasEditor = dialog.getByTestId("channel-template-canvas");
+  await expect(canvasEditor).toBeVisible();
+  await expect(dialog.getByTestId("channel-template-canvas-panel")).toHaveCSS(
+    "overflow",
+    "hidden",
+  );
+  await waitForAnimations(page);
+  const expandedCanvasDialogBox = await dialog.boundingBox();
+  expect(expandedCanvasDialogBox).not.toBeNull();
+  expect(expandedCanvasDialogBox?.height ?? 0).toBeGreaterThan(
+    collapsedCanvasDialogBox?.height ?? 0,
+  );
+  await canvasEditor.fill("# Weekly planning");
+  await canvasToggle.click();
+  await expect(dialog.locator("#template-canvas")).toHaveCount(0);
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(31rem, 85vh)",
+  );
+  await waitForAnimations(page);
+  const collapsedAgainDialogBox = await dialog.boundingBox();
+  expect(
+    Math.abs(
+      (collapsedAgainDialogBox?.height ?? 0) -
+        (collapsedCanvasDialogBox?.height ?? 0),
+    ),
+  ).toBeLessThan(1);
+  await canvasToggle.click();
+  await expect(canvasEditor).toHaveValue("# Weekly planning");
+  await expect(
+    dialog.getByText("Where do you want to work from?", { exact: true }),
+  ).toBeVisible();
+  const projectFolderList = dialog.getByTestId(
+    "channel-template-project-folders",
+  );
+  const addProjectFolder = dialog.getByTestId(
+    "channel-template-add-project-folder",
+  );
+  await expect(addProjectFolder).toHaveText("Add folder");
+  await addProjectFolder.click();
+  const firstProjectFolder = dialog.getByTestId(
+    "channel-template-project-folder-0",
+  );
+  await expect(firstProjectFolder).toHaveText("/Users/dev/projects/sprout");
+  await expect(firstProjectFolder.locator("svg.lucide-folder")).toHaveCount(1);
+  const secondProjectFolder = dialog.getByTestId(
+    "channel-template-project-folder-1",
+  );
+  await expect(secondProjectFolder).toHaveText("/Users/dev/projects/buzz-docs");
+  await expect(projectFolderList).toHaveClass(/divide-y/);
+  await secondProjectFolder
+    .getByRole("button", {
+      name: "Remove /Users/dev/projects/buzz-docs",
+    })
+    .click();
+  await expect(
+    dialog.getByTestId("channel-template-project-folder-1"),
+  ).toHaveCount(0);
+  await addProjectFolder.click();
+  await expect(
+    dialog.getByTestId("channel-template-project-folder-1"),
+  ).toHaveText("/Users/dev/projects/buzz-docs");
+  await expect(
+    dialog.getByTestId("channel-template-project-folder-2"),
+  ).toHaveText("/Users/dev/projects/tools");
+  const worktreeToggle = dialog.getByTestId("channel-template-worktree-toggle");
+  await expect(worktreeToggle).not.toBeChecked();
+  const worktreeToggleRow = dialog.getByTestId(
+    "channel-template-worktree-toggle-row",
+  );
+  const projectFolderRowBox = await firstProjectFolder.boundingBox();
+  const worktreeToggleRowBox = await worktreeToggleRow.boundingBox();
+  expect(projectFolderRowBox).not.toBeNull();
+  expect(worktreeToggleRowBox).not.toBeNull();
+  expect(worktreeToggleRowBox?.height).toBe(projectFolderRowBox?.height);
+  await expect(
+    dialog.getByTestId("channel-template-worktree-fields"),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("channel-template-worktree-guidance"),
+  ).toHaveCount(0);
+  await worktreeToggle.click();
+  await expect(worktreeToggle).toBeChecked();
+  await expect(
+    dialog.getByTestId("channel-template-worktree-fields"),
+  ).toBeVisible();
+  const worktreeLocation = dialog.locator("#template-worktree-location");
+  await expect(worktreeLocation).toHaveValue("");
+  await expect(worktreeLocation).toHaveAttribute(
+    "placeholder",
+    "Default: ~/.buzz/worktrees",
+  );
+  await expect(
+    dialog.getByText(
+      "Where Buzz creates new worktrees. Leave blank to use ~/.buzz/worktrees.",
+      { exact: true },
+    ),
+  ).toHaveCount(0);
+  await worktreeLocation.fill("/Users/dev/custom-worktrees");
+  await expect(worktreeLocation).toHaveValue("/Users/dev/custom-worktrees");
+  await worktreeLocation.fill("");
+  await expect(dialog.locator("#template-worktree-base-branch")).toHaveValue(
+    "main",
+  );
+  await expect(
+    dialog.getByTestId("channel-template-worktree-guidance"),
+  ).toContainText(
+    "With worktrees enabled, use these 3 project folders for review only. New changes belong in worktrees.",
+  );
+  await canvasToggle.click();
+  expect(await dialog.evaluate((element) => element.style.maxHeight)).toBe(
+    "min(42rem, 85vh)",
+  );
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(42rem, 85vh)",
+  );
+
+  const dialogScrollArea = dialog.getByTestId("channel-template-scroll-area");
+  await expect(dialogScrollArea).toHaveCSS("overflow-y", "hidden");
   await page.locator("#template-name").fill("Weekly planning");
-  await page.locator("#template-description").fill("Plan the next week.");
+  await expectFilledTemplateNameForeground();
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "3");
+  await expect(
+    dialog.getByTestId("channel-template-agents-page"),
+  ).toBeVisible();
+  await expect(dialog.getByTestId("channel-template-details-page")).toHaveCount(
+    0,
+  );
+  await expect(
+    dialog.getByTestId("channel-template-agent-picker-title"),
+  ).toHaveText("Agents");
+  await expect(
+    dialog.getByText("Add teams or individual agents to this template."),
+  ).toHaveCount(0);
+
+  const dialogBox = await dialog.boundingBox();
+  expect(dialogBox).not.toBeNull();
+  expect(dialogBox?.width ?? 0).toBeGreaterThan(540);
+
+  const teamSection = dialog.getByTestId("channel-template-picker-teams");
+  const memberSection = dialog.getByTestId("channel-template-picker-members");
+  await expect(dialog.getByTestId("channel-template-teams-header")).toHaveText(
+    "Agent teams",
+  );
+  await expect(
+    dialog.getByTestId("channel-template-members-header"),
+  ).toHaveText("Agents");
+  const teamSectionBox = await teamSection.boundingBox();
+  const memberSectionBox = await memberSection.boundingBox();
+  expect(teamSectionBox).not.toBeNull();
+  expect(memberSectionBox).not.toBeNull();
+  expect(teamSectionBox?.y ?? 0).toBeLessThan(memberSectionBox?.y ?? 0);
+
+  const teamRow = dialog.getByTestId(
+    "channel-template-team-row-template-planning-team",
+  );
+  const teamAvatarStack = teamRow.getByTestId("compact-team-avatar-stack");
+  await expect(teamAvatarStack).toBeVisible();
+  await expect(
+    teamAvatarStack.locator("[data-compact-team-avatar-slot]"),
+  ).toHaveCount(3);
+  await expect(
+    teamAvatarStack.locator('[data-compact-team-avatar-slot="overflow"]'),
+  ).toHaveText("+3");
+  await expect(teamRow).not.toContainText("Plans and researches upcoming work");
+
+  const agentPicker = dialog.getByTestId("channel-template-agent-picker");
+  await expect(agentPicker).toHaveCSS("overflow-y", "auto");
+  const pickerMetrics = await agentPicker.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(pickerMetrics.scrollHeight).toBeGreaterThan(
+    pickerMetrics.clientHeight,
+  );
+  const dialogScrollMetrics = await dialogScrollArea.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dialogScrollMetrics.scrollHeight).toBeLessThanOrEqual(
+    dialogScrollMetrics.clientHeight + 1,
+  );
+
+  const teamTitlePositions = await teamSection
+    .locator("[data-template-picker-row-title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getBoundingClientRect().x),
+    );
+  expect(teamTitlePositions.length).toBeGreaterThan(1);
+  expect(
+    Math.max(...teamTitlePositions) - Math.min(...teamTitlePositions),
+  ).toBeLessThanOrEqual(1);
+
+  await teamRow.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(
+    teamRow.getByRole("button", { name: "Remove", exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByText("Runtimes", { exact: true })).toHaveCount(0);
+  await expect(
+    dialog.getByText("Choose which runtime to use for each agent."),
+  ).toHaveCount(0);
+
+  const memberRow = dialog.getByTestId(
+    "channel-template-member-row-template-writer",
+  );
+  await memberRow.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(
+    memberRow.getByRole("button", { name: "Remove", exact: true }),
+  ).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(stepIndicator).toHaveAttribute("aria-valuenow", "2");
+  await expect(page.locator("#template-name")).toHaveValue("Weekly planning");
+  await expect(firstProjectFolder).toHaveText("/Users/dev/projects/sprout");
+  await expect(
+    dialog.getByTestId("channel-template-project-folder-1"),
+  ).toHaveText("/Users/dev/projects/buzz-docs");
+  await expect(
+    dialog.getByTestId("channel-template-project-folder-2"),
+  ).toHaveText("/Users/dev/projects/tools");
+  await expect(worktreeToggle).toBeChecked();
+  await canvasToggle.click();
+  await expect(dialog.getByTestId("channel-template-canvas")).toHaveValue(
+    "# Weekly planning",
+  );
+  await canvasToggle.click();
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(
+    teamRow.getByRole("button", { name: "Remove", exact: true }),
+  ).toBeVisible();
+  await expect(
+    memberRow.getByRole("button", { name: "Remove", exact: true }),
+  ).toBeVisible();
+
+  await expect(dialog.getByTestId("channel-template-teams-header")).toHaveCSS(
+    "position",
+    "sticky",
+  );
+  await expect(dialog.getByTestId("channel-template-members-header")).toHaveCSS(
+    "position",
+    "sticky",
+  );
+
+  const commandPayloadBaseline = (await readCommandPayloadLog(page)).length;
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  await expect(templateControl).toHaveText("Weekly planning");
-  await expect(page.getByTestId("create-channel-description")).toHaveValue(
-    "Plan the next week.",
+  const createTemplateCall = (await readCommandPayloadLog(page))
+    .slice(commandPayloadBaseline)
+    .find((entry) => entry.command === "create_channel_template");
+  expect(createTemplateCall?.payload).toEqual(
+    expect.objectContaining({
+      input: expect.objectContaining({
+        templateType: "channel",
+        canvasTemplate: "# Weekly planning",
+        projectFolders: [
+          "/Users/dev/projects/sprout",
+          "/Users/dev/projects/buzz-docs",
+          "/Users/dev/projects/tools",
+        ],
+        projectFolder: "/Users/dev/projects/sprout",
+        worktree: {
+          location: "~/.buzz/worktrees",
+          baseBranch: "main",
+        },
+        agents: expect.objectContaining({
+          personas: [expect.objectContaining({ personaId: "template-writer" })],
+          teams: [
+            expect.objectContaining({ teamId: "template-planning-team" }),
+          ],
+        }),
+      }),
+    }),
   );
+  await expect(page.getByTestId("channel-templates-list")).toContainText(
+    "Weekly planning",
+  );
+});
+
+test("create channel template wizard respects reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await openSettings(page, "channel-templates");
+  await page
+    .getByTestId("settings-channel-templates")
+    .getByRole("button", { name: "Create", exact: true })
+    .click();
+
+  const dialog = page.getByTestId("channel-template-dialog");
+  await expect(dialog).toHaveCSS("transition-property", "height, max-width");
+  await expect(dialog).toHaveCSS("transition-duration", "0s");
+  await dialog.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(
+    dialog.getByRole("heading", {
+      name: "Create channel template",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(dialog).toHaveCSS("transition-duration", "0s");
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(31rem, 85vh)",
+  );
+  await dialog.getByTestId("channel-template-canvas-toggle").click();
+  await expect(dialog.getByTestId("channel-template-canvas")).toBeVisible();
+  expect(await dialog.evaluate((element) => element.style.height)).toBe(
+    "min(42rem, 85vh)",
+  );
+  await expect
+    .poll(() =>
+      dialog
+        .getByTestId("channel-template-canvas-panel")
+        .evaluate((element) => element.getAnimations().length),
+    )
+    .toBe(0);
 });
 
 test("create ephemeral stream shows sidebar and header affordances", async ({

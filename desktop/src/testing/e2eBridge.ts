@@ -13,6 +13,7 @@ import {
 import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
+import type { TeamSnapshotImportPreview } from "@/shared/api/tauriTeams";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
@@ -295,6 +296,8 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelTemplates?: ChannelTemplate[];
+    /** Multi-folder picker results returned in order for template folder-list tests. */
+    channelTemplateProjectFolderPicks?: string[][];
     channelsReadError?: string;
     /** Reject successive mock `get_channels` calls, then resume. */
     channelsReadErrors?: (string | null)[];
@@ -397,6 +400,8 @@ type E2eConfig = {
      * import dialog.
      */
     teamSnapshotPreviewHasSourceAllowlist?: boolean;
+    /** Override the team snapshot preview returned by the mock bridge. */
+    teamSnapshotPreview?: TeamSnapshotImportPreview;
     /**
      * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
      * message — lets specs prove malformed/hash/size-mismatch error paths.
@@ -7632,6 +7637,7 @@ let personaSharePublicationCallCount = 0;
 
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
+let channelTemplateProjectFolderPickCount = 0;
 
 // Live-output sequence for the install currently being replayed. The backend
 // counter is per run (`InstallReporter::for_run` starts a fresh one), so this
@@ -11850,10 +11856,14 @@ export function maybeInstallE2eTauriMocks() {
         return (activeConfig?.mock?.channelTemplates ?? []).map((template) => ({
           id: template.id,
           name: template.name,
+          template_type: template.templateType,
           description: template.description,
           channel_type: template.channelType,
           visibility: template.visibility,
           canvas_template: template.canvasTemplate,
+          project_folders: template.projectFolders,
+          project_folder: template.projectFolder,
+          worktree: template.worktree,
           agents: template.agents,
           is_builtin: template.isBuiltin,
           created_at: template.createdAt,
@@ -11863,10 +11873,14 @@ export function maybeInstallE2eTauriMocks() {
         const { input } = payload as {
           input: {
             name: string;
+            templateType?: "channel" | "section";
             description?: string;
             channelType?: "stream" | "forum";
             visibility?: "open" | "private";
             canvasTemplate?: string;
+            projectFolders?: string[];
+            projectFolder?: string;
+            worktree?: ChannelTemplate["worktree"];
             agents?: ChannelTemplate["agents"];
           };
         };
@@ -11874,10 +11888,17 @@ export function maybeInstallE2eTauriMocks() {
         const created: ChannelTemplate = {
           id: `template-${Date.now()}`,
           name: input.name,
+          templateType: input.templateType ?? "channel",
           description: input.description ?? null,
           channelType: input.channelType ?? "stream",
           visibility: input.visibility ?? "open",
           canvasTemplate: input.canvasTemplate ?? null,
+          projectFolders:
+            input.projectFolders ??
+            (input.projectFolder ? [input.projectFolder] : []),
+          projectFolder:
+            input.projectFolders?.[0] ?? input.projectFolder ?? null,
+          worktree: input.worktree ?? null,
           agents: input.agents ?? { personas: [], teams: [] },
           isBuiltin: false,
           createdAt: timestamp,
@@ -11893,15 +11914,33 @@ export function maybeInstallE2eTauriMocks() {
         return {
           id: created.id,
           name: created.name,
+          template_type: created.templateType,
           description: created.description,
           channel_type: created.channelType,
           visibility: created.visibility,
           canvas_template: created.canvasTemplate,
+          project_folders: created.projectFolders,
+          project_folder: created.projectFolder,
+          worktree: created.worktree,
           agents: created.agents,
           is_builtin: created.isBuiltin,
           created_at: created.createdAt,
           updated_at: created.updatedAt,
         };
+      }
+      case "pick_channel_template_project_folder": {
+        const picks = activeConfig?.mock?.channelTemplateProjectFolderPicks;
+        const selected =
+          picks && picks.length > 0
+            ? picks[
+                Math.min(
+                  channelTemplateProjectFolderPickCount,
+                  picks.length - 1,
+                )
+              ]
+            : ["/Users/dev/projects/sprout"];
+        channelTemplateProjectFolderPickCount += 1;
+        return selected;
       }
       case "create_team":
         return handleCreateTeam(
@@ -12040,6 +12079,10 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "preview_team_snapshot_import": {
         // Return a minimal preview — no writes performed.
+        const configuredPreview = activeConfig?.mock?.teamSnapshotPreview;
+        if (configuredPreview) {
+          return configuredPreview;
+        }
         const previewHasAllowlist =
           activeConfig?.mock?.teamSnapshotPreviewHasSourceAllowlist ?? false;
         return {

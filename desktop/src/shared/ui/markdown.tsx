@@ -18,7 +18,6 @@ import {
   resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
@@ -41,7 +40,6 @@ import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
-  MENTION_CHIP_PREFIX_CLASS,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 
@@ -67,6 +65,7 @@ import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
+import { MarkdownMention } from "./markdown/MarkdownMention";
 import {
   MediaContextMenu,
   type MediaContextMenuPosition,
@@ -1604,59 +1603,9 @@ function createMarkdownComponents(
     ul: ({ children }) => (
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
-    mention: function MarkdownMention({
-      children,
-    }: {
-      children?: React.ReactNode;
-    }) {
-      const { agentMentionPubkeysByName, mentionPubkeysByName } =
-        useMarkdownRuntime();
-      const mentionText = String(children ?? "");
-      const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
-      const pubkey = mentionPubkeysByName?.[mentionName];
-      const isAgentMention =
-        pubkey !== undefined &&
-        agentMentionPubkeysByName?.[mentionName] === pubkey;
-      const mentionLabel = mentionText.replace(/^@/, "");
-      const renderedMentionText = isAgentMention ? (
-        mentionLabel
-      ) : (
-        <>
-          <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
-          {mentionLabel}
-        </>
-      );
-      // Only chips that actually open a profile get the clickable affordance.
-      // A mention whose pubkey didn't resolve stays a plain chip — a pointer
-      // cursor there promises a click that does nothing.
-      const opensProfile = interactive && pubkey !== undefined;
-      const mentionNode = (
-        <span
-          data-mention=""
-          className={cn(
-            MENTION_CHIP_BASE_CLASSES,
-            opensProfile && "cursor-pointer",
-            opensProfile && MENTION_CHIP_HOVER_CLASSES,
-            isAgentMention && "agent-mention-highlight",
-          )}
-        >
-          {renderedMentionText}
-        </span>
-      );
-
-      return opensProfile ? (
-        <UserProfilePopover
-          botIdenticonValue={mentionLabel}
-          pubkey={pubkey}
-          role={isAgentMention ? "bot" : undefined}
-          triggerElement="span"
-        >
-          {mentionNode}
-        </UserProfilePopover>
-      ) : (
-        mentionNode
-      );
-    },
+    mention: ({ children }: { children?: React.ReactNode }) => (
+      <MarkdownMention interactive={interactive}>{children}</MarkdownMention>
+    ),
     emoji: ({ src, alt }: { src?: string; alt?: string }) => {
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!resolvedSrc) {
@@ -1768,6 +1717,7 @@ function getMarkdownComponents(
 }
 
 function MarkdownInner({
+  agentMentionNames,
   channelNames,
   className,
   configNudgeAuthorPubkey,
@@ -1821,6 +1771,7 @@ function MarkdownInner({
   );
   const runtime = React.useMemo<MarkdownRuntime>(
     () => ({
+      agentMentionNames,
       agentMentionPubkeysByName,
       channels,
       imetaByUrl,
@@ -1840,6 +1791,7 @@ function MarkdownInner({
       },
     }),
     [
+      agentMentionNames,
       agentMentionPubkeysByName,
       channels,
       imetaByUrl,
@@ -1954,6 +1906,7 @@ export const Markdown = React.memo(
       prev.agentMentionPubkeysByName,
       next.agentMentionPubkeysByName,
     ) &&
+    shallowArrayEqual(prev.agentMentionNames, next.agentMentionNames) &&
     shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&

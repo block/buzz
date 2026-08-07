@@ -24,13 +24,33 @@ function profile(overrides = {}) {
 test("returns undefined without tags or profiles", () => {
   const profiles = { [PUBKEY]: profile({ displayName: "alice" }) };
   assert.deepEqual(resolveMentionProps(undefined, profiles), {
+    agentMentionNames: undefined,
     mentionNames: undefined,
     mentionPubkeysByName: undefined,
   });
   assert.deepEqual(resolveMentionProps([["p", PUBKEY]], undefined), {
+    agentMentionNames: undefined,
     mentionNames: undefined,
     mentionPubkeysByName: undefined,
   });
+});
+
+test("resolves team mention display metadata without expanding member names", () => {
+  assert.deepEqual(
+    resolveMentionProps(
+      [
+        ["p", PUBKEY],
+        ["p", OTHER_PUBKEY],
+        ["team_mention", "team-launch", "Launch Team"],
+      ],
+      undefined,
+    ),
+    {
+      agentMentionNames: ["Launch Team"],
+      mentionNames: ["Launch Team"],
+      mentionPubkeysByName: undefined,
+    },
+  );
 });
 
 test("resolves the display name alias from p tags", () => {

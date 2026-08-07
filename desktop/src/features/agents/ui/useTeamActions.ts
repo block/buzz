@@ -30,6 +30,7 @@ import type {
 import { deriveImportToast } from "./teamSnapshotImport.lib";
 
 type TeamDialogState = {
+  allowImport: boolean;
   description: string;
   initialValues: CreateTeamInput | UpdateTeamInput;
   submitLabel: string;
@@ -164,12 +165,12 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
+      allowImport: true,
       title: "Create team",
       description: "Group agents together for quick deployment to channels.",
       submitLabel: "Create team",
       initialValues: {
         name: "",
-        description: "",
         personaIds: [],
       },
     });
@@ -179,12 +180,12 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
+      allowImport: false,
       title: `Duplicate ${team.name}`,
       description: "Create a new team by copying this one.",
       submitLabel: "Create team",
       initialValues: {
         name: `${team.name} copy`,
-        description: team.description ?? "",
         personaIds: [...team.personaIds],
       },
     });
@@ -208,6 +209,7 @@ export function useTeamActions(
     actions.setActionNoticeMessage(null);
     actions.setActionErrorMessage(null);
     setTeamDialogState({
+      allowImport: false,
       title: "Edit team",
       description: "",
       submitLabel: "Save changes",

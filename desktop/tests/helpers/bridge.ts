@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { TeamSnapshotImportPreview } from "../../src/shared/api/tauriTeams";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
@@ -363,6 +364,8 @@ type MockBridgeOptions = {
    * import dialog.
    */
   teamSnapshotPreviewHasSourceAllowlist?: boolean;
+  /** Override the team snapshot preview returned by the mock bridge. */
+  teamSnapshotPreview?: TeamSnapshotImportPreview;
   /**
    * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
    * message — lets specs prove malformed/hash/size-mismatch error paths.

@@ -95,6 +95,28 @@ test("parseChannelSectionPayload: valid sections with some invalid ones filters 
   ]);
 });
 
+test("parseChannelSectionPayload: preserves a reusable section template id", () => {
+  const result = parseChannelSectionPayload({
+    sections: [
+      {
+        id: "s1",
+        name: "Engineering",
+        order: 0,
+        templateId: "engineering-defaults",
+      },
+    ],
+    assignments: {},
+  });
+  assert.deepEqual(result?.sections, [
+    {
+      id: "s1",
+      name: "Engineering",
+      order: 0,
+      templateId: "engineering-defaults",
+    },
+  ]);
+});
+
 test("parseChannelSectionPayload: missing assignments returns empty assignments object", () => {
   const result = parseChannelSectionPayload({ sections: [] });
   assert.deepEqual(result?.assignments, {});

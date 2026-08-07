@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct ChannelTemplateRecord {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub template_type: TemplateType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default = "default_channel_type")]
@@ -12,12 +14,27 @@ pub struct ChannelTemplateRecord {
     pub visibility: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_folders: Vec<String>,
+    /// Legacy first-folder alias retained for older saved templates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<TemplateWorktreeConfig>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
     #[serde(default)]
     pub is_builtin: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateType {
+    #[default]
+    Channel,
+    Section,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,6 +44,13 @@ pub struct TemplateAgentRoster {
     pub personas: Vec<TemplateAgentEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TemplateTeamEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateWorktreeConfig {
+    pub location: String,
+    pub base_branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,10 +98,15 @@ fn default_visibility() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CreateChannelTemplateRequest {
     pub name: String,
+    pub template_type: Option<TemplateType>,
     pub description: Option<String>,
     pub channel_type: Option<String>,
     pub visibility: Option<String>,
     pub canvas_template: Option<String>,
+    #[serde(default)]
+    pub project_folders: Vec<String>,
+    pub project_folder: Option<String>,
+    pub worktree: Option<TemplateWorktreeConfig>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
 }
@@ -87,10 +116,15 @@ pub struct CreateChannelTemplateRequest {
 pub struct UpdateChannelTemplateRequest {
     pub id: String,
     pub name: String,
+    pub template_type: Option<TemplateType>,
     pub description: Option<String>,
     pub channel_type: Option<String>,
     pub visibility: Option<String>,
     pub canvas_template: Option<String>,
+    #[serde(default)]
+    pub project_folders: Vec<String>,
+    pub project_folder: Option<String>,
+    pub worktree: Option<TemplateWorktreeConfig>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
 }

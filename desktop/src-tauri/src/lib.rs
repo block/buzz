@@ -800,6 +800,7 @@ pub fn run() {
             set_persona_shared,
             reconcile_inbound_persona_event,
             list_channel_templates,
+            pick_channel_template_project_folder,
             create_channel_template,
             update_channel_template,
             delete_channel_template,

@@ -479,7 +479,67 @@ test("the new agent card offers create, discover, and import", async ({
   await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
 });
 
-test("the new team card offers create and import", async ({ page }) => {
+test("the new team card opens one create and import dialog with add-row agent selection", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:honey"],
+    personas: [
+      {
+        id: "custom:release-agent",
+        displayName: "Release Agent",
+        systemPrompt: "Coordinate release work.",
+      },
+    ],
+    teams: [
+      {
+        id: "existing-release-team",
+        name: "Existing release team",
+        description: "Coordinates releases.",
+        personaIds: ["custom:release-agent"],
+      },
+    ],
+    teamSnapshotPreview: {
+      name: "Imported release team",
+      description:
+        "Coordinates **release readiness** across engineering and support.",
+      instructions:
+        "## Ownership\n\n**Release Agent** owns launch readiness.\n\n- Keep updates concise\n- Call out launch blockers",
+      members: [
+        {
+          displayName: "Release Agent",
+          summary: "Release readiness across engineering and support.",
+          systemPrompt:
+            "# Release coordinator\n\n**Coordinate** release work and summarize risks. Escalate launch blockers immediately.",
+          avatarUrl:
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          isBuiltIn: false,
+          model: "gpt-5",
+          runtime: "codex",
+          hasSourceAllowlist: false,
+          sourceAllowlistCount: 0,
+        },
+        {
+          displayName: "Support Agent",
+          summary: null,
+          systemPrompt:
+            "**Prepare** customer-facing release notes. Keep the language approachable.",
+          avatarUrl: null,
+          hasSourceAllowlist: false,
+          sourceAllowlistCount: 0,
+        },
+        ...Array.from({ length: 10 }, (_, index) => ({
+          displayName: `Imported Agent ${index + 1}`,
+          summary: `Supports release workstream ${index + 1}.`,
+          systemPrompt: `Support release workstream ${index + 1}.`,
+          avatarUrl: null,
+          hasSourceAllowlist: false,
+          sourceAllowlistCount: 0,
+        })),
+      ],
+      hasSourceAllowlist: false,
+    },
+  });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
@@ -488,11 +548,180 @@ test("the new team card offers create and import", async ({ page }) => {
   await expect(newTeamCard.locator(".lucide-plus")).toBeVisible();
 
   await newTeamCard.click();
+
+  const dialog = page.getByTestId("team-dialog");
+  await expect(dialog).toBeVisible();
   await expect(
-    page.getByRole("menuitem", { exact: true, name: "Create team" }),
+    dialog.getByRole("heading", { exact: true, name: "Create team" }),
+  ).toBeVisible();
+  await expect(dialog.getByLabel("Name")).toBeVisible();
+  await expect(dialog.getByLabel("Name")).toHaveAttribute(
+    "placeholder",
+    "Enter a team name.",
+  );
+  await expect(dialog.getByText("Agents", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Description")).toHaveCount(0);
+  await expect(dialog.getByLabel("Team Instructions")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.getByText("Built-in", { exact: true })).toHaveCount(0);
+
+  await waitForAnimations(page);
+  const dialogBox = await dialog.boundingBox();
+  const pickerBox = await dialog.getByTestId("team-agent-picker").boundingBox();
+  expect(dialogBox?.width ?? 0).toBeGreaterThanOrEqual(570);
+  expect(pickerBox?.height ?? 0).toBeGreaterThanOrEqual(350);
+
+  const releaseAgentRow = dialog.getByTestId(
+    "team-agent-row-custom:release-agent",
+  );
+  await expect(
+    releaseAgentRow.getByRole("button", { exact: true, name: "Add" }),
+  ).toBeVisible();
+
+  const submit = dialog.getByTestId("team-submit");
+  await expect(submit).toBeDisabled();
+  await dialog.getByLabel("Name").fill("Release team");
+  await releaseAgentRow
+    .getByRole("button", { exact: true, name: "Add" })
+    .click();
+  await expect(
+    releaseAgentRow.getByRole("button", { exact: true, name: "Remove" }),
+  ).toBeVisible();
+  await expect(submit).toBeEnabled();
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await dialog.getByTestId("team-import").click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
+    buffer: Buffer.from("{}"),
+    mimeType: "application/json",
+    name: "imported.team.json",
+  });
+  await expect(dialog).toBeHidden();
+  const importDialog = page.getByTestId("team-snapshot-import-dialog");
+  await expect(importDialog).toBeVisible();
+  await expect(
+    importDialog.getByRole("heading", {
+      exact: true,
+      name: "Import team snapshot",
+    }),
+  ).toBeVisible();
+  await expect(importDialog.getByText("Imported release team")).toBeVisible();
+  const importedDescription = importDialog.getByTestId(
+    "team-snapshot-import-description",
+  );
+  await expect(importedDescription).toHaveText(
+    "Coordinates release readiness across engineering and support.",
+  );
+  await expect(importedDescription.locator("strong")).toHaveText(
+    "release readiness",
+  );
+  const importedInstructions = importDialog.getByTestId(
+    "team-snapshot-import-instructions",
+  );
+  await expect(
+    importedInstructions.getByRole("heading", {
+      exact: true,
+      name: "Ownership",
+    }),
+  ).toBeVisible();
+  await expect(importedInstructions.locator("strong")).toHaveText(
+    "Release Agent",
+  );
+  await expect(importedInstructions.getByRole("listitem")).toHaveCount(2);
+  await expect(importedDescription.locator("pre, code")).toHaveCount(0);
+  await expect(importDialog.getByRole("separator")).toHaveCount(0);
+  const firstImportedMember = importDialog.getByTestId(
+    "team-snapshot-import-member-0",
+  );
+  await expect(
+    firstImportedMember.getByTestId("team-snapshot-import-member-summary-0"),
+  ).toHaveText("Release readiness across engineering and support.");
+  await expect(
+    firstImportedMember.getByTestId("team-snapshot-import-member-summary-0"),
+  ).not.toContainText("Coordinate release work and summarize risks.");
+  await expect(
+    importDialog.getByTestId("team-snapshot-import-member-summary-1"),
+  ).toHaveText("Prepare customer-facing release notes.");
+  await expect(
+    importDialog.getByTestId("team-snapshot-import-member-summary-1"),
+  ).not.toContainText("**");
+  await expect(importDialog).not.toContainText(
+    /\d+ agents? will be imported\./,
+  );
+  await expect(
+    importDialog.getByTestId("team-snapshot-import-member-avatar-0-image"),
+  ).toBeVisible();
+
+  await firstImportedMember.locator("summary").click();
+  const importedMemberDetails = firstImportedMember.getByTestId(
+    "team-snapshot-import-member-details-0",
+  );
+  await expect(importedMemberDetails).toBeVisible();
+  await expect(
+    importedMemberDetails.getByTestId("agent-definition-metadata"),
+  ).toContainText("codex");
+  await expect(
+    importedMemberDetails.getByRole("heading", {
+      exact: true,
+      name: "Release coordinator",
+    }),
+  ).toBeVisible();
+  await expect(importedMemberDetails.locator("strong")).toHaveText(
+    "Coordinate",
+  );
+
+  await waitForAnimations(page);
+  const importDialogBox = await importDialog.boundingBox();
+  const importFooter = importDialog.getByTestId("team-snapshot-import-footer");
+  const importFooterBox = await importFooter.boundingBox();
+  const importScrollArea = importDialog.getByTestId(
+    "team-snapshot-import-scroll-area",
+  );
+  const importScrollMetrics = await importScrollArea.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  const viewport = page.viewportSize();
+  expect(importDialogBox?.width ?? 0).toBeGreaterThanOrEqual(570);
+  expect(
+    importDialogBox?.height ?? Number.POSITIVE_INFINITY,
+  ).toBeLessThanOrEqual(Math.min(672, (viewport?.height ?? 720) * 0.85) + 1);
+  expect(importScrollMetrics.scrollHeight).toBeGreaterThan(
+    importScrollMetrics.clientHeight,
+  );
+  expect(
+    (importFooterBox?.y ?? 0) + (importFooterBox?.height ?? 0),
+  ).toBeLessThanOrEqual(
+    (importDialogBox?.y ?? 0) + (importDialogBox?.height ?? 0) + 1,
+  );
+  await expect(
+    importFooter.getByRole("button", { exact: true, name: "Cancel" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("menuitem", { exact: true, name: "Import" }),
+    importFooter.getByRole("button", { exact: true, name: "Import" }),
+  ).toBeVisible();
+  await importFooter
+    .getByRole("button", { exact: true, name: "Cancel" })
+    .click();
+
+  await page
+    .getByRole("button", { name: "Existing release team team actions" })
+    .click();
+  await page.getByRole("menuitem", { exact: true, name: "Edit" }).click();
+  await expect(
+    dialog.getByRole("heading", { exact: true, name: "Edit team" }),
+  ).toBeVisible();
+  await expect(dialog.getByLabel("Description")).toHaveValue(
+    "Coordinates releases.",
+  );
+  await expect(dialog.getByLabel("Team Instructions")).toBeVisible();
+  await expect(dialog.getByTestId("team-import")).toHaveCount(0);
+  await expect(
+    dialog
+      .getByTestId("team-agent-row-custom:release-agent")
+      .getByRole("button", { exact: true, name: "Remove" }),
   ).toBeVisible();
 });
 

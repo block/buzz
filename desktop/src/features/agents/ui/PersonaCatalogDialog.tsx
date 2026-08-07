@@ -10,11 +10,10 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Dialog } from "@/shared/ui/dialog";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
-import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import agentOutlineUrl from "../assets/agent-outline.svg";
-import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
+import { AgentDefinitionDetails } from "./AgentDefinitionDetails";
 import { PersonaAddedBy } from "./PersonaAddedBy";
 import { personaCatalogCopy } from "./personaLibraryCopy";
 
@@ -30,16 +29,6 @@ type PersonaCatalogDialogProps = {
   open: boolean;
   personas: AgentPersona[];
 };
-
-const agentInstructionMarkdownClassName = [
-  "mt-3 w-full min-w-0 max-w-full overflow-x-hidden leading-6 text-muted-foreground [&>*]:min-w-0 [&>*]:max-w-full [&_.code-block-lines]:min-w-0 [&_.code-block-lines]:max-w-full [&_.code-block-lines]:whitespace-pre-wrap [&_.code-block-lines]:[overflow-wrap:anywhere] [&_.inline-code-chip]:max-w-full [&_.inline-code-chip]:whitespace-pre-wrap [&_.inline-code-chip]:[overflow-wrap:anywhere] [&_blockquote]:!text-muted-foreground [&_code]:!text-muted-foreground [&_li]:text-muted-foreground [&_ol]:text-muted-foreground [&_p]:text-muted-foreground [&_strong]:text-muted-foreground [&_td]:text-muted-foreground [&_ul]:text-muted-foreground",
-  "[&>h1]:!text-sm [&>h1]:!font-semibold [&>h1]:!leading-6 [&>h1]:!tracking-normal [&>h1]:!text-foreground",
-  "[&>h2]:!text-sm [&>h2]:!font-semibold [&>h2]:!leading-6 [&>h2]:!tracking-normal [&>h2]:!text-foreground",
-  "[&>h3]:!text-sm [&>h3]:!font-semibold [&>h3]:!leading-6 [&>h3]:!tracking-normal [&>h3]:!text-foreground",
-  "[&>h4]:!text-sm [&>h4]:!font-semibold [&>h4]:!leading-6 [&>h4]:!tracking-normal [&>h4]:!text-foreground",
-  "[&>h5]:!text-sm [&>h5]:!font-semibold [&>h5]:!leading-6 [&>h5]:!tracking-normal [&>h5]:!text-foreground",
-  "[&>h6]:!text-sm [&>h6]:!font-semibold [&>h6]:!leading-6 [&>h6]:!tracking-normal [&>h6]:!text-foreground",
-].join(" ");
 
 export function PersonaCatalogDialog({
   error,
@@ -331,22 +320,12 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
         </div>
       </div>
 
-      <AgentDefinitionMetadata
+      <AgentDefinitionDetails
         isBuiltIn={persona.isBuiltIn}
         model={persona.model}
         runtime={persona.runtime}
+        systemPrompt={persona.systemPrompt}
       />
-
-      <div className="min-w-0 max-w-full pt-3">
-        <p className="text-base font-semibold text-foreground">
-          Agent instruction
-        </p>
-        <Markdown
-          className={agentInstructionMarkdownClassName}
-          content={persona.systemPrompt}
-          interactive={false}
-        />
-      </div>
     </div>
   );
 }

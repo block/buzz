@@ -184,8 +184,12 @@ pub(crate) fn build_import_team(
 fn member_preview(member: &AgentSnapshot) -> TeamSnapshotMemberPreview {
     TeamSnapshotMemberPreview {
         display_name: member.profile.display_name.clone(),
+        summary: member.profile.about.clone(),
         system_prompt: member.definition.system_prompt.clone(),
         avatar_url: effective_avatar(member),
+        is_built_in: member.definition.source_is_builtin,
+        model: member.definition.model.clone(),
+        runtime: member.definition.runtime.clone(),
         has_source_allowlist: !member.definition.respond_to_allowlist.is_empty(),
         source_allowlist_count: member.definition.respond_to_allowlist.len(),
     }
@@ -196,8 +200,12 @@ fn member_preview(member: &AgentSnapshot) -> TeamSnapshotMemberPreview {
 #[serde(rename_all = "camelCase")]
 pub struct TeamSnapshotMemberPreview {
     pub display_name: String,
+    pub summary: Option<String>,
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
+    pub is_built_in: bool,
+    pub model: Option<String>,
+    pub runtime: Option<String>,
     pub has_source_allowlist: bool,
     pub source_allowlist_count: usize,
 }

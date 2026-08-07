@@ -9,6 +9,8 @@
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
 
+mod mention_reference_tags;
+
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
@@ -78,17 +80,9 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
 
 fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
     for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
+        tags.push(mention_reference_tags::parse_mention_reference_tag(
+            mention,
+        )?);
     }
     Ok(())
 }

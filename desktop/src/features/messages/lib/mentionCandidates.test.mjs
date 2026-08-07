@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
+  resolveTeamMentions,
 } from "./mentionCandidates.ts";
 
 function persona(id, displayName, isActive = true) {
@@ -86,18 +87,21 @@ test("team mentions preserve team order and prefer concrete managed agents", () 
   assert.equal(suggestion.kind, "team");
   assert.deepEqual(suggestion.teamMembers, [
     {
+      avatarUrl: null,
       displayName: "Planner in channel",
       kind: "identity",
       personaId: "planner",
       pubkey: "3".repeat(64),
     },
     {
+      avatarUrl: null,
       displayName: "Build Bot",
       kind: "identity",
       personaId: "builder",
       pubkey: "2".repeat(64),
     },
     {
+      avatarUrl: null,
       displayName: "Reviewer",
       kind: "persona",
       personaId: "reviewer",
@@ -105,7 +109,45 @@ test("team mentions preserve team order and prefer concrete managed agents", () 
   ]);
   assert.equal(
     formatTeamMention(suggestion.displayName, suggestion.teamMembers),
-    "Launch Team(@Planner in channel @Build Bot @Reviewer) ",
+    "@Launch Team ",
+  );
+
+  assert.deepEqual(
+    resolveTeamMentions("Ask @Launch Team to help", [suggestion]),
+    {
+      personaMembers: [
+        {
+          avatarUrl: null,
+          displayName: "Reviewer",
+          kind: "persona",
+          personaId: "reviewer",
+        },
+      ],
+      pubkeys: ["3".repeat(64), "2".repeat(64)],
+      tags: [["team_mention", "launch", "Launch Team"]],
+    },
+  );
+});
+
+test("team delivery targets are absent when the team chip is not in the text", () => {
+  assert.deepEqual(
+    resolveTeamMentions("Ask the launch crew to help", [
+      {
+        kind: "team",
+        teamId: "launch",
+        teamMembers: [
+          {
+            displayName: "Planner",
+            kind: "identity",
+            pubkey: "1".repeat(64),
+          },
+        ],
+        displayName: "Launch Team",
+        isMember: false,
+        isAgent: true,
+      },
+    ]),
+    { personaMembers: [], pubkeys: [], tags: [] },
   );
 });
 

@@ -2,7 +2,9 @@ import type { ManagedAgent } from "@/shared/api/types";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
+import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 
 export { MENTION_REFERENCE_TAG };
@@ -56,6 +58,17 @@ export function mergeOutgoingTagsWithReferenceMentions(
   return [
     ...(outgoingTags ?? []),
     ...normalizedPubkeys.map((pubkey) => [MENTION_REFERENCE_TAG, pubkey]),
+  ];
+}
+
+export function buildMentionTags(
+  content: string,
+  customEmoji: CustomEmoji[],
+  getTeamMentionTags: (content: string) => string[][],
+) {
+  return [
+    ...buildCustomEmojiTags(content, customEmoji),
+    ...getTeamMentionTags(content),
   ];
 }
 

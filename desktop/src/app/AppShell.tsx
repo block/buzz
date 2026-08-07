@@ -489,6 +489,7 @@ export function AppShell() {
     openBrowseChannels: handleOpenBrowseChannels,
     onBrowseDialogOpenChange: handleBrowseDialogOpenChange,
     getCreateSuccess,
+    initialTemplateId: browseInitialTemplateId,
   } = useChannelBrowserDialog(() => void refetchChannels());
   const handleOpenSearch = React.useCallback(() => {
     setSearchFocusRequest((request) => request + 1);
@@ -564,8 +565,7 @@ export function AppShell() {
     [applyAgents, applyCanvas, createForumMutation, goChannel],
   );
 
-  // The channel browser can create either a stream or a forum depending on
-  // which section opened it. Route to the matching handler.
+  // Route browser creation to the stream or forum handler that opened it.
   const handleBrowseChannelCreate = React.useCallback(
     async (input: {
       name: string;
@@ -966,6 +966,7 @@ export function AppShell() {
                     createChannelMutation.isPending ||
                     createForumMutation.isPending
                   }
+                  initialTemplateId={browseInitialTemplateId}
                   onBrowseChannelJoin={handleBrowseChannelJoin}
                   onBrowseChannelCreate={handleBrowseChannelCreate}
                   onBrowseDialogOpenChange={handleBrowseDialogOpenChange}

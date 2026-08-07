@@ -6,6 +6,7 @@ export type ChannelSection = {
   id: string;
   name: string;
   icon?: string;
+  templateId?: string;
   order: number;
 };
 
@@ -69,11 +70,17 @@ export function parseChannelSectionPayload(
           typeof section.icon === "string" && section.icon.trim().length > 0
             ? section.icon.trim()
             : undefined;
+        const templateId =
+          typeof section.templateId === "string" &&
+          section.templateId.trim().length > 0
+            ? section.templateId.trim()
+            : undefined;
         return [
           {
             id: section.id,
             name: section.name,
             ...(icon ? { icon } : {}),
+            ...(templateId ? { templateId } : {}),
             order: section.order,
           },
         ];
