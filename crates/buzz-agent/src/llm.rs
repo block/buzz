@@ -1121,7 +1121,10 @@ fn responses_body(
         "input": input,
     });
     if let Some(e) = effort {
-        body["reasoning"] = json!({ "effort": e.openai_effort_str() });
+        body["reasoning"] = json!({
+            "effort": e.openai_effort_str(),
+            "summary": cfg.thinking_summary.as_str(),
+        });
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
@@ -2644,7 +2647,7 @@ fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, HookServers, OpenAiApi, Provider};
+    use crate::config::{Config, HookServers, OpenAiApi, Provider, ThinkingSummary};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -2682,6 +2685,7 @@ mod tests {
             prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
         }
     }
@@ -4099,6 +4103,75 @@ mod tests {
             Some(ThinkingEffort::Low),
         );
         assert_eq!(body["reasoning"]["effort"], "low");
+        // summary defaults to "auto" when effort is set.
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn responses_body_summary_present_iff_effort_set() {
+        // effort set → reasoning object present with both effort and summary.
+        let body_with_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Medium),
+        );
+        assert!(
+            body_with_effort.get("reasoning").is_some(),
+            "reasoning must be present when effort is set"
+        );
+        assert_eq!(body_with_effort["reasoning"]["effort"], "medium");
+        assert_eq!(body_with_effort["reasoning"]["summary"], "auto");
+
+        // effort None → reasoning object entirely absent.
+        let body_no_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body_no_effort.get("reasoning").is_none(),
+            "reasoning must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn responses_body_emits_configured_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Detailed;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::High),
+        );
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(
+            body["reasoning"]["summary"], "detailed",
+            "configured summary mode must be forwarded to reasoning object"
+        );
+    }
+
+    #[test]
+    fn responses_body_concise_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Concise;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Low),
+        );
+        assert_eq!(body["reasoning"]["summary"], "concise");
     }
 
     #[test]
