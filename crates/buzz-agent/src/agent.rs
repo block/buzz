@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
@@ -292,7 +293,8 @@ impl RunCtx<'_> {
             let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
+                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
