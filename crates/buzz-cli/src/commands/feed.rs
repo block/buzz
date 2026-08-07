@@ -59,6 +59,11 @@ pub async fn cmd_get_feed(
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json => normalized,
+        crate::OutputFormat::Raw => {
+            return Err(CliError::Usage(
+                "--format raw is not supported by feed get".into(),
+            ));
+        }
     };
     println!("{output}");
     Ok(())
