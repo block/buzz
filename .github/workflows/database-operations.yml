@@ -51,6 +51,12 @@ jobs:
             --query 'Parameter.Value' \
             --output text)"
           [[ -n "$github_token" && "$github_token" != None ]] || { echo "::error::dispatch token unavailable"; exit 1; }
+          github_curl_config="$RUNNER_TEMP/ghar-curl.conf"
+          umask 077
+          printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' \
+            "$github_token" > "$github_curl_config"
+          github_token=""
+          trap 'rm -f "$github_curl_config"' EXIT
 
           dispatch_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           dispatch_body="$(jq -cn \
@@ -58,10 +64,8 @@ jobs:
             --arg migration_file "$MIGRATION_FILE" \
             '{ref:"main",inputs:{operation:$operation,migration_file:$migration_file,migration_ref:"main"}}')"
           dispatch_status="$(curl -sS -o "$RUNNER_TEMP/ghar-dispatch-response" -w '%{http_code}' \
+            --config "$github_curl_config" \
             -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $github_token" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
             -H 'Content-Type: application/json' \
             "https://api.github.com/repos/$GHAR_REPOSITORY/actions/workflows/$GHAR_WORKFLOW/dispatches" \
             --data "$dispatch_body")"
@@ -70,9 +74,7 @@ jobs:
           run_id=""
           for _ in $(seq 1 30); do
             runs_json="$(curl -fsS \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $github_token" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --config "$github_curl_config" \
               "https://api.github.com/repos/$GHAR_REPOSITORY/actions/workflows/$GHAR_WORKFLOW/runs?event=workflow_dispatch&branch=$GHAR_REF&per_page=20")"
             run_id="$(jq -r --arg since "$dispatch_started" '.workflow_runs | map(select(.created_at >= $since)) | sort_by(.created_at) | last.id // empty' <<< "$runs_json")"
             [[ "$run_id" =~ ^[0-9]+$ ]] && break
@@ -82,9 +84,7 @@ jobs:
 
           for _ in $(seq 1 90); do
             run_json="$(curl -fsS \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $github_token" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --config "$github_curl_config" \
               "https://api.github.com/repos/$GHAR_REPOSITORY/actions/runs/$run_id")"
             status="$(jq -r '.status' <<< "$run_json")"
             if [[ "$status" == completed ]]; then
