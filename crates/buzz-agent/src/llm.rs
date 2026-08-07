@@ -139,14 +139,12 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
-        let base_timeout = cfg.llm_timeout;
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
                 .post_anthropic(
                     cfg,
                     &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
-                    base_timeout,
                 )
                 .await
                 .and_then(parse_anthropic),
@@ -159,7 +157,7 @@ impl Llm {
                     effective_model,
                     cfg.prompt_caching,
                 );
-                self.post_openrouter(cfg, &body, base_timeout)
+                self.post_openrouter(cfg, &body)
                     .await
                     .and_then(parse_openai_with_reasoning_details)
             }
@@ -194,58 +192,38 @@ impl Llm {
                             )
                         }
                     },
-                    base_timeout,
                 )
                 .await
             }
             Provider::DatabricksV2 => {
-                self.databricks_v2_request(
-                    cfg,
-                    effective_model,
-                    |route| match route {
-                        DatabricksV2Route::OpenAiResponses => {
-                            // OpenAI Responses path: normalize effort against the per-model table.
-                            let e = effort
-                                .map(|ef| normalize_effort_for_openai_route(ef, effective_model));
-                            (
-                                responses_body(
-                                    cfg,
-                                    system_prompt,
-                                    history,
-                                    tools,
-                                    effective_model,
-                                    e,
-                                ),
-                                parse_responses as OpenAiParse,
-                            )
-                        }
-                        DatabricksV2Route::AnthropicMessages => {
-                            // Anthropic Messages path: normalize effort (none|minimal → omit).
-                            let e = effort.and_then(normalize_effort_for_anthropic_route);
-                            (
-                                anthropic_body(
-                                    cfg,
-                                    system_prompt,
-                                    history,
-                                    tools,
-                                    effective_model,
-                                    e,
-                                ),
-                                parse_anthropic as OpenAiParse,
-                            )
-                        }
-                        DatabricksV2Route::MlflowChatCompletions => {
-                            // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
-                            let e = effort
-                                .map(|ef| normalize_effort_for_openai_route(ef, effective_model));
-                            (
-                                openai_body(cfg, system_prompt, history, tools, effective_model, e),
-                                parse_openai as OpenAiParse,
-                            )
-                        }
-                    },
-                    base_timeout,
-                )
+                self.databricks_v2_request(cfg, effective_model, |route| match route {
+                    DatabricksV2Route::OpenAiResponses => {
+                        // OpenAI Responses path: normalize effort against the per-model table.
+                        let e =
+                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        (
+                            responses_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_responses as OpenAiParse,
+                        )
+                    }
+                    DatabricksV2Route::AnthropicMessages => {
+                        // Anthropic Messages path: normalize effort (none|minimal → omit).
+                        let e = effort.and_then(normalize_effort_for_anthropic_route);
+                        (
+                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_anthropic as OpenAiParse,
+                        )
+                    }
+                    DatabricksV2Route::MlflowChatCompletions => {
+                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
+                        let e =
+                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        (
+                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_openai as OpenAiParse,
+                        )
+                    }
+                })
                 .await
             }
         };
@@ -300,73 +278,70 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
-        let base_timeout = cfg.llm_timeout;
-        match cfg.provider {
-            Provider::Anthropic => {
-                let body = json!({
-                    "model": effective_model,
-                    "max_tokens": max_output_tokens,
-                    "system": system_prompt,
-                    "messages": [{
-                        "role": "user",
-                        "content": [{ "type": "text", "text": user_prompt }],
-                    }],
-                });
-                Ok(parse_anthropic(self.post_anthropic(cfg, &body, base_timeout).await?)?.text)
-            }
-            Provider::OpenRouter => {
-                let body = openrouter_summary_body(
-                    effective_model,
-                    system_prompt,
-                    user_prompt,
-                    max_output_tokens,
-                );
-                let v = self.post_openrouter(cfg, &body, base_timeout).await?;
-                Ok(parse_openai(v)?.text)
-            }
-            Provider::OpenAi | Provider::Databricks => {
-                let r = self
-                    .openai_request(
-                        cfg,
+        let call_start = std::time::Instant::now();
+        let result = (async {
+            match cfg.provider {
+                Provider::Anthropic => {
+                    let body = json!({
+                        "model": effective_model,
+                        "max_tokens": max_output_tokens,
+                        "system": system_prompt,
+                        "messages": [{
+                            "role": "user",
+                            "content": [{ "type": "text", "text": user_prompt }],
+                        }],
+                    });
+                    Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
+                }
+                Provider::OpenRouter => {
+                    let body = openrouter_summary_body(
                         effective_model,
-                        false,
-                        |use_responses, request_model| {
-                            if use_responses {
-                                (
-                                    json!({
-                                        "model": request_model,
-                                        "max_output_tokens": max_output_tokens,
-                                        "instructions": system_prompt,
-                                        "input": user_prompt,
-                                    }),
-                                    parse_responses as OpenAiParse,
-                                )
-                            } else {
-                                (
-                                    json!({
-                                        "model": request_model,
-                                        "stream": false,
-                                        "max_completion_tokens": max_output_tokens,
-                                        "messages": [
-                                            { "role": "system", "content": system_prompt },
-                                            { "role": "user", "content": user_prompt },
-                                        ],
-                                    }),
-                                    parse_openai as OpenAiParse,
-                                )
-                            }
-                        },
-                        base_timeout,
-                    )
-                    .await?;
-                Ok(r.text)
-            }
-            Provider::DatabricksV2 => {
-                let r = self
-                    .databricks_v2_request(
-                        cfg,
-                        effective_model,
-                        |route| match route {
+                        system_prompt,
+                        user_prompt,
+                        max_output_tokens,
+                    );
+                    let v = self.post_openrouter(cfg, &body).await?;
+                    Ok(parse_openai(v)?.text)
+                }
+                Provider::OpenAi | Provider::Databricks => {
+                    let r = self
+                        .openai_request(
+                            cfg,
+                            effective_model,
+                            false,
+                            |use_responses, request_model| {
+                                if use_responses {
+                                    (
+                                        json!({
+                                            "model": request_model,
+                                            "max_output_tokens": max_output_tokens,
+                                            "instructions": system_prompt,
+                                            "input": user_prompt,
+                                        }),
+                                        parse_responses as OpenAiParse,
+                                    )
+                                } else {
+                                    (
+                                        json!({
+                                            "model": request_model,
+                                            "stream": false,
+                                            "max_completion_tokens": max_output_tokens,
+                                            "messages": [
+                                                { "role": "system", "content": system_prompt },
+                                                { "role": "user", "content": user_prompt },
+                                            ],
+                                        }),
+                                        parse_openai as OpenAiParse,
+                                    )
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(r.text)
+                }
+                Provider::DatabricksV2 => {
+                    let r = self
+                        .databricks_v2_request(cfg, effective_model, |route| match route {
                             DatabricksV2Route::OpenAiResponses => (
                                 json!({
                                     "model": effective_model,
@@ -400,23 +375,28 @@ impl Llm {
                                 }),
                                 parse_openai as OpenAiParse,
                             ),
-                        },
-                        base_timeout,
-                    )
-                    .await?;
-                Ok(r.text)
+                        })
+                        .await?;
+                    Ok(r.text)
+                }
             }
+        })
+        .await;
+        if result.is_ok() {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                duration_ms,
+                "llm: summarize completed"
+            );
         }
+        result
     }
 
-    async fn post_anthropic(
-        &self,
-        cfg: &Config,
-        body: &Value,
-        base_timeout: std::time::Duration,
-    ) -> Result<Value, AgentError> {
+    async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, base_timeout, |r| {
+        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -434,7 +414,6 @@ impl Llm {
         effective_model: &str,
         tools_supplied: bool,
         mut build: F,
-        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
@@ -444,7 +423,7 @@ impl Llm {
             effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
 
         let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build, base_timeout)
+            .openai_request_for_model(cfg, &request_model, &mut build)
             .await;
         match first {
             Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
@@ -456,7 +435,7 @@ impl Llm {
                     provider_message = detail,
                     "relay-mesh auto: collective request failed; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build, base_timeout)
+                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
                     .await
                     .map_err(PostError::into_agent)
             }
@@ -473,7 +452,7 @@ impl Llm {
                     fallback_model = MESH_AUTO_MODEL_ID,
                     "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build, base_timeout)
+                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
                     .await
                     .map_err(PostError::into_agent)
             }
@@ -625,7 +604,6 @@ impl Llm {
         cfg: &Config,
         request_model: &str,
         build: &mut F,
-        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, PostError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
@@ -637,14 +615,14 @@ impl Llm {
         if use_responses {
             let (body, parse) = build(true, request_model);
             return parse(
-                self.post_openai(cfg, "/responses", &body, request_model, base_timeout)
+                self.post_openai(cfg, "/responses", &body, request_model)
                     .await?,
             )
             .map_err(PostError::from);
         }
         let (body, parse) = build(false, request_model);
         match self
-            .post_openai(cfg, "/chat/completions", &body, request_model, base_timeout)
+            .post_openai(cfg, "/chat/completions", &body, request_model)
             .await
         {
             Ok(value) => parse(value).map_err(PostError::from),
@@ -653,7 +631,7 @@ impl Llm {
             {
                 let (body, parse) = build(true, request_model);
                 parse(
-                    self.post_openai(cfg, "/responses", &body, request_model, base_timeout)
+                    self.post_openai(cfg, "/responses", &body, request_model)
                         .await?,
                 )
                 .map_err(PostError::from)
@@ -667,7 +645,6 @@ impl Llm {
         cfg: &Config,
         effective_model: &str,
         build: F,
-        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
@@ -675,15 +652,9 @@ impl Llm {
         let route = databricks_v2_route_for_model(effective_model);
         let (body, parse) = build(route);
         parse(
-            self.post_openai(
-                cfg,
-                databricks_v2_path(route),
-                &body,
-                effective_model,
-                base_timeout,
-            )
-            .await
-            .map_err(PostError::into_agent)?,
+            self.post_openai(cfg, databricks_v2_path(route), &body, effective_model)
+                .await
+                .map_err(PostError::into_agent)?,
         )
     }
 
@@ -698,7 +669,6 @@ impl Llm {
         path: &str,
         body: &Value,
         effective_model: &str,
-        base_timeout: std::time::Duration,
     ) -> Result<Value, PostError> {
         let (url, body_owned);
         let body_ref: &Value = match cfg.provider {
@@ -732,7 +702,7 @@ impl Llm {
                 &url,
                 body_ref,
                 effective_model == MESH_VIRTUAL_MODEL_ID,
-                base_timeout,
+                cfg.llm_timeout,
                 |r| r.bearer_auth(&bearer),
             )
             .await
@@ -750,17 +720,12 @@ impl Llm {
         }
     }
 
-    async fn post_openrouter(
-        &self,
-        cfg: &Config,
-        body: &Value,
-        base_timeout: std::time::Duration,
-    ) -> Result<Value, AgentError> {
+    async fn post_openrouter(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
         let mut bearer = self.auth.bearer().await?;
         let mut refreshed = false;
         loop {
-            match openrouter_post(&self.http, &url, body, &bearer, base_timeout).await {
+            match openrouter_post(&self.http, &url, body, &bearer, cfg.llm_timeout).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
                     let new_bearer = self.auth.refresh_now(&bearer).await?;
@@ -1803,6 +1768,16 @@ const ESCALATION_TIMEOUT_CAP: std::time::Duration = std::time::Duration::from_se
 /// preserved as-is.
 ///
 /// Examples at base = 240 s: 0 failures → 240 s; 1 → 480 s; 2 → 960 s; 3 → 1200 s.
+///
+/// **Worst-case turn ceiling** (all 3 attempts time out, `MAX_RETRIES = 3`):
+///
+/// ```text
+/// total ≤ base + min(2×base, cap) + min(4×base, cap)
+/// ```
+///
+/// Concrete anchors operators can use to size their outer turn timeout:
+/// - 240 s base (default): 240 + 480 + 960 = **1680 s** (~28 min)
+/// - 900 s base: 900 + 1200 + 1200 = **3300 s** (~55 min)
 fn escalated_timeout(base: std::time::Duration, timeout_failures: u32) -> std::time::Duration {
     // `checked_shl` returns None when the shift would overflow u32; saturate to
     // u32::MAX so the cap below clamps it rather than panicking or wrapping.
@@ -2294,10 +2269,24 @@ enum OpenRouterErrorClass {
 /// worst-case turn latency to a value smaller than the per-request timeout.
 const RETRY_AFTER_CAP_SECS: u64 = 60;
 
-fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
-    let val = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+/// Compute the retry delay from a raw `Retry-After` header value.
+///
+/// Returns `Some(duration)` when the header is present, non-zero, and
+/// parseable as a decimal number of seconds; the value is capped at
+/// `RETRY_AFTER_CAP_SECS`. Returns `None` when the header is absent,
+/// unparseable, or zero — callers should fall back to `backoff_with_jitter`.
+///
+/// This is the single place the cap logic lives; `parse_retry_after_header`
+/// delegates here so the cap can be unit tested without an HTTP header map.
+fn retry_delay_for_429(header_value: Option<&str>) -> Option<std::time::Duration> {
+    let val = header_value?;
     let secs: u64 = val.trim().parse().ok()?;
     (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+}
+
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let val = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    retry_delay_for_429(Some(val))
 }
 
 fn classify_openrouter_error(
@@ -4698,6 +4687,81 @@ mod tests {
         );
     }
 
+    /// `openrouter_post`: a body-read timeout on the first attempt retries under
+    /// an escalated budget and succeeds on the second attempt.
+    ///
+    /// Same shape as `post_body_read_timeout_retries_with_escalated_budget` —
+    /// the stub stalls mid-body on the first request, then returns a complete
+    /// response immediately on the second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare 64-byte body, send 4 bytes, stall.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"c",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                // Second attempt: complete valid OpenRouter JSON response.
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder().build().unwrap();
+        let out = openrouter_post(&client, &url, &json!({}), "key", Duration::from_secs(1))
+            .await
+            .expect("openrouter_post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
+        );
+    }
+
     /// `terminal_llm_error` below `STALL_NOTICE_THRESHOLD` carries the detail
     /// and attempt count but no stall-specific text — this is the common case
     /// (a handful of quick retries), not an outage.
@@ -5695,7 +5759,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .expect("retry with fresh token should succeed");
         assert_eq!(out, json!({ "ok": true }));
@@ -5704,7 +5768,7 @@ mod tests {
         // Second call's 401 must trigger its own refresh — the guard cannot
         // be a stored flag that an earlier turn already tripped.
         let out2 = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .unwrap();
         assert_eq!(out2, json!({ "ok": true }));
@@ -5731,7 +5795,7 @@ mod tests {
         c.base_url = base;
 
         let err = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .unwrap_err();
         assert!(
@@ -5762,7 +5826,7 @@ mod tests {
         c.base_url = base;
 
         let err = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .unwrap_err();
         assert!(
@@ -5793,7 +5857,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .expect("retry with fresh token should clear the 403");
         assert_eq!(out, json!({ "ok": true }));
@@ -7362,53 +7426,65 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    /// A `Retry-After` header is actually honored as a sleep before the retry.
-    ///
-    /// The cap enforcement is covered by the `parse_retry_after_header` unit
-    /// tests above; this test proves the parsed-and-capped delay is passed to
-    /// `tokio::time::sleep` rather than being computed but discarded. Uses a 1 s
-    /// Retry-After (well below the 60 s cap) so the test completes quickly in
-    /// real time while still asserting the sleep duration.
-    ///
-    /// Note: `start_paused = true` is intentionally NOT used here — a per-request
-    /// `RequestBuilder::timeout()` combined with a paused Tokio clock causes the
-    /// runtime to auto-advance time to the timeout before the stub I/O fires,
-    /// which would make all attempts appear to time out. Real-clock timing is
-    /// required for per-request `.timeout()` to coexist with stub TCP servers.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn openrouter_post_429_retry_after_sleep_is_honored() {
-        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
-            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
-                .with_header("Retry-After", "1"),
-            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
-        ])
-        .await;
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
-        let before = std::time::Instant::now();
-        let out = openrouter_post(
-            &http,
-            &format!("{url}/x"),
-            &json!({}),
-            "key",
-            Duration::from_secs(30),
-        )
-        .await
-        .expect("second attempt succeeds after 1s Retry-After sleep");
-        assert_eq!(out["choices"][0]["message"]["content"], "ok");
-        assert!(
-            before.elapsed() >= Duration::from_millis(800),
-            "must sleep at least the Retry-After hint (1s): elapsed {:?}",
-            before.elapsed()
+    // ---- retry_delay_for_429 (pure-function tests, no network) ---------------
+
+    /// A huge server-advertised Retry-After is capped at RETRY_AFTER_CAP_SECS.
+    /// This test proves the cap is actually wired into the loop's only delay
+    /// computation (not just a dead constant), because `openrouter_post`'s 429
+    /// arm calls `parse_retry_after_header` which delegates to this function.
+    #[test]
+    fn retry_delay_for_429_huge_value_is_capped() {
+        let d = retry_delay_for_429(Some("999999")).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "999999s must be capped to {RETRY_AFTER_CAP_SECS}s"
         );
-        assert!(
-            before.elapsed() < Duration::from_secs(10),
-            "must complete well before the 60s cap: elapsed {:?}",
-            before.elapsed()
+    }
+
+    /// A small value below the cap is returned as-is.
+    #[test]
+    fn retry_delay_for_429_small_value_honored() {
+        let d = retry_delay_for_429(Some("3")).unwrap();
+        assert_eq!(d, Duration::from_secs(3), "3s must be honored verbatim");
+    }
+
+    /// A value equal to the cap is returned unchanged (boundary).
+    #[test]
+    fn retry_delay_for_429_exact_cap_is_not_truncated() {
+        let d = retry_delay_for_429(Some(&RETRY_AFTER_CAP_SECS.to_string())).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "exact cap must not be truncated"
         );
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Missing header returns None → caller falls back to backoff.
+    #[test]
+    fn retry_delay_for_429_missing_header_is_none() {
+        assert!(
+            retry_delay_for_429(None).is_none(),
+            "absent header must return None"
+        );
+    }
+
+    /// Garbage / non-numeric header returns None.
+    #[test]
+    fn retry_delay_for_429_garbage_header_is_none() {
+        assert!(
+            retry_delay_for_429(Some("not-a-number")).is_none(),
+            "unparseable header must return None"
+        );
+    }
+
+    /// Zero is treated as absent (no-op: don't sleep 0 seconds).
+    #[test]
+    fn retry_delay_for_429_zero_is_none() {
+        assert!(
+            retry_delay_for_429(Some("0")).is_none(),
+            "zero Retry-After must return None (no-op sleep)"
+        );
     }
 
     /// An untyped 503 (no `error.metadata.error_type`) exhausts all
@@ -7654,10 +7730,7 @@ mod tests {
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = url;
 
-        let err = llm
-            .post_openrouter(&c, &json!({}), Duration::from_secs(30))
-            .await
-            .unwrap_err();
+        let err = llm.post_openrouter(&c, &json!({})).await.unwrap_err();
         assert!(
             matches!(&err, AgentError::LlmAuth(s) if s.contains("static key rejected")),
             "static 401 must surface as LlmAuth with 'static key rejected': got {err:?}"
@@ -7691,9 +7764,7 @@ mod tests {
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = base;
 
-        let result = llm
-            .post_openrouter(&c, &json!({}), Duration::from_secs(30))
-            .await;
+        let result = llm.post_openrouter(&c, &json!({})).await;
         // `spawn_auth_stub` returns `{"ok":true}` on success.
         assert!(
             result.is_ok(),
