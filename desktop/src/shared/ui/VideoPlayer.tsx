@@ -1454,9 +1454,8 @@ function VideoReviewDialog({
   }, [videoRef]);
 
   const readAuthoringSeconds = React.useCallback(() => {
-    const video = videoRef.current;
-    return boundSeconds(video?.currentTime ?? currentTimeRef.current);
-  }, [boundSeconds, videoRef]);
+    return boundSeconds(currentTimeRef.current);
+  }, [boundSeconds]);
 
   const pauseForCommentAuthoring = React.useCallback(() => {
     const video = videoRef.current;

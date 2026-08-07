@@ -158,13 +158,27 @@ test.describe("thread unread indicator", () => {
       });
     }
 
-    // Switch back — thread summary should show unread badge
+    // Switch back — thread summary should expose one coherent unread unit.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
     const badge = page.getByTestId("thread-unread-badge");
     await expect(badge).toBeVisible();
-    await expect(badge).toContainText("3");
+    await expect(badge).toHaveText("3 new");
+
+    await expect(threadSummary).toHaveAccessibleName(/3 unread/);
+
+    const accent = page.getByTestId("thread-unread-accent");
+    await expect(accent).toBeVisible();
+    const accentBox = await accent.boundingBox();
+    const summaryBox = await threadSummary.boundingBox();
+    expect(accentBox).not.toBeNull();
+    expect(summaryBox).not.toBeNull();
+    expect(
+      (accentBox?.y ?? 0) + (accentBox?.height ?? 0),
+    ).toBeGreaterThanOrEqual(
+      (summaryBox?.y ?? 0) + (summaryBox?.height ?? 0) - 1,
+    );
   });
 
   test("02-thread-new-divider", async ({ page }) => {

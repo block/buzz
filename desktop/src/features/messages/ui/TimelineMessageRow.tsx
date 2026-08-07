@@ -133,6 +133,8 @@ export function MessageRowItem({
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
+    const hasUnreadThreadReplies =
+      (threadUnreadCounts?.get(message.id) ?? 0) > 0;
     return (
       <div
         className={cn(
@@ -141,6 +143,13 @@ export function MessageRowItem({
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
         )}
       >
+        {hasUnreadThreadReplies ? (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute bottom-1 left-0 top-1 z-20 w-0.5 rounded-full bg-primary/60"
+            data-testid="thread-unread-accent"
+          />
+        ) : null}
         <MessageRow
           channelId={channelId}
           highlighted={false}
