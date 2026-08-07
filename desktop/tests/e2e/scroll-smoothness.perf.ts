@@ -26,7 +26,7 @@ import { installMockBridge } from "../helpers/bridge";
  * only reproduces in the real desktop shell and is Tyler's real-wheel pass.
  *
  * Run headed to watch it:
- *   pnpm build && npx playwright test --config=playwright.perf.config.ts --headed
+ *   pnpm build:e2e && npx playwright test --config=playwright.perf.config.ts --headed
  */
 
 const SEED_ROWS = 600; // a genuinely busy channel, fully mounted

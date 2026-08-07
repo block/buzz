@@ -25,7 +25,7 @@ import { installMockBridge } from "../helpers/bridge";
  *
  * Absolute ms are machine-specific; the quiet-vs-busy DELTA on one machine
  * is the signal. Run it (from desktop/):
- *   pnpm build
+ *   pnpm build:e2e
  *   npx playwright test --config=playwright.perf.config.ts typing-latency.perf.ts
  */
 
