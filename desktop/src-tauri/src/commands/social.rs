@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nostr::{Event, EventId, Tag};
+use nostr::{Event, EventId, PublicKey, Tag};
 use tauri::State;
 
 use crate::{
@@ -12,6 +12,9 @@ use crate::{
     nostr_convert,
     relay::{query_relay, submit_event, SubmitEventResponse},
 };
+
+const KIND_LONG_FORM: u32 = buzz_core_pkg::kind::KIND_LONG_FORM;
+const LONG_FORM_IDENTIFIER_MAX_BYTES: usize = 4096;
 
 fn e_tag_id(tag: &Tag) -> Option<&String> {
     let values = tag.as_slice();
@@ -48,6 +51,74 @@ fn reaction_emoji(event: &Event) -> String {
     } else {
         event.content.clone()
     }
+}
+
+fn validate_pubkey(pubkey: &str) -> Result<String, String> {
+    PublicKey::from_hex(pubkey)
+        .map(|key| key.to_hex())
+        .map_err(|e| format!("invalid pubkey: {e}"))
+}
+
+fn validate_long_form_identifier(identifier: &str) -> Result<(), String> {
+    if identifier.is_empty() {
+        return Err("invalid identifier: must not be empty".to_string());
+    }
+    if identifier.len() > LONG_FORM_IDENTIFIER_MAX_BYTES {
+        return Err(format!(
+            "invalid identifier: exceeds {LONG_FORM_IDENTIFIER_MAX_BYTES} bytes"
+        ));
+    }
+    if identifier.chars().any(char::is_control) {
+        return Err("invalid identifier: must not contain control characters".to_string());
+    }
+
+    Ok(())
+}
+
+fn long_form_note_filter(pubkey: &str, identifier: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [KIND_LONG_FORM],
+        "authors": [pubkey],
+        "#d": [identifier],
+        "limit": 1,
+    })
+}
+
+fn long_form_note_from_event(event: &Event) -> Result<(String, UserNoteInfo), String> {
+    if event.kind.as_u16() as u32 != KIND_LONG_FORM {
+        return Err(format!(
+            "expected kind:{KIND_LONG_FORM}, got {}",
+            event.kind.as_u16()
+        ));
+    }
+
+    let identifier = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) == Some("d") {
+                values.get(1).cloned()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "kind:30023 event is missing required d tag".to_string())?;
+    validate_long_form_identifier(&identifier)?;
+
+    let note = UserNoteInfo {
+        id: event.id.to_hex(),
+        pubkey: event.pubkey.to_hex(),
+        created_at: event.created_at.as_secs() as i64,
+        content: event.content.clone(),
+        tags: event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect(),
+    };
+
+    Ok((identifier, note))
 }
 
 /// Publish a global kind:1 text note (NIP-01).
@@ -172,6 +243,33 @@ pub async fn get_note(
         .notes
         .into_iter()
         .next())
+}
+
+/// Fetch a single NIP-23 long-form note by exact kind:30023 coordinate.
+#[tauri::command]
+pub async fn get_long_form_note(
+    pubkey: String,
+    identifier: String,
+    state: State<'_, AppState>,
+) -> Result<Option<UserNoteInfo>, String> {
+    let pubkey = validate_pubkey(&pubkey)?;
+    validate_long_form_identifier(&identifier)?;
+
+    let events = query_relay(&state, &[long_form_note_filter(&pubkey, &identifier)]).await?;
+
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    if event.pubkey.to_hex() != pubkey {
+        return Err("relay returned long-form note for a different author".to_string());
+    }
+
+    let (returned_identifier, note) = long_form_note_from_event(event)?;
+    if returned_identifier != identifier {
+        return Err("relay returned long-form note for a different identifier".to_string());
+    }
+
+    Ok(Some(note))
 }
 
 const MAX_NOTE_IDS: usize = 200;
@@ -420,12 +518,90 @@ mod tests {
             .expect("sign event")
     }
 
+    fn long_form_event(tags: Vec<Tag>, content: &str) -> Event {
+        EventBuilder::new(Kind::Custom(KIND_LONG_FORM as u16), content)
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event")
+    }
+
     #[test]
     fn e_tag_id_returns_only_event_tag_values() {
         let e = tag(&["e", "a"]);
         let p = tag(&["p", "b"]);
         assert_eq!(e_tag_id(&e), Some(&"a".to_string()));
         assert_eq!(e_tag_id(&p), None);
+    }
+
+    #[test]
+    fn validates_pubkey_as_canonical_hex() {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+
+        assert_eq!(validate_pubkey(&pubkey).unwrap(), pubkey);
+        assert!(validate_pubkey("not-a-pubkey").is_err());
+        assert!(validate_pubkey(&format!("{pubkey} ")).is_err());
+    }
+
+    #[test]
+    fn validates_long_form_identifier() {
+        assert!(validate_long_form_identifier("article-slug").is_ok());
+        assert!(validate_long_form_identifier("").is_err());
+        assert!(validate_long_form_identifier("article\nslug").is_err());
+        assert!(validate_long_form_identifier(&"a".repeat(LONG_FORM_IDENTIFIER_MAX_BYTES)).is_ok());
+        assert!(
+            validate_long_form_identifier(&"a".repeat(LONG_FORM_IDENTIFIER_MAX_BYTES + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn long_form_note_filter_is_exact_coordinate_query() {
+        let filter = long_form_note_filter("abc", "slug");
+
+        assert_eq!(
+            filter,
+            serde_json::json!({
+                "kinds": [30023],
+                "authors": ["abc"],
+                "#d": ["slug"],
+                "limit": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn long_form_note_from_event_reuses_user_note_shape() {
+        let event = long_form_event(
+            vec![
+                tag(&["d", "article-slug"]),
+                tag(&["title", "Article title"]),
+                tag(&["summary", "Short summary"]),
+                tag(&["published_at", "1710000000"]),
+                tag(&["t", "rust"]),
+                tag(&["t", "nostr"]),
+            ],
+            "# Body",
+        );
+
+        let (identifier, note) = long_form_note_from_event(&event).unwrap();
+
+        assert_eq!(note.id, event.id.to_hex());
+        assert_eq!(note.pubkey, event.pubkey.to_hex());
+        assert_eq!(identifier, "article-slug");
+        assert_eq!(note.content, "# Body");
+        assert!(note
+            .tags
+            .iter()
+            .any(|tag| tag == &["title".to_string(), "Article title".to_string()]));
+    }
+
+    #[test]
+    fn long_form_note_from_event_rejects_wrong_kind_or_missing_d_tag() {
+        let wrong_kind = event(vec![tag(&["d", "article-slug"])], "body");
+        assert!(long_form_note_from_event(&wrong_kind).is_err());
+
+        let missing_d = long_form_event(Vec::new(), "body");
+        assert!(long_form_note_from_event(&missing_d).is_err());
     }
 
     #[test]
