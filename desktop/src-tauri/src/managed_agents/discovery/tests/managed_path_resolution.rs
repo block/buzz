@@ -88,3 +88,38 @@ fn resolve_command_prefers_buzz_managed_npm_shim_over_path() {
         "Buzz-managed npm shim must win over PATH/global shims"
     );
 }
+
+/// A binary that exists only in a directory from the registry PATH (not the
+/// inherited process PATH) must still resolve: the registry fallback exists
+/// precisely for processes whose environment predates a PATH update (e.g.
+/// apps relaunched by an updater), which is the Hermes Agent on Windows case.
+#[cfg(windows)]
+#[test]
+fn resolve_in_dirs_finds_binary_from_registry_style_dir_list() {
+    use std::path::PathBuf;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let registry_dir = temp
+        .path()
+        .join("hermes-agent")
+        .join("venv")
+        .join("Scripts");
+    std::fs::create_dir_all(&registry_dir).expect("create registry-style dir");
+
+    let binary = registry_dir.join("hermes-acp.exe");
+    std::fs::write(&binary, b"placeholder").expect("write fake hermes-acp.exe");
+
+    let basenames = vec!["hermes-acp".to_string(), "hermes-acp.exe".to_string()];
+    let dirs = [
+        PathBuf::from("C:\\definitely\\missing"),
+        registry_dir.clone(),
+    ];
+
+    let resolved = super::super::registry_path::resolve_in_dirs(&basenames, dirs.into_iter());
+
+    assert_eq!(
+        resolved.as_deref(),
+        Some(binary.as_path()),
+        "registry-style dir scan must find hermes-acp.exe even though the process PATH misses it"
+    );
+}
