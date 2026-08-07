@@ -11,6 +11,7 @@
 use aho_corasick::AhoCorasick;
 use futures_util::StreamExt;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
@@ -24,11 +25,11 @@ use crate::usage::{TurnUsage, UsageTracker};
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
 const REDACTED_MCP_VALUE: &str = "[REDACTED]";
-/// Substring redaction is a fallback for adapter echoes outside the structured
-/// `mcpServers` object. Very short values create destructive false positives
-/// in ordinary diagnostics, so short values use exact or token-boundary matching.
-const MIN_SENSITIVE_PATTERN_BYTES: usize = 12;
-const MIN_BOUNDED_SENSITIVE_PATTERN_BYTES: usize = 8;
+/// Bound retained values across repeated sessions. Crossing either limit
+/// switches diagnostics to fail-closed redaction instead of dropping an old
+/// credential from protection or allowing unbounded matcher growth.
+const MAX_RETAINED_MCP_VALUES: usize = 8_192;
+const MAX_RETAINED_MCP_VALUE_BYTES: usize = 256 * 1024;
 const COMMON_MCP_VALUES: [&str; 13] = [
     "true",
     "false",
@@ -51,52 +52,23 @@ fn common_mcp_value(value: &str) -> bool {
         .any(|common| value.eq_ignore_ascii_case(common))
 }
 
-fn safe_sensitive_pattern(value: &str) -> bool {
-    value.len() >= MIN_SENSITIVE_PATTERN_BYTES && !common_mcp_value(value)
-}
-
-fn bounded_sensitive_pattern(value: &str) -> bool {
-    (MIN_BOUNDED_SENSITIVE_PATTERN_BYTES..MIN_SENSITIVE_PATTERN_BYTES).contains(&value.len())
-        && !common_mcp_value(value)
-}
-
-fn contains_bounded_value(text: &str, value: &str) -> bool {
-    let bytes = text.as_bytes();
-    text.match_indices(value).any(|(start, _)| {
-        let end = start + value.len();
-        let before_is_boundary =
-            start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
-        let after_is_boundary =
-            end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
-        before_is_boundary && after_is_boundary
-    })
-}
-
 #[derive(Default)]
 struct SensitiveMcpValueMatcher {
     substring: Option<AhoCorasick>,
-    exact: Vec<String>,
-    bounded: Vec<String>,
+    exact: HashSet<String>,
+    redact_all: bool,
 }
 
 impl SensitiveMcpValueMatcher {
     fn new(values: &[String]) -> Result<Self, aho_corasick::BuildError> {
-        let mut exact = values
+        let exact = values
             .iter()
             .filter(|value| !value.is_empty())
             .cloned()
-            .collect::<Vec<_>>();
-        exact.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        exact.dedup();
-
-        let bounded = exact
-            .iter()
-            .filter(|value| bounded_sensitive_pattern(value))
-            .cloned()
-            .collect();
+            .collect::<HashSet<_>>();
         let substring_patterns = exact
             .iter()
-            .filter(|value| safe_sensitive_pattern(value))
+            .filter(|value| !common_mcp_value(value))
             .collect::<Vec<_>>();
         let substring = if substring_patterns.is_empty() {
             None
@@ -107,20 +79,24 @@ impl SensitiveMcpValueMatcher {
         Ok(Self {
             substring,
             exact,
-            bounded,
+            redact_all: false,
         })
     }
 
+    fn fail_closed() -> Self {
+        Self {
+            redact_all: true,
+            ..Self::default()
+        }
+    }
+
     fn is_match(&self, text: &str) -> bool {
-        self.exact.iter().any(|value| text == value)
+        self.redact_all
+            || self.exact.contains(text)
             || self
                 .substring
                 .as_ref()
                 .is_some_and(|matcher| matcher.find(text).is_some())
-            || self
-                .bounded
-                .iter()
-                .any(|value| contains_bounded_value(text, value))
     }
 }
 
@@ -507,6 +483,8 @@ pub struct AcpClient {
     observer_context: ObserverContext,
     /// Credential values retained across sessions for log and observer redaction.
     sensitive_mcp_values: Vec<String>,
+    /// Encoded bytes retained in `sensitive_mcp_values`.
+    sensitive_mcp_value_bytes: usize,
     /// Multi-pattern matcher rebuilt when a session introduces new credentials.
     sensitive_mcp_matcher: SensitiveMcpValueMatcher,
     /// Most recently observed `_meta.goose.activeRunId` from a
@@ -884,6 +862,7 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             sensitive_mcp_values: Vec::new(),
+            sensitive_mcp_value_bytes: 0,
             sensitive_mcp_matcher: SensitiveMcpValueMatcher::default(),
             active_run_id: None,
             steering_supported: false,
@@ -914,6 +893,10 @@ impl AcpClient {
     }
 
     fn register_sensitive_mcp_values(&mut self, servers: &[McpServer]) -> Result<(), AcpError> {
+        if self.sensitive_mcp_matcher.redact_all {
+            return Ok(());
+        }
+
         let mut changed = false;
         for value in servers
             .iter()
@@ -925,7 +908,17 @@ impl AcpClient {
                 .iter()
                 .any(|registered| registered == value)
             {
+                let next_bytes = self.sensitive_mcp_value_bytes.saturating_add(value.len());
+                if self.sensitive_mcp_values.len() >= MAX_RETAINED_MCP_VALUES
+                    || next_bytes > MAX_RETAINED_MCP_VALUE_BYTES
+                {
+                    self.sensitive_mcp_values.clear();
+                    self.sensitive_mcp_value_bytes = 0;
+                    self.sensitive_mcp_matcher = SensitiveMcpValueMatcher::fail_closed();
+                    return Ok(());
+                }
                 self.sensitive_mcp_values.push(value.clone());
+                self.sensitive_mcp_value_bytes = next_bytes;
                 changed = true;
             }
         }
@@ -3087,14 +3080,52 @@ mod tests {
     }
 
     #[test]
-    fn short_or_common_mcp_values_do_not_redact_unrelated_diagnostics() {
-        let values = ["1", "/", "true", "prod", "production", "localhost", "token"]
+    fn wire_redaction_suppresses_embedded_short_sensitive_echoes() {
+        let values = ["s3cr3t", "!@#", "🔑"].map(str::to_string);
+        let source = serde_json::json!({
+            "word": "authentication failed for s3cr3t",
+            "punctuation": "credential!@#rejected",
+            "unicode": "credential🔑rejected"
+        });
+        let matcher = sensitive_matcher(&values);
+
+        let redacted = redact_wire_value(&source, &matcher);
+
+        assert_eq!(redacted["word"], REDACTED_MCP_VALUE);
+        assert_eq!(redacted["punctuation"], REDACTED_MCP_VALUE);
+        assert_eq!(redacted["unicode"], REDACTED_MCP_VALUE);
+        assert_eq!(
+            source["word"], "authentication failed for s3cr3t",
+            "redaction must not mutate the wire payload"
+        );
+    }
+
+    #[test]
+    fn configured_short_non_common_values_fail_closed_in_diagnostics() {
+        let matcher = sensitive_matcher(&["1".into(), "/".into(), "token".into()]);
+
+        for diagnostic in [
+            "retry 1 failed",
+            "invalid / path",
+            "token accounting failed",
+        ] {
+            assert_eq!(
+                redact_wire_value(&serde_json::json!(diagnostic), &matcher),
+                REDACTED_MCP_VALUE,
+                "configured values take precedence over diagnostic detail"
+            );
+        }
+    }
+
+    #[test]
+    fn common_mcp_values_do_not_redact_unrelated_diagnostics() {
+        let values = ["true", "prod", "production", "localhost"]
             .map(str::to_string)
             .to_vec();
         let matcher = sensitive_matcher(&values);
 
         let diagnostic = serde_json::json!({
-            "message": "production retry 1/true on localhost used token accounting"
+            "message": "production retry used true on localhost"
         });
         assert_eq!(redact_wire_value(&diagnostic, &matcher), diagnostic);
         for value in values {
@@ -4209,7 +4240,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_mcp_argument_echo_is_redacted() {
-        let argument_secret = "s3cr3t8!";
+        let argument_secret = "s3cr3t";
         let error_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -4342,6 +4373,35 @@ mod tests {
         assert!(!serialized_events.contains(first_secret));
         assert!(!serialized_events.contains(second_secret));
         assert!(serialized_events.contains(REDACTED_MCP_VALUE));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sensitive_value_retention_limit_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        let payload = "x".repeat(40 * 1024);
+
+        for index in 0..8 {
+            let value = format!("{index}:{payload}");
+            client
+                .register_sensitive_mcp_values(&[McpServer::Stdio(McpServerStdio {
+                    name: "bounded-redaction".into(),
+                    command: "test-mcp".into(),
+                    args: vec![],
+                    env: vec![EnvVar {
+                        name: "TOKEN".into(),
+                        value,
+                    }],
+                })])
+                .expect("credential redactor should remain available");
+        }
+
+        assert!(client.sensitive_mcp_matcher.redact_all);
+        assert!(client.sensitive_mcp_values.is_empty());
+        assert_eq!(
+            client.redact_wire_value(&serde_json::json!("ordinary diagnostic")),
+            REDACTED_MCP_VALUE
+        );
         client.shutdown().await;
     }
 
