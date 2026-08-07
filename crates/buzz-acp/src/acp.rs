@@ -26,8 +26,9 @@ const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 const REDACTED_MCP_VALUE: &str = "[REDACTED]";
 /// Substring redaction is a fallback for adapter echoes outside the structured
 /// `mcpServers` object. Very short values create destructive false positives
-/// in ordinary diagnostics, so they are protected structurally only.
+/// in ordinary diagnostics, so short values use exact or token-boundary matching.
 const MIN_SENSITIVE_PATTERN_BYTES: usize = 12;
+const MIN_BOUNDED_SENSITIVE_PATTERN_BYTES: usize = 8;
 const COMMON_MCP_VALUES: [&str; 13] = [
     "true",
     "false",
@@ -44,11 +45,83 @@ const COMMON_MCP_VALUES: [&str; 13] = [
     "localhost",
 ];
 
+fn common_mcp_value(value: &str) -> bool {
+    COMMON_MCP_VALUES
+        .iter()
+        .any(|common| value.eq_ignore_ascii_case(common))
+}
+
 fn safe_sensitive_pattern(value: &str) -> bool {
-    value.len() >= MIN_SENSITIVE_PATTERN_BYTES
-        && !COMMON_MCP_VALUES
+    value.len() >= MIN_SENSITIVE_PATTERN_BYTES && !common_mcp_value(value)
+}
+
+fn bounded_sensitive_pattern(value: &str) -> bool {
+    (MIN_BOUNDED_SENSITIVE_PATTERN_BYTES..MIN_SENSITIVE_PATTERN_BYTES).contains(&value.len())
+        && !common_mcp_value(value)
+}
+
+fn contains_bounded_value(text: &str, value: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.match_indices(value).any(|(start, _)| {
+        let end = start + value.len();
+        let before_is_boundary =
+            start == 0 || !bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_';
+        let after_is_boundary =
+            end == bytes.len() || !bytes[end].is_ascii_alphanumeric() && bytes[end] != b'_';
+        before_is_boundary && after_is_boundary
+    })
+}
+
+#[derive(Default)]
+struct SensitiveMcpValueMatcher {
+    substring: Option<AhoCorasick>,
+    exact: Vec<String>,
+    bounded: Vec<String>,
+}
+
+impl SensitiveMcpValueMatcher {
+    fn new(values: &[String]) -> Result<Self, aho_corasick::BuildError> {
+        let mut exact = values
             .iter()
-            .any(|common| value.eq_ignore_ascii_case(common))
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        exact.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        exact.dedup();
+
+        let bounded = exact
+            .iter()
+            .filter(|value| bounded_sensitive_pattern(value))
+            .cloned()
+            .collect();
+        let substring_patterns = exact
+            .iter()
+            .filter(|value| safe_sensitive_pattern(value))
+            .collect::<Vec<_>>();
+        let substring = if substring_patterns.is_empty() {
+            None
+        } else {
+            Some(AhoCorasick::new(substring_patterns)?)
+        };
+
+        Ok(Self {
+            substring,
+            exact,
+            bounded,
+        })
+    }
+
+    fn is_match(&self, text: &str) -> bool {
+        self.exact.iter().any(|value| text == value)
+            || self
+                .substring
+                .as_ref()
+                .is_some_and(|matcher| matcher.find(text).is_some())
+            || self
+                .bounded
+                .iter()
+                .any(|value| contains_bounded_value(text, value))
+    }
 }
 
 /// An MCP server configuration passed to `session/new`.
@@ -247,7 +320,7 @@ pub enum AcpError {
 /// detail (e.g. a `data` field) is not lost.
 fn agent_error_from_json(
     error: &serde_json::Value,
-    sensitive_value_matcher: Option<&AhoCorasick>,
+    sensitive_value_matcher: &SensitiveMcpValueMatcher,
 ) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let redacted_error = redact_wire_value(error, sensitive_value_matcher);
@@ -285,7 +358,7 @@ fn contains_serialized_json_key(text: &str, key: &str) -> bool {
 
 fn redact_wire_text<'a>(
     text: &'a str,
-    sensitive_value_matcher: Option<&AhoCorasick>,
+    sensitive_value_matcher: &SensitiveMcpValueMatcher,
 ) -> Cow<'a, str> {
     let looks_like_serialized_mcp_config = contains_serialized_json_key(text, "mcpServers")
         && (contains_serialized_json_key(text, "args")
@@ -295,7 +368,7 @@ fn redact_wire_text<'a>(
     if looks_like_serialized_mcp_config {
         return Cow::Borrowed(REDACTED_MCP_VALUE);
     }
-    if sensitive_value_matcher.is_some_and(|matcher| matcher.find(text).is_some()) {
+    if sensitive_value_matcher.is_match(text) {
         return Cow::Borrowed(REDACTED_MCP_VALUE);
     }
     Cow::Borrowed(text)
@@ -307,11 +380,11 @@ fn redact_wire_text<'a>(
 /// wire, but must not reach tracing or observer frames.
 fn redact_wire_value(
     value: &serde_json::Value,
-    sensitive_value_matcher: Option<&AhoCorasick>,
+    sensitive_value_matcher: &SensitiveMcpValueMatcher,
 ) -> serde_json::Value {
     fn redact_in_place(
         value: &mut serde_json::Value,
-        sensitive_value_matcher: Option<&AhoCorasick>,
+        sensitive_value_matcher: &SensitiveMcpValueMatcher,
     ) {
         match value {
             serde_json::Value::Array(values) => {
@@ -435,7 +508,7 @@ pub struct AcpClient {
     /// Credential values retained across sessions for log and observer redaction.
     sensitive_mcp_values: Vec<String>,
     /// Multi-pattern matcher rebuilt when a session introduces new credentials.
-    sensitive_mcp_matcher: Option<AhoCorasick>,
+    sensitive_mcp_matcher: SensitiveMcpValueMatcher,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -811,7 +884,7 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             sensitive_mcp_values: Vec::new(),
-            sensitive_mcp_matcher: None,
+            sensitive_mcp_matcher: SensitiveMcpValueMatcher::default(),
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -845,7 +918,7 @@ impl AcpClient {
         for value in servers
             .iter()
             .flat_map(McpServer::sensitive_values)
-            .filter(|value| safe_sensitive_pattern(value))
+            .filter(|value| !value.is_empty())
         {
             if !self
                 .sensitive_mcp_values
@@ -862,23 +935,23 @@ impl AcpClient {
 
         self.sensitive_mcp_values
             .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        self.sensitive_mcp_matcher =
-            Some(AhoCorasick::new(&self.sensitive_mcp_values).map_err(|_| {
+        self.sensitive_mcp_matcher = SensitiveMcpValueMatcher::new(&self.sensitive_mcp_values)
+            .map_err(|_| {
                 AcpError::Protocol("failed to initialize MCP credential redaction".to_string())
-            })?);
+            })?;
         Ok(())
     }
 
     fn redact_wire_text<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        redact_wire_text(text, self.sensitive_mcp_matcher.as_ref())
+        redact_wire_text(text, &self.sensitive_mcp_matcher)
     }
 
     fn redact_wire_value(&self, value: &serde_json::Value) -> serde_json::Value {
-        redact_wire_value(value, self.sensitive_mcp_matcher.as_ref())
+        redact_wire_value(value, &self.sensitive_mcp_matcher)
     }
 
     fn agent_error_from_json(&self, error: &serde_json::Value) -> AcpError {
-        agent_error_from_json(error, self.sensitive_mcp_matcher.as_ref())
+        agent_error_from_json(error, &self.sensitive_mcp_matcher)
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
@@ -2585,15 +2658,8 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 mod tests {
     use super::*;
 
-    fn sensitive_matcher(values: &[String]) -> Option<AhoCorasick> {
-        let mut patterns = values
-            .iter()
-            .map(String::as_str)
-            .filter(|value| safe_sensitive_pattern(value))
-            .collect::<Vec<_>>();
-        patterns.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        patterns.dedup();
-        (!patterns.is_empty()).then(|| AhoCorasick::new(patterns).expect("valid patterns"))
+    fn sensitive_matcher(values: &[String]) -> SensitiveMcpValueMatcher {
+        SensitiveMcpValueMatcher::new(values).expect("valid patterns")
     }
 
     #[test]
@@ -2876,7 +2942,7 @@ mod tests {
             }
         });
 
-        let redacted = redact_wire_value(&source, None);
+        let redacted = redact_wire_value(&source, &SensitiveMcpValueMatcher::default());
 
         assert_eq!(
             source["params"]["mcpServers"][0]["env"][0]["value"], "secret-one",
@@ -2947,7 +3013,7 @@ mod tests {
         });
         let original_source = source.clone();
 
-        let redacted = redact_wire_value(&source, None);
+        let redacted = redact_wire_value(&source, &SensitiveMcpValueMatcher::default());
 
         for echo in redacted["echoes"].as_array().expect("redacted echoes") {
             assert_eq!(echo, REDACTED_MCP_VALUE);
@@ -2975,7 +3041,7 @@ mod tests {
             }
         });
 
-        let redacted = redact_wire_value(&source, None);
+        let redacted = redact_wire_value(&source, &SensitiveMcpValueMatcher::default());
         assert_eq!(
             redacted["params"]["mcpServers"][0]["headers"][0]["value"],
             REDACTED_MCP_VALUE
@@ -3006,7 +3072,7 @@ mod tests {
         ];
 
         let matcher = sensitive_matcher(&sensitive_values);
-        let redacted = redact_wire_value(&source, matcher.as_ref());
+        let redacted = redact_wire_value(&source, &matcher);
 
         let message = redacted["error"]["message"]
             .as_str()
@@ -3026,12 +3092,18 @@ mod tests {
             .map(str::to_string)
             .to_vec();
         let matcher = sensitive_matcher(&values);
-        assert!(matcher.is_none());
 
         let diagnostic = serde_json::json!({
             "message": "production retry 1/true on localhost used token accounting"
         });
-        assert_eq!(redact_wire_value(&diagnostic, matcher.as_ref()), diagnostic);
+        assert_eq!(redact_wire_value(&diagnostic, &matcher), diagnostic);
+        for value in values {
+            assert_eq!(
+                redact_wire_value(&serde_json::json!({"message": value}), &matcher)["message"],
+                REDACTED_MCP_VALUE,
+                "an exact short-value echo must still be protected"
+            );
+        }
     }
 
     #[test]
@@ -4137,7 +4209,7 @@ mod tests {
 
     #[tokio::test]
     async fn plain_mcp_argument_echo_is_redacted() {
-        let argument_secret = "argument-secret-returned-by-adapter";
+        let argument_secret = "s3cr3t8!";
         let error_response = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -5567,7 +5639,7 @@ mod tests {
         // Errors without a string `message` field (e.g. only a `data` field) must
         // not be silently truncated to "unknown error" — the full JSON is preserved.
         let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
-        match super::agent_error_from_json(&error, None) {
+        match super::agent_error_from_json(&error, &SensitiveMcpValueMatcher::default()) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32000);
                 assert!(
@@ -5592,7 +5664,8 @@ mod tests {
             }
         });
 
-        let rendered = super::agent_error_from_json(&error, None).to_string();
+        let rendered =
+            super::agent_error_from_json(&error, &SensitiveMcpValueMatcher::default()).to_string();
 
         assert!(!rendered.contains(secret));
         assert!(rendered.contains(REDACTED_MCP_VALUE));
@@ -5602,7 +5675,7 @@ mod tests {
     #[test]
     fn agent_error_from_json_uses_message_field_when_present() {
         let error = serde_json::json!({"code": -32001, "message": "auth denied"});
-        match super::agent_error_from_json(&error, None) {
+        match super::agent_error_from_json(&error, &SensitiveMcpValueMatcher::default()) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
