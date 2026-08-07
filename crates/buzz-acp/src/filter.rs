@@ -350,8 +350,9 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 1. **channels** — if not `"all"`, the event's channel UUID must be in the list.
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
-///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+///    exist unless the caller marks the channel as satisfying the mention
+///    requirement implicitly. Tag kind is checked via `tag.as_slice()` for
+///    stable, library-independent access.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
 /// # Fail-closed filter error handling
@@ -371,6 +372,18 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    match_event_with_implicit_mention(event, channel_id, rules, agent_pubkey_hex, false).await
+}
+
+/// Match an event while optionally treating the channel itself as an implicit
+/// mention, as conversational DM channels do in mentions subscription mode.
+pub async fn match_event_with_implicit_mention(
+    event: &nostr::Event,
+    channel_id: uuid::Uuid,
+    rules: &[SubscriptionRule],
+    agent_pubkey_hex: &str,
+    implicit_mention: bool,
+) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
     for (index, rule) in rules.iter().enumerate() {
@@ -387,7 +400,7 @@ pub async fn match_event(
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention {
+        if rule.require_mention && !implicit_mention {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();
                 s.first().map(|k| k.as_str()) == Some("p")
@@ -661,6 +674,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_dm_message_satisfies_mention_rule_without_p_tag() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let event = make_event(9, "plain DM follow-up");
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            Some("dm"),
+        )];
+
+        let matched =
+            match_event_with_implicit_mention(&event, channel_id, &rules, agent_pubkey, true)
+                .await
+                .expect("a direct-message channel should satisfy the mention requirement");
+
+        assert_eq!(matched.prompt_tag, "dm");
     }
 
     #[tokio::test]
