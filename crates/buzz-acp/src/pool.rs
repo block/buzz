@@ -1014,15 +1014,25 @@ async fn create_session_and_apply_model(
         }),
     );
 
-    // Apply permission mode if not the agent's built-in default AND the agent
-    // advertises the requested mode in session/new. Agents that don't support
-    // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness rejects interactive permission requests.
-    if !ctx.permission_mode.is_default()
-        && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
-    {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
-    }
+    // Session mode / sandbox selection.
+    //
+    // Codex-ACP exposes *agent modes* as config option `mode` with ids like
+    // `agent`, `agent-full-access`, `read-only` — these control Seatbelt
+    // sandbox + approval policy. ACP `permission_mode` wire strings
+    // (`dontAsk`, `bypassPermissions`, …) are a different concept and are
+    // **not** valid Codex mode ids. Historically we only called
+    // `session/set_config_option mode=dontAsk`, which Codex rejects (or we
+    // skip via `agent_supports_mode`), leaving the default `agent` mode:
+    // workspace-write with `networkAccess: false`. Shell tools then cannot
+    // resolve MagicDNS or reach the relay, so `buzz messages send` fails
+    // with "nodename nor servname" while parent buzz-acp reactions still
+    // work.
+    //
+    // Prefer `agent-full-access` when advertised (network + no interactive
+    // approvals). Otherwise fall back to the ACP permission_mode string for
+    // agents that actually list it.
+    apply_session_sandbox_mode(&mut agent.acp, &resp.session_id, &resp.raw, &ctx.permission_mode)
+        .await?;
 
     Ok(resp.session_id)
 }
@@ -1130,6 +1140,10 @@ async fn apply_model_switch(
     Ok(())
 }
 
+/// Codex-ACP mode id: full FS + network, approval never. Required so shell
+/// tools (`buzz messages send`) can reach the relay (including MagicDNS).
+const CODEX_AGENT_FULL_ACCESS_MODE: &str = "agent-full-access";
+
 /// Check whether the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
@@ -1146,7 +1160,48 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// Set the session permission mode via `session/set_config_option`.
+/// Pick the `session/set_config_option` `mode` value for this session.
+///
+/// Prefer Codex `agent-full-access` when advertised so sandboxed shell tools
+/// get network. Otherwise use the ACP permission_mode wire string when the
+/// agent lists it (non-Codex adapters).
+fn resolve_session_mode_wire(
+    session_new_result: &serde_json::Value,
+    permission_mode: &PermissionMode,
+) -> Option<&'static str> {
+    if agent_supports_mode(session_new_result, CODEX_AGENT_FULL_ACCESS_MODE) {
+        return Some(CODEX_AGENT_FULL_ACCESS_MODE);
+    }
+    if permission_mode.is_default() {
+        return None;
+    }
+    let wire = permission_mode.as_wire_str();
+    if agent_supports_mode(session_new_result, wire) {
+        Some(wire)
+    } else {
+        None
+    }
+}
+
+/// Apply sandbox/permission session mode after `session/new`.
+async fn apply_session_sandbox_mode(
+    acp: &mut AcpClient,
+    session_id: &str,
+    session_new_result: &serde_json::Value,
+    permission_mode: &PermissionMode,
+) -> Result<(), AcpError> {
+    let Some(wire) = resolve_session_mode_wire(session_new_result, permission_mode) else {
+        tracing::debug!(
+            target: "pool::permission",
+            "no applicable session mode for permission_mode={} — leaving agent default",
+            permission_mode.as_wire_str()
+        );
+        return Ok(());
+    };
+    apply_session_mode_value(acp, session_id, wire).await
+}
+
+/// Set the session mode via `session/set_config_option` (`configId=mode`).
 ///
 /// Non-fatal for most errors: logs and proceeds. The agent falls back to its
 /// default mode, and any interactive permission request is rejected by
@@ -1154,12 +1209,11 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
 /// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
-async fn apply_permission_mode(
+async fn apply_session_mode_value(
     acp: &mut AcpClient,
     session_id: &str,
-    mode: &PermissionMode,
+    wire: &str,
 ) -> Result<(), AcpError> {
-    let wire = mode.as_wire_str();
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
         acp.session_set_config_option(session_id, "mode", wire)
             .await
@@ -1170,7 +1224,7 @@ async fn apply_permission_mode(
         Ok(Ok(_)) => {
             tracing::info!(
                 target: "pool::permission",
-                "applied permission mode {wire:?} on session {session_id}"
+                "applied session mode {wire:?} on session {session_id}"
             );
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
@@ -1182,22 +1236,22 @@ async fn apply_permission_mode(
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
                 target: "pool::permission",
-                "fatal error setting permission mode {wire:?}: {e}"
+                "fatal error setting session mode {wire:?}: {e}"
             );
             return Err(e);
         }
-        // Application-level errors — agent is fine, just uses default permission mode.
+        // Application-level errors — agent is fine, just uses default mode.
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool rejection"
+                "failed to set session mode {wire:?}: {e} — falling back to agent default sandbox"
             );
         }
         Err(_) => {
             // Outer timeout fired — stream may be in unknown state.
             tracing::error!(
                 target: "pool::permission",
-                "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
+                "session mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
             );
             return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
         }
@@ -3309,8 +3363,10 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
 /// Map a cancelling [`ControlSignal`] to the [`CancelReason`] that should frame
 /// the merged re-prompt, then requeue the batch (in `Queue` dedup mode) with
 /// that reason stamped onto [`FlushBatch::cancel_reason`]. `Cancel`/`Rotate`
-/// drop the batch entirely. The reason is consumed by the main loop at requeue
-/// time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
+/// drop the batch entirely (no merged re-prompt) but post a channel failure
+/// notice so the user is not left staring at silence after a long mid-turn
+/// cancel or harness shutdown. The reason is consumed by the main loop at
+/// requeue time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
 #[inline]
 fn requeue_cancelled_batch(
     ctx: &PromptContext,
@@ -3320,13 +3376,42 @@ fn requeue_cancelled_batch(
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
-        // Cancel/Rotate discard the batch — no merged re-prompt.
-        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+        // Cancel/Rotate discard the batch — no merged re-prompt. Surface a
+        // channel notice so stop/shutdown cannot bury an in-flight turn.
+        ControlSignal::Cancel | ControlSignal::Rotate => {
+            if let Some(batch) = batch {
+                spawn_cancel_drop_notice(ctx, &batch, signal);
+            }
+            return None;
+        }
     };
     requeue_batch_if_queue(ctx, batch).map(|mut b| {
         b.cancel_reason = Some(reason);
         b
     })
+}
+
+/// Best-effort channel notice when Cancel/Rotate drops an in-flight batch.
+/// Without this, users see working indicators and steers for minutes/hours,
+/// then silence when the harness stops — the exact 51dacc57 failure mode.
+fn spawn_cancel_drop_notice(ctx: &PromptContext, batch: &FlushBatch, signal: ControlSignal) {
+    let why = match signal {
+        ControlSignal::Rotate => "agent session rotated",
+        _ => "stopped mid-task",
+    };
+    let content = format!(
+        "⚠️ I was {why} before finishing this turn. Re-mention me (or reply in this thread) if you still need the work done."
+    );
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|be| crate::queue::parse_thread_tags(&be.event))
+        .unwrap_or_default();
+    let rest = ctx.rest_client.clone();
+    let channel_id = batch.channel_id;
+    tokio::spawn(async move {
+        post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+    });
 }
 
 /// Result of classifying a failed [`AcpClient::cancel_with_cleanup_grace`]
@@ -4037,6 +4122,52 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    fn session_new_with_modes(ids: &[&str]) -> serde_json::Value {
+        json!({
+            "modes": {
+                "availableModes": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>(),
+                "currentModeId": ids.first().copied().unwrap_or("agent"),
+            }
+        })
+    }
+
+    #[test]
+    fn resolve_session_mode_prefers_codex_full_access_when_advertised() {
+        let raw = session_new_with_modes(&["read-only", "agent", "agent-full-access"]);
+        // Even with Default permission_mode, Codex needs network for buzz CLI.
+        assert_eq!(
+            resolve_session_mode_wire(&raw, &PermissionMode::Default),
+            Some("agent-full-access")
+        );
+        assert_eq!(
+            resolve_session_mode_wire(&raw, &PermissionMode::DontAsk),
+            Some("agent-full-access")
+        );
+    }
+
+    #[test]
+    fn resolve_session_mode_falls_back_to_permission_wire_without_codex_modes() {
+        let raw = session_new_with_modes(&["dontAsk", "acceptEdits"]);
+        assert_eq!(
+            resolve_session_mode_wire(&raw, &PermissionMode::DontAsk),
+            Some("dontAsk")
+        );
+        assert_eq!(
+            resolve_session_mode_wire(&raw, &PermissionMode::Default),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_session_mode_skips_unsupported_permission_wire() {
+        // Codex advertises agent modes only — dontAsk is not among them.
+        let raw = session_new_with_modes(&["agent", "read-only"]);
+        assert_eq!(
+            resolve_session_mode_wire(&raw, &PermissionMode::DontAsk),
+            None
+        );
     }
 
     #[test]

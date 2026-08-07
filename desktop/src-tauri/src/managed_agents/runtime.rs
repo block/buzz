@@ -527,6 +527,9 @@ pub fn spawn_agent_child(
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
+    // Fieldcraft memory CLI: inject ~/.fieldcraft/env and prefer loopback when
+    // the local server is listening so agents do not depend on Tailscale MagicDNS.
+    super::fieldcraft_env::apply_fieldcraft_env(&mut command);
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
@@ -760,6 +763,13 @@ pub fn spawn_agent_child(
     for key in &gate_remove {
         command.env_remove(key);
     }
+
+    // Smart thread participation (continue active threads without fresh @).
+    let participation = super::thread_participation::load_thread_participation(app);
+    super::thread_participation::apply_thread_participation_env(
+        &mut command,
+        participation.enabled,
+    );
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 

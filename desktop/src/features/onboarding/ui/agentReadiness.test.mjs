@@ -52,6 +52,28 @@ test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logg
   });
 });
 
+test("resolveAgentReadiness_grok_is_ready_when_native_acp_is_available", () => {
+  const runtimes = [
+    makeRuntime({
+      id: "grok",
+      label: "Grok Build",
+      authStatus: { status: "not_applicable" },
+      command: "grok",
+      defaultArgs: ["agent", "--always-approve", "stdio"],
+    }),
+  ];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({ preferred_runtime: "grok" }),
+    "preferred",
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Grok Build",
+  });
+});
+
 test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
   const runtimes = [
     makeRuntime({ id: "claude", label: "Claude" }),

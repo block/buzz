@@ -7522,6 +7522,25 @@ async function handleDiscoverAcpRuntimes(
       login_hint: undefined,
     },
     {
+      id: "grok",
+      label: "Grok Build",
+      avatar_url: "https://x.ai/favicon.ico",
+      availability: "not_installed",
+      command: null,
+      binary_path: null,
+      default_args: ["agent", "--always-approve", "stdio"],
+      mcp_command: null,
+      install_hint:
+        "Buzz talks to Grok Build through the Grok CLI's native ACP mode. Authenticate with `grok login`.",
+      install_instructions_url: "https://docs.x.ai/build/overview",
+      can_auto_install: true,
+      requires_external_cli: true,
+      underlying_cli_path: null,
+      node_required: false,
+      auth_status: { status: "not_applicable" },
+      source: "builtin",
+    },
+    {
       id: "claude",
       label: "Claude Code",
       avatar_url: "",
@@ -7635,6 +7654,7 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+let mockThreadParticipationPref: { enabled: boolean } = { enabled: true };
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -12396,6 +12416,17 @@ export function maybeInstallE2eTauriMocks() {
           ?.runtimeId;
         if (!runtimeId) return null;
         return config.mock?.runtimeFileConfigs?.[runtimeId] ?? null;
+      }
+      case "get_thread_participation": {
+        return mockThreadParticipationPref;
+      }
+      case "set_thread_participation": {
+        const enabled =
+          typeof (payload as { enabled?: unknown })?.enabled === "boolean"
+            ? (payload as { enabled: boolean }).enabled
+            : true;
+        mockThreadParticipationPref = { enabled };
+        return mockThreadParticipationPref;
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.

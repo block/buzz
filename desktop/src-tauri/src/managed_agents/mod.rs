@@ -14,6 +14,7 @@ pub(crate) mod custom_harnesses;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
+mod fieldcraft_env;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
@@ -39,6 +40,7 @@ pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
 mod teams;
+pub(crate) mod thread_participation;
 mod types;
 
 // Shared guard for tests that mutate or read process-global PATH.

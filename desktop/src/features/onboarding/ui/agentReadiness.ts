@@ -12,7 +12,7 @@ export type AgentReadinessResult =
 /**
  * Determine whether the user has a working agent path configured.
  *
- * CLI path: the preferred Claude or Codex runtime is available and logged in.
+ * CLI path: the preferred CLI-login runtime is available and authenticated.
  * Provider path: the preferred Buzz Agent or Goose runtime has provider and
  * model set, plus all required credential env vars for that provider.
  *
@@ -47,7 +47,7 @@ export function resolveAgentReadiness(
   }
 
   if (
-    (preferredRuntime.id === "claude" || preferredRuntime.id === "codex") &&
+    ["claude", "codex", "grok"].includes(preferredRuntime.id) &&
     (preferredRuntime.authStatus.status === "logged_in" ||
       preferredRuntime.authStatus.status === "not_applicable")
   ) {

@@ -165,9 +165,16 @@ pub async fn restore_managed_agents_on_launch(
         // replacing the three separate kernel enumerations.
         super::sweep_untracked_bundle_harnesses(&tracked_pids);
 
+        // Same eligibility as `reconcile_managed_agent_runtimes`: inactive /
+        // archived records must not resurrect on relaunch even if
+        // `start_on_app_launch` is still true (dual Welcome Team remint).
         let candidates: Vec<String> = records
             .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| {
+                record.is_active
+                    && record.start_on_app_launch
+                    && record.backend == BackendKind::Local
+            })
             .map(|record| record.pubkey.clone())
             .collect();
 
