@@ -88,7 +88,7 @@ pub enum MemoryLevel {
 /// meaningful across environments is included; machine-local / secret fields
 /// are deliberately absent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSnapshotDefinition {
     pub name: String,
     /// Portable source classification for import-preview metadata. Imported
@@ -121,7 +121,7 @@ pub struct AgentSnapshotDefinition {
 
 /// kind:0 presentation fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSnapshotProfile {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,7 +138,7 @@ pub struct AgentSnapshotProfile {
 
 /// A single decrypted memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSnapshotMemoryEntry {
     pub slug: String,
     pub body: String,
@@ -146,7 +146,7 @@ pub struct AgentSnapshotMemoryEntry {
 
 /// Memory section of the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSnapshotMemory {
     /// Indicates what was included at export time.
     pub level: MemoryLevel,
@@ -162,7 +162,7 @@ pub struct AgentSnapshotMemory {
 /// Serializes to / from JSON. Embedded in `.agent.json` directly, or in the
 /// `buzz_agent_snapshot` tEXt chunk of a `.agent.png` (base64-encoded).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSnapshot {
     /// Fixed discriminator for format sniffing.
     pub format: String,
@@ -285,8 +285,29 @@ pub fn encode_snapshot_json(snapshot: &AgentSnapshot) -> Result<Vec<u8>, String>
 
 /// Decode a manifest from JSON bytes.
 pub fn decode_snapshot_json(bytes: &[u8]) -> Result<AgentSnapshot, String> {
-    let snapshot: AgentSnapshot =
+    #[derive(Deserialize)]
+    struct SnapshotHeader {
+        format: String,
+        version: u32,
+    }
+
+    // Read the discriminator first so a snapshot from a newer Buzz release
+    // receives the useful version error even when that version adds fields v1
+    // does not understand.
+    let header: SnapshotHeader =
         serde_json::from_slice(bytes).map_err(|e| format!("Invalid snapshot JSON: {e}"))?;
+    validate_snapshot_format(&header.format, header.version)?;
+
+    let snapshot: AgentSnapshot =
+        serde_json::from_slice(bytes).map_err(|e| {
+            if e.to_string().starts_with("unknown field") {
+                format!(
+                    "This agent snapshot contains fields this version of Buzz does not support. Update Buzz or export a compatible snapshot. Details: {e}"
+                )
+            } else {
+                format!("Invalid snapshot JSON: {e}")
+            }
+        })?;
     validate_snapshot(&snapshot)?;
     Ok(snapshot)
 }
@@ -385,23 +406,31 @@ pub fn decode_snapshot_png(png_bytes: &[u8]) -> Result<AgentSnapshot, String> {
 /// Validate that the manifest has the correct format/version and required
 /// fields. Returns an error string on failure.
 pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> {
-    if snapshot.format != FORMAT_DISCRIMINATOR {
-        return Err(format!(
-            "Unsupported snapshot format: {:?} (expected {:?})",
-            snapshot.format, FORMAT_DISCRIMINATOR
-        ));
-    }
-    if snapshot.version != 1 {
-        return Err(format!(
-            "Unsupported snapshot version: {} (expected 1)",
-            snapshot.version
-        ));
-    }
+    validate_snapshot_format(&snapshot.format, snapshot.version)?;
     if snapshot.definition.name.trim().is_empty() {
         return Err("Snapshot definition.name is empty".to_string());
     }
     if snapshot.profile.display_name.trim().is_empty() {
         return Err("Snapshot profile.displayName is empty".to_string());
+    }
+    Ok(())
+}
+
+/// Validate only the portable snapshot discriminator and schema version.
+///
+/// Team snapshots use this before strict member deserialization so a newer
+/// member version receives upgrade guidance before any new fields are parsed.
+pub(crate) fn validate_snapshot_format(format: &str, version: u32) -> Result<(), String> {
+    if format != FORMAT_DISCRIMINATOR {
+        return Err(format!(
+            "Unsupported snapshot format: {:?} (expected {:?})",
+            format, FORMAT_DISCRIMINATOR
+        ));
+    }
+    if version != FORMAT_VERSION {
+        return Err(format!(
+            "Unsupported snapshot version {version}. This version of Buzz supports version {FORMAT_VERSION}. Update Buzz or export a compatible snapshot."
+        ));
     }
     Ok(())
 }

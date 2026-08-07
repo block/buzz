@@ -58,7 +58,7 @@ pub const LOCKED_CARD_REFUSAL: &str =
 /// Typed outer envelope stored (base64 JSON) in the `buzz_agent_snapshot`
 /// chunk of a locked card.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LockedSnapshotEnvelope {
     /// Always [`LOCKED_FORMAT`].
     pub format: String,
@@ -68,7 +68,7 @@ pub struct LockedSnapshotEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LockedEncryption {
     /// Always [`LOCKED_SCHEME`].
     pub scheme: String,
@@ -130,24 +130,14 @@ pub(crate) fn parse_canonical_pubkey(field: &str, value: &str) -> Result<PublicK
 pub fn validate_envelope(
     envelope: &LockedSnapshotEnvelope,
 ) -> Result<(PublicKey, PublicKey), String> {
-    if envelope.format != LOCKED_FORMAT {
-        return Err(format!(
-            "Unsupported locked card format: {:?} (expected {LOCKED_FORMAT:?})",
-            envelope.format
-        ));
-    }
-    if envelope.version != LOCKED_VERSION {
-        return Err(format!(
-            "Unsupported locked card envelope version: {} (expected {LOCKED_VERSION})",
-            envelope.version
-        ));
-    }
+    validate_locked_envelope_format(&envelope.format, envelope.version)?;
     if envelope.encryption.scheme != LOCKED_SCHEME {
         return Err(format!(
             "Unsupported locked card encryption scheme: {:?} (expected {LOCKED_SCHEME:?})",
             envelope.encryption.scheme
         ));
     }
+
     let owner = parse_canonical_pubkey("ownerPubkey", &envelope.encryption.owner_pubkey)?;
     let agent = parse_canonical_pubkey("agentPubkey", &envelope.encryption.agent_pubkey)?;
     if owner == agent {
@@ -160,6 +150,20 @@ pub fn validate_envelope(
         return Err("Locked card ciphertext is empty.".to_string());
     }
     Ok((owner, agent))
+}
+
+fn validate_locked_envelope_format(format: &str, version: u32) -> Result<(), String> {
+    if format != LOCKED_FORMAT {
+        return Err(format!(
+            "Unsupported locked card format: {format:?} (expected {LOCKED_FORMAT:?})"
+        ));
+    }
+    if version != LOCKED_VERSION {
+        return Err(format!(
+            "Unsupported locked card envelope version {version}. This version of Buzz supports version {LOCKED_VERSION}. Update Buzz or export a compatible snapshot."
+        ));
+    }
+    Ok(())
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -185,8 +189,27 @@ pub fn parse_chunk_payload(json_bytes: &[u8]) -> Result<ChunkPayload, String> {
             if json_bytes.len() > MAX_LOCKED_ENVELOPE_JSON_BYTES {
                 return Err("Locked card envelope exceeds the maximum size.".to_string());
             }
-            let envelope: LockedSnapshotEnvelope = serde_json::from_slice(json_bytes)
+            #[derive(Deserialize)]
+            struct LockedEnvelopeHeader {
+                format: String,
+                version: u32,
+            }
+
+            let header: LockedEnvelopeHeader = serde_json::from_slice(json_bytes)
                 .map_err(|e| format!("Invalid locked card envelope: {e}"))?;
+            validate_locked_envelope_format(&header.format, header.version)?;
+
+            let envelope: LockedSnapshotEnvelope = serde_json::from_slice(json_bytes).map_err(
+                |e| {
+                    if e.to_string().starts_with("unknown field") {
+                        format!(
+                            "This locked agent snapshot contains fields this version of Buzz does not support. Update Buzz or export a compatible snapshot. Details: {e}"
+                        )
+                    } else {
+                        format!("Invalid locked card envelope: {e}")
+                    }
+                },
+            )?;
             validate_envelope(&envelope)?;
             Ok(ChunkPayload::Locked(envelope))
         }

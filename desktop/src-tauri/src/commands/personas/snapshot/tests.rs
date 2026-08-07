@@ -295,6 +295,23 @@ fn import_unsupported_version_fails_closed() {
     );
 }
 
+/// The production import decoder must not accept a v1 manifest while silently
+/// discarding portable capabilities added by another exporter.
+#[test]
+fn import_unknown_portable_capability_fails_closed() {
+    let snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["definition"]["skills"] = serde_json::json!([{
+        "name": "analytics",
+        "description": "Analyze product performance"
+    }]);
+
+    let result = decode_snapshot_from_bytes(&serde_json::to_vec(&value).unwrap());
+    let error = result.expect_err("unknown portable capability must fail closed");
+    assert!(error.contains("contains fields this version of Buzz does not support"));
+    assert!(error.contains("skills"));
+}
+
 /// Completely empty input fails closed.
 #[test]
 fn import_empty_bytes_fail_closed() {

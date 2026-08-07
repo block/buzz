@@ -39,7 +39,9 @@ use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
 use crate::managed_agents::{
-    agent_snapshot::{make_png_with_text, validate_snapshot, AgentSnapshot, MemoryLevel},
+    agent_snapshot::{
+        make_png_with_text, validate_snapshot, validate_snapshot_format, AgentSnapshot, MemoryLevel,
+    },
     TeamRecord,
 };
 
@@ -58,7 +60,7 @@ pub const FORMAT_VERSION: u32 = 1;
 
 /// Team-level metadata carried in the snapshot header.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TeamSnapshotMeta {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,7 +76,7 @@ pub struct TeamSnapshotMeta {
 /// Serializes to / from JSON. Embedded in `.team.json` directly, or in the
 /// `buzz_team_snapshot` tEXt chunk of a `.team.png` (base64-encoded).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TeamSnapshot {
     /// Fixed discriminator for format sniffing.
     pub format: String,
@@ -116,8 +118,46 @@ pub fn encode_team_snapshot_json(snapshot: &TeamSnapshot) -> Result<Vec<u8>, Str
 
 /// Decode a manifest from JSON bytes.
 pub fn decode_team_snapshot_json(bytes: &[u8]) -> Result<TeamSnapshot, String> {
-    let snapshot: TeamSnapshot =
+    #[derive(Deserialize)]
+    struct TeamSnapshotHeader {
+        format: String,
+        version: u32,
+    }
+
+    #[derive(Deserialize)]
+    struct TeamMemberHeaders {
+        members: Vec<AgentSnapshotHeader>,
+    }
+
+    #[derive(Deserialize)]
+    struct AgentSnapshotHeader {
+        format: String,
+        version: u32,
+    }
+
+    // Check the envelope before decoding strict v1 fields. This keeps the
+    // upgrade path useful when a newer team format adds fields v1 cannot read.
+    let header: TeamSnapshotHeader =
         serde_json::from_slice(bytes).map_err(|e| format!("Invalid team snapshot JSON: {e}"))?;
+    validate_team_snapshot_format(&header.format, header.version)?;
+
+    let member_headers: TeamMemberHeaders =
+        serde_json::from_slice(bytes).map_err(|e| format!("Invalid team snapshot JSON: {e}"))?;
+    for (index, member) in member_headers.members.iter().enumerate() {
+        validate_snapshot_format(&member.format, member.version)
+            .map_err(|e| format!("Team member {index} is invalid: {e}"))?;
+    }
+
+    let snapshot: TeamSnapshot =
+        serde_json::from_slice(bytes).map_err(|e| {
+            if e.to_string().starts_with("unknown field") {
+                format!(
+                    "This team snapshot contains fields this version of Buzz does not support. Update Buzz or export a compatible snapshot. Details: {e}"
+                )
+            } else {
+                format!("Invalid team snapshot JSON: {e}")
+            }
+        })?;
     validate_team_snapshot(&snapshot)?;
     Ok(snapshot)
 }
@@ -194,18 +234,7 @@ fn validate_member_memory_consistency(idx: usize, member: &AgentSnapshot) -> Res
 /// Also checks the memory-consistency invariant per member via
 /// `validate_member_memory_consistency`.
 pub(crate) fn validate_team_snapshot(snapshot: &TeamSnapshot) -> Result<(), String> {
-    if snapshot.format != FORMAT_DISCRIMINATOR {
-        return Err(format!(
-            "Unsupported team snapshot format: {:?} (expected {:?})",
-            snapshot.format, FORMAT_DISCRIMINATOR
-        ));
-    }
-    if snapshot.version != 1 {
-        return Err(format!(
-            "Unsupported team snapshot version: {} (expected 1)",
-            snapshot.version
-        ));
-    }
+    validate_team_snapshot_format(&snapshot.format, snapshot.version)?;
     if snapshot.team.name.trim().is_empty() {
         return Err("Team snapshot team.name is empty".to_string());
     }
@@ -216,6 +245,21 @@ pub(crate) fn validate_team_snapshot(snapshot: &TeamSnapshot) -> Result<(), Stri
         validate_snapshot(member).map_err(|e| format!("Team member {i} is invalid: {e}"))?;
         validate_member_memory_consistency(i, member)
             .map_err(|e| format!("Team member {i} memory is malformed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_team_snapshot_format(format: &str, version: u32) -> Result<(), String> {
+    if format != FORMAT_DISCRIMINATOR {
+        return Err(format!(
+            "Unsupported team snapshot format: {:?} (expected {:?})",
+            format, FORMAT_DISCRIMINATOR
+        ));
+    }
+    if version != FORMAT_VERSION {
+        return Err(format!(
+            "Unsupported team snapshot version {version}. This version of Buzz supports version {FORMAT_VERSION}. Update Buzz or export a compatible snapshot."
+        ));
     }
     Ok(())
 }
@@ -414,6 +458,36 @@ mod tests {
         assert!(result
             .unwrap_err()
             .contains("Unsupported team snapshot version"));
+    }
+
+    #[test]
+    fn newer_version_reports_version_before_unknown_member_fields() {
+        let mut value = serde_json::to_value(two_member_team()).unwrap();
+        value["version"] = serde_json::json!(2);
+        value["members"][0]["definition"]["skills"] = serde_json::json!([{"name": "analysis"}]);
+
+        let error = decode_team_snapshot_json(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.contains("Unsupported team snapshot version 2"));
+        assert!(error.contains("Update Buzz"));
+    }
+
+    #[test]
+    fn v1_rejects_unknown_team_fields_instead_of_dropping_them() {
+        for path in ["top-level", "team metadata"] {
+            let mut value = serde_json::to_value(two_member_team()).unwrap();
+            if path == "top-level" {
+                value["coordinationPolicy"] = serde_json::json!({"mode": "review"});
+            } else {
+                value["team"]["sharedContext"] = serde_json::json!("current priorities");
+            }
+
+            let error =
+                decode_team_snapshot_json(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert!(
+                error.contains("contains fields this version of Buzz does not support"),
+                "{path} should fail with compatibility guidance: {error}"
+            );
+        }
     }
 
     #[test]

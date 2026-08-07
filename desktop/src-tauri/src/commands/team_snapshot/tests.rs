@@ -1,11 +1,12 @@
 use super::*;
 use crate::managed_agents::{
     agent_snapshot::{
-        AgentSnapshotDefinition, AgentSnapshotMemory, AgentSnapshotMemoryEntry,
+        make_png_with_text, AgentSnapshotDefinition, AgentSnapshotMemory, AgentSnapshotMemoryEntry,
         AgentSnapshotProfile,
     },
-    team_snapshot::{TeamSnapshotMeta, FORMAT_DISCRIMINATOR, FORMAT_VERSION},
+    team_snapshot::{TeamSnapshotMeta, FORMAT_DISCRIMINATOR, FORMAT_VERSION, PNG_CHUNK_KEYWORD},
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 fn member(name: &str) -> AgentSnapshot {
     AgentSnapshot {
@@ -359,6 +360,54 @@ fn canonical_team_json_is_accepted_without_extension_case_policy() {
     // Preview/confirm intentionally decode content rather than file names, so
     // canonical lowercase and uppercase extensions reach this same safe path.
     assert!(decode_team_snapshot_from_bytes(&bytes).is_ok());
+}
+
+#[test]
+fn team_import_rejects_unknown_portable_fields_from_json_and_png() {
+    let mut value = serde_json::to_value(snapshot(vec![member("Alice")])).unwrap();
+    value["team"]["toolRequirements"] = serde_json::json!([{"capability": "analytics.read"}]);
+    let json = serde_json::to_vec(&value).unwrap();
+    let png = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(&json)).unwrap();
+
+    for bytes in [&json, &png] {
+        let error = decode_team_snapshot_from_bytes(bytes).unwrap_err();
+        assert!(error.contains("contains fields this version of Buzz does not support"));
+        assert!(error.contains("toolRequirements"));
+    }
+}
+
+#[test]
+fn team_import_reports_newer_member_version_before_unknown_fields() {
+    let mut value = serde_json::to_value(snapshot(vec![member("Alice")])).unwrap();
+    value["members"][0]["version"] = serde_json::json!(2);
+    value["members"][0]["definition"]["skills"] = serde_json::json!([{"name": "analysis"}]);
+    let json = serde_json::to_vec(&value).unwrap();
+    let png = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(&json)).unwrap();
+
+    for bytes in [json.as_slice(), png.as_slice()] {
+        let error = decode_team_snapshot_from_bytes(bytes).unwrap_err();
+        assert!(error.contains("Team member 0 is invalid"));
+        assert!(error.contains("Unsupported snapshot version 2"));
+        assert!(error.contains("Update Buzz"));
+    }
+}
+
+#[test]
+fn newer_team_version_precedes_a_changed_member_container() {
+    let value = serde_json::json!({
+        "format": FORMAT_DISCRIMINATOR,
+        "version": 2,
+        "team": {"name": "Future Team"},
+        "agents": [{"format": "future-agent"}]
+    });
+    let json = serde_json::to_vec(&value).unwrap();
+    let png = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(&json)).unwrap();
+
+    for bytes in [json.as_slice(), png.as_slice()] {
+        let error = decode_team_snapshot_from_bytes(bytes).unwrap_err();
+        assert!(error.contains("Unsupported team snapshot version 2"));
+        assert!(error.contains("Update Buzz"));
+    }
 }
 
 #[test]
