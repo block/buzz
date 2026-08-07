@@ -24,7 +24,10 @@ import {
   deriveAgentConfigFieldModel,
   getRenderableEffortField,
   hasRenderableAgentConfigField,
+  implicitEffortProvider,
+  readEffortEnvValue,
   structuredEnvKeys,
+  updateEffortEnvValue,
   filterBakedGenericRows,
 } from "@/features/agents/lib/agentConfigCore";
 import {
@@ -250,10 +253,7 @@ export function AgentConfigFields({
     [config, disclosure, selectedRuntime],
   );
   const effortField = getRenderableEffortField(fieldModel);
-  const effortPersistenceKey =
-    effortField?.currentPersistence.kind === "envVar"
-      ? effortField.currentPersistence.key
-      : null;
+  const effortPersistence = effortField?.currentPersistence;
 
   const numericDescriptors = fieldModel.fields.filter(
     (d): d is NumericDescriptor =>
@@ -266,7 +266,10 @@ export function AgentConfigFields({
     ...(effortField ? [effortField] : []),
     ...numericDescriptors,
   ]);
-  const bakedEnvMap = Object.fromEntries(bakedEnv.map((e) => [e.key, e.value]));
+  const bakedEnvMap = React.useMemo(
+    () => Object.fromEntries(bakedEnv.map((e) => [e.key, e.value])),
+    [bakedEnv],
+  );
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
@@ -294,9 +297,8 @@ export function AgentConfigFields({
     (config.model?.trim().length ?? 0) > 0 ||
     fallbackModel !== null;
   const bakedEffort = React.useMemo(
-    () =>
-      bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
-    [bakedEnv],
+    () => readEffortEnvValue(bakedEnvMap, effortPersistence) || null,
+    [bakedEnvMap, effortPersistence],
   );
   const bakedGenericRows = React.useMemo<readonly InheritedEnvRow[]>(
     () =>
@@ -434,9 +436,10 @@ export function AgentConfigFields({
     selectedRuntimeId,
   ]);
 
-  const currentEffortForAutoClear = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const currentEffortForAutoClear = readEffortEnvValue(
+    config.env_vars,
+    effortPersistence,
+  );
 
   // When the selected harness changes outside this component (Back → setup
   // page → choose a different harness → Next), the saved model can belong to
@@ -461,8 +464,11 @@ export function AgentConfigFields({
       modelIsOptional && !modelControlVisible && modelDiscoverySuccessfulEmpty;
     if (!catalogMiss && !omittedAfterSuccessfulEmpty) return;
 
-    const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    const nextEnvVars = updateEffortEnvValue(
+      config.env_vars,
+      effortPersistence,
+      "",
+    );
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -475,7 +481,7 @@ export function AgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     healOnMount,
-    effortPersistenceKey,
+    effortPersistence,
   ]);
 
   // Orphan-model clearing follows the mount-time healing policy above: the
@@ -496,8 +502,11 @@ export function AgentConfigFields({
       return;
     }
 
-    const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    const nextEnvVars = updateEffortEnvValue(
+      config.env_vars,
+      effortPersistence,
+      "",
+    );
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -506,7 +515,7 @@ export function AgentConfigFields({
     dependentFieldsDisabled,
     onConfigChange,
     onCustomModelEditingChange,
-    effortPersistenceKey,
+    effortPersistence,
   ]);
   const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
     config.provider ?? "",
@@ -516,9 +525,10 @@ export function AgentConfigFields({
     currentEffort: currentEffortForAutoClear,
     effortValid: effortValidForAutoClear,
     onClear: () => {
-      const nextEnvVars = { ...config.env_vars };
-      if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
-      onConfigChange({ ...config, env_vars: nextEnvVars });
+      onConfigChange({
+        ...config,
+        env_vars: updateEffortEnvValue(config.env_vars, effortPersistence, ""),
+      });
     },
   });
 
@@ -623,20 +633,12 @@ export function AgentConfigFields({
     return "Select a provider";
   }, [bakedProvider, providerOptions]);
 
-  const implicitEffortProvider =
-    selectedRuntimeId === "claude"
-      ? "anthropic"
-      : selectedRuntimeId === "codex"
-        ? "openai"
-        : "";
   const effortProvider = providerFieldVisible
     ? (config.provider ?? "")
-    : implicitEffortProvider;
+    : implicitEffortProvider(selectedRuntimeId);
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
-  const currentEffort = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const currentEffort = readEffortEnvValue(config.env_vars, effortPersistence);
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const progressiveDefaults = disclosure === "progressive-defaults";
@@ -871,15 +873,14 @@ export function AgentConfigFields({
             label="Effort"
             labelClassName={fieldLabelClassName}
             onChange={(value) => {
-              const nextEnvVars = { ...config.env_vars };
-              if (value === "") {
-                if (effortPersistenceKey)
-                  delete nextEnvVars[effortPersistenceKey];
-              } else {
-                if (effortPersistenceKey)
-                  nextEnvVars[effortPersistenceKey] = value;
-              }
-              onConfigChange({ ...config, env_vars: nextEnvVars });
+              onConfigChange({
+                ...config,
+                env_vars: updateEffortEnvValue(
+                  config.env_vars,
+                  effortPersistence,
+                  value,
+                ),
+              });
             }}
             placeholderClassName={placeholderClassName}
             selectClassName={selectClassName}

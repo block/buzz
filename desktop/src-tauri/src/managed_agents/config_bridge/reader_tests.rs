@@ -54,6 +54,8 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        thinking_config_json_env_var: None,
+        thinking_config_json_key: None,
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         max_rounds_env_var: None,
@@ -643,6 +645,8 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         config_file_format: None,
         supports_acp_native_config: false,
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        thinking_config_json_env_var: None,
+        thinking_config_json_key: None,
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
@@ -894,43 +898,6 @@ fn no_effort_anywhere_yields_no_thinking_effort_field() {
     );
 }
 
-/// AC-5 (conflicting-ACP): inherited effort set (global=high) + live ACP effort=low
-/// → ACP wins as primary (AcpConfigOption), global is the overridden secondary.
-#[test]
-fn acp_effort_wins_over_inherited_global_effort_as_secondary() {
-    let record = test_record();
-    let runtime = buzz_agent_rt();
-    let cache = SessionConfigCache {
-        config_options: vec![AcpConfigOptionEntry {
-            config_id: "effort".to_string(),
-            category: Some("effort".to_string()),
-            display_name: Some("Effort".to_string()),
-            current_value: Some("low".to_string()),
-            options: vec![],
-        }],
-        available_modes: vec![],
-        available_models: vec![],
-        current_model: None,
-        model_overridden: false,
-        goose_native_config: None,
-        captured_at: "".to_string(),
-    };
-    let tiers = global_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "high");
-
-    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers);
-
-    let effort = surface
-        .normalized
-        .thinking_effort
-        .expect("effort must surface from ACP tier");
-    // Live ACP value wins.
-    assert_eq!(effort.value.as_deref(), Some("low"));
-    assert_eq!(effort.origin, ConfigOrigin::AcpConfigOption);
-    // Global is surfaced as the overridden baseline.
-    assert_eq!(effort.overridden_value.as_deref(), Some("high"));
-    assert_eq!(effort.overridden_origin, Some(ConfigOrigin::GlobalDefault));
-}
-
 // ── Numerics inheritance tests ────────────────────────────────────────────────
 //
 // max_output_tokens and context_limit gain persona/global tiers.
@@ -948,6 +915,8 @@ fn numeric_max_tokens_inherits_from_global_env() {
     assert_eq!(field.origin, ConfigOrigin::GlobalDefault);
 }
 
-// ── Extended tests (split file to respect line-count ratchet) ────────────────
+// ── Extended tests (split files to respect line-count ratchet) ───────────────
 #[path = "reader_tests_ext.rs"]
 mod ext;
+#[path = "reader_thinking_tests.rs"]
+mod thinking;

@@ -163,6 +163,8 @@ mod tests {
                 runtime: Some("goose".to_string()),
                 model: None,
                 provider: None,
+                thinking_effort: None,
+                portable_env: Default::default(),
                 parallelism: Some(1),
                 respond_to: None,
                 respond_to_allowlist: vec![],

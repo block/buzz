@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use super::{
     display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
-    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
-    DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
+    is_well_formed_env_key, json_env_string, merged_user_env, portable_config_for_import,
+    portable_env_for_import, validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS,
+    MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
 fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -500,4 +501,134 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+// ── portable snapshot configuration ─────────────────────────────────
+
+#[test]
+fn portable_import_restores_codex_effort_and_drops_crafted_secrets() {
+    let source = map(&[
+        ("CLAUDE_CODE_EFFORT_LEVEL", "medium"),
+        ("OPENAI_API_KEY", "secret"),
+        ("UNRELATED_SETTING", "not-portable"),
+    ]);
+
+    let env_vars = portable_config_for_import(Some("codex"), &source, Some("high")).unwrap();
+
+    assert_eq!(
+        env_vars.get("CLAUDE_CODE_EFFORT_LEVEL").map(String::as_str),
+        Some("medium")
+    );
+    assert!(!env_vars.contains_key("OPENAI_API_KEY"));
+    assert!(!env_vars.contains_key("UNRELATED_SETTING"));
+    assert_eq!(
+        env_vars.get("CODEX_CONFIG").map(String::as_str),
+        Some(r#"{"model_reasoning_effort":"high"}"#)
+    );
+}
+
+/// A catalog persona event is authored by a stranger, so its `thinking_effort`
+/// is untrusted input that lands in a local environment variable. The env
+/// validator's value rules (no NUL bytes, size caps) must therefore apply to it
+/// — an earlier revision inserted the effort *after* validation had already
+/// run, so a crafted value bypassed the checks entirely.
+#[test]
+fn portable_import_rejects_crafted_effort_values() {
+    let empty = BTreeMap::new();
+
+    // Not one of the documented tiers: dropped rather than written through.
+    for crafted in [
+        "high\0injected",
+        "definitely-not-a-tier",
+        "HIGH; rm -rf /",
+        "high medium",
+    ] {
+        let env_vars = portable_config_for_import(Some("claude"), &empty, Some(crafted)).unwrap();
+        assert!(
+            !env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"),
+            "crafted effort {crafted:?} must not reach the harness variable"
+        );
+    }
+
+    // An oversized value must not slip past the per-value byte cap.
+    let huge = "h".repeat(MAX_ENV_VALUE_BYTES + 1);
+    let env_vars = portable_config_for_import(Some("claude"), &empty, Some(&huge)).unwrap();
+    assert!(!env_vars.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+
+    // A real tier still round-trips, for both target shapes.
+    let plain = portable_config_for_import(Some("claude"), &empty, Some("xhigh")).unwrap();
+    assert_eq!(
+        plain.get("CLAUDE_CODE_EFFORT_LEVEL").map(String::as_str),
+        Some("xhigh")
+    );
+    let structured = portable_config_for_import(Some("codex"), &empty, Some("high")).unwrap();
+    assert_eq!(
+        structured.get("CODEX_CONFIG").map(String::as_str),
+        Some(r#"{"model_reasoning_effort":"high"}"#)
+    );
+}
+
+#[test]
+fn codex_effort_reader_ignores_malformed_or_non_string_json_values() {
+    let malformed = map(&[("CODEX_CONFIG", "not-json")]);
+    assert_eq!(
+        json_env_string(&malformed, "CODEX_CONFIG", "model_reasoning_effort"),
+        None
+    );
+
+    let non_string = map(&[("CODEX_CONFIG", r#"{"model_reasoning_effort":3}"#)]);
+    assert_eq!(
+        json_env_string(&non_string, "CODEX_CONFIG", "model_reasoning_effort"),
+        None
+    );
+}
+
+#[test]
+fn portable_import_canonicalizes_effort_and_first_class_value_wins() {
+    let source = map(&[("claude_code_effort_level", "low")]);
+
+    let env_vars = portable_config_for_import(Some("claude"), &source, Some("high")).unwrap();
+
+    assert_eq!(env_vars.len(), 1);
+    assert_eq!(
+        env_vars.get("CLAUDE_CODE_EFFORT_LEVEL").map(String::as_str),
+        Some("high")
+    );
+    assert!(!env_vars
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("claude_code_effort_level")
+            && key != "CLAUDE_CODE_EFFORT_LEVEL"));
+}
+
+#[test]
+fn portable_import_drops_derived_model_provider_aliases() {
+    let imported = portable_env_for_import(&map(&[
+        ("BUZZ_AGENT_MODEL", "attacker-model"),
+        ("buzz_agent_provider", "attacker-provider"),
+        ("GOOSE_MODEL", "attacker-model"),
+        ("goose_provider", "attacker-provider"),
+        ("GOOSE_THINKING_EFFORT", "high"),
+    ]))
+    .unwrap();
+
+    assert_eq!(imported.len(), 1);
+    assert_eq!(
+        imported.get("GOOSE_THINKING_EFFORT").map(String::as_str),
+        Some("high")
+    );
+}
+
+#[test]
+fn portable_import_drops_crafted_secret_without_persisting_it() {
+    let imported = portable_env_for_import(&map(&[
+        ("GOOSE_THINKING_EFFORT", "high"),
+        ("ANTHROPIC_API_KEY", "sk-ant-secret"),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        imported.get("GOOSE_THINKING_EFFORT").map(String::as_str),
+        Some("high")
+    );
+    assert!(!imported.contains_key("ANTHROPIC_API_KEY"));
 }

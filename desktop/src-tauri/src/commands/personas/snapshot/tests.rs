@@ -9,7 +9,7 @@ use crate::managed_agents::{
         AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory, AgentSnapshotMemoryEntry,
         AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
     },
-    BackendKind, ManagedAgentRecord, RespondTo,
+    portable_config_for_import, BackendKind, ManagedAgentRecord, RespondTo,
 };
 use std::collections::BTreeMap;
 
@@ -102,6 +102,8 @@ fn make_snapshot(
             runtime: None,
             model: None,
             provider: None,
+            thinking_effort: None,
+            portable_env: Default::default(),
             parallelism: None,
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -569,6 +571,38 @@ fn import_preview_includes_exported_definition_metadata() {
     assert!(preview.is_builtin);
     assert_eq!(preview.model.as_deref(), Some("claude-opus-4-5"));
     assert_eq!(preview.runtime.as_deref(), Some("goose"));
+}
+
+// ── Import: portable runtime configuration ──────────────────────────────
+
+#[test]
+fn agent_snapshot_import_configuration_restores_codex_effort_and_safe_env_only() {
+    let snapshot = AgentSnapshotDefinition {
+        runtime: Some("codex".to_string()),
+        thinking_effort: Some("high".to_string()),
+        portable_env: BTreeMap::from([
+            ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "medium".to_string()),
+            ("OPENAI_API_KEY".to_string(), "secret".to_string()),
+        ]),
+        ..make_snapshot(MemoryLevel::None, vec![]).definition
+    };
+
+    let env_vars = portable_config_for_import(
+        snapshot.runtime.as_deref(),
+        &snapshot.portable_env,
+        snapshot.thinking_effort.as_deref(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        env_vars.get("CODEX_CONFIG").map(String::as_str),
+        Some(r#"{"model_reasoning_effort":"high"}"#)
+    );
+    assert_eq!(
+        env_vars.get("CLAUDE_CODE_EFFORT_LEVEL").map(String::as_str),
+        Some("medium")
+    );
+    assert!(!env_vars.contains_key("OPENAI_API_KEY"));
 }
 
 // ── Import: resolve_snapshot_import_behavior — the production selection path

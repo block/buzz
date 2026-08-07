@@ -49,7 +49,7 @@ pub(crate) fn read_config_surface(
             .or_else(|| find_config_option_value(c, "model"))
     });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
-    let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
+    let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "thought_level"));
 
     let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
 
@@ -514,10 +514,15 @@ fn build_thinking_field(
     ];
     let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
 
-    let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
-        ConfigWriteMechanism::AcpSetConfigOption {
-            config_id: "effort".to_string(),
-        }
+    let write_via = if !is_pre_spawn {
+        find_thinking_config_id(session_cache)
+            .map(|config_id| ConfigWriteMechanism::AcpSetConfigOption { config_id })
+            .unwrap_or_else(|| match thinking_env_var {
+                Some(env_key) => ConfigWriteMechanism::RespawnWithEnvVar {
+                    env_key: env_key.to_string(),
+                },
+                None => ConfigWriteMechanism::ReadOnly,
+            })
     } else if let Some(env_key) = thinking_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
             env_key: env_key.to_string(),
@@ -690,6 +695,18 @@ fn find_model_config_id(cache: Option<&SessionConfigCache>) -> Option<String> {
         c.config_options
             .iter()
             .find(|o| o.category.as_deref() == Some("model"))
+            .map(|o| o.config_id.clone())
+    })
+}
+
+/// ACP adapters expose effort as the `thought_level` category, but their
+/// protocol config IDs differ (`reasoning_effort` for Codex, `effort` for
+/// Claude). Return the advertised config ID instead of inventing one.
+fn find_thinking_config_id(cache: Option<&SessionConfigCache>) -> Option<String> {
+    cache.and_then(|c| {
+        c.config_options
+            .iter()
+            .find(|o| o.category.as_deref() == Some("thought_level"))
             .map(|o| o.config_id.clone())
     })
 }

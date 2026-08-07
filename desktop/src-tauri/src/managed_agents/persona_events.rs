@@ -10,16 +10,17 @@ use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
 use super::{AgentDefinition, ManagedAgentRecord};
-use crate::app_state::AppState;
+use crate::{
+    app_state::AppState,
+    managed_agents::env_vars::{portable_config_for_import, thinking_effort_from_runtime_env},
+};
 
 /// The JSON body stored in a persona event's content field.
 ///
 /// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
 /// content body: `display_name, system_prompt, avatar_url, runtime, model,
-/// provider, name_pool`). serde emits fields in declaration order, so this
-/// order pins the exact content bytes and therefore the NIP-01 event id — a
-/// reorder here breaks cross-implementation interop. Guarded by
-/// `content_matches_nip_ap_vector`.
+/// provider, name_pool`). New optional fields are appended so legacy content
+/// retains its exact bytes and therefore its NIP-01 event id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
@@ -48,6 +49,11 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// A non-secret, harness-neutral effort tier. This is deliberately a
+    /// scalar—not a general env map—so shared catalog events never expose
+    /// credentials or arbitrary local configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<String>,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -178,6 +184,11 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 
     let content: PersonaEventContent = serde_json::from_str(event.content.as_ref())
         .map_err(|e| format!("failed to parse persona event content: {e}"))?;
+    let env_vars = portable_config_for_import(
+        content.runtime.as_deref(),
+        &BTreeMap::new(),
+        content.thinking_effort.as_deref(),
+    )?;
 
     let created_at = event.created_at.to_human_datetime();
 
@@ -196,7 +207,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         source_team: None,
         source_team_persona_slug: Some(d_tag),
         catalog_source: None,
-        env_vars: BTreeMap::new(),
+        env_vars,
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
@@ -388,6 +399,14 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        // Never publish `env_vars`: it may hold API keys. The only env-backed
+        // configuration that crosses the catalog boundary is this explicitly
+        // projected scalar, restored to its runtime-specific env target on
+        // import.
+        thinking_effort: thinking_effort_from_runtime_env(
+            record.runtime.as_deref(),
+            &record.env_vars,
+        ),
         // NIP-AP behavioral defaults: live since the create-path unification
         // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
         // Quad-absent records serialize identically to the reserved era, so

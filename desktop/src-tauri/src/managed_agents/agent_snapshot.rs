@@ -21,7 +21,7 @@
 //! The following fields are NEVER serialized:
 //!   - `private_key_nsec` / any private key material
 //!   - `auth_tag` (NIP-OA)
-//!   - `env_vars` (API keys / credentials)
+//!   - raw `env_vars` (API keys / credentials); only an explicit safe allowlist is projected
 //!   - `relay_url` (machine-local endpoint)
 //!   - `acp_command` / `agent_command` / `agent_command_override` / `agent_args`
 //!     (machine-local harness paths)
@@ -43,9 +43,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use serde::{Deserialize, Serialize};
-use std::io::Cursor;
+use std::{collections::BTreeMap, io::Cursor};
 
-use crate::managed_agents::types::ManagedAgentRecord;
+use crate::managed_agents::{
+    env_vars::{portable_env_for_export, thinking_effort_from_record},
+    types::ManagedAgentRecord,
+};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -103,6 +106,16 @@ pub struct AgentSnapshotDefinition {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Harness-neutral thinking/effort value. `portable_env` retains the
+    /// runtime-specific setting where an environment variable is supported;
+    /// this field also carries Codex's structured configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<String>,
+    /// Non-secret environment-backed configuration. This is a projection of
+    /// `env_vars`, never the raw map: only keys approved by
+    /// `env_vars::is_safe_to_reveal` are serialized.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub portable_env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +217,8 @@ pub fn build_snapshot(
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
+        thinking_effort: thinking_effort_from_record(record),
+        portable_env: portable_env_for_export(&record.env_vars),
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
         respond_to: record.definition_respond_to.clone(),
         respond_to_allowlist: record.definition_respond_to_allowlist.clone(),

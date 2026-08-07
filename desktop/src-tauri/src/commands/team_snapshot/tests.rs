@@ -18,6 +18,8 @@ fn member(name: &str) -> AgentSnapshot {
             runtime: Some("goose".to_string()),
             model: None,
             provider: None,
+            thinking_effort: None,
+            portable_env: Default::default(),
             parallelism: Some(2),
             respond_to: Some("allowlist".to_string()),
             respond_to_allowlist: vec!["ab".repeat(32)],
@@ -272,6 +274,44 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
     assert_eq!(snap_none.members[0].memory.level, MemoryLevel::None);
     assert!(snap_none.members[0].memory.entries.is_empty());
 
+    // Per-instance configuration wins over the definition-derived fallback.
+    let mut configured_instance = instance.clone();
+    configured_instance.runtime = Some("codex".to_string());
+    configured_instance.env_vars.insert(
+        "CODEX_CONFIG".to_string(),
+        r#"{"model_reasoning_effort":"high"}"#.to_string(),
+    );
+    configured_instance
+        .env_vars
+        .insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "medium".to_string());
+    configured_instance
+        .env_vars
+        .insert("OPENAI_API_KEY".to_string(), "must-not-export".to_string());
+    let configured = build_team_export_snapshot(
+        &team,
+        &definitions,
+        std::slice::from_ref(&configured_instance),
+        MemoryLevel::None,
+        &memory_map,
+    )
+    .unwrap();
+    assert_eq!(
+        configured.members[0].definition.thinking_effort.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        configured.members[0]
+            .definition
+            .portable_env
+            .get("CLAUDE_CODE_EFFORT_LEVEL")
+            .map(String::as_str),
+        Some("medium")
+    );
+    assert!(!configured.members[0]
+        .definition
+        .portable_env
+        .contains_key("OPENAI_API_KEY"));
+
     // No instance → entries stripped even with Everything level.
     let snap_no_instance = build_team_export_snapshot(
         &team,
@@ -327,6 +367,30 @@ fn team_import_definitions_are_built_for_all_members() {
             && definition.respond_to_allowlist.is_empty()
     }));
     assert_eq!(definitions[0].system_prompt, "Alice prompt");
+}
+
+#[test]
+fn team_import_definitions_restore_safe_portable_env_and_drop_secrets() {
+    let mut configured_member = member("Codex");
+    configured_member.definition.runtime = Some("codex".to_string());
+    configured_member.definition.thinking_effort = Some("high".to_string());
+    configured_member.definition.portable_env = std::collections::BTreeMap::from([
+        ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "medium".to_string()),
+        ("OPENAI_API_KEY".to_string(), "secret".to_string()),
+    ]);
+
+    let definitions =
+        build_import_definitions(&snapshot(vec![configured_member]), false, "now").unwrap();
+
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(
+        definitions[0]
+            .env_vars
+            .get("CLAUDE_CODE_EFFORT_LEVEL")
+            .map(String::as_str),
+        Some("medium")
+    );
+    assert!(!definitions[0].env_vars.contains_key("OPENAI_API_KEY"));
 }
 
 #[test]

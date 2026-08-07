@@ -484,6 +484,8 @@ mod png_body_tests {
                 runtime: None,
                 model: None,
                 provider: None,
+                thinking_effort: None,
+                portable_env: Default::default(),
                 parallelism: None,
                 respond_to: None,
                 respond_to_allowlist: vec![],

@@ -121,6 +121,32 @@ test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowe
 
 const { fromRawAcpRuntimeCatalogEntry } = await import("./tauri.ts");
 
+test("fromRawAcpRuntimeCatalogEntry maps structured thinking configuration", () => {
+  const raw = {
+    id: "codex",
+    label: "Codex",
+    avatar_url: "",
+    availability: "available",
+    command: "codex-acp",
+    binary_path: "/usr/local/bin/codex-acp",
+    default_args: [],
+    mcp_command: null,
+    thinking_config_json_env_var: "CODEX_CONFIG",
+    thinking_config_json_key: "model_reasoning_effort",
+    install_hint: "",
+    install_instructions_url: "",
+    can_auto_install: false,
+    underlying_cli_path: null,
+    node_required: false,
+    auth_status: { status: "not_applicable" },
+    source: "builtin",
+  };
+
+  const entry = fromRawAcpRuntimeCatalogEntry(raw);
+  assert.equal(entry.thinkingConfigJsonEnvVar, "CODEX_CONFIG");
+  assert.equal(entry.thinkingConfigJsonKey, "model_reasoning_effort");
+});
+
 test("fromRawAcpRuntimeCatalogEntry maps definition_env to definitionEnv", () => {
   const raw = {
     id: "my-harness",

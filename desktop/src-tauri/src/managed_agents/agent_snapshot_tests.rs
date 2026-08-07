@@ -533,11 +533,47 @@ fn definition_fields_present_in_snapshot() {
     assert_eq!(snapshot.definition.runtime.as_deref(), Some("goose"));
     assert_eq!(snapshot.definition.model.as_deref(), Some("claude-opus-4"));
     assert_eq!(snapshot.definition.provider.as_deref(), Some("anthropic"));
+    assert!(snapshot.definition.thinking_effort.is_none());
+    assert!(snapshot.definition.portable_env.is_empty());
     assert_eq!(snapshot.definition.name_pool, vec!["Alice", "Bob"]);
     // definition_respond_to maps to respond_to in the snapshot definition
     assert_eq!(snapshot.definition.respond_to.as_deref(), Some("allowlist"));
     // definition_respond_to_allowlist should be included
     assert!(!snapshot.definition.respond_to_allowlist.is_empty());
+}
+
+#[test]
+fn snapshot_exports_only_safe_env_and_codex_effort() {
+    let mut record = minimal_record();
+    record.runtime = Some("codex".to_string());
+    record.env_vars.insert(
+        "CODEX_CONFIG".to_string(),
+        r#"{"model_reasoning_effort":"high","other_setting":"preserved"}"#.to_string(),
+    );
+    record
+        .env_vars
+        .insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "medium".to_string());
+    record
+        .env_vars
+        .insert("OPENAI_API_KEY".to_string(), "must-not-export".to_string());
+
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    assert_eq!(snapshot.definition.thinking_effort.as_deref(), Some("high"));
+    assert_eq!(
+        snapshot
+            .definition
+            .portable_env
+            .get("CLAUDE_CODE_EFFORT_LEVEL")
+            .map(String::as_str),
+        Some("medium")
+    );
+    assert!(!snapshot
+        .definition
+        .portable_env
+        .contains_key("OPENAI_API_KEY"));
+    let json = snapshot_json_string(&record);
+    assert!(!json.contains("must-not-export"));
+    assert!(!json.contains("unrelated=value"));
 }
 
 #[test]

@@ -239,9 +239,9 @@ fn d_tag_already_valid_slug_is_unchanged() {
     // through untouched (no spurious coordinate change on existing data).
     let mut record = sample_persona();
     record.source_team_persona_slug = None;
-    record.id = "11111111-2222-3333-4444-555555555555".to_string();
+    record.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string();
     let d = persona_d_tag(&record);
-    assert_eq!(d, "11111111-2222-3333-4444-555555555555");
+    assert_eq!(d, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     assert!(passes_relay_slug_grammar(&d));
 }
 
@@ -303,6 +303,36 @@ fn round_trip_serialization() {
     assert!(restored.is_active);
 }
 
+#[test]
+fn catalog_round_trip_preserves_effort_without_publishing_env_vars() {
+    let mut record = sample_persona();
+    record.runtime = Some("codex".to_string());
+    record.env_vars = BTreeMap::from([
+        (
+            "CODEX_CONFIG".to_string(),
+            r#"{"model_reasoning_effort":"xhigh","model_providers":{"private":{"wire_api":"secret"}}}"#.to_string(),
+        ),
+        ("OPENAI_API_KEY".to_string(), "secret".to_string()),
+    ]);
+
+    let event = build_persona_event(&record)
+        .unwrap()
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+
+    assert!(event.content.contains(r#""thinking_effort":"xhigh""#));
+    assert!(!event.content.contains("CODEX_CONFIG"));
+    assert!(!event.content.contains("OPENAI_API_KEY"));
+    assert!(!event.content.contains("secret"));
+
+    let restored = persona_from_event(&event).unwrap();
+    assert_eq!(
+        restored.env_vars.get("CODEX_CONFIG").map(String::as_str),
+        Some(r#"{"model_reasoning_effort":"xhigh"}"#)
+    );
+    assert_eq!(restored.env_vars.len(), 1);
+}
+
 /// NIP-AP reference vector (Event 1, `docs/nips/NIP-AP.md:195-207`): the
 /// serialized content bytes MUST match the spec exactly, byte-for-byte.
 /// serde emits fields in declaration order, so this pins the content
@@ -325,6 +355,7 @@ fn content_matches_nip_ap_vector() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        thinking_effort: None,
     };
     assert_eq!(
         serde_json::to_string(&content).unwrap(),
@@ -576,6 +607,7 @@ fn persona_content_hash_is_deterministic() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        thinking_effort: None,
     };
     let hash1 = persona_content_hash(&content);
     let hash2 = persona_content_hash(&content);
@@ -596,6 +628,7 @@ fn persona_content_hash_changes_on_edit() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        thinking_effort: None,
     };
     let mut content2 = content1.clone();
     content2.system_prompt = Some("Goodbye".to_string());

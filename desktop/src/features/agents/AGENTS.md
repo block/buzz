@@ -38,21 +38,29 @@ with a TypeScript lookup table or an id comparison in a component.
 
 ## Rules
 
-1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`
-   belongs in `deriveAgentConfigFieldModel` (once, with a named reason), never
-   in a component. Components ask the field model what exists
-   (`hasRenderableAgentConfigField`, `getRenderableEffortField`).
-2. **Effort reads/writes go through the descriptor.** Use the effort
-   descriptor's `currentPersistence` key — never a raw
-   `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
-   where the value lives *today*; `targetApplication` is how the harness
-   *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
-   migration work.
-3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
-   New absences get new named reasons in `AgentConfigOmission` /
-   `render` — never a `showX` prop.
+1. **No hardcoded harness-ID checks in render code.** A harness-identity fact
+   belongs in `lib/agentConfigCore.ts` (once, named), never in a component.
+   Components ask the field model what exists
+   (`hasRenderableAgentConfigField`, `getRenderableEffortField`) and call
+   `implicitEffortProvider(runtimeId)` rather than testing for `"claude"` /
+   `"codex"` inline.
+2. **Effort reads/writes go through the descriptor.** Use
+   `readEffortEnvValue` / `updateEffortEnvValue` with the descriptor's
+   `currentPersistence` — never a raw `BUZZ_AGENT_THINKING_EFFORT` literal in
+   UI code. A descriptor owns either a plain environment variable
+   (`thinking_env_var`) or one property inside a structured JSON environment
+   value (`thinking_config_json_env_var` + `thinking_config_json_key`); the
+   helpers dispatch on the shape so unrelated JSON configuration survives
+   edits. `currentPersistence` and `targetApplication` are now intentionally
+   **identical**: the value is stored exactly where the harness reads it, so
+   there is no translation step that can silently drop an edit. An earlier
+   revision pinned `currentPersistence` to `BUZZ_AGENT_THINKING_EFFORT` for
+   every runtime, which made the Goose and Claude Code controls write a key
+   their harness ignores — do not reintroduce a divergence.
+3. **Field absence has a named reason, not a boolean.** Effort is omitted only
+   as `unsupportedByHarness`, meaning the runtime catalog declares no
+   environment target for it. New absences get new named reasons in
+   `AgentConfigOmission` / `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:
    "resetDependentValues"` (user changed harness/provider → dependent values
    reset everywhere) vs `onCatalogMismatch: "explainOnly" | "onboardingCleanup"`

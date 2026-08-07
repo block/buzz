@@ -11,7 +11,9 @@ use crate::{
     relay::query_relay,
 };
 
+mod custom_harness_entry;
 mod post_install_verification;
+use custom_harness_entry::custom_harness_catalog_entry;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
@@ -96,9 +98,7 @@ pub async fn save_custom_harness(
     original_id: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<AcpRuntimeCatalogEntry, String> {
-    use crate::managed_agents::{
-        custom_harnesses, AcpAvailabilityStatus, AuthStatus, HarnessSource,
-    };
+    use crate::managed_agents::{custom_harnesses, AcpAvailabilityStatus};
     use tauri::Manager;
 
     // ── Phase 1: full validation before touching the filesystem ─────────────
@@ -152,33 +152,13 @@ pub async fn save_custom_harness(
     let default_args =
         crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
 
-    Ok(AcpRuntimeCatalogEntry {
-        id: definition.id,
-        label: definition.label,
-        avatar_url: String::new(),
+    Ok(custom_harness_catalog_entry(
+        definition,
         availability,
-        command: command_opt,
+        command_opt,
         binary_path,
         default_args,
-        mcp_command: None,
-        model_env_var: None,
-        provider_env_var: None,
-        thinking_env_var: None,
-        max_tokens_env_var: None,
-        context_limit_env_var: None,
-        max_rounds_env_var: None,
-        install_hint: definition.install_hint,
-        install_instructions_url: definition.install_instructions_url,
-        can_auto_install: false,
-        requires_external_cli: false,
-        underlying_cli_path: None,
-        node_required: false,
-        auth_status: AuthStatus::NotApplicable,
-        login_hint: None,
-        source: HarnessSource::Custom,
-        definition_env: definition.env,
-        max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
-    })
+    ))
 }
 
 /// Remove a user-defined harness definition from `<app-data>/custom_harnesses/`.

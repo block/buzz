@@ -70,7 +70,8 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
   "name_pool": ["<string>", ...],
   "respond_to": "<string | null>",
   "respond_to_allowlist": ["<64-hex pubkey>", ...],
-  "parallelism": "<integer | null>"
+  "parallelism": "<integer | null>",
+  "thinking_effort": "<string | null>"
 }
 ```
 
@@ -93,20 +94,27 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
 | `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
 | `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |
+| `thinking_effort` | string \| null | `null` | Non-secret effort tier for the declared runtime. Readers apply it only through their known runtime's dedicated effort setting; it is not a generic environment-variable mechanism. |
 
 The behavioral fields (`respond_to`, `respond_to_allowlist`,
 `parallelism`) are definition-level *defaults*: a spawned instance copies them
-at creation and may be reconfigured independently afterwards. They were
-previously carried only on the kind:30177 projection (see
-"Slimming: kind:30177" below).
+at creation and may be reconfigured independently afterwards. `thinking_effort`
+is likewise a definition-level default, but readers must map it only through a
+known runtime's explicit effort configuration target. They were previously
+carried only on the kind:30177 projection (see "Slimming: kind:30177" below).
 
-**Status: reserved.** In the current implementation these behavioral fields are
+**Status: reserved.** In the current implementation the behavioral fields are
 *parsed but not yet applied*: readers tolerate and preserve them at the wire
 layer, but the local definition store does not yet carry them and writers do
 not emit them. The instance-copy-at-creation behavior activates in a
 subsequent release (the create-path unification). Until then a definition
 carrying these fields round-trips through the wire type but the values do not
 survive a local edit-and-republish cycle.
+
+`thinking_effort` is implemented independently of those reserved behavioral
+fields. Writers emit it only as a normalized non-secret scalar, and readers
+map it only for a recognized runtime with an explicit effort configuration
+target.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
 

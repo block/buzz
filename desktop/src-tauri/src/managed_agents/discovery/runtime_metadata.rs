@@ -47,6 +47,11 @@ pub(crate) struct KnownAcpRuntime {
     pub config_file_format: Option<&'static str>,
     pub supports_acp_native_config: bool, // tier 1a: config/read+write
     pub thinking_env_var: Option<&'static str>,
+    /// Structured JSON environment configuration target for thinking effort.
+    /// The value is a JSON object; `thinking_config_json_key` identifies the
+    /// scalar property that carries the selected effort level.
+    pub thinking_config_json_env_var: Option<&'static str>,
+    pub thinking_config_json_key: Option<&'static str>,
     /// Env var for normalizing `max_output_tokens`. `None` when the harness
     /// does not have a first-class env var for this field (config-file only).
     pub max_tokens_env_var: Option<&'static str>,

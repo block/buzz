@@ -7390,6 +7390,10 @@ function withMockRuntimeConfigMetadata(
           : runtime.id === "goose"
             ? "GOOSE_PROVIDER"
             : null,
+    // Effort targets mirror the Rust catalog
+    // (managed_agents/discovery/known_runtimes.rs). Claude Code and Codex must
+    // not default to null here: that made the mock advertise no effort support
+    // for harnesses that do support it, so specs asserted the wrong shape.
     thinking_env_var:
       "thinking_env_var" in runtime
         ? runtime.thinking_env_var
@@ -7397,7 +7401,21 @@ function withMockRuntimeConfigMetadata(
           ? "BUZZ_AGENT_THINKING_EFFORT"
           : runtime.id === "goose"
             ? "GOOSE_THINKING_EFFORT"
-            : null,
+            : runtime.id === "claude"
+              ? "CLAUDE_CODE_EFFORT_LEVEL"
+              : null,
+    thinking_config_json_env_var:
+      "thinking_config_json_env_var" in runtime
+        ? runtime.thinking_config_json_env_var
+        : runtime.id === "codex"
+          ? "CODEX_CONFIG"
+          : null,
+    thinking_config_json_key:
+      "thinking_config_json_key" in runtime
+        ? runtime.thinking_config_json_key
+        : runtime.id === "codex"
+          ? "model_reasoning_effort"
+          : null,
     max_tokens_env_var:
       "max_tokens_env_var" in runtime
         ? runtime.max_tokens_env_var

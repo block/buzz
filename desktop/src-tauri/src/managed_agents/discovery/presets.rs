@@ -67,6 +67,8 @@ pub(super) fn preset_catalog_entry(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        thinking_config_json_env_var: None,
+        thinking_config_json_key: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,

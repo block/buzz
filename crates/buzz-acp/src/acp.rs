@@ -4502,6 +4502,18 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_config_env_preserves_persona_reasoning_effort() {
+        let persona_cfg = r#"{"model_reasoning_effort":"high","other_setting":"keep"}"#;
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(value["model_reasoning_effort"], "high");
+        assert_eq!(value["other_setting"], "keep");
+        assert_eq!(value["sandbox_workspace_write"]["network_access"], true);
+    }
+
+    #[test]
     fn build_codex_config_env_persona_keys_survive_merge() {
         // Persona has CODEX_CONFIG with unrelated keys; generated overlay must
         // force network_access=true without erasing persona keys.

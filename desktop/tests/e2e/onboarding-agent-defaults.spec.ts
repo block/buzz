@@ -471,9 +471,13 @@ test("defaults renders only fields supported by the selected harness", async ({
   await expect(page.getByTestId("global-agent-model")).toHaveText(
     "Default model",
   );
-  await expect(
-    page.getByTestId("global-agent-thinking-effort-select"),
-  ).toHaveCount(0);
+  // Claude Code DOES support effort — through its own CLAUDE_CODE_EFFORT_LEVEL
+  // variable — so the control renders. What must not happen is the stale
+  // buzz-agent value showing up as Claude's: it is keyed to a variable Claude
+  // never reads.
+  const effortSelect = page.getByTestId("global-agent-thinking-effort-select");
+  await expect(effortSelect).toBeVisible();
+  await expect(effortSelect).not.toHaveAttribute("data-value", "high");
 });
 
 test("defaults hides model when optional harness has empty discovery", async ({

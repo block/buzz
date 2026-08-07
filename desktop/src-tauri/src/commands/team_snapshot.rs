@@ -17,8 +17,9 @@ use crate::{
     },
     managed_agents::{
         agent_snapshot::{build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel},
-        load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
-        save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
+        load_managed_agents, load_personas, load_teams, load_teams_readonly,
+        portable_config_for_import, save_managed_agents, save_personas, save_teams,
+        AgentDefinition, ManagedAgentRecord, TeamRecord,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -118,6 +119,12 @@ fn definition_from_snapshot(
     let respond_to = (behavior.respond_to != crate::managed_agents::RespondTo::default())
         .then(|| behavior.respond_to.as_str().to_string());
 
+    let env_vars = portable_config_for_import(
+        member.definition.runtime.as_deref(),
+        &member.definition.portable_env,
+        member.definition.thinking_effort.as_deref(),
+    )?;
+
     Ok(AgentDefinition {
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
@@ -133,7 +140,7 @@ fn definition_from_snapshot(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
-        env_vars: Default::default(),
+        env_vars,
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
         parallelism: behavior.parallelism,
@@ -299,8 +306,14 @@ fn build_team_export_snapshot(
                 _ => (MemoryLevel::None, Vec::new()),
             };
 
+            let snapshot_record = instance.cloned().unwrap_or_else(|| {
+                let mut record = persona.clone().into_agent_record();
+                record.env_vars = persona.env_vars.clone();
+                record
+            });
+
             Ok(build_snapshot(
-                &persona.clone().into_agent_record(),
+                &snapshot_record,
                 effective_level,
                 entries,
                 None,
@@ -520,6 +533,11 @@ pub async fn confirm_team_snapshot_import(
 
     let mut minted: Vec<MintedMember> = Vec::with_capacity(snapshot.members.len());
     for (member, definition) in snapshot.members.iter().zip(definitions) {
+        let portable_env = portable_config_for_import(
+            member.definition.runtime.as_deref(),
+            &member.definition.portable_env,
+            member.definition.thinking_effort.as_deref(),
+        )?;
         let display_name = definition.display_name.clone();
         let effective_avatar_url = effective_avatar(member);
         let respond_to_wire = definition.respond_to.clone();
@@ -573,7 +591,7 @@ pub async fn confirm_team_snapshot_import(
             model: member.definition.model.clone(),
             provider: member.definition.provider.clone(),
             persona_source_version: None,
-            env_vars: std::collections::BTreeMap::new(),
+            env_vars: portable_env,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,

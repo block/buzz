@@ -170,26 +170,202 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
     Ok(())
 }
 
+/// Explicitly portable, non-secret settings. Keep this separate from the
+/// structured provider/model fields: those are derived at spawn/deploy time and
+/// therefore must not be imported from a snapshot environment map.
+const PORTABLE_ENV_KEYS: &[&str] = &[
+    "BUZZ_AGENT_THINKING_EFFORT",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "GOOSE_THINKING_EFFORT",
+    "DATABRICKS_HOST",
+    "DATABRICKS_MODEL",
+];
+
+/// Returns the canonical spelling of an explicitly portable, non-secret key.
+/// Snapshot input is untrusted and Windows treats environment names
+/// case-insensitively, so callers must not retain a sender-controlled spelling.
+fn portable_env_key(key: &str) -> Option<&'static str> {
+    PORTABLE_ENV_KEYS
+        .iter()
+        .copied()
+        .find(|portable| portable.eq_ignore_ascii_case(key))
+}
+
 /// Returns `true` when `key` is safe to show verbatim — not a credential.
 ///
 /// Default-deny: every key NOT in this explicit allowlist is masked. Callers
 /// that display env values (baked-env UI, spawn-diff tooltip) share this
 /// single authority — no second list.
 ///
-/// Allowlist (case-insensitive):
-/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
-/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
-/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+/// This display policy also includes derived provider/model values so users can
+/// inspect the configuration Buzz supplies from structured fields. Those keys
+/// are intentionally excluded from portable snapshots; see [`portable_env_key`].
 pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
-    const SAFE_KEYS: &[&str] = &[
+    const SAFE_DISPLAY_KEYS: &[&str] = &[
         "BUZZ_AGENT_PROVIDER",
         "BUZZ_AGENT_MODEL",
         "BUZZ_AGENT_THINKING_EFFORT",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "GOOSE_THINKING_EFFORT",
         "DATABRICKS_HOST",
         "DATABRICKS_MODEL",
     ];
-    let upper = key.to_ascii_uppercase();
-    SAFE_KEYS.iter().any(|safe| upper == *safe)
+    SAFE_DISPLAY_KEYS
+        .iter()
+        .any(|safe| safe.eq_ignore_ascii_case(key))
+}
+
+/// Project only explicitly approved, non-secret environment settings for a
+/// portable agent/team snapshot. This is intentionally separate from the UI
+/// display policy's callers so export never accidentally serializes raw env.
+pub(crate) fn portable_env_for_export(
+    env_vars: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut projected = BTreeMap::new();
+    for (key, value) in env_vars {
+        if let Some(canonical_key) = portable_env_key(key) {
+            // Persisted maps should already use canonical spellings. If a legacy
+            // record contains aliases, prefer the canonical key deterministically
+            // rather than exporting two keys that collide on Windows.
+            if key == canonical_key || !projected.contains_key(canonical_key) {
+                projected.insert(canonical_key.to_string(), value.clone());
+            }
+        }
+    }
+    projected
+}
+
+/// Accept the portable snapshot projection only after applying the explicit
+/// portable-key allowlist and normal save-time environment validation used by
+/// UI input. Keys are canonicalized to prevent case-insensitive collisions in a
+/// Windows child-process environment; unknown and derived model/provider keys
+/// are dropped rather than becoming persisted configuration.
+pub(crate) fn portable_env_for_import(
+    portable_env: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    let projected = portable_env_for_export(portable_env);
+    validate_user_env_keys(&projected)?;
+    Ok(projected)
+}
+
+/// Extract a portable thinking value from the runtime-specific persisted
+/// representation. Plain environment targets store a level directly; structured
+/// JSON targets (currently Codex) store it at their catalog-declared property.
+pub(crate) fn thinking_effort_from_record(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+) -> Option<String> {
+    let runtime = record
+        .runtime
+        .as_deref()
+        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .or_else(|| crate::managed_agents::known_acp_runtime(&record.agent_command))?;
+
+    thinking_effort_from_runtime_env(Some(runtime.id), &record.env_vars)
+}
+
+/// Extract a portable thinking value for a declared runtime from its
+/// runtime-specific persisted representation. Catalog sharing uses this
+/// runtime-id-only form because publishing a persona never has an agent command
+/// fallback and must not infer behavior from arbitrary local environment data.
+///
+/// The value is filtered to a recognized tier: this feeds a plaintext public
+/// relay event, so an unrecognized local string is not something to broadcast.
+pub(crate) fn thinking_effort_from_runtime_env(
+    runtime_id: Option<&str>,
+    env_vars: &BTreeMap<String, String>,
+) -> Option<String> {
+    let runtime = runtime_id.and_then(crate::managed_agents::known_acp_runtime_exact)?;
+
+    if let (Some(env_key), Some(json_key)) = (
+        runtime.thinking_config_json_env_var,
+        runtime.thinking_config_json_key,
+    ) {
+        return json_env_string(env_vars, env_key, json_key)
+            .as_deref()
+            .and_then(portable_effort_tier);
+    }
+
+    runtime
+        .thinking_env_var
+        .and_then(|key| env_vars.get(key))
+        .map(String::as_str)
+        .and_then(portable_effort_tier)
+}
+
+/// Restore the safe, portable portion of a snapshot's runtime configuration.
+/// A first-class effort value is written to the catalog-declared target: a
+/// direct env var for standard harnesses, or a minimal JSON object for Codex.
+pub(crate) fn portable_config_for_import(
+    runtime_id: Option<&str>,
+    portable_env: &BTreeMap<String, String>,
+    thinking_effort: Option<&str>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut env_vars = portable_env_for_import(portable_env)?;
+    let Some(runtime) = runtime_id.and_then(crate::managed_agents::known_acp_runtime_exact) else {
+        return Ok(env_vars);
+    };
+    let Some(effort) = thinking_effort.and_then(portable_effort_tier) else {
+        return Ok(env_vars);
+    };
+
+    if let (Some(env_key), Some(json_key)) = (
+        runtime.thinking_config_json_env_var,
+        runtime.thinking_config_json_key,
+    ) {
+        remove_env_key_case_insensitive(&mut env_vars, env_key);
+        env_vars.insert(
+            env_key.to_string(),
+            serde_json::json!({ json_key: effort }).to_string(),
+        );
+    } else if let Some(env_key) = runtime.thinking_env_var {
+        // The first-class snapshot field is authoritative when the two values
+        // differ, while the allowlisted env map remains available for all other
+        // non-secret runtime configuration. Remove aliases first because
+        // Windows collapses environment names case-insensitively.
+        remove_env_key_case_insensitive(&mut env_vars, env_key);
+        env_vars.insert(env_key.to_string(), effort.to_string());
+    }
+    Ok(env_vars)
+}
+
+fn remove_env_key_case_insensitive(env_vars: &mut BTreeMap<String, String>, key: &str) {
+    env_vars.retain(|existing, _| !existing.eq_ignore_ascii_case(key));
+}
+
+/// The complete set of effort tiers Buzz will write into a harness variable.
+///
+/// Default-deny, and deliberately a closed list: `thinking_effort` arriving from
+/// a catalog persona event or a hand-edited snapshot file is authored by someone
+/// else, and it is written straight into a child process's environment. Anything
+/// outside this set is dropped rather than forwarded. Mirrors
+/// `BUZZ_AGENT_THINKING_EFFORT_VALUES` in `ui/buzzAgentConfig.ts`; the
+/// per-harness narrowing of which tiers are *offered* is a UI concern, while
+/// this is the trust boundary.
+const PORTABLE_EFFORT_TIERS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Returns the tier only when it is one Buzz recognizes, lowercased.
+fn portable_effort_tier(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    PORTABLE_EFFORT_TIERS
+        .contains(&normalized.as_str())
+        .then_some(normalized)
+}
+
+fn json_env_string(
+    env_vars: &BTreeMap<String, String>,
+    env_key: &str,
+    json_key: &str,
+) -> Option<String> {
+    env_vars
+        .get(env_key)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get(json_key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,

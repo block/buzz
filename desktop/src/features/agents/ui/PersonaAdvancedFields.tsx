@@ -8,10 +8,7 @@ import {
   OWNER_ONLY_ACCESS_DISABLED_REASON,
 } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
-import {
-  isBuzzAgentRuntime,
-  BUZZ_AGENT_THINKING_EFFORT,
-} from "./buzzAgentConfig";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 import {
   AGENT_PARALLELISM_HELP,
   AGENT_PARALLELISM_PLACEHOLDER,
@@ -29,8 +26,11 @@ import {
 } from "./agentConfigOptions";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import {
+  deriveEffortEnvDescriptor,
   deriveNumericDescriptors,
+  readEffortEnvValue,
   structuredEnvKeys,
+  updateEffortEnvValue,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
 
@@ -105,15 +105,37 @@ export function PersonaAdvancedFields({
     [catalogStatus, selectedRuntime],
   );
 
+  // Effort descriptor for the runtime's own environment target — a plain
+  // variable (Claude Code, Goose, buzz-agent) or one property inside a
+  // structured JSON variable (Codex's CODEX_CONFIG).
+  const catalogEffortDescriptor = React.useMemo(
+    () =>
+      catalogStatus === "ready"
+        ? deriveEffortEnvDescriptor(selectedRuntime)
+        : undefined,
+    [catalogStatus, selectedRuntime],
+  );
+  // buzz-agent keeps its richer provider/model-aware control below, which owns
+  // the same key, so the generic select must not render twice for it.
+  const effortDescriptor = isBuzzAgentRuntime(modelTuningRuntimeId)
+    ? undefined
+    : catalogEffortDescriptor;
+  const effortValue = readEffortEnvValue(
+    envVars,
+    effortDescriptor?.currentPersistence,
+  );
+
+  // A first-class effort control owns its env key, so hide the raw generic row
+  // only when the catalog is ready and one of the two controls renders.
   const effectiveHiddenKeys = React.useMemo(
     () => [
       ...hiddenEnvKeys,
-      ...(isBuzzAgentRuntime(modelTuningRuntimeId)
-        ? [BUZZ_AGENT_THINKING_EFFORT]
-        : []),
       ...structuredEnvKeys(numericDescriptors),
+      ...structuredEnvKeys(
+        catalogEffortDescriptor ? [catalogEffortDescriptor] : [],
+      ),
     ],
-    [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
+    [catalogEffortDescriptor, hiddenEnvKeys, numericDescriptors],
   );
 
   // Persona hint: definitions keep a portable requested value across harnesses.
@@ -235,6 +257,48 @@ export function PersonaAdvancedFields({
           />
         </div>
       </div>
+
+      {/* Catalog-backed effort target — env var or structured JSON property.
+          Rendered above the env-vars editor so the key it owns always has a
+          first-class control. */}
+      {effortDescriptor ? (
+        <div className="space-y-1.5">
+          <label
+            className="text-sm font-medium text-foreground"
+            htmlFor="persona-thinking-effort"
+          >
+            Thinking / Effort
+            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+          </label>
+          <select
+            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
+            data-testid="persona-thinking-effort-select"
+            disabled={disabled}
+            id="persona-thinking-effort"
+            onChange={(event) =>
+              onEnvVarsChange(
+                updateEffortEnvValue(
+                  envVars,
+                  effortDescriptor.currentPersistence,
+                  event.target.value,
+                ),
+              )
+            }
+            value={effortValue}
+          >
+            <option value="">Inherit runtime default</option>
+            {effortDescriptor.values.map((effort: string) => (
+              <option key={effort} value={effort}>
+                {effort}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Applied through this runtime's own configuration. Leave on inherit
+            to use the runtime default.
+          </p>
+        </div>
+      ) : null}
 
       <EnvVarsEditor
         disabled={disabled}
