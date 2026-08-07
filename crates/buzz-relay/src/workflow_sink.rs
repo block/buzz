@@ -252,12 +252,19 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `workflow-owner` is the sole authorization principal for ACP
+            //      (owner-only / allowlist gates). `p` tags stay attribution and
+            //      mention/wake routing only and never grant authority.
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
+                Tag::parse(["workflow-owner", &author_pubkey_hex]).map_err(|e| {
+                    ActionSinkError::EventBuild(format!("workflow-owner tag: {e}"))
+                })?,
+                // Keep owner `p` for legacy attribution/compat until clients stop
+                // relying on it; ACP must not treat it as authority.
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
