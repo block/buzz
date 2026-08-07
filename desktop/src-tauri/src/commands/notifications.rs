@@ -63,11 +63,10 @@ mod windows {
         std::thread::spawn(move || {
             let app_id = app.config().identifier.clone();
             let mut toast = tauri_winrt_notification::Toast::new(&app_id);
-            toast.title(&title);
+            toast.text1(&title);
             if let Some(body_text) = body.as_deref() {
-                toast.body(body_text);
+                toast.text2(body_text);
             }
-            toast.sound(Some(tauri_winrt_notification::Sound::Mute));
 
             match toast.show() {
                 Ok(_) => {}
