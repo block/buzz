@@ -23,6 +23,15 @@
 - [ ] Relay acessível por HTTPS/WSS
 - [ ] Testes funcionais concluídos
 
+## Operações da base
+
+- [x] Bootstrap ArgoCD com credencial admin `/shared/postgres/PASSWORD` e
+  credenciais de aplicação `/buzz/POSTGRES_*`
+- [x] GHAR dual-credential workflow mergeado (`lolmeida/github-actions#36`)
+- [x] Runner ARC dedicado `arc-buzz-database` declarado e acesso de rede
+  permitido
+- [ ] Workflow Buzz GHAR mergeado e healthcheck/ensure executados
+
 ## Phase 4 — Validação operacional
 
 - [ ] Backup e restore validados — CronJob declarado; restore ainda não executado
@@ -35,3 +44,4 @@
 - a validação de migrations/restore em PostgreSQL 15 ainda está pendente;
 - o digest próprio do fork ainda depende do workflow `31128599898`;
 - a validação pública de `buzz.lolmeida.com` ainda está pendente.
+- o workflow operacional do Buzz ainda está no PR #12.

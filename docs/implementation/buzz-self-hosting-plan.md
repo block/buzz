@@ -23,6 +23,11 @@ S3-compatible exclusivo.
 - Não expor PostgreSQL, Redis, MinIO, Adminer ou métricas à Internet.
 - Secrets: Vaultwarden → AWS SSM → ExternalSecrets → Kubernetes Secret.
 - Imagem fixada por digest; nunca `main` ou `latest` em produção.
+- Bootstrap admin/app: ArgoCD lê `/shared/postgres/PASSWORD` para o role
+  administrativo e `/buzz/POSTGRES_*` para o role da aplicação; o runtime usa
+  somente a credencial da aplicação.
+- Operações manuais da base: workflow GHAR através do runner ARC
+  `arc-buzz-database`, com OIDC/SSM e sem criação de recursos Kubernetes.
 - Agentes privilegiados, workflows, webhooks e huddles ficam desativados inicialmente.
 
 ## Fases
@@ -30,8 +35,10 @@ S3-compatible exclusivo.
 1. Fork, branch, pipeline de imagem e documentação.
 2. S3, database/role PostgreSQL, database lógico Redis e secrets dedicados.
 3. ArgoCD, Ingress, TLS e DNS diretos.
-4. Testes de migrations, runtime, segurança, backup e restore.
-5. Ativação gradual de agentes, workflows, webhooks e HA.
+4. Bootstrap PostgreSQL via ArgoCD com credenciais admin/app separadas e
+   operações controladas via GHAR/runner ARC.
+5. Testes de migrations, runtime, segurança, backup e restore.
+6. Ativação gradual de agentes, workflows, webhooks e HA.
 
 ## Critérios de aceitação
 
@@ -44,6 +51,7 @@ S3-compatible exclusivo.
 - Backup e restore demonstrados.
 - Imagem e chart fixados em versões imutáveis.
 - Rollback para o digest anterior validado.
+- GHAR verifica a conectividade com `sslmode=require` e não oferece DROP/reset.
 
 ## Rollback
 
@@ -59,3 +67,6 @@ S3-compatible exclusivo.
 - Approval gates e algumas ações de workflow estão incompletos upstream.
 - Redis é necessário para fanout e coordenação distribuída.
 - A especificação de multi-tenancy upstream ainda é draft.
+- A migração GHAR executa apenas o ficheiro SQL explicitamente selecionado; a
+  migração automática embutida do relay continua a ser a fonte de migrações
+  SQLx completas.
