@@ -68,6 +68,9 @@ mod lifecycle;
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 
+mod spawn_relay;
+use spawn_relay::spawn_relay_roles;
+
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
 ///
@@ -395,36 +398,12 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
-/// Split a spawn's relay input into its two roles: the canonical pair key
-/// (identity) and the URL the child actually connects with.
-///
-/// The runtime key canonicalizes via `buzz_core::relay::normalize_relay_url`,
-/// which folds every loopback spelling to `127.0.0.1`. That is correct for
-/// identity, receipts, log paths, and dedup — and explicitly NOT for
-/// connections: the normalizer's own contract says "Connection code may
-/// retain the configured URL; this canonical form is for identity, receipts,
-/// status and deduplication." On a per-host multi-tenant relay,
-/// `ws://localhost:3100` and `ws://127.0.0.1:3100` resolve to *different
-/// communities*, so handing the canonical form to the child connects the
-/// agent to a different (typically empty) community than the desktop's own
-/// traffic — the harness logs "discovered 0 channel(s)" and idles while the
-/// UI writes memberships to a tenant the agent never sees. The child
-/// therefore gets the configured URL byte-for-byte.
-fn spawn_relay_roles(
-    pubkey: String,
-    configured_relay_url: &str,
-) -> Result<(ManagedAgentRuntimeKey, String), String> {
-    let key = ManagedAgentRuntimeKey::new(pubkey, configured_relay_url)?;
-    Ok((key, configured_relay_url.to_string()))
-}
-
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
 ///
 /// `relay_url`: the workspace-resolved relay URL **as configured** — handed to
-/// the child verbatim. The canonical pair identity is derived internally; see
-/// `spawn_relay_roles` for why the two must not be conflated.
+/// the child verbatim; see `spawn_relay_roles` for the identity/connection split.
 ///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
@@ -438,7 +417,10 @@ pub fn spawn_agent_child(
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    let (runtime_key, connection_relay_url) = spawn_relay_roles(record.pubkey.clone(), relay_url)?;
+    // `effective_relay_url` is the configured URL, handed to the child verbatim;
+    // `runtime_key` is canonical and identity-only (log path, spawn-config
+    // hash). See `spawn_relay_roles` for why the two must not be conflated.
+    let (runtime_key, effective_relay_url) = spawn_relay_roles(record.pubkey.clone(), relay_url)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
     // override wins. `agent_args` and `mcp_command` are pure derivations of the
@@ -522,14 +504,6 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
-
-    // The child connects with the configured URL exactly as the caller
-    // resolved it from the workspace — never the canonical `runtime_key`
-    // form, which folds loopback hosts and would land the agent in a
-    // different community on per-host multi-tenant relays (see
-    // `spawn_relay_roles`). `runtime_key` keeps the identity-side jobs:
-    // the log path above and the spawn-config hash below.
-    let effective_relay_url = connection_relay_url;
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -871,16 +845,13 @@ pub fn spawn_agent_child(
             record,
             descriptor: &descriptor,
             // CANONICAL pair relay, not the connection URL: the prospective
-            // side (`prospective_spawn_config_snapshot`, called from
-            // `build_managed_agent_summary`) recomputes with
-            // `workspace_pair_key(...).relay_url` — canonical — so stamping
-            // the configured spelling here would flag a permanent spurious
-            // restart for any workspace whose configured URL differs from its
-            // canonical form (e.g. `ws://localhost:3100` vs
-            // `ws://127.0.0.1:3100`). Known boundary: a spelling-only edit of
-            // the workspace relay (same canonical form) therefore does not
-            // badge, even though the child's connection host now follows the
-            // configured spelling.
+            // side (`prospective_spawn_config_snapshot`, via
+            // `build_managed_agent_summary`) recomputes with the canonical
+            // `workspace_pair_key(...).relay_url`, so stamping the configured
+            // spelling would flag a permanent spurious restart whenever the
+            // two differ. Known boundary: a spelling-only relay edit (same
+            // canonical form) therefore does not badge, even though the
+            // child's connection host follows the configured spelling.
             relay_url: &runtime_key.relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
@@ -993,8 +964,7 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    // Pass the configured URL, not `key.relay_url` — the canonical form is
-    // identity-only and must not become the child's connection target.
+    // Configured URL, not the identity-only canonical `key.relay_url`.
     let mut process = spawn_agent_child(app, record, &relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {

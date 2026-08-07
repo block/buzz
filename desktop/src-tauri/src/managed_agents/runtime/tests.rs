@@ -1,32 +1,5 @@
 use crate::managed_agents::known_acp_runtime;
 
-// ── spawn relay roles: identity vs connection ───────────────────────────
-
-#[test]
-fn spawn_relay_roles_keeps_configured_url_for_the_child() {
-    // Identity canonicalizes loopback spellings to 127.0.0.1; the connection
-    // URL handed to the child must stay exactly as configured. On a per-host
-    // multi-tenant relay `ws://localhost:3100` and `ws://127.0.0.1:3100` are
-    // different communities, so folding the child's URL strands the agent in
-    // an empty parallel tenant ("discovered 0 channel(s)", idles) while the
-    // desktop's own traffic — and the memberships the user creates in the UI —
-    // land under the configured host.
-    let (key, connection) =
-        super::spawn_relay_roles("a".repeat(64), "ws://localhost:3100").expect("valid relay URL");
-    assert_eq!(key.relay_url, "ws://127.0.0.1:3100");
-    assert_eq!(connection, "ws://localhost:3100");
-}
-
-#[test]
-fn spawn_relay_roles_agree_for_non_loopback_hosts() {
-    // For real deployments the two roles agree (modulo canonical lowercasing),
-    // which is why this bug was invisible against hosted relays.
-    let (key, connection) = super::spawn_relay_roles("b".repeat(64), "wss://relay.example.com")
-        .expect("valid relay URL");
-    assert_eq!(key.relay_url, "wss://relay.example.com");
-    assert_eq!(connection, "wss://relay.example.com");
-}
-
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]
