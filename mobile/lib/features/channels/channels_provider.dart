@@ -561,13 +561,21 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       debugPrint('[ChannelsNotifier] unread catch-up skipped: $error');
       return;
     }
-    final futures = <Future<void>>[];
+    // Collect the work as *thunks*, not futures. Invoking an async function
+    // starts it immediately, so building a `List<Future>` up front dispatches
+    // every request at once and leaves the batch loop below only awaiting
+    // already-in-flight work. That made the batching a no-op: a member of N
+    // channels issued N concurrent history REQs at startup, on top of the live
+    // subscriptions, and the relay's fixed-window WS admission budget rejected
+    // the overflow with `rate-limited: quota exceeded`. The failed catch-ups
+    // then retried, re-spending the same budget.
+    final pending = <Future<void> Function()>[];
 
     for (final channel in channels) {
       if (!channel.isMember || channel.isArchived) continue;
       final readAt = readState.effectiveTimestamp(channel.id);
-      futures.add(
-        _catchUpUnreadEventsForChannel(
+      pending.add(
+        () => _catchUpUnreadEventsForChannel(
           session,
           channel,
           myPk,
@@ -578,8 +586,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     const batchSize = 5;
-    for (var i = 0; i < futures.length; i += batchSize) {
-      await Future.wait(futures.sublist(i, min(i + batchSize, futures.length)));
+    for (var i = 0; i < pending.length; i += batchSize) {
+      final slice = pending.sublist(i, min(i + batchSize, pending.length));
+      await Future.wait(slice.map((start) => start()));
     }
 
     state = state.whenData((channels) => List<Channel>.of(channels));
