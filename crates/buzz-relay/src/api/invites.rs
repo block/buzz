@@ -24,7 +24,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::handlers::side_effects::{
+    emit_group_discovery_events, publish_nip43_member_added, publish_nip43_membership_list,
+};
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
@@ -406,6 +408,7 @@ pub async fn claim_invite(
                     member = %claimer_hex,
                     "relay member added via v2 invite"
                 );
+                join_active_open_channels(&tenant, &state, &claimer_hex).await;
                 // NIP-43 side effects only on Joined, never on other outcomes.
                 if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
                     tracing::warn!(
@@ -484,6 +487,7 @@ pub async fn claim_invite(
             member = %claimer_hex,
             "relay member added via invite"
         );
+        join_active_open_channels(&tenant, &state, &claimer_hex).await;
         if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
             tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
         }
@@ -524,6 +528,93 @@ fn claim_key_rate_limited(
 ) -> bool {
     let counter = cache.get_with(key, || Arc::new(std::sync::atomic::AtomicU32::new(0)));
     counter.fetch_add(1, Ordering::Relaxed) >= CLAIM_RATE_LIMIT
+}
+
+/// Add a newly joined relay member to every active open channel and republish
+/// each channel's NIP-29 discovery state. Relay membership has already been
+/// committed when this runs, so failures are logged rather than changing the
+/// successful claim response.
+async fn join_active_open_channels(
+    tenant: &buzz_core::tenant::TenantContext,
+    state: &Arc<AppState>,
+    claimer_hex: &str,
+) {
+    let claimer_bytes = match hex::decode(claimer_hex) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        Ok(bytes) => {
+            tracing::warn!(
+                community = %tenant.community(),
+                member = %claimer_hex,
+                decoded_len = bytes.len(),
+                "cannot auto-join invite claimer to open channels: decoded pubkey is not 32 bytes"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                community = %tenant.community(),
+                member = %claimer_hex,
+                error = %error,
+                "cannot auto-join invite claimer to open channels: invalid hex pubkey"
+            );
+            return;
+        }
+    };
+
+    let channels = match state
+        .db
+        .list_channels(tenant.community(), Some("open"))
+        .await
+    {
+        Ok(channels) => channels,
+        Err(error) => {
+            tracing::warn!(
+                community = %tenant.community(),
+                member = %claimer_hex,
+                error = %error,
+                "failed to list open channels after invite claim"
+            );
+            return;
+        }
+    };
+
+    for channel in channels {
+        if channel.archived_at.is_some() || channel.channel_type == "dm" {
+            continue;
+        }
+
+        if let Err(error) = state
+            .db
+            .add_member(
+                tenant.community(),
+                channel.id,
+                &claimer_bytes,
+                buzz_db::channel::MemberRole::Member,
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                community = %tenant.community(),
+                channel = %channel.id,
+                member = %claimer_hex,
+                error = %error,
+                "failed to auto-join invite claimer to open channel"
+            );
+            continue;
+        }
+
+        state.invalidate_membership(tenant, channel.id, &claimer_bytes);
+        if let Err(error) = emit_group_discovery_events(tenant, state, channel.id).await {
+            tracing::warn!(
+                community = %tenant.community(),
+                channel = %channel.id,
+                member = %claimer_hex,
+                error = %error,
+                "failed to publish open-channel discovery after invite claim"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -655,7 +746,8 @@ mod tests {
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
         config.database_url = database_url.clone();
-        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:1".to_string());
         config.relay_url = format!("wss://{host}");
         // The claim route must work on relays where membership is enforced —
         // that is the entire point of an invite.
@@ -749,6 +841,44 @@ mod tests {
             })
             .await
             .expect("count side-effect events")
+    }
+
+    async fn has_channel_member(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        channel: Uuid,
+        member: &Keys,
+    ) -> bool {
+        state
+            .db
+            .is_member(community, channel, &member.public_key().to_bytes())
+            .await
+            .expect("channel membership lookup")
+    }
+
+    async fn group_members_event_mentions(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        channel: Uuid,
+        member: &Keys,
+    ) -> bool {
+        let events = state
+            .db
+            .query_events(&buzz_db::EventQuery {
+                channel_id: Some(channel),
+                kinds: Some(vec![buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32]),
+                limit: Some(1),
+                ..buzz_db::EventQuery::for_community(community)
+            })
+            .await
+            .expect("query group members event");
+        let member_hex = member.public_key().to_hex();
+        events.first().is_some_and(|stored| {
+            stored.event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() >= 2 && parts[0] == "p" && parts[1] == member_hex
+            })
+        })
     }
 
     #[test]
@@ -954,6 +1084,51 @@ mod tests {
             .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
             .await
             .expect("seed owner");
+        let owner_bytes = owner.public_key().to_bytes();
+        let open_channel = state
+            .db
+            .create_channel(
+                community.id,
+                "open-invites",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &owner_bytes,
+                None,
+            )
+            .await
+            .expect("create open channel");
+        let private_channel = state
+            .db
+            .create_channel(
+                community.id,
+                "private-invites",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Private,
+                None,
+                &owner_bytes,
+                None,
+            )
+            .await
+            .expect("create private channel");
+        let archived_channel = state
+            .db
+            .create_channel(
+                community.id,
+                "archived-invites",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &owner_bytes,
+                None,
+            )
+            .await
+            .expect("create archived channel");
+        state
+            .db
+            .archive_channel(community.id, archived_channel.id)
+            .await
+            .expect("archive channel");
         let before_delta_count = event_count(
             &state,
             community.id,
@@ -1005,6 +1180,35 @@ mod tests {
         .await;
         assert_eq!(delta_count, before_delta_count + 1);
         assert_eq!(list_count, before_list_count + 1);
+        assert!(
+            has_channel_member(&state, community.id, open_channel.id, &first).await,
+            "new claimer must join active open channels"
+        );
+        assert!(
+            group_members_event_mentions(&state, community.id, open_channel.id, &first).await,
+            "kind:39002 must advertise the new open-channel membership"
+        );
+        assert!(
+            !has_channel_member(&state, community.id, private_channel.id, &first).await,
+            "new claimer must not join private channels"
+        );
+        assert!(
+            !has_channel_member(&state, community.id, archived_channel.id, &first).await,
+            "new claimer must not join archived open channels"
+        );
+        let late_open_channel = state
+            .db
+            .create_channel(
+                community.id,
+                "late-open-invites",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &owner_bytes,
+                None,
+            )
+            .await
+            .expect("create open channel after the genuine claim");
 
         let response = post_json(
             state.clone(),
@@ -1039,6 +1243,10 @@ mod tests {
             )
             .await,
             list_count
+        );
+        assert!(
+            !has_channel_member(&state, community.id, late_open_channel.id, &first).await,
+            "AlreadyMember re-claim must not add channel memberships"
         );
 
         let response = post_json(
