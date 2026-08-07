@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Copy } from "lucide-react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
@@ -17,6 +17,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { buildThreadTranscript } from "@/features/messages/lib/threadTranscript";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -24,10 +25,12 @@ import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanel
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -522,6 +525,26 @@ export function MessageThreadPanel({
     settleAtBottomAfterLayout,
   );
 
+  // Copies the loaded thread — the head plus every reply currently in the
+  // panel's list (collapsed branches contribute their visible parent row
+  // only) — as a plain-text transcript. Serialization rules live in
+  // `lib/threadTranscript.ts`.
+  const threadRepliesRef = React.useRef(threadReplies);
+  threadRepliesRef.current = threadReplies;
+  const threadHeadRef = React.useRef(threadHead);
+  threadHeadRef.current = threadHead;
+  const handleCopyThread = React.useCallback(() => {
+    const head = threadHeadRef.current;
+    if (!head) {
+      return;
+    }
+
+    copyTextToClipboard(
+      buildThreadTranscript(head, threadRepliesRef.current),
+      "Thread copied to clipboard",
+    );
+  }, []);
+
   const knownAgentPubkeys = useKnownAgentPubkeys();
   const initialAgentPubkeys = React.useMemo(() => {
     if (
@@ -951,6 +974,21 @@ export function MessageThreadPanel({
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
+      <AuxiliaryPanelHeaderActions>
+        <Button
+          aria-label="Copy thread"
+          className="shrink-0"
+          data-testid="copy-thread"
+          disabled={threadRepliesPending}
+          onClick={handleCopyThread}
+          size="icon"
+          title="Copy thread as text"
+          type="button"
+          variant="ghost"
+        >
+          <Copy />
+        </Button>
+      </AuxiliaryPanelHeaderActions>
     </>
   );
 
