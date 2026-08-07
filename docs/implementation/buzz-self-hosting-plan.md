@@ -10,16 +10,16 @@
 
 ## Objetivo
 
-Publicar o Buzz primeiro em `buzz-staging.lolmeida.com` e depois em
-`buzz.lolmeida.com`, usando MicroK8s, ArgoCD, PostgreSQL, Redis e S3-compatible
-isolados.
+Publicar diretamente o Buzz em `buzz.lolmeida.com`, usando MicroK8s, ArgoCD,
+PostgreSQL/Redis partilhados com database/role e database lógico exclusivos, e
+S3-compatible exclusivo.
 
 ## Decisões
 
 - Single-community e uma réplica no primeiro release.
-- PostgreSQL 17 é o baseline de produção.
-- PostgreSQL 16 só pode ser aceite após testes completos de migrations e restore.
-- Não reutilizar databases, roles ou Redis de outros serviços.
+- PostgreSQL 15.18 e Redis 7 existentes são reutilizados somente com isolamento
+  lógico explícito; migrations e restore têm de ser validados.
+- O namespace `buzz` é a única instalação pública; não há promoção staging → produção.
 - Não expor PostgreSQL, Redis, MinIO, Adminer ou métricas à Internet.
 - Secrets: Vaultwarden → AWS SSM → ExternalSecrets → Kubernetes Secret.
 - Imagem fixada por digest; nunca `main` ou `latest` em produção.
@@ -28,11 +28,10 @@ isolados.
 ## Fases
 
 1. Fork, branch, pipeline de imagem e documentação.
-2. PostgreSQL 17, Redis 7.x, S3/prefixo e secrets dedicados.
-3. ArgoCD, Ingress, TLS, DNS e staging.
+2. S3, database/role PostgreSQL, database lógico Redis e secrets dedicados.
+3. ArgoCD, Ingress, TLS e DNS diretos.
 4. Testes de migrations, runtime, segurança, backup e restore.
-5. Promoção controlada para produção.
-6. Ativação gradual de agentes, workflows, webhooks e HA.
+5. Ativação gradual de agentes, workflows, webhooks e HA.
 
 ## Critérios de aceitação
 

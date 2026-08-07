@@ -3,6 +3,7 @@
 - Estado: aceito
 - Data: 2026-08-06
 - Issue: https://github.com/lolmeida/buzz/issues/1
+- Supersedido em deployment por: [ADR-0002](ADR-0002-buzz-direct-shared-services.md)
 
 ## Contexto
 
