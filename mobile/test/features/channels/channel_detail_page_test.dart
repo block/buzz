@@ -2053,7 +2053,7 @@ void main() {
         expect(latestMessage, findsOneWidget);
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
 
         await tester.tap(find.text('Message #general'));
@@ -2065,7 +2065,7 @@ void main() {
         );
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -2078,7 +2078,7 @@ void main() {
         expect(latestMessage, findsOneWidget);
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -2086,6 +2086,53 @@ void main() {
         );
       },
     );
+
+    testWidgets('keeps a short followed tail flush through composer resize', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.reset);
+
+      final messages = [
+        for (var i = 0; i < 3; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final latestMessage = find.byKey(
+        const ValueKey('channel-message-group-msg2'),
+      );
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getBottomLeft(latestMessage).dy,
+        closeTo(tester.getTopLeft(composerDock).dy, 1),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+    });
 
     testWidgets(
       'does not realign a user-detached timeline on keyboard resize',
@@ -2232,6 +2279,18 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
+      final latestMessage = find.byKey(
+        const ValueKey('channel-message-group-newest'),
+      );
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+      expect(
+        tester.getBottomLeft(latestMessage).dy,
+        closeTo(tester.getTopLeft(composerDock).dy, 1),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
     });
 
     testWidgets(
