@@ -40,6 +40,8 @@ pub enum AdmitReason {
     Mention,
     /// Bare (or non-exclusive) human reply in an active thread.
     ThreadContinuation,
+    /// Bare human top-level message in a channel where this agent is active.
+    ChannelContinuation,
 }
 
 /// Decision for a single inbound event.
@@ -51,6 +53,8 @@ pub enum ParticipationDecision {
         /// Root to mark active. For top-level mentions this is the event id
         /// itself (it becomes the thread root when the agent replies).
         mark_root: Option<String>,
+        /// Channel to mark active (continuation without @ in this channel).
+        mark_channel: Option<String>,
     },
     /// Drop silently.
     Drop,
@@ -62,6 +66,9 @@ struct ActiveThreadsStateFile {
     version: u32,
     /// root_id (hex) → last activity as unix milliseconds.
     roots: HashMap<String, u64>,
+    /// channel_id (uuid string) → last activity as unix milliseconds.
+    #[serde(default)]
+    channels: HashMap<String, u64>,
 }
 
 /// Set of thread roots this agent is participating in.
@@ -72,6 +79,8 @@ struct ActiveThreadsStateFile {
 pub struct ActiveThreads {
     /// root_id → last activity unix ms.
     roots: HashMap<String, u64>,
+    /// channel_id → last activity unix ms.
+    channels: HashMap<String, u64>,
     ttl: Duration,
     max: usize,
     /// When set, every mark/gc that changes membership is written here.
@@ -88,6 +97,7 @@ impl ActiveThreads {
     pub fn new(ttl: Duration, max: usize) -> Self {
         Self {
             roots: HashMap::new(),
+            channels: HashMap::new(),
             ttl,
             max: max.max(1),
             persist_path: None,
@@ -110,6 +120,59 @@ impl ActiveThreads {
         self.roots.insert(key, now_unix_ms());
         self.evict_if_needed();
         self.persist();
+    }
+
+    /// Mark (or refresh) a channel as active for bare top-level continuation.
+    pub fn mark_channel(&mut self, channel_id: &str) {
+        let key = channel_id.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        self.gc();
+        self.channels.insert(key, now_unix_ms());
+        self.evict_channels_if_needed();
+        self.persist();
+    }
+
+    fn mark_channel_at(&mut self, channel_id: &str, at_ms: u64) {
+        let key = channel_id.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let existing = self.channels.get(&key).copied().unwrap_or(0);
+        if at_ms >= existing {
+            self.channels.insert(key, at_ms);
+        }
+    }
+
+    /// True when `channel_id` is tracked and not expired.
+    pub fn is_channel_active(&mut self, channel_id: &str) -> bool {
+        let key = channel_id.trim().to_ascii_lowercase();
+        self.gc();
+        match self.channels.get(&key) {
+            Some(&at_ms) if age_ms(at_ms) <= self.ttl_ms() => true,
+            Some(_) => {
+                self.channels.remove(&key);
+                self.persist();
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn evict_channels_if_needed(&mut self) {
+        while self.channels.len() > self.max {
+            let oldest = self
+                .channels
+                .iter()
+                .min_by_key(|(_, at)| *at)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.channels.remove(&k);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Mark without writing disk (used during bulk rehydrate).
@@ -143,6 +206,10 @@ impl ActiveThreads {
         self.roots.len()
     }
 
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
+
     /// Load roots from `path` (if it exists), dropping expired entries.
     pub fn load_from_path(&mut self, path: &Path) -> Result<usize, String> {
         let raw = match std::fs::read_to_string(path) {
@@ -162,6 +229,11 @@ impl ActiveThreads {
         for (root, at_ms) in file.roots {
             if age_ms(at_ms) <= self.ttl_ms() {
                 self.mark_at(&root, at_ms);
+            }
+        }
+        for (ch, at_ms) in file.channels {
+            if age_ms(at_ms) <= self.ttl_ms() {
+                self.mark_channel_at(&ch, at_ms);
             }
         }
         self.evict_if_needed();
@@ -195,15 +267,22 @@ impl ActiveThreads {
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         let mut roots = HashMap::new();
+        let mut channels = HashMap::new();
         let ttl_ms = self.ttl_ms();
         for (k, &at_ms) in &self.roots {
             if age_ms(at_ms) <= ttl_ms {
                 roots.insert(k.clone(), at_ms);
             }
         }
+        for (k, &at_ms) in &self.channels {
+            if age_ms(at_ms) <= ttl_ms {
+                channels.insert(k.clone(), at_ms);
+            }
+        }
         let file = ActiveThreadsStateFile {
             version: STATE_VERSION,
             roots,
+            channels,
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|e| format!("serialize active-threads: {e}"))?;
@@ -269,6 +348,7 @@ impl ActiveThreads {
     fn gc(&mut self) {
         let ttl_ms = self.ttl_ms();
         self.roots.retain(|_, at_ms| age_ms(*at_ms) <= ttl_ms);
+        self.channels.retain(|_, at_ms| age_ms(*at_ms) <= ttl_ms);
     }
 
     fn evict_if_needed(&mut self) {
@@ -390,6 +470,10 @@ pub struct ParticipationContext<'a> {
     pub author_is_agent: bool,
     /// Whether this root is currently active for the agent.
     pub thread_is_active: bool,
+    /// Whether this channel is currently active for the agent.
+    pub channel_is_active: bool,
+    /// Channel id to mark when admitting (uuid string).
+    pub channel_id: Option<&'a str>,
 }
 
 /// Decide whether the harness should wake the agent for this event.
@@ -412,11 +496,17 @@ pub fn decide(ctx: &ParticipationContext<'_>) -> ParticipationDecision {
         .iter()
         .any(|pk| pk.eq_ignore_ascii_case(&agent));
 
+    let mark_channel = ctx
+        .channel_id
+        .map(|c| c.trim().to_ascii_lowercase())
+        .filter(|c| !c.is_empty());
+
     if mentioned {
         let mark_root = participation_root(ctx.thread, ctx.event_id_hex);
         return ParticipationDecision::Admit {
             reason: AdmitReason::Mention,
             mark_root,
+            mark_channel,
         };
     }
 
@@ -428,24 +518,42 @@ pub fn decide(ctx: &ParticipationContext<'_>) -> ParticipationDecision {
         return ParticipationDecision::Drop;
     }
 
-    // Thread continuation only for humans (loop guard).
+    // Continuation only for humans (loop guard).
     if ctx.author_is_agent {
         return ParticipationDecision::Drop;
     }
 
-    let Some(root) = ctx.thread.root_event_id.as_deref() else {
-        // Top-level, no mention, no thread → stay quiet.
-        return ParticipationDecision::Drop;
-    };
-
-    if !ctx.thread_is_active {
-        return ParticipationDecision::Drop;
+    if let Some(root) = ctx.thread.root_event_id.as_deref() {
+        if ctx.thread_is_active {
+            return ParticipationDecision::Admit {
+                reason: AdmitReason::ThreadContinuation,
+                mark_root: Some(root.to_ascii_lowercase()),
+                mark_channel,
+            };
+        }
+        // Threaded but root not active — fall through to channel check.
     }
 
-    ParticipationDecision::Admit {
-        reason: AdmitReason::ThreadContinuation,
-        mark_root: Some(root.to_ascii_lowercase()),
+    // Top-level (or inactive-thread) bare human message in an active channel.
+    if ctx.channel_is_active {
+        let mark_root = if ctx.thread.root_event_id.is_none() {
+            // Top-level: this message becomes a root if the agent replies.
+            Some(ctx.event_id_hex.trim().to_ascii_lowercase())
+                .filter(|k| is_event_id_hex(k))
+        } else {
+            ctx.thread
+                .root_event_id
+                .as_ref()
+                .map(|r| r.to_ascii_lowercase())
+        };
+        return ParticipationDecision::Admit {
+            reason: AdmitReason::ChannelContinuation,
+            mark_root,
+            mark_channel,
+        };
     }
+
+    ParticipationDecision::Drop
 }
 
 /// Resolve the root id that should become active for this event.
@@ -491,12 +599,16 @@ pub fn decide_event(
     agent_pubkey_hex: &str,
     author_is_agent: bool,
     active: &mut ActiveThreads,
+    channel_id: Option<&str>,
 ) -> ParticipationDecision {
     let thread = parse_thread_tags(event);
     let event_id = event.id.to_hex();
     let author = event.pubkey.to_hex();
     let root = thread.root_event_id.as_deref();
     let thread_is_active = root.map(|r| active.is_active(r)).unwrap_or(false);
+    let channel_is_active = channel_id
+        .map(|c| active.is_channel_active(c))
+        .unwrap_or(false);
 
     let decision = decide(&ParticipationContext {
         agent_pubkey_hex,
@@ -505,14 +617,22 @@ pub fn decide_event(
         thread: &thread,
         author_is_agent,
         thread_is_active,
+        channel_is_active,
+        channel_id,
     });
 
     if let ParticipationDecision::Admit {
-        mark_root: Some(ref root),
+        mark_root: ref root,
+        mark_channel: ref ch,
         ..
     } = decision
     {
-        active.mark(root);
+        if let Some(root) = root {
+            active.mark(root);
+        }
+        if let Some(ch) = ch {
+            active.mark_channel(ch);
+        }
     }
 
     decision
@@ -636,7 +756,7 @@ mod tests {
         let event = make_event(&author, "hey", vec![p_tag(&agent)]);
         let mut active = ActiveThreads::default();
 
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert!(matches!(
             d,
             ParticipationDecision::Admit {
@@ -659,12 +779,13 @@ mod tests {
         );
         let mut active = ActiveThreads::default();
 
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert!(matches!(
             d,
             ParticipationDecision::Admit {
                 reason: AdmitReason::Mention,
-                mark_root: Some(ref r)
+                mark_root: Some(ref r),
+                mark_channel: _,
             } if r == &root
         ));
         assert!(active.is_active(&root));
@@ -683,12 +804,13 @@ mod tests {
             "follow up without alias",
             vec![e_tag(&root, "root"), e_tag(&parent_id(), "reply")],
         );
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert_eq!(
             d,
             ParticipationDecision::Admit {
                 reason: AdmitReason::ThreadContinuation,
                 mark_root: Some(root.clone()),
+                mark_channel: None,
             }
         );
         assert!(active.is_active(&root));
@@ -706,7 +828,7 @@ mod tests {
             "random reply",
             vec![e_tag(&root, "root"), e_tag(&root, "reply")],
         );
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert_eq!(d, ParticipationDecision::Drop);
     }
 
@@ -724,7 +846,7 @@ mod tests {
             "talking to someone else",
             vec![e_tag(&root, "root"), e_tag(&root, "reply"), p_tag(&other)],
         );
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert_eq!(d, ParticipationDecision::Drop);
     }
 
@@ -748,12 +870,13 @@ mod tests {
                 p_tag(&author.public_key().to_hex()),
             ],
         );
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert_eq!(
             d,
             ParticipationDecision::Admit {
                 reason: AdmitReason::ThreadContinuation,
                 mark_root: Some(root),
+                mark_channel: None,
             }
         );
     }
@@ -776,7 +899,7 @@ mod tests {
                 p_tag(&agent),
             ],
         );
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert!(matches!(
             d,
             ParticipationDecision::Admit {
@@ -784,6 +907,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn bare_top_level_in_active_channel_continues() {
+        let author = keys_for(2);
+        let agent = agent_pk();
+        let channel = "5dc175ab-fa04-4303-bccf-6e37c1fe7baa";
+        let mut active = ActiveThreads::default();
+        active.mark_channel(channel);
+
+        let event = make_event(&author, "hey i did it myself", vec![]);
+        let d = decide_event(&event, &agent, false, &mut active, Some(channel));
+        assert!(matches!(
+            d,
+            ParticipationDecision::Admit {
+                reason: AdmitReason::ChannelContinuation,
+                ..
+            }
+        ));
+        assert!(active.is_channel_active(channel));
+        assert!(active.is_active(&event.id.to_hex()));
     }
 
     #[test]
@@ -799,7 +943,7 @@ mod tests {
             "sibling agent chatter",
             vec![e_tag(&root, "root"), e_tag(&root, "reply")],
         );
-        let d = decide_event(&event, &agent, true, &mut active);
+        let d = decide_event(&event, &agent, true, &mut active, None);
         assert_eq!(d, ParticipationDecision::Drop);
     }
 
@@ -809,7 +953,7 @@ mod tests {
         let agent = agent_pk();
         let mut active = ActiveThreads::default();
         let event = make_event(&author, "hello channel", vec![]);
-        let d = decide_event(&event, &agent, false, &mut active);
+        let d = decide_event(&event, &agent, false, &mut active, None);
         assert_eq!(d, ParticipationDecision::Drop);
     }
 
@@ -853,12 +997,15 @@ mod tests {
             thread: &thread,
             author_is_agent: false,
             thread_is_active: false,
+            channel_is_active: false,
+            channel_id: None,
         });
         assert_eq!(
             d,
             ParticipationDecision::Admit {
                 reason: AdmitReason::Mention,
                 mark_root: Some(event_id),
+                mark_channel: None,
             }
         );
     }

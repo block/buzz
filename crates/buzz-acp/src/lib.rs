@@ -2079,6 +2079,7 @@ async fn tokio_main() -> Result<()> {
                 tracing::info!(
                     path = %path.display(),
                     roots = s.len(),
+                    channels = s.channel_count(),
                     "loaded active-thread state from disk"
                 );
                 s
@@ -2105,9 +2106,10 @@ async fn tokio_main() -> Result<()> {
         .await;
         tracing::info!(
             roots = store.len(),
+            channels = store.channel_count(),
             rehydrated,
             path = %path.display(),
-            "thread participation enabled — bare human replies in active threads wake this agent"
+            "thread participation enabled — bare human replies in active threads/channels wake this agent"
         );
         store
     } else {
@@ -2632,11 +2634,13 @@ async fn tokio_main() -> Result<()> {
                                     &ctx.rest_client,
                                 )
                                 .await;
+                                let channel_id_str = buzz_event.channel_id.to_string();
                                 let decision = participation::decide_event(
                                     &buzz_event.event,
                                     &pubkey_hex,
                                     author_is_agent,
                                     &mut active_threads,
+                                    Some(&channel_id_str),
                                 );
                                 match decision {
                                     participation::ParticipationDecision::Admit {
@@ -2646,6 +2650,7 @@ async fn tokio_main() -> Result<()> {
                                         if matches!(
                                             reason,
                                             participation::AdmitReason::ThreadContinuation
+                                                | participation::AdmitReason::ChannelContinuation
                                         ) {
                                             prompt_tag = "thread-continuation".into();
                                         }
@@ -2660,7 +2665,7 @@ async fn tokio_main() -> Result<()> {
                                         tracing::info!(
                                             channel_id = %buzz_event.channel_id,
                                             event_id = %buzz_event.event.id.to_hex(),
-                                            "thread participation — dropping (not mentioned, inactive thread, exclusive other, or agent author)"
+                                            "thread participation — dropping (not mentioned, inactive thread/channel, exclusive other, or agent author)"
                                         );
                                         continue;
                                     }
