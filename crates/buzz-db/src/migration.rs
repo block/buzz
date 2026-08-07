@@ -100,7 +100,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+    const DESTRUCTIVE_TEST_OPT_IN_ENV: &str = "BUZZ_TEST_DESTRUCTIVE_DB";
+    const TEST_DATABASE_URL_ENV: &str = "BUZZ_TEST_DATABASE_URL";
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -115,6 +116,45 @@ mod tests {
         kind: ConstraintKind,
         description: String,
         columns: Vec<String>,
+    }
+
+    fn resolve_destructive_test_database_url(
+        opt_in: Option<&str>,
+        database_url: Option<String>,
+    ) -> std::result::Result<String, &'static str> {
+        if opt_in != Some("1") {
+            return Err(
+                "set BUZZ_TEST_DESTRUCTIVE_DB=1 to enable schema-destructive database tests",
+            );
+        }
+
+        database_url
+            .filter(|url| !url.trim().is_empty())
+            .ok_or("set BUZZ_TEST_DATABASE_URL to an isolated disposable Postgres database")
+    }
+
+    fn destructive_test_database_url() -> String {
+        let opt_in = std::env::var(DESTRUCTIVE_TEST_OPT_IN_ENV).ok();
+        let database_url = std::env::var(TEST_DATABASE_URL_ENV).ok();
+
+        resolve_destructive_test_database_url(opt_in.as_deref(), database_url)
+            .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    #[test]
+    fn destructive_database_tests_require_explicit_opt_in_and_url() {
+        let url = "postgres://buzz:buzz_test@localhost:5432/buzz_test".to_owned();
+
+        assert!(resolve_destructive_test_database_url(None, Some(url.clone())).is_err());
+        assert!(resolve_destructive_test_database_url(Some("0"), Some(url.clone())).is_err());
+        assert!(resolve_destructive_test_database_url(Some("true"), Some(url.clone())).is_err());
+        assert!(resolve_destructive_test_database_url(Some("1"), None).is_err());
+        assert!(resolve_destructive_test_database_url(Some("1"), Some(String::new())).is_err());
+        assert!(resolve_destructive_test_database_url(Some("1"), Some(" \t".to_owned())).is_err());
+        assert_eq!(
+            resolve_destructive_test_database_url(Some("1"), Some(url.clone())),
+            Ok(url)
+        );
     }
 
     /// Concatenated SQL of every embedded migration, in version order.
@@ -1091,14 +1131,12 @@ mod tests {
         );
     }
 
-    async fn connect_test_pool() -> PgPool {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+    async fn connect_destructive_test_pool() -> PgPool {
+        let database_url = destructive_test_database_url();
 
         PgPool::connect(&database_url)
             .await
-            .expect("connect to test DB")
+            .expect("connect to isolated destructive test DB")
     }
 
     async fn reset_public_schema(pool: &PgPool) {
@@ -1122,9 +1160,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Postgres"]
+    #[ignore = "requires BUZZ_TEST_DESTRUCTIVE_DB=1 and BUZZ_TEST_DATABASE_URL"]
     async fn pre_0007_ambiguous_nip_rs_data_blocks_without_mutation_and_allows_retry() {
-        let pool = connect_test_pool().await;
+        let pool = connect_destructive_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
             .run_to(6, &pool)
@@ -1192,9 +1230,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Postgres"]
+    #[ignore = "requires BUZZ_TEST_DESTRUCTIVE_DB=1 and BUZZ_TEST_DATABASE_URL"]
     async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
-        let pool = connect_test_pool().await;
+        let pool = connect_destructive_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
             .run_to(7, &pool)
@@ -1252,9 +1290,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Postgres"]
+    #[ignore = "requires BUZZ_TEST_DESTRUCTIVE_DB=1 and BUZZ_TEST_DATABASE_URL"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {
-        let pool = connect_test_pool().await;
+        let pool = connect_destructive_test_pool().await;
         reset_public_schema(&pool).await;
 
         run_migrations(&pool).await.expect("run migrations");
