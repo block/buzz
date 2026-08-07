@@ -13,9 +13,14 @@ pub(crate) use discovery::{
 };
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
 
+mod snapshot;
+pub use snapshot::{snapshot_from_events, MeshSnapshot};
+
 mod catalog;
+mod experimental_catalog;
 pub(crate) use catalog::canonical_curated_model_id;
 pub use catalog::{model_catalog, MeshModelCatalog};
+pub use experimental_catalog::{experimental_catalog, MeshExperimentalCatalog};
 
 mod identity;
 pub use identity::ensure_owner_identity;
@@ -29,6 +34,9 @@ pub(crate) use recovery::{
     rearm_relay_mesh_for_running_agents, recover_stale_mesh_runtime, MeshRecoveryUrgency,
     MeshRuntimeRecovery,
 };
+
+mod peers;
+pub use peers::{live_view_from_payload, MeshLiveView};
 
 mod usage;
 pub use usage::{serving_usage_from_payload, MeshServingUsage};
@@ -630,6 +638,19 @@ impl DesktopMeshRuntime {
         };
         let status = ready.status().await?;
         Ok(serving_usage_from_payload(&status.payload))
+    }
+
+    /// This machine's live gossip view of the mesh — who we are actually
+    /// connected to right now. Distinct from the relay snapshot, which reports
+    /// last-published notes valid for 120s. See [`peers`] for why both exist.
+    pub async fn live_view(&self) -> anyhow::Result<MeshLiveView> {
+        let mut handle = self.handle.lock().await;
+        Self::promote_finished_startup(&mut handle).await;
+        let DesktopMeshHandle::Ready(ready) = &*handle else {
+            anyhow::bail!("mesh management status is not ready");
+        };
+        let status = ready.status().await?;
+        Ok(live_view_from_payload(&status.payload))
     }
 
     pub async fn dial_endpoint_addr(&self, endpoint_addr: impl Into<String>) -> anyhow::Result<()> {

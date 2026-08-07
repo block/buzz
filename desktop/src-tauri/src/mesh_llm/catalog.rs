@@ -26,17 +26,42 @@ const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
 const CURATED_LARGE_DESCRIPTION: &str =
     "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
 const CURATED_SMALL: &str = "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M";
+/// Matches the `MODEL_CATALOG` entry; declared here so the fit-eligibility
+/// check does not depend on that lookup succeeding.
+const CURATED_SMALL_SIZE: &str = "4.6GB";
 const CURATED_SMALL_ALIAS: &str = "Gemma-4-E4B-it-Q4_K_M";
 /// Rated-capacity boundary between the two curated tiers, in GB (marketing
 /// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
 const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
 
-/// The Buzz-curated recommendation for a machine's rated memory capacity.
-fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
-    match rated_gb {
+/// The Buzz-curated recommendation for this machine, or `None` when even the
+/// small pick cannot fit.
+///
+/// Tiering is by *rated* capacity (marketing GB), but eligibility is by *fit*
+/// against usable AI memory — two different numbers, and conflating them was a
+/// real bug: the tier alone would hand a 6GB machine a 4.6GB model its own
+/// catalog marks `TooLarge`, and the one-tap card would then happily start it.
+///
+/// `None` is the honest answer for a machine that cannot host anything. It is
+/// not a failure state — such a machine can still *consume* shared compute,
+/// which is what the card says.
+fn buzz_recommended_model(rated_gb: Option<u64>, vram_gb: f64) -> Option<&'static str> {
+    let tier = match rated_gb {
         Some(gb) if gb >= CURATED_LARGE_MIN_RATED_GB => CURATED_LARGE,
         _ => CURATED_SMALL,
+    };
+    // Verify the tier actually fits. A rated capacity above the boundary does
+    // not guarantee usable memory for the larger pick (an eGPU-less machine
+    // with a large unified pool still caps what it will lend), so fall back to
+    // the small pick rather than recommending something that cannot load.
+    let fits = |size: &str| fit_code(parse_size_gb(size), vram_gb) != ModelFit::TooLarge;
+    if tier == CURATED_LARGE && fits(CURATED_LARGE_SIZE) {
+        return Some(CURATED_LARGE);
     }
+    if fits(CURATED_SMALL_SIZE) {
+        return Some(CURATED_SMALL);
+    }
+    None
 }
 
 /// Convert Buzz's pre-0.74 curated package aliases into the canonical model
@@ -60,7 +85,7 @@ pub enum ModelFit {
     TooLarge,
 }
 
-fn fit_code(model_gb: f64, vram_gb: f64) -> ModelFit {
+pub(super) fn fit_code(model_gb: f64, vram_gb: f64) -> ModelFit {
     if model_gb <= vram_gb * 0.6 {
         ModelFit::Comfortable
     } else if model_gb <= vram_gb * 0.9 {
@@ -190,7 +215,8 @@ fn build_catalog(
         });
     }
 
-    let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
+    let recommended =
+        buzz_recommended_model(rated_capacity_gb(vram_bytes), vram_gb).map(str::to_string);
     for entry in &mut entries {
         entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
         // Both curated tiers are always offered: the recommended one for this
@@ -283,6 +309,29 @@ mod tests {
         assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
         let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
         assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+    }
+
+    #[test]
+    fn a_machine_too_small_for_any_pick_recommends_nothing() {
+        // 4GB usable cannot hold the 4.6GB small pick. Recommending it anyway
+        // is what let the one-tap card start a model its own catalog marks
+        // TooLarge; `None` is the honest answer, and such a machine can still
+        // consume shared compute.
+        let unfit = build_catalog(None, 6_000_000_000, 4.0, &[]);
+        assert_eq!(unfit.recommended, None);
+        assert!(
+            unfit.entries.iter().all(|entry| !entry.recommended),
+            "no entry may be marked recommended when nothing fits"
+        );
+    }
+
+    #[test]
+    fn a_high_rated_machine_with_little_usable_memory_falls_back() {
+        // Rated capacity clears the 64GB tier boundary, but the usable figure
+        // (an explicit --max-vram cap, say) cannot hold the 17GB large pick.
+        // Tier alone would recommend it; fit must veto down to the small pick.
+        let capped = build_catalog(None, 128_000_000_000, 8.0, &[]);
+        assert_eq!(capped.recommended.as_deref(), Some(CURATED_SMALL));
     }
 
     #[test]

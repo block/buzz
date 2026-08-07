@@ -1,6 +1,8 @@
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
+  RELAY_MESH_AUTO_MODEL,
+  RELAY_MESH_PROVIDER,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -147,6 +149,27 @@ export function selectionOnModelDropdownChange(
     clearKnownModelOnCustomEntry: boolean;
     /** Caller-computed: whether the current model is outside the known options. */
     isModelCustom: boolean;
+    /**
+     * Caller-computed: whether the effective provider is Buzz shared compute.
+     *
+     * Shared compute encodes Auto as the literal `"auto"`, not as blank. Blank
+     * means *inherit the global model*, so a blank Auto on shared compute both
+     * resolves to whatever unrelated model the global config names (e.g. a
+     * Claude id sent to a local mesh node) and fails the raw-pair submit gate in
+     * `agentAiConfigurationModeSatisfied`, which requires a non-empty model.
+     *
+     * `"auto"` is also a trigger token rather than a final choice: Buzz sets
+     * `BUZZ_AGENT_PREFER_MESH_FOR_AUTO` for this provider, and buzz-agent
+     * rewrites exactly `"auto"` to the virtual `mesh` model when the live
+     * catalog offers enough models for Mixture-of-Agents. Any concrete model id
+     * defeats that translation.
+     *
+     * Optional. Callers that already derive it (because the picker can be driven
+     * by an *inherited* effective provider, not just the selection's own) should
+     * pass it; otherwise the selection's own provider is used, which covers every
+     * case where the agent names the provider itself.
+     */
+    isRelayMesh?: boolean;
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
@@ -159,8 +182,15 @@ export function selectionOnModelDropdownChange(
     return next;
   }
 
+  const isRelayMesh =
+    params.isRelayMesh ?? current.provider.trim() === RELAY_MESH_PROVIDER;
+
   next.isCustomModelEditing = false;
   next.model =
-    params.nextValue === AUTO_MODEL_DROPDOWN_VALUE ? "" : params.nextValue;
+    params.nextValue === AUTO_MODEL_DROPDOWN_VALUE
+      ? isRelayMesh
+        ? RELAY_MESH_AUTO_MODEL
+        : ""
+      : params.nextValue;
   return next;
 }

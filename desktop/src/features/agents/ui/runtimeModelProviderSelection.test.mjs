@@ -228,3 +228,94 @@ test("auto-model selection clears the model; concrete selection sets it", () => 
   );
   assert.equal(concrete.model, "gpt-5");
 });
+
+test('shared compute encodes Auto as "auto", not blank', () => {
+  // Blank means *inherit the global model*, so on shared compute a blank Auto
+  // resolves to whatever unrelated model the global config names -- a Claude id
+  // sent to a local mesh node -- and it fails the raw-pair submit gate in
+  // `agentAiConfigurationModeSatisfied`, which is what greyed out Create.
+  //
+  // "auto" is also a trigger token, not a final choice: buzz-agent rewrites
+  // exactly "auto" to the virtual `mesh` model when the catalog offers enough
+  // models for Mixture-of-Agents. Any concrete id defeats that translation.
+  const auto = selectionOnModelDropdownChange(
+    { ...base, provider: "relay-mesh", model: "some-physical-model" },
+    {
+      nextValue: "__auto_model__",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+      isRelayMesh: true,
+    },
+  );
+  assert.equal(auto.model, "auto");
+  assert.equal(auto.isCustomModelEditing, false);
+});
+
+test("a concrete shared-compute model is still honoured verbatim", () => {
+  // Only Auto is special. An explicit pick must reach mesh-llm unchanged.
+  const concrete = selectionOnModelDropdownChange(
+    { ...base, provider: "relay-mesh", model: "auto" },
+    {
+      nextValue: "unsloth/gemma-4-26B",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+      isRelayMesh: true,
+    },
+  );
+  assert.equal(concrete.model, "unsloth/gemma-4-26B");
+});
+
+test("ordinary providers keep blank for Auto", () => {
+  // Blank is the generic "inherit the global default" encoding everywhere else,
+  // and must not be migrated to "auto".
+  const auto = selectionOnModelDropdownChange(
+    { ...base, provider: "anthropic", model: "claude-opus-5" },
+    {
+      nextValue: "__auto_model__",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+      isRelayMesh: false,
+    },
+  );
+  assert.equal(auto.model, "");
+  // Omitting the flag entirely behaves the same, so existing callers are safe.
+  const omitted = selectionOnModelDropdownChange(
+    { ...base, provider: "anthropic", model: "claude-opus-5" },
+    {
+      nextValue: "__auto_model__",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+    },
+  );
+  assert.equal(omitted.model, "");
+});
+
+test("shared compute is inferred from the selection when the caller omits it", () => {
+  // The Edit dialog cannot pass the flag (its file is at the size ceiling), so
+  // the selection's own provider has to be enough for the common case where the
+  // agent names relay-mesh itself.
+  const auto = selectionOnModelDropdownChange(
+    { ...base, provider: "relay-mesh", model: "some-physical-model" },
+    {
+      nextValue: "__auto_model__",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+    },
+  );
+  assert.equal(auto.model, "auto");
+});
+
+test("an explicit flag wins over the selection's own provider", () => {
+  // Inheritance case: the picker can run off an effective provider the selection
+  // does not name, so a caller that knows better must be able to say so.
+  const inherited = selectionOnModelDropdownChange(
+    { ...base, provider: "", model: "x" },
+    {
+      nextValue: "__auto_model__",
+      clearKnownModelOnCustomEntry: false,
+      isModelCustom: false,
+      isRelayMesh: true,
+    },
+  );
+  assert.equal(inherited.model, "auto");
+});

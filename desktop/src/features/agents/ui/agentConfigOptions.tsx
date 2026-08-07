@@ -37,6 +37,19 @@ export const ADVANCED_FIELDS_MOTION_TRANSITION = {
 } as const;
 
 export const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
+/**
+ * The model value that means "Auto" on Buzz shared compute.
+ *
+ * Not blank: blank means *inherit the global model*, which for this provider
+ * resolves to whatever unrelated model the global config names. It is also a
+ * trigger token rather than a final choice -- buzz-agent rewrites exactly
+ * `"auto"` to the virtual `mesh` model when the live catalog offers enough
+ * models for Mixture-of-Agents (`BUZZ_AGENT_PREFER_MESH_FOR_AUTO`), so any
+ * concrete model id defeats that translation.
+ */
+export const RELAY_MESH_AUTO_MODEL = "auto";
+/** Provider id for Buzz shared compute. */
+export const RELAY_MESH_PROVIDER = "relay-mesh";
 export const CUSTOM_MODEL_DROPDOWN_VALUE = "__custom_model__";
 export const AUTO_PROVIDER_DROPDOWN_VALUE = "__auto_provider__";
 export const CUSTOM_PROVIDER_DROPDOWN_VALUE = "__custom_provider__";
