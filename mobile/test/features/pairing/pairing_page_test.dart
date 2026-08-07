@@ -224,6 +224,82 @@ void main() {
       expect(notifier.pairedCodes, [code]);
     });
 
+    testWidgets('uses Face ID copy on iOS builds', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.dark().copyWith(platform: TargetPlatform.iOS),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+
+      expect(find.text('Use Face ID'), findsOneWidget);
+    });
+
+    testWidgets('uses generic biometrics copy on Android builds', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+
+      expect(find.text('Use biometrics'), findsOneWidget);
+    });
+
+    testWidgets('new identity import offers protection checked by default', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      final checkbox = tester.widget<CheckboxListTile>(
+        find.byKey(const Key('protect-imported-identity-checkbox')),
+      );
+      expect(checkbox.value, isTrue);
+      expect(
+        find.textContaining('open Buzz and approve protected actions'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('desktop recovery does not show import protection checkbox', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(
+              () => _ConfirmingSasPairingNotifier(sendsIdentityToDesktop: true),
+            ),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      expect(
+        find.byKey(const Key('protect-imported-identity-checkbox')),
+        findsNothing,
+      );
+    });
+
     testWidgets('recovery SAS warns about permanent desktop access', (
       tester,
     ) async {
@@ -260,6 +336,9 @@ class _ErrorPairingNotifier extends Notifier<PairingState>
       PairingState(status: PairingStatus.error, errorMessage: error);
 
   @override
+  Future<bool> authorizeIdentityExport() async => true;
+
+  @override
   Future<void> pair(String rawInput) async {}
 
   @override
@@ -267,6 +346,9 @@ class _ErrorPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}
@@ -278,6 +360,9 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
   PairingState build() => const PairingState(status: PairingStatus.connecting);
 
   @override
+  Future<bool> authorizeIdentityExport() async => true;
+
+  @override
   Future<void> pair(String rawInput) async {}
 
   @override
@@ -285,6 +370,9 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}
@@ -298,6 +386,9 @@ class _RecordingPairingNotifier extends Notifier<PairingState>
   PairingState build() => const PairingState();
 
   @override
+  Future<bool> authorizeIdentityExport() async => true;
+
+  @override
   Future<void> pair(String rawInput) async => pairedCodes.add(rawInput);
 
   @override
@@ -305,6 +396,9 @@ class _RecordingPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}
@@ -324,6 +418,9 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
   );
 
   @override
+  Future<bool> authorizeIdentityExport() async => true;
+
+  @override
   Future<void> pair(String rawInput) async {}
 
   @override
@@ -331,6 +428,9 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}

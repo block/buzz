@@ -4,6 +4,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/settings/accent_picker_page.dart';
 import 'package:buzz/features/settings/theme_picker_page.dart';
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -168,6 +170,53 @@ void main() {
     });
   });
 
+  group('SettingsPage', () {
+    testWidgets('removes a protected community without device authentication', (
+      tester,
+    ) async {
+      final auth = _ProtectedAuthNotifier();
+      final authorizer = _RecordingAuthorizer();
+      final instance = await _prefs(const {});
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+          overrides: [
+            savedPrefsProvider.overrideWithValue(instance),
+            authProvider.overrideWith(() => auth),
+            sensitiveActionAuthorizerProvider.overrideWithValue(authorizer),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('Remove community'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('Remove community'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove “Dungeon” from this phone?'), findsOneWidget);
+      expect(
+        find.text(
+          'You’ll be signed out of this community on this phone. '
+          'To come back, you’ll need to add it again from another signed-in device.',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
+      await tester.pumpAndSettle();
+
+      expect(auth.signOutCalls, 1);
+      expect(authorizer.authorizationCalls, 0);
+    });
+  });
+
   group('Buzz accent behavior', () {
     testWidgets('settings hides accent navigation for Buzz', (tester) async {
       await _pumpPicker(
@@ -235,4 +284,38 @@ void main() {
       );
     });
   });
+}
+
+class _ProtectedAuthNotifier extends AuthNotifier {
+  int signOutCalls = 0;
+
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: AuthStatus.authenticated,
+    community: Community(
+      id: 'dungeon',
+      name: 'Dungeon',
+      relayUrl: 'https://dungeon.example',
+      sensitiveActionPolicy: SensitiveActionPolicy.enabled,
+      addedAt: DateTime(2026),
+    ),
+  );
+
+  @override
+  Future<void> signOut() async {
+    signOutCalls++;
+  }
+}
+
+class _RecordingAuthorizer implements SensitiveActionAuthorizer {
+  int authorizationCalls = 0;
+
+  @override
+  Future<DeviceAuthResult> authorizeIdentityAction() async {
+    authorizationCalls++;
+    return DeviceAuthResult.success;
+  }
+
+  @override
+  Future<bool> isSupported() async => true;
 }

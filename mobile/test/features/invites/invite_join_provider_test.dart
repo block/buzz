@@ -10,6 +10,7 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
 import '../../shared/community/community_storage_test.dart';
 
@@ -37,6 +38,9 @@ void main() {
         final container = ProviderContainer(
           overrides: [
             communityStorageProvider.overrideWithValue(storage),
+            sensitiveActionAuthorizerProvider.overrideWithValue(
+              _SuccessfulAuthorizer(),
+            ),
             authProvider.overrideWith(() => auth),
             inviteKeyGeneratorProvider.overrideWithValue(() {
               generatedKeys++;
@@ -86,6 +90,9 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
+          sensitiveActionAuthorizerProvider.overrideWithValue(
+            _SuccessfulAuthorizer(),
+          ),
           authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
           inviteJoinHttpClientProvider.overrideWithValue(
@@ -156,6 +163,10 @@ void main() {
       );
       expect(auth.authenticatedCommunities.single.pubkey, keys.public);
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
+      expect(
+        auth.authenticatedCommunities.single.sensitiveActionPolicy,
+        SensitiveActionPolicy.enabled,
+      );
     },
   );
 
@@ -181,6 +192,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(storage),
+        sensitiveActionAuthorizerProvider.overrideWithValue(
+          _SuccessfulAuthorizer(),
+        ),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
@@ -225,6 +239,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(storage),
+        sensitiveActionAuthorizerProvider.overrideWithValue(
+          _SuccessfulAuthorizer(),
+        ),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
@@ -270,6 +287,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(storage),
+        sensitiveActionAuthorizerProvider.overrideWithValue(
+          _SuccessfulAuthorizer(),
+        ),
         authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
@@ -317,6 +337,15 @@ void main() {
     );
     expect(auth.authenticatedCommunities, hasLength(1));
   });
+}
+
+class _SuccessfulAuthorizer implements SensitiveActionAuthorizer {
+  @override
+  Future<DeviceAuthResult> authorizeIdentityAction() async =>
+      DeviceAuthResult.success;
+
+  @override
+  Future<bool> isSupported() async => true;
 }
 
 class _RecordingAuthNotifier extends AuthNotifier {

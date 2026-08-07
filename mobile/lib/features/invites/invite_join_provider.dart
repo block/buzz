@@ -8,6 +8,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
+import '../../shared/security/sensitive_action_authorizer.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
@@ -117,6 +118,17 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         return;
       }
 
+      final authorization = await ref
+          .read(sensitiveActionAuthorizationSessionProvider)
+          .authorize();
+      if (authorization != DeviceAuthResult.success) {
+        state = state.copyWith(
+          status: InviteJoinStatus.error,
+          errorMessage: _authorizationError(authorization),
+        );
+        return;
+      }
+
       final keys = ref.read(inviteKeyGeneratorProvider)();
       final body = jsonEncode({
         'code': invite.code,
@@ -159,6 +171,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         relayUrl: invite.relayUrl,
         pubkey: keys.public,
         nsec: keys.nsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.enabled,
       );
       await ref
           .read(authProvider.notifier)
@@ -265,6 +278,16 @@ bool _requiresFreshInvite(Object error) {
   return message.contains('join_policy_required') ||
       message.contains('invite_exhausted');
 }
+
+String _authorizationError(DeviceAuthResult result) => switch (result) {
+  DeviceAuthResult.cancelled => 'Device authentication was cancelled.',
+  DeviceAuthResult.unavailable =>
+    'Set up a device passcode or biometrics before joining.',
+  DeviceAuthResult.lockedOut =>
+    'Device authentication is locked. Unlock it in system settings and try again.',
+  DeviceAuthResult.failed => 'Device authentication failed. Try again.',
+  DeviceAuthResult.success => '',
+};
 
 String _friendlyInviteError(Object error) {
   final message = error.toString();

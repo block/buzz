@@ -1,0 +1,126 @@
+import 'package:flutter/foundation.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:local_auth/local_auth.dart';
+
+String sensitiveActionAuthenticationName(TargetPlatform platform) =>
+    switch (platform) {
+      TargetPlatform.iOS => 'Face ID',
+      TargetPlatform.android => 'biometrics',
+      _ => 'device authentication',
+    };
+
+/// Coarse outcomes safe to use for control flow without retaining OS details.
+enum DeviceAuthResult { success, cancelled, unavailable, lockedOut, failed }
+
+abstract interface class SensitiveActionAuthorizer {
+  Future<DeviceAuthResult> authorizeIdentityAction();
+
+  Future<bool> isSupported();
+}
+
+class LocalSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
+  LocalSensitiveActionAuthorizer([LocalAuthentication? authentication])
+    : _authentication = authentication ?? LocalAuthentication();
+
+  final LocalAuthentication _authentication;
+
+  @override
+  Future<DeviceAuthResult> authorizeIdentityAction() async {
+    try {
+      final supported = await _authentication.isDeviceSupported();
+      if (!supported) return DeviceAuthResult.unavailable;
+      final authenticated = await _authentication.authenticate(
+        localizedReason: 'Confirm this sensitive Buzz identity action',
+        biometricOnly: false,
+        sensitiveTransaction: true,
+        persistAcrossBackgrounding: false,
+      );
+      return authenticated ? DeviceAuthResult.success : DeviceAuthResult.failed;
+    } on LocalAuthException catch (error) {
+      return switch (error.code) {
+        LocalAuthExceptionCode.userCanceled ||
+        LocalAuthExceptionCode.systemCanceled ||
+        LocalAuthExceptionCode.timeout => DeviceAuthResult.cancelled,
+        LocalAuthExceptionCode.temporaryLockout ||
+        LocalAuthExceptionCode.biometricLockout => DeviceAuthResult.lockedOut,
+        LocalAuthExceptionCode.noCredentialsSet ||
+        LocalAuthExceptionCode.noBiometricsEnrolled ||
+        LocalAuthExceptionCode.noBiometricHardware ||
+        LocalAuthExceptionCode.biometricHardwareTemporarilyUnavailable ||
+        LocalAuthExceptionCode.uiUnavailable => DeviceAuthResult.unavailable,
+        _ => DeviceAuthResult.failed,
+      };
+    } catch (_) {
+      return DeviceAuthResult.failed;
+    }
+  }
+
+  @override
+  Future<bool> isSupported() async {
+    try {
+      return await _authentication.isDeviceSupported();
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+final sensitiveActionAuthorizerProvider = Provider<SensitiveActionAuthorizer>((
+  ref,
+) {
+  return LocalSensitiveActionAuthorizer();
+});
+
+final sensitiveActionAuthSupportedProvider = FutureProvider<bool>((ref) {
+  return ref.watch(sensitiveActionAuthorizerProvider).isSupported();
+});
+
+final appLockClockProvider = Provider<DateTime Function()>((ref) {
+  return DateTime.now;
+});
+
+class SensitiveActionAuthorizationSession {
+  SensitiveActionAuthorizationSession({
+    required SensitiveActionAuthorizer authorizer,
+    required DateTime Function() now,
+  }) : _authorizer = authorizer,
+       _now = now;
+
+  final SensitiveActionAuthorizer _authorizer;
+  final DateTime Function() _now;
+
+  DateTime? lastSuccessfulAt;
+  Future<DeviceAuthResult>? _authorizationInFlight;
+
+  bool get isAuthorizing => _authorizationInFlight != null;
+
+  Future<DeviceAuthResult> authorize() async {
+    final inFlight = _authorizationInFlight;
+    if (inFlight != null) return inFlight;
+
+    final authorization = _authorizer.authorizeIdentityAction();
+    _authorizationInFlight = authorization;
+    try {
+      final result = await authorization;
+      if (result == DeviceAuthResult.success) lastSuccessfulAt = _now();
+      return result;
+    } finally {
+      if (identical(_authorizationInFlight, authorization)) {
+        _authorizationInFlight = null;
+      }
+    }
+  }
+
+  bool wasAuthorizedWithin(Duration duration) {
+    final authorizedAt = lastSuccessfulAt;
+    return authorizedAt != null && _now().difference(authorizedAt) < duration;
+  }
+}
+
+final sensitiveActionAuthorizationSessionProvider =
+    Provider<SensitiveActionAuthorizationSession>((ref) {
+      return SensitiveActionAuthorizationSession(
+        authorizer: ref.watch(sensitiveActionAuthorizerProvider),
+        now: ref.watch(appLockClockProvider),
+      );
+    });

@@ -25,9 +25,25 @@ class _ConnectionSection extends ConsumerWidget {
             title: 'Send identity to desktop',
             subtitle: 'Scan a recovery code shown by Buzz Desktop',
             trailing: const _RowChevron(),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
-            ),
+            onTap: () async {
+              final authorized = await ref
+                  .read(pairingProvider.notifier)
+                  .authorizeIdentityExport();
+              if (!context.mounted) return;
+              if (!authorized) {
+                final message = ref.read(pairingProvider).errorMessage;
+                if (message != null) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(message)));
+                }
+                return;
+              }
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
+              );
+              ref.read(pairingProvider.notifier).reset();
+            },
           ),
         ],
       ],
@@ -86,13 +102,18 @@ class _IdentityRow extends StatelessWidget {
 }
 
 void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
+  final communityName = ref.read(authProvider).value?.community?.name;
+  final title = communityName == null || communityName.trim().isEmpty
+      ? 'Remove community from this phone?'
+      : 'Remove “$communityName” from this phone?';
+
   showBuzzDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
-      title: const Text('Remove Community'),
+      title: Text(title),
       content: const Text(
-        'This will disconnect this community. You will need '
-        'to scan a new pairing code to reconnect.',
+        'You’ll be signed out of this community on this phone. '
+        'To come back, you’ll need to add it again from another signed-in device.',
       ),
       actions: [
         TextButton(

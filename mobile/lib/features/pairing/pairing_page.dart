@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
@@ -127,6 +128,12 @@ class PairingPage extends HookConsumerWidget {
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
                     sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
+                    protectImportedIdentity:
+                        pairingState.protectImportedIdentity,
+                    errorMessage: pairingState.errorMessage,
+                    onProtectionChanged: (value) => ref
+                        .read(pairingProvider.notifier)
+                        .setProtectImportedIdentity(value),
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -196,6 +203,9 @@ class _SasVerificationView extends StatelessWidget {
   final String sasCode;
   final bool confirmed;
   final bool sendsIdentityToDesktop;
+  final bool protectImportedIdentity;
+  final String? errorMessage;
+  final ValueChanged<bool> onProtectionChanged;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
@@ -203,12 +213,18 @@ class _SasVerificationView extends StatelessWidget {
     required this.sasCode,
     required this.confirmed,
     required this.sendsIdentityToDesktop,
+    required this.protectImportedIdentity,
+    required this.errorMessage,
+    required this.onProtectionChanged,
     required this.onConfirm,
     required this.onDeny,
   });
 
   @override
   Widget build(BuildContext context) {
+    final authenticationName = sensitiveActionAuthenticationName(
+      Theme.of(context).platform,
+    );
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -265,6 +281,34 @@ class _SasVerificationView extends StatelessWidget {
             color: context.colors.onSurfaceVariant,
           ),
         ),
+
+        const SizedBox(height: Grid.sm),
+
+        if (!sendsIdentityToDesktop)
+          CheckboxListTile(
+            key: const Key('protect-imported-identity-checkbox'),
+            value: protectImportedIdentity,
+            onChanged: confirmed
+                ? null
+                : (value) => onProtectionChanged(value ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            title: Text('Use $authenticationName'),
+            subtitle: Text(
+              'Require $authenticationName to open Buzz and approve protected actions.',
+            ),
+          ),
+
+        if (errorMessage != null) ...[
+          const SizedBox(height: Grid.xs),
+          Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.error,
+            ),
+          ),
+        ],
 
         const SizedBox(height: Grid.lg),
 

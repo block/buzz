@@ -1,5 +1,7 @@
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -20,6 +22,7 @@ import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
+import 'shared/security/sensitive_action_authorizer.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 
@@ -131,10 +134,19 @@ class App extends HookConsumerWidget {
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => DeepLinkDispatcher(
-            child: HomePage(
-              settingsPageBuilder: _buildSettingsPage,
-              hasUnreadInbox: hasUnreadInbox,
+          AuthStatus.authenticated => AppLockGate(
+            communityId: state.community?.id,
+            enabled:
+                state.community?.sensitiveActionPolicy ==
+                SensitiveActionPolicy.enabled,
+            child: KeyedSubtree(
+              key: ValueKey(state.community?.id),
+              child: DeepLinkDispatcher(
+                child: HomePage(
+                  settingsPageBuilder: _buildSettingsPage,
+                  hasUnreadInbox: hasUnreadInbox,
+                ),
+              ),
             ),
           ),
           _ => const DeepLinkDispatcher(
@@ -161,6 +173,221 @@ class _SplashScreen extends StatelessWidget {
     return const Scaffold(
       body: Center(
         child: BuzzLoadingIndicator(size: 56, semanticLabel: 'Starting Buzz'),
+      ),
+    );
+  }
+}
+
+const appLockTimeout = Duration(minutes: 5);
+const _appPrivacyChannel = MethodChannel('xyz.block.buzz/app_privacy');
+
+class AppLockGate extends ConsumerStatefulWidget {
+  const AppLockGate({
+    super.key,
+    required this.enabled,
+    required this.child,
+    this.communityId,
+  });
+
+  final bool enabled;
+  final Widget child;
+  final String? communityId;
+
+  @override
+  ConsumerState<AppLockGate> createState() => _AppLockGateState();
+}
+
+class _AppLockGateState extends ConsumerState<AppLockGate>
+    with WidgetsBindingObserver {
+  bool _locked = true;
+  bool _authenticating = false;
+  DateTime? _backgroundedAt;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _setAndroidRecentsProtection(widget.enabled);
+    if (!widget.enabled) _locked = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _unlockIfNeeded());
+  }
+
+  @override
+  void didUpdateWidget(AppLockGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.enabled != widget.enabled) {
+      _setAndroidRecentsProtection(widget.enabled);
+    }
+    if (!widget.enabled) {
+      setState(() => _locked = false);
+    } else if (!oldWidget.enabled ||
+        oldWidget.communityId != widget.communityId) {
+      setState(() => _locked = true);
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _unlockIfNeeded(forceFresh: true),
+      );
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!widget.enabled ||
+        _authenticating ||
+        ref.read(sensitiveActionAuthorizationSessionProvider).isAuthorizing) {
+      return;
+    }
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _backgroundedAt ??= ref.read(appLockClockProvider)();
+        setState(() => _locked = true);
+      case AppLifecycleState.resumed:
+        final backgroundedAt = _backgroundedAt;
+        _backgroundedAt = null;
+        if (backgroundedAt != null) {
+          final timedOut =
+              ref.read(appLockClockProvider)().difference(backgroundedAt) >=
+              appLockTimeout;
+          _unlockIfNeeded(forceFresh: timedOut);
+        }
+    }
+  }
+
+  Future<void> _unlockIfNeeded({bool forceFresh = false}) async {
+    if (!mounted || !widget.enabled || !_locked || _authenticating) return;
+    final session = ref.read(sensitiveActionAuthorizationSessionProvider);
+    if (!forceFresh && session.wasAuthorizedWithin(appLockTimeout)) {
+      setState(() => _locked = false);
+      return;
+    }
+
+    setState(() => _authenticating = true);
+    final result = await session.authorize();
+    if (!mounted || !widget.enabled) return;
+    setState(() {
+      _authenticating = false;
+      _locked = result != DeviceAuthResult.success;
+    });
+  }
+
+  Future<void> _setAndroidRecentsProtection(bool enabled) async {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _appPrivacyChannel.invokeMethod<void>(
+        'setRecentsProtection',
+        enabled,
+      );
+    } on MissingPluginException {
+      // Widget tests and unsupported embedders do not register this channel.
+    }
+  }
+
+  @override
+  void dispose() {
+    _setAndroidRecentsProtection(false);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _leaveCommunity() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leave community?'),
+        content: const Text(
+          'This removes the community and its identity from this phone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave community'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      await ref.read(authProvider.notifier).signOut();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locked = widget.enabled && _locked;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(offstage: locked, child: widget.child),
+        if (locked) _buildLockScreen(context),
+      ],
+    );
+  }
+
+  Widget _buildLockScreen(BuildContext context) {
+    final authenticationName = sensitiveActionAuthenticationName(
+      Theme.of(context).platform,
+    );
+    return Scaffold(
+      key: const Key('app-lock-screen'),
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Image.asset(
+                      'assets/images/buzz-icon.png',
+                      key: const Key('app-lock-logo'),
+                      width: 112,
+                      semanticLabel: 'Buzz',
+                    ),
+                    const SizedBox(height: 32),
+                    FilledButton(
+                      key: const Key('app-lock-unlock-button'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        disabledBackgroundColor: Colors.white54,
+                        disabledForegroundColor: Colors.black54,
+                      ),
+                      onPressed: _authenticating ? null : _unlockIfNeeded,
+                      child: Text(
+                        _authenticating
+                            ? 'Authenticating…'
+                            : 'Unlock with $authenticationName',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextButton(
+                  key: const Key('app-lock-leave-community'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white54,
+                    textStyle: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  onPressed: _leaveCommunity,
+                  child: const Text('Leave community'),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
