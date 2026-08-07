@@ -582,7 +582,7 @@ function MessageComposerImpl({
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
         queuedAttachments: currentQueuedAttachments,
-        linkPreviewTags: getReadyLinkPreviewTags(),
+        linkPreviewTags: await getReadyLinkPreviewTags(),
         sentDraftKey: resolveSentDraftKey(
           effectiveDraftKeyRef.current,
           drafts.loadDraft,

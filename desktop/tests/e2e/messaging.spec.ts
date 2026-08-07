@@ -220,33 +220,47 @@ test.beforeEach(async ({ page }, testInfo) => {
                         imageDomain: null,
                       },
                     }
-                  : testInfo.title.includes("link preview") ||
-                      testInfo.title.includes("supported Compact")
+                  : testInfo.title.includes(
+                        "send waits for an in-flight link preview snapshot upload",
+                      )
                     ? {
                         linkPreviewMetadata: {
                           title: "Buzz pull request",
                           siteName: "GitHub",
                           description: "A sender-authored preview snapshot.",
-                          imageDataUrl: null,
-                          imageDomain: null,
+                          imageDataUrl:
+                            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                          imageDomain: "opengraph.githubassets.com",
                         },
-                        linkPreviewMetadataDelayMs: testInfo.title.includes(
-                          "loading card before cold resolver work",
-                        )
-                          ? 10_000
-                          : testInfo.title.includes("style defaults") ||
-                              testInfo.title.includes("send does not wait") ||
-                              testInfo.title.includes("attachment-sized")
-                            ? 1_500
-                            : undefined,
-                        linkPreviewMetadataStartBlockMs:
-                          testInfo.title.includes(
+                        linkPreviewUploadDelayMs: 400,
+                      }
+                    : testInfo.title.includes("link preview") ||
+                        testInfo.title.includes("supported Compact")
+                      ? {
+                          linkPreviewMetadata: {
+                            title: "Buzz pull request",
+                            siteName: "GitHub",
+                            description: "A sender-authored preview snapshot.",
+                            imageDataUrl: null,
+                            imageDomain: null,
+                          },
+                          linkPreviewMetadataDelayMs: testInfo.title.includes(
                             "loading card before cold resolver work",
                           )
-                            ? 150
-                            : undefined,
-                      }
-                    : undefined;
+                            ? 10_000
+                            : testInfo.title.includes("style defaults") ||
+                                testInfo.title.includes("send does not wait") ||
+                                testInfo.title.includes("attachment-sized")
+                              ? 1_500
+                              : undefined,
+                          linkPreviewMetadataStartBlockMs:
+                            testInfo.title.includes(
+                              "loading card before cold resolver work",
+                            )
+                              ? 150
+                              : undefined,
+                        }
+                      : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 150 }
     : baseMock;
@@ -719,6 +733,45 @@ test("send does not wait for a pending link preview snapshot", async ({
     )?.linkPreviewTags;
   });
   expect(linkPreviewTags ?? []).toEqual([]);
+});
+
+test("send waits for an in-flight link preview snapshot upload", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+
+  const composerPreviews = page.locator("[data-composer-link-previews]");
+  const card = composerPreviews.locator("[data-link-preview-composer-card]");
+  await expect(card).toBeVisible();
+  // Metadata resolves (image painted) but the sendable tag is not ready yet:
+  // the snapshot media upload is still in flight, so the card must NOT claim
+  // "done" and no tag is captured.
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(card).toHaveAttribute("data-snapshot-tag-ready", "false");
+  await expect(composerPreviews).toHaveAttribute(
+    "data-ready-snapshot-count",
+    "0",
+  );
+
+  // Sending immediately must still land the preview: Send waits for the
+  // in-flight upload rather than shipping a bare link.
+  await page.getByTestId("send-message").click();
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
 });
 
 test("hiding composer link previews suppresses the whole draft and emits the blanket marker", async ({

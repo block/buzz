@@ -365,6 +365,9 @@ type E2eConfig = {
     linkPreviewMetadataDelayMs?: number;
     /** Simulates native cold-cache startup work before the async response. */
     linkPreviewMetadataStartBlockMs?: number;
+    /** Delays link-preview snapshot media uploads so specs can exercise the
+     *  Send-time wait for in-flight snapshot uploads. */
+    linkPreviewUploadDelayMs?: number;
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -8930,6 +8933,10 @@ async function resolveMockUploadDescriptorForBytes(
   args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
+  const uploadDelayMs = config?.mock?.linkPreviewUploadDelayMs ?? 0;
+  if (uploadDelayMs > 0 && args.filename?.startsWith("link-preview-")) {
+    await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+  }
   const configured = config?.mock?.uploadDescriptors;
   if (configured !== undefined) {
     const descriptors = await resolveMockUploadDescriptors(config);

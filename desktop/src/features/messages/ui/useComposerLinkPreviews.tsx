@@ -24,6 +24,12 @@ import {
 } from "@/shared/ui/attachment";
 import { Button } from "@/shared/ui/button";
 
+// Upper bound on how long Send waits for in-flight snapshot uploads before
+// giving up and sending without the not-yet-ready tag. Keeps a fast Enter from
+// dropping a preview whose upload is nearly done, without letting a stalled
+// relay upload hang the message indefinitely.
+const SNAPSHOT_SEND_WAIT_CAP_MS = 2000;
+
 function previewHostname(href: string): string {
   try {
     return new URL(href).hostname.replace(/^www\./, "");
@@ -34,8 +40,10 @@ function previewHostname(href: string): string {
 
 function ComposerLinkPreviewCard({
   preview,
+  tagReady,
 }: {
   preview: ResolvedLinkPreview;
+  tagReady: boolean;
 }) {
   const imageSrc = preview.imageState === "image" ? preview.imageDataUrl : null;
   const [failedImageSrc, setFailedImageSrc] = React.useState<string | null>(
@@ -43,6 +51,11 @@ function ComposerLinkPreviewCard({
   );
   const showImage = Boolean(imageSrc && failedImageSrc !== imageSrc);
   const hostname = previewHostname(preview.href);
+  // The card only claims "done" once the sendable snapshot tag exists: metadata
+  // resolution alone does not survive Send (the snapshot media still has to
+  // finish uploading to the relay). `buzz://` entity links never snapshot, so
+  // `snapshotReady` stays false for them and they never falsely claim "done".
+  const sendReady = Boolean(preview.snapshotReady && tagReady);
   let path = "";
   try {
     const url = new URL(preview.href);
@@ -55,7 +68,8 @@ function ComposerLinkPreviewCard({
       data-image-state={preview.imageState}
       data-link-preview={preview.kind}
       data-link-preview-composer-card=""
-      state={preview.snapshotReady ? "done" : "processing"}
+      data-snapshot-tag-ready={sendReady ? "true" : "false"}
+      state={sendReady ? "done" : "processing"}
     >
       <AttachmentMedia
         className="h-[55px] w-[55px] rounded-none rounded-l-2xl bg-muted"
@@ -155,6 +169,9 @@ export function useComposerLinkPreviews(content: string) {
   const suppressedRef = React.useRef(suppressed);
   suppressedRef.current = suppressed;
   const uploadsRef = React.useRef(new Set<string>());
+  // In-flight snapshot upload promises, keyed by href. Send awaits these (with
+  // a cap) so a snapshot that is mid-upload still lands its tag on the message.
+  const pendingUploadsRef = React.useRef(new Map<string, Promise<void>>());
   const activeHrefsRef = React.useRef(new Set<string>());
   activeHrefsRef.current = new Set(candidates.map((preview) => preview.href));
 
@@ -184,7 +201,7 @@ export function useComposerLinkPreviews(content: string) {
       )
         continue;
       uploadsRef.current.add(preview.href);
-      void Promise.all([
+      const uploadPromise = Promise.all([
         uploadDataUrl(preview.imageDataUrl, "link-preview-image.png"),
         uploadDataUrl(preview.faviconDataUrl, "link-preview-favicon.png"),
       ])
@@ -201,10 +218,22 @@ export function useComposerLinkPreviews(content: string) {
             faviconSha256: favicon.sha256,
           });
           if (!tag) return;
+          // Update the ref synchronously as well as state: Send awaits this
+          // promise and then reads `readyTagsByHrefRef`, which otherwise would
+          // not reflect the pending `setReadyTags` until the next render.
+          readyTagsByHrefRef.current = {
+            ...readyTagsByHrefRef.current,
+            [preview.href]: tag,
+          };
           setReadyTags((current) => ({ ...current, [preview.href]: tag }));
         })
         .catch(() => {})
-        .finally(() => uploadsRef.current.delete(preview.href));
+        .finally(() => {
+          uploadsRef.current.delete(preview.href);
+          pendingUploadsRef.current.delete(preview.href);
+        });
+      pendingUploadsRef.current.set(preview.href, uploadPromise);
+      void uploadPromise;
     }
   }, [previews, readyTags]);
 
@@ -223,7 +252,11 @@ export function useComposerLinkPreviews(content: string) {
       <div className="flex max-w-full items-start gap-1">
         <AttachmentGroup className="max-w-full flex-row flex-wrap items-start overflow-visible pb-0">
           {previews.map((preview) => (
-            <ComposerLinkPreviewCard key={preview.href} preview={preview} />
+            <ComposerLinkPreviewCard
+              key={preview.href}
+              preview={preview}
+              tagReady={Boolean(readyTags[preview.href])}
+            />
           ))}
         </AttachmentGroup>
         <Button
@@ -241,8 +274,22 @@ export function useComposerLinkPreviews(content: string) {
       </div>
     </div>
   ) : null;
-  const getReadyTags = React.useCallback(() => {
+  // Send awaits this: give in-flight snapshot uploads a brief, capped chance to
+  // finish (so a fast Enter still lands the preview) before capturing the tags.
+  const getReadyTags = React.useCallback(async () => {
     if (suppressedRef.current) return [["link-preview", "none"]];
+    const pending = [...activeHrefsRef.current]
+      .map((href) => pendingUploadsRef.current.get(href))
+      .filter((promise): promise is Promise<void> => Boolean(promise));
+    if (pending.length > 0) {
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, SNAPSHOT_SEND_WAIT_CAP_MS);
+        }),
+      ]);
+      if (suppressedRef.current) return [["link-preview", "none"]];
+    }
     return [...activeHrefsRef.current].flatMap((href) => {
       const tag = readyTagsByHrefRef.current[href];
       return tag ? [tag] : [];
