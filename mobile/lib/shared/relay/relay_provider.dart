@@ -51,10 +51,18 @@ class RelayConfig {
     return scheme == null ? _baseUrl : uri.replace(scheme: scheme).toString();
   }
 
-  /// Derive the websocket URL from the HTTP base URL.
+  /// Derive the websocket URL from the base URL.
+  ///
+  /// A base that is already `ws`/`wss` (e.g. an invite-joined community's
+  /// `wss://` relay) passes through unchanged — mapping it to `ws` would be a
+  /// silent TLS downgrade that also fails against TLS-only relays.
   String get wsUrl {
     final uri = Uri.parse(baseUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
+    final scheme = switch (uri.scheme) {
+      'https' || 'wss' => 'wss',
+      'http' || 'ws' => 'ws',
+      _ => uri.scheme,
+    };
     return uri.replace(scheme: scheme).toString();
   }
 }
