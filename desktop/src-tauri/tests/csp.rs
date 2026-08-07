@@ -195,7 +195,10 @@ fn connect_src_allows_ipc_and_cleartext_relays() {
 fn script_src_stays_free_of_unsafe_inline_and_eval() {
     let allowed = sources("script-src");
     // The inline boot script in index.html is covered by Tauri's build-time
-    // sha256 hashing, so neither escape hatch is ever needed here.
+    // SHA-256 hashing (scripts only — Tauri nonces inline <style> elements via
+    // a different path), so neither escape hatch is ever needed here. The boot
+    // background style was moved to public/boot.css to avoid the nonce path for
+    // style-src; see boot.css for the full rationale.
     assert!(!allowed.contains(&"'unsafe-inline'".to_owned()));
     assert!(!allowed.contains(&"'unsafe-eval'".to_owned()));
 }
