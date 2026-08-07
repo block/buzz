@@ -385,7 +385,7 @@ export async function sendDesktopNotification(
   // when the notification backend becomes temporarily unavailable. Callers
   // discard the returned promise without a rejection handler, so an
   // un-guarded throw becomes an unhandled rejection. Treat constructor failure
-  // as a delivery miss (return false) and warn once so the console isn't noisy.
+  // as a delivery miss (return false) and log the failed delivery.
   try {
     const notification = new window.Notification(payload.title, {
       body: payload.body,
