@@ -387,6 +387,11 @@ test("the new agent card opens unified create, catalog, and import flows", async
         displayName: "Code Reviewer",
         systemPrompt: "Review code changes.",
       },
+      {
+        id: "custom:layout-auditor",
+        displayName: "Layout Auditor",
+        systemPrompt: "Review responsive layouts.",
+      },
     ],
   });
   await gotoApp(page);
@@ -411,6 +416,9 @@ test("the new agent card opens unified create, catalog, and import flows", async
     }),
   );
   const firstRowTop = Math.min(...cardBoxes.map(({ top }) => top));
+  expect(
+    cardBoxes.filter(({ top }) => Math.abs(top - firstRowTop) < 1),
+  ).toHaveLength(5);
   const rightmostFirstRowCard = Math.max(
     ...cardBoxes
       .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
@@ -518,12 +526,12 @@ test("team cards follow the agents grid alignment at compact widths", async ({
   await agentsContent.evaluate((element) => {
     (element as HTMLElement).style.width = "600px";
   });
-  await expect
-    .poll(async () => (await firstAgentGridCard.boundingBox())?.x ?? 0)
-    .toBeGreaterThan(wideAgentBox?.x ?? 0);
-
   const compactAgentBox = await firstAgentGridCard.boundingBox();
   const compactTeamBox = await firstTeamGridCard.boundingBox();
+  expect(compactAgentBox?.width ?? 0).toBeLessThan(wideAgentBox?.width ?? 0);
+  expect(
+    Math.abs((compactAgentBox?.width ?? 0) - (compactTeamBox?.width ?? 0)),
+  ).toBeLessThan(1);
   expect(
     Math.abs((compactAgentBox?.x ?? 0) - (compactTeamBox?.x ?? 0)),
   ).toBeLessThan(1);
