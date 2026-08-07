@@ -52,6 +52,40 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## Identities and first client
+
+Buzz uses separate identities for the relay and its owner:
+
+- `BUZZ_RELAY_PRIVATE_KEY` is the service identity. Store it in the Secret named by `secrets.existingSecret` and back it up.
+- `ownerPubkey` is the public key for the human operator. Keep the matching private key in your client or key manager, not in the relay Secret.
+
+Do not reuse the owner key as the relay key. Separate keys let you rotate infrastructure credentials without changing the operator identity, and keep service actions distinct from human actions.
+
+Joining and pairing solve different onboarding problems. An invite link joins a new identity to the community. Device pairing copies an existing identity to another device. Enable and expose the [device pairing relay](#device-pairing-relay) before pairing a phone or another desktop.
+
+## Storage and rollout behavior
+
+Set a storage class explicitly when the cluster has multiple defaults or when the default is unsuitable for databases. The quickstart profile accepts a class for each chart-managed volume:
+
+```yaml
+persistence:
+  git:
+    storageClass: fast-block
+postgresql:
+  persistence:
+    storageClass: fast-block
+redis:
+  persistence:
+    storageClass: fast-block
+minio:
+  persistence:
+    storageClass: fast-block
+```
+
+`storageClassName` is immutable after a PersistentVolumeClaim is created. Back up state before changing it, pause reconciliation, and recreate the affected claim through your deployment workflow.
+
+The relay Deployment uses `Recreate` when its Git scratch volume is `ReadWriteOnce` or `ReadWriteOncePod`. This releases a single-writer volume before Kubernetes starts the replacement pod. It uses `RollingUpdate` for `emptyDir` and multi-writer claims.
+
 ## S3 URL addressing
 
 Buzz uses one URL style for both media and Git/CAS object-store requests:
@@ -167,9 +201,9 @@ an Ingress or HTTPRoute for the pairing Service; route the public hostname to
 
 - Redis (`redis.enabled=true`, `externalRedis.url`, or `REDIS_URL` in `existingSecret`) — for `buzz-pubsub` fan-out
 
-It does **not** require ReadWriteMany git storage. Git ref/object state is object-store-backed (each request hydrates an ephemeral repo from S3-compatible storage; writer serialization is the object-store pointer CAS — see `docs/git-on-object-storage.md`), and repo-name uniqueness lives in Postgres. Each replica can use its own `ReadWriteOnce` volume; no shared filesystem is needed.
+It does **not** require persistent or ReadWriteMany Git storage. Git ref/object state is object-store-backed (each request hydrates an ephemeral repo from S3-compatible storage; writer serialization is the object-store pointer CAS — see `docs/git-on-object-storage.md`), and repo-name uniqueness lives in Postgres. Set `persistence.git.enabled=false` for multiple replicas so every pod receives its own `emptyDir`. The chart-managed PVC is one shared claim, not one `ReadWriteOnce` claim per replica.
 
-The chart **template-fails** if the Redis invariant is broken at `replicaCount > 1`. No silent degradation.
+The chart **template-fails** if Redis is missing or multiple replicas would share one chart-managed `ReadWriteOnce` or `ReadWriteOncePod` claim. No silent degradation.
 
 ### Relay autoscaling
 
@@ -193,7 +227,9 @@ adapter (for example Prometheus Adapter) configured to expose the relay's
 `buzz_ws_connections_active` gauge as a pod metric with the name in
 `websocketMetricName`. The chart creates the HPA but deliberately does not
 install or configure a cluster-wide metrics adapter. Scale-down is gradual by
-default so long-lived WebSocket connections have time to drain.
+default so long-lived WebSocket connections have time to drain. Because the
+default `autoscaling.minReplicas` is greater than one, set
+`persistence.git.enabled=false` when turning autoscaling on.
 
 ## Upgrades
 
@@ -207,9 +243,8 @@ Save these. Losing any of them is data loss. See NOTES.txt printed by `helm inst
 
 1. `BUZZ_RELAY_PRIVATE_KEY` — relay identity. Rotating it = new identity (federation peers will not recognize the relay).
 2. PostgreSQL database — the canonical event store.
-3. S3 bucket — media blobs (chart default bucket: `buzz-media`).
-4. Git PVC — repo on-disk state served by the relay's git endpoint.
-5. Owner private key — held by the operator, not by this chart. Restore by re-installing with the same `ownerPubkey`.
+3. S3 bucket — media and Git object-store state (chart default bucket: `buzz-media`).
+4. Owner private key — held by the operator, not by this chart. Restore by re-installing with the same `ownerPubkey`.
 
 ## Honest limitations (v1)
 

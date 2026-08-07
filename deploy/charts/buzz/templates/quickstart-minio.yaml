@@ -92,6 +92,9 @@ metadata:
     helm.sh/resource-policy: keep
 spec:
   accessModes: ["ReadWriteOnce"]
+  {{- if .Values.minio.persistence.storageClass }}
+  storageClassName: {{ .Values.minio.persistence.storageClass | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ .Values.minio.persistence.size | quote }}
