@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 30);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -946,6 +946,23 @@ mod tests {
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        // Workflow approval package persistence and the exactly-once dispatch
+        // journal are additive so existing installations receive them without
+        // changing the consolidated schema checksum.
+        assert_eq!(migrations[28].version, 29);
+        let workflow_approval_safety = migrations[28].sql.as_str();
+        assert!(workflow_approval_safety.contains("ADD COLUMN IF NOT EXISTS request_message"));
+        assert!(workflow_approval_safety
+            .contains("CREATE TABLE IF NOT EXISTS workflow_step_dispatches"));
+
+        // Reply-triggered workflows are deduplicated by their persisted parent
+        // across every installation, not only by an operator-applied index.
+        assert_eq!(migrations[29].version, 30);
+        let workflow_reply_parent_dedupe = migrations[29].sql.as_str();
+        assert!(workflow_reply_parent_dedupe.contains("uq_workflow_runs_reply_parent"));
+        assert!(workflow_reply_parent_dedupe.contains("reply_to_message_id"));
+        assert!(desired_schema.contains("uq_workflow_runs_reply_parent"));
     }
 
     #[test]

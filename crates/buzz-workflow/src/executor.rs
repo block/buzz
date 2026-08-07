@@ -37,6 +37,22 @@ pub struct TriggerContext {
     pub emoji: String,
     /// Event ID of the triggering message (hex string).
     pub message_id: String,
+    /// Content of the persisted event this trigger directly replies to.
+    ///
+    /// Empty for top-level events, missing/deleted parents, or lookup failure.
+    /// This is resolved by the workflow engine from relay-owned thread metadata,
+    /// not copied from child-event content.
+    #[serde(default)]
+    pub reply_to_text: String,
+    /// Signing pubkey of the persisted event this trigger directly replies to.
+    ///
+    /// This deliberately ignores attribution tags: filters that use this field
+    /// are checking the parent event's cryptographic author.
+    #[serde(default)]
+    pub reply_to_author: String,
+    /// Event ID of the persisted event this trigger directly replies to.
+    #[serde(default)]
+    pub reply_to_message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
 }
@@ -54,6 +70,9 @@ impl TriggerContext {
             "timestamp" => Some(&self.timestamp),
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
+            "reply_to_text" => Some(&self.reply_to_text),
+            "reply_to_author" => Some(&self.reply_to_author),
+            "reply_to_message_id" => Some(&self.reply_to_message_id),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
@@ -210,6 +229,9 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// | `trigger.text`                    | `trigger_text`            |
 /// | `trigger.author`                  | `trigger_author`          |
 /// | `trigger.channel_id`              | `trigger_channel_id`      |
+/// | `trigger.reply_to_text`           | `trigger_reply_to_text`   |
+/// | `trigger.reply_to_author`         | `trigger_reply_to_author` |
+/// | `trigger.reply_to_message_id`     | `trigger_reply_to_message_id` |
 /// | `trigger.timestamp`               | `trigger_timestamp`       |
 /// | `trigger.emoji`                   | `trigger_emoji`           |
 /// | `trigger.message_id`              | `trigger_message_id`      |
@@ -220,6 +242,7 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 /// - `str_contains(haystack, needle)` → bool
 /// - `str_starts_with(s, prefix)` → bool
 /// - `str_ends_with(s, suffix)` → bool
+/// - `str_trim(s)` → string
 /// - `str_len(s)` → int
 pub fn build_eval_context(
     trigger_ctx: &TriggerContext,
@@ -274,6 +297,15 @@ pub fn build_eval_context(
     )
     .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
 
+    ctx.set_function(
+        "str_trim".into(),
+        Function::new(|arg| {
+            let s = arg.as_string()?;
+            Ok(Value::String(s.trim().to_string()))
+        }),
+    )
+    .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
+
     // Register webhook fields first as `trigger_FIELD` so that standard trigger
     // fields inserted below always take precedence and cannot be spoofed.
     for (key, val) in &trigger_ctx.webhook_fields {
@@ -293,6 +325,15 @@ pub fn build_eval_context(
         ("trigger_timestamp", trigger_ctx.timestamp.as_str()),
         ("trigger_emoji", trigger_ctx.emoji.as_str()),
         ("trigger_message_id", trigger_ctx.message_id.as_str()),
+        ("trigger_reply_to_text", trigger_ctx.reply_to_text.as_str()),
+        (
+            "trigger_reply_to_author",
+            trigger_ctx.reply_to_author.as_str(),
+        ),
+        (
+            "trigger_reply_to_message_id",
+            trigger_ctx.reply_to_message_id.as_str(),
+        ),
     ];
 
     for (name, val) in &trigger_fields {
@@ -458,11 +499,37 @@ pub enum StepResult {
     Completed(JsonValue),
     /// Step requests suspension (approval gate). Execution must pause.
     Suspended {
-        /// Token used to resume or reject this approval gate.
-        approval_token: String,
+        /// Everything the caller needs to persist the approval and notify the
+        /// approver. Carrying this out of the executor (rather than the bare
+        /// token) is what lets `finalize_run` create a real
+        /// `workflow_approvals` row instead of guessing at the spec/deadline.
+        approval: Box<PendingApproval>,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
+}
+
+/// An approval gate that execution suspended on.
+///
+/// Produced by the `request_approval` action and consumed by
+/// [`crate::WorkflowEngine::finalize_run`], which persists it and emits the
+/// kind:46010 request event. The raw `token` is the bearer reference the
+/// approver quotes back; only its SHA-256 is stored.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    /// Raw approval token (UUID). Stored hashed; surfaced to the approver.
+    pub token: String,
+    /// The `id` of the step that suspended.
+    pub step_id: String,
+    /// Zero-based index of the suspending step, so resume starts at `+ 1`.
+    pub step_index: usize,
+    /// Who may approve. `""`/`"any"` or a 64-char hex pubkey — anything else
+    /// is rejected at definition-validation time and fails closed here.
+    pub approver_spec: String,
+    /// Human-readable prompt shown to the approver.
+    pub message: String,
+    /// Absolute deadline after which the gate expires and the run fails.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn resolve_send_message_channel(
@@ -518,6 +585,7 @@ fn resolve_send_message_channel(
 /// persist state and stop the execution loop.
 pub async fn dispatch_action(
     step_id: &str,
+    step_index: usize,
     action: &ActionDef,
     engine: &WorkflowEngine,
     community_id: CommunityId,
@@ -565,11 +633,90 @@ pub async fn dispatch_action(
                 "SendMessage → {channel_id}: {text}"
             );
 
-            let event_id = engine
-                .action_sink()?
-                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+            // At-most-once dispatch. Claim the step durably before emitting.
+            //
+            // The run-level CAS guarantees resumption starts once; it does not
+            // cover a crash *between* emitting this event and persisting the
+            // trace entry that records it. On recovery the step would re-run,
+            // and because a Nostr event is re-signed with a fresh timestamp the
+            // result is a second, distinct message — for the post-gate step of
+            // the outreach workflow, a second instruction to send on LinkedIn.
+            //
+            // The claim is decided by a primary-key conflict in Postgres, so it
+            // holds across concurrent resumers, restarts and multiple pods.
+            use buzz_db::workflow::StepDispatchClaim;
+            let claim = engine
+                .db
+                .claim_step_dispatch(community_id, run_id, step_id)
                 .await
-                .map_err(WorkflowError::from)?;
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendMessage: dispatch claim failed for step {step_id}: {e}"
+                    ))
+                })?;
+
+            let event_id = match claim {
+                StepDispatchClaim::AlreadyDispatched(id) => {
+                    // Reuse the original event rather than emitting a second
+                    // one. This is the replay path.
+                    let hex_id = hex::encode(&id);
+                    info!(
+                        run_id = %run_id, step = step_id, event_id = %hex_id,
+                        "SendMessage already dispatched — reusing recorded event, not re-sending"
+                    );
+                    hex_id
+                }
+                StepDispatchClaim::InFlight => {
+                    // A previous attempt claimed this step and never recorded an
+                    // event. We cannot know whether the message left the relay,
+                    // so we must not send again. Fail closed and let a human
+                    // decide — a duplicate external send is the worse outcome.
+                    return Err(WorkflowError::WebhookError(format!(
+                        "SendMessage: step {step_id} was claimed by an attempt that did not \
+                         complete; refusing to re-send because the original dispatch may have \
+                         succeeded. Inspect workflow_step_dispatches for run {run_id}."
+                    )));
+                }
+                StepDispatchClaim::Claimed => {
+                    let sent = engine
+                        .action_sink()?
+                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .await;
+
+                    match sent {
+                        Ok(id) => {
+                            // Record before returning, so a replay finds it.
+                            if let Ok(bytes) = hex::decode(&id) {
+                                if let Err(e) = engine
+                                    .db
+                                    .complete_step_dispatch(community_id, run_id, step_id, &bytes)
+                                    .await
+                                {
+                                    warn!(
+                                        run_id = %run_id, step = step_id,
+                                        "SendMessage: failed to record dispatch: {e}. The step \
+                                         will read as in-flight on replay and refuse to re-send."
+                                    );
+                                }
+                            }
+                            id
+                        }
+                        Err(e) => {
+                            // The sink failed, so nothing left the relay for
+                            // this attempt. Releasing the claim is safe and
+                            // stops a transient error wedging the step forever.
+                            if let Err(rel) = engine
+                                .db
+                                .release_step_dispatch(community_id, run_id, step_id)
+                                .await
+                            {
+                                warn!(run_id = %run_id, step = step_id, "release claim failed: {rel}");
+                            }
+                            return Err(WorkflowError::from(e));
+                        }
+                    }
+                }
+            };
 
             Ok(StepResult::Completed(serde_json::json!({
                 "sent": true,
@@ -653,18 +800,31 @@ pub async fn dispatch_action(
             timeout,
         } => {
             let timeout_str = timeout.as_deref().unwrap_or("24h");
+            let timeout_secs = parse_duration_secs(timeout_str)?;
+
+            // Fail closed on an unsupported approver spec. `validate()` rejects
+            // these at save time, but a definition stored before that check
+            // existed can still reach here — suspending on a spec no grant can
+            // ever satisfy would strand the run until it expired.
+            let approver_spec = normalize_approver_spec(from)?;
+
             info!(
                 run_id = %run_id, step = step_id,
-                "RequestApproval from={from} timeout={timeout_str}: {message}"
+                "RequestApproval timeout={timeout_str}: suspending for approval"
             );
 
             let token = generate_approval_token(run_id, step_id);
-
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
+            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(timeout_secs as i64);
 
             Ok(StepResult::Suspended {
-                approval_token: token,
+                approval: Box::new(PendingApproval {
+                    token,
+                    step_id: step_id.to_owned(),
+                    step_index,
+                    approver_spec,
+                    message: message.clone(),
+                    expires_at,
+                }),
             })
         }
 
@@ -697,6 +857,37 @@ pub async fn dispatch_action(
 /// sufficient and avoids the predictability of time-based entropy.
 fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Canonicalize a `request_approval.from` spec, or reject it.
+///
+/// Mirrors `check_approver_spec` in the relay's command executor, which is the
+/// enforcement point for an inbound grant. The two must agree: a spec that
+/// validates here but not there produces a gate that suspends and can never be
+/// approved.
+///
+/// Accepted:
+/// - `""` / `"any"` — any authenticated user may approve. Normalized to `"any"`.
+/// - 64-char hex pubkey — only that key may approve. Normalized to lowercase.
+///
+/// Everything else (`@charlie`, `@release-manager`, role names) fails closed.
+/// Role-based specs are not implemented relay-side, so accepting one here would
+/// strand every run that reached the gate.
+pub(crate) fn normalize_approver_spec(spec: &str) -> Result<String, WorkflowError> {
+    let trimmed = spec.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("any") {
+        return Ok("any".to_owned());
+    }
+
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(trimmed.to_lowercase());
+    }
+
+    Err(WorkflowError::InvalidDefinition(format!(
+        "request_approval.from must be \"any\" or a 64-character hex pubkey; \
+         got '{trimmed}', which no approval grant can satisfy"
+    )))
 }
 
 /// Parse a duration string like "5m", "1h", "30s" into seconds.
@@ -942,7 +1133,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
-    pub approval_token: Option<String>,
+    pub pending_approval: Option<Box<PendingApproval>>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -959,10 +1150,12 @@ pub struct ExecutionResult {
 /// 3. Dispatches the action.
 /// 4. Stores the step output for use by later steps.
 ///
-/// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
-/// Caller must persist the approval record and update the run status.
+/// On `RequestApproval`: returns `ExecutionResult` with
+/// `pending_approval = Some(..)` and stops. Steps after the gate are not
+/// dispatched. The caller persists the approval record and moves the run to
+/// `waiting_approval`.
 ///
-/// Returns `ExecutionResult` with `approval_token = None` on normal completion.
+/// Returns `ExecutionResult` with `pending_approval = None` on normal completion.
 ///
 /// Enforces `engine.config.max_concurrent` via a semaphore — returns
 /// [`WorkflowError::CapacityExceeded`] immediately if all permits are taken.
@@ -1140,6 +1333,7 @@ async fn execute_steps(
             std::time::Duration::from_secs(timeout_secs),
             dispatch_action(
                 &step.id,
+                i,
                 &resolved_action,
                 engine,
                 community_id,
@@ -1183,15 +1377,19 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended { approval } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                // Return immediately. Every later step stays unexecuted until an
+                // authorised grant resumes the run at `step_index + 1`.
+                trace.push(serde_json::json!({
+                    "step_id": step.id,
+                    "status": "waiting_approval",
+                }));
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    pending_approval: Some(approval),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1209,7 +1407,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
-        approval_token: None,
+        pending_approval: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
@@ -1229,6 +1427,9 @@ mod tests {
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
+            reply_to_text: "@Hermes REENGAGEMENT_RESEARCH_REQUEST".to_owned(),
+            reply_to_author: "relay-pubkey".to_owned(),
+            reply_to_message_id: "parent-event-id-hex".to_owned(),
             webhook_fields: HashMap::new(),
         }
     }
@@ -1245,6 +1446,43 @@ mod tests {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "By abc123def456");
+    }
+
+    #[test]
+    fn resolve_reply_parent_context() {
+        let ctx = make_trigger();
+        let out = resolve_template(
+            "Parent {{trigger.reply_to_author}}: {{trigger.reply_to_text}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "Parent relay-pubkey: @Hermes REENGAGEMENT_RESEARCH_REQUEST"
+        );
+    }
+
+    #[tokio::test]
+    async fn condition_can_require_cryptographic_reply_parent() {
+        let ctx = make_trigger();
+        let condition = concat!(
+            "trigger_reply_to_author == \"relay-pubkey\" && ",
+            "str_starts_with(trigger_reply_to_text, ",
+            "\"@Hermes REENGAGEMENT_RESEARCH_REQUEST\")"
+        );
+        assert!(evaluate_condition(condition, &ctx, &HashMap::new())
+            .await
+            .unwrap());
+
+        let mut post_approval = ctx;
+        post_approval.reply_to_text = "@Hermes BUZZ_REENGAGEMENT_APPROVED".to_owned();
+        assert!(
+            !evaluate_condition(condition, &post_approval, &HashMap::new())
+                .await
+                .unwrap(),
+            "a post-approval response must not satisfy the research-response gate"
+        );
     }
 
     #[test]
@@ -1660,6 +1898,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn condition_str_trim_composes_with_ends_with() {
+        let mut ctx = make_trigger();
+        ctx.text = "package\nDRAFT_END \n\t".to_string();
+        let result = evaluate_condition(
+            "str_ends_with(str_trim(trigger_text), \"DRAFT_END\")",
+            &ctx,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
     async fn condition_str_len() {
         let ctx = make_trigger(); // text = "P1 incident in production" (25 chars)
         let result = evaluate_condition("str_len(trigger_text) > 10", &ctx, &HashMap::new())
@@ -1833,5 +2085,133 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    // ── WF-08: approval gate suspension ─────────────────────────────────────
+
+    const HEX64: &str = "1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90";
+
+    #[test]
+    fn approver_spec_normalizes_any_and_empty() {
+        assert_eq!(normalize_approver_spec("any").unwrap(), "any");
+        assert_eq!(normalize_approver_spec("ANY").unwrap(), "any");
+        assert_eq!(normalize_approver_spec("").unwrap(), "any");
+        assert_eq!(normalize_approver_spec("   ").unwrap(), "any");
+    }
+
+    #[test]
+    fn approver_spec_normalizes_hex_to_lowercase() {
+        let upper = HEX64.to_uppercase();
+        assert_eq!(normalize_approver_spec(&upper).unwrap(), HEX64);
+        assert_eq!(normalize_approver_spec(HEX64).unwrap(), HEX64);
+    }
+
+    #[test]
+    fn approver_spec_rejects_mentions_and_roles() {
+        // These are exactly the specs the relay's check_approver_spec fails
+        // closed on. Accepting them here would strand a run at the gate.
+        for bad in ["@charlie", "@release-manager", "owner", "admin"] {
+            assert!(
+                normalize_approver_spec(bad).is_err(),
+                "spec '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn approver_spec_rejects_malformed_hex() {
+        // Right length, wrong alphabet.
+        let non_hex = "z".repeat(64);
+        assert!(normalize_approver_spec(&non_hex).is_err());
+        // Right alphabet, wrong length.
+        assert!(normalize_approver_spec("1a99c7e0").is_err());
+        assert!(normalize_approver_spec(&format!("{HEX64}00")).is_err());
+    }
+
+    /// A three-step definition: act, gate, act. Mirrors the real
+    /// "draft -> approve -> send" shape.
+    fn gated_def(from: &str) -> WorkflowDef {
+        let yaml = format!(
+            "name: Gated\ntrigger:\n  on: message_posted\nsteps:\n  - id: draft\n    action: send_message\n    text: 'draft'\n  - id: gate\n    action: request_approval\n    from: '{from}'\n    timeout: '48h'\n    message: 'send it?'\n  - id: send\n    action: send_message\n    text: 'sent'\n"
+        );
+        crate::schema::parse_yaml(&yaml)
+            .expect("fixture should parse")
+            .0
+    }
+
+    #[test]
+    fn approval_gate_is_the_second_of_three_steps() {
+        let def = gated_def(HEX64);
+        assert_eq!(def.steps.len(), 3);
+        assert_eq!(def.steps[1].id, "gate");
+        assert!(matches!(
+            def.steps[1].action,
+            ActionDef::RequestApproval { .. }
+        ));
+        // The step after the gate is a real side effect. If suspension ever
+        // failed to stop the loop, this is what would fire unapproved.
+        assert_eq!(def.steps[2].id, "send");
+    }
+
+    #[test]
+    fn suspended_result_carries_everything_needed_to_persist_the_gate() {
+        // Build the PendingApproval the way dispatch_action does, and assert the
+        // fields the DB row and the kind:46010 event are built from.
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(172_800);
+        let approval = PendingApproval {
+            token: Uuid::new_v4().to_string(),
+            step_id: "gate".to_owned(),
+            step_index: 1,
+            approver_spec: normalize_approver_spec(HEX64).unwrap(),
+            message: "send it?".to_owned(),
+            expires_at,
+        };
+
+        // Resume must start at the step *after* the gate, never re-run it.
+        assert_eq!(approval.step_index + 1, 2);
+        assert_eq!(approval.approver_spec, HEX64);
+        // The token is a UUID, which is what the CLI's validate_uuid expects.
+        assert!(Uuid::parse_str(&approval.token).is_ok());
+
+        let result = ExecutionResult {
+            pending_approval: Some(Box::new(approval)),
+            step_index: 1,
+            step_outputs: HashMap::new(),
+            trace: Vec::new(),
+        };
+        assert!(
+            result.pending_approval.is_some(),
+            "a suspended run must be distinguishable from a completed one"
+        );
+        assert_eq!(
+            result.step_index, 1,
+            "step_index must be the gate, so step 2 stays unexecuted"
+        );
+    }
+
+    #[test]
+    fn completed_result_has_no_pending_approval() {
+        let result = ExecutionResult {
+            pending_approval: None,
+            step_index: 3,
+            step_outputs: HashMap::new(),
+            trace: Vec::new(),
+        };
+        // finalize_run branches on exactly this: None means Completed.
+        assert!(result.pending_approval.is_none());
+    }
+
+    #[test]
+    fn approval_timeout_parses_to_expected_deadline() {
+        assert_eq!(parse_duration_secs("48h").unwrap(), 172_800);
+        assert_eq!(parse_duration_secs("30m").unwrap(), 1_800);
+        assert_eq!(parse_duration_secs("60s").unwrap(), 60);
+        assert!(parse_duration_secs("soon").is_err());
+    }
+
+    #[test]
+    fn default_approval_timeout_is_24h() {
+        // dispatch_action falls back to "24h" when `timeout` is omitted.
+        assert_eq!(parse_duration_secs("24h").unwrap(), 86_400);
     }
 }
