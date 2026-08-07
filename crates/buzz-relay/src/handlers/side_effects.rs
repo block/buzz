@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_CREATED,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -785,6 +785,56 @@ pub async fn emit_system_message(
         .await
     {
         warn!("System message fan-out failed: {e}");
+    }
+
+    Ok(())
+}
+
+/// Emit the relay-confirmed DM discovery event consumed by `buzz dms list`.
+///
+/// The event is channel-scoped so the normal private-channel read gate applies.
+/// Every participant receives a `p` tag, which lets each identity discover the
+/// same conversation with a `#p` query.
+pub async fn emit_dm_created(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    created_at: u64,
+    participant_pubkeys: &[Vec<u8>],
+) -> anyhow::Result<()> {
+    let channel_id_str = channel_id.to_string();
+    let mut participant_hexes: Vec<String> = participant_pubkeys.iter().map(hex::encode).collect();
+    participant_hexes.sort_unstable();
+    participant_hexes.dedup();
+
+    let mut tags = Vec::with_capacity(participant_hexes.len() + 2);
+    tags.push(Tag::parse(["d", &channel_id_str])?);
+    tags.push(Tag::parse(["h", &channel_id_str])?);
+    for pubkey in &participant_hexes {
+        tags.push(Tag::parse(["p", pubkey])?);
+    }
+
+    let event = EventBuilder::new(Kind::Custom(KIND_DM_CREATED as u16), "")
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|e| anyhow::anyhow!("failed to sign DM discovery event: {e}"))?;
+
+    let (stored, was_inserted) = state
+        .db
+        .insert_event(tenant.community(), &event, Some(channel_id))
+        .await?;
+    if was_inserted {
+        let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored,
+            KIND_DM_CREATED,
+            &relay_pubkey_hex,
+            None,
+        )
+        .await;
     }
 
     Ok(())
