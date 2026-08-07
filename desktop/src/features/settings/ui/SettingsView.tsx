@@ -48,7 +48,7 @@ type SettingsViewProps = SettingsPanelProps & {
   section: SettingsSection;
 };
 
-const settingsNavGroups: Array<{
+export const settingsNavGroups: Array<{
   label: string;
   sections: SettingsSection[];
 }> = [
@@ -71,7 +71,14 @@ const settingsNavGroups: Array<{
   },
   {
     label: "App",
-    sections: ["agents", "compute", "experimental", "mobile", "updates"],
+    sections: [
+      "agents",
+      "compute",
+      "experimental",
+      "mobile",
+      "updates",
+      "admin-console",
+    ],
   },
 ];
 

@@ -1,18 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Desktop and shared changes
+
+- feat(desktop): add in-app admin console for relay operators — NIP-98 client for deployment-wide reports and product feedback (`Settings → Admin console`)
+
 ## v0.5.5
 
 ### Desktop and shared changes
 
-- feat: paste composer text without formatting ([#4801](https://github.com/block/buzz/pull/4801)) ([`25a9cf1be6d245fbd7373cb1160dbc790baf5bd5`](https://github.com/block/buzz/commit/25a9cf1be6d245fbd7373cb1160dbc790baf5bd5))
-- Revert "chore(release): release Buzz Desktop version 0.5.5" ([#4808](https://github.com/block/buzz/pull/4808)) ([`79c52166cfe6b6d36bdc7686f943595c74e2f578`](https://github.com/block/buzz/commit/79c52166cfe6b6d36bdc7686f943595c74e2f578))
-- chore(release): release Buzz Desktop version 0.5.5 ([#4800](https://github.com/block/buzz/pull/4800)) ([`a0ed13de14ee64dd90c32335790f7d3b4e94330d`](https://github.com/block/buzz/commit/a0ed13de14ee64dd90c32335790f7d3b4e94330d))
-- fix: reauthenticate databricks model discovery ([#4008](https://github.com/block/buzz/pull/4008)) ([`4a2305170eef565bf1836e2859247e67c030f8af`](https://github.com/block/buzz/commit/4a2305170eef565bf1836e2859247e67c030f8af))
-- Revert "chore(release): release Buzz Desktop version 0.5.5" ([#4797](https://github.com/block/buzz/pull/4797)) ([`8faf09f9aedb4989e57c7b6c5bd1052a444a3370`](https://github.com/block/buzz/commit/8faf09f9aedb4989e57c7b6c5bd1052a444a3370))
-- feat: Buzz entity links — rich preview cards + in-app navigation for repos, PRs, and issues ([#4695](https://github.com/block/buzz/pull/4695)) ([`a1d78f2959b41c63f063ff818076d38c31071a47`](https://github.com/block/buzz/commit/a1d78f2959b41c63f063ff818076d38c31071a47))
-- fix(desktop): serialize tray channel actions for frontend ([#4762](https://github.com/block/buzz/pull/4762)) ([`4c665aeac366fca5097eaa1088fb87f3d248eac7`](https://github.com/block/buzz/commit/4c665aeac366fca5097eaa1088fb87f3d248eac7))
-- chore(release): release Buzz Desktop version 0.5.5 ([#4788](https://github.com/block/buzz/pull/4788)) ([`b948c54792c4933b4e003d2b227dc6e1f7c05fb4`](https://github.com/block/buzz/commit/b948c54792c4933b4e003d2b227dc6e1f7c05fb4))
-- feat(projects): support multiple repositories ([#4671](https://github.com/block/buzz/pull/4671)) ([`e30db7028f9f1dc7646b5814ed03b4c54a4d2a48`](https://github.com/block/buzz/commit/e30db7028f9f1dc7646b5814ed03b4c54a4d2a48))
 - fix(desktop): widen post-Enter timeouts in empty-edit-delete spec ([#4792](https://github.com/block/buzz/pull/4792)) ([`7bcfe7e0a141900d6e1e5bd0b3bce488b57d6453`](https://github.com/block/buzz/commit/7bcfe7e0a141900d6e1e5bd0b3bce488b57d6453))
 - fix(desktop): wait for terminal frame before splash ([#4781](https://github.com/block/buzz/pull/4781)) ([`65f7a100353b9a5302da2614f2d85edee1c136a2`](https://github.com/block/buzz/commit/65f7a100353b9a5302da2614f2d85edee1c136a2))
 - fix(desktop): integer-align custom reaction emoji ([#4779](https://github.com/block/buzz/pull/4779)) ([`8b8d86c5d26e2fa8cf419fdd8d0e56433f95d71a`](https://github.com/block/buzz/commit/8b8d86c5d26e2fa8cf419fdd8d0e56433f95d71a))
@@ -53,7 +50,7 @@
 - fix(mobile): recover stale relay sessions ([#4372](https://github.com/block/buzz/pull/4372)) ([`ce56e34411d2940e70a6c0de653ffae36d334701`](https://github.com/block/buzz/commit/ce56e34411d2940e70a6c0de653ffae36d334701))
 
 [Compare desktop-v0.5.4...desktop-v0.5.5](https://github.com/block/buzz/compare/desktop-v0.5.4...desktop-v0.5.5)
-
+>>>>>>> 9570237a1 (feat(desktop): add in-app admin console for relay operators)
 ## v0.5.4
 
 ### Desktop and shared changes
