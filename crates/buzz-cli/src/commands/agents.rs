@@ -90,11 +90,18 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             reason,
             replaced_by,
             content,
+            admin,
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth =
-                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
+            let auth = resolve_auth(
+                client,
+                &target_pubkey,
+                &signer_hex,
+                admin,
+                &mut std::io::stderr(),
+            )
+            .await?;
             let builder = build_archive_identity_request(
                 &target_pubkey,
                 &content,
@@ -122,11 +129,18 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             target_pubkey,
             reason,
             content,
+            admin,
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth =
-                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
+            let auth = resolve_auth(
+                client,
+                &target_pubkey,
+                &signer_hex,
+                admin,
+                &mut std::io::stderr(),
+            )
+            .await?;
             let builder = build_unarchive_identity_request(
                 &target_pubkey,
                 &content,
@@ -317,24 +331,59 @@ fn resolve_auth_from_profile(
     }
 }
 
-/// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests.
+/// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests,
+/// with one automatic retry on extraction failure.
 ///
-/// Mirrors the desktop's `maybe_owner_auth_tag`:
+/// Resolution logic:
 /// - `target == signer`: self path — no auth needed → `Ok(None)`, silent.
-/// - Otherwise: fetch target's kind:0, delegate to [`resolve_auth_from_profile`]
-///   which either returns the extracted tag or emits one `{"warning":"..."}` JSON
-///   line to `warn_sink` and returns `None` — the bare request is still sent so
-///   relay admins can succeed without owner attestation. Query/network failures
-///   surface as `Err`.
+/// - Otherwise: fetch target's kind:0 and attempt extraction.
+///   - Success → `Ok(Some(tag))`.
+///   - Failure → fetch again once (transient republish is the dominant cause).
+///     - Retry success → `Ok(Some(tag))`.
+///     - Retry failure, `allow_bare == true` (admin flag set) → emit
+///       `{"warning":"..."}` to `warn_sink` and return `Ok(None)`, allowing
+///       the bare request through for relay-admin callers.
+///     - Retry failure, `allow_bare == false` → `Err` with an actionable
+///       message naming the extraction failure. The request is NOT sent.
+/// - Network/parse failures surface as `Err` regardless of `allow_bare`.
 async fn resolve_auth(
     client: &BuzzClient,
     target_hex: &str,
     signer_hex: &str,
+    allow_bare: bool,
     warn_sink: &mut dyn std::io::Write,
 ) -> Result<Option<[String; 4]>, CliError> {
     if target_hex.eq_ignore_ascii_case(signer_hex) {
         return Ok(None);
     }
+    let first = fetch_kind0(client, target_hex).await?;
+    let second = {
+        // Only fetch again if the first attempt failed extraction — avoid a
+        // redundant round-trip when the first attempt already succeeded.
+        let mut probe: Vec<u8> = Vec::new();
+        if resolve_auth_from_profile(first.as_ref(), target_hex, signer_hex, &mut probe).is_none() {
+            Some(fetch_kind0(client, target_hex).await?)
+        } else {
+            None
+        }
+    };
+    resolve_auth_deciding(
+        first.as_ref(),
+        second.as_ref().map(|o| o.as_ref()),
+        target_hex,
+        signer_hex,
+        allow_bare,
+        warn_sink,
+    )
+    .map_err(CliError::Usage)
+}
+
+/// Fetch the most-recent kind:0 for `target_hex` from the relay.
+/// Returns `None` when no event was found, `Err` on network/parse failure.
+async fn fetch_kind0(
+    client: &BuzzClient,
+    target_hex: &str,
+) -> Result<Option<serde_json::Value>, CliError> {
     let filter = json!({"kinds": [0], "authors": [target_hex], "limit": 1});
     let raw = client
         .query(&filter)
@@ -342,13 +391,108 @@ async fn resolve_auth(
         .map_err(|e| CliError::Other(format!("failed to fetch target kind:0: {e}")))?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("invalid kind:0 query response: {e}")))?;
-    let profile = events.into_iter().next();
-    Ok(resolve_auth_from_profile(
-        profile.as_ref(),
-        target_hex,
-        signer_hex,
-        warn_sink,
-    ))
+    Ok(events.into_iter().next())
+}
+
+/// Pure, sync resolution core — testable without a live client.
+///
+/// Tries `first_profile`; if extraction fails, tries `retry_profile` (when
+/// `Some`). On definitive failure, either warns-and-returns-`None`
+/// (`allow_bare == true`) or returns `Err(message)` (`allow_bare == false`).
+///
+/// `retry_profile` is `None` when the caller already determined the first
+/// attempt succeeded (no retry needed) or when called from tests that cover
+/// only the single-attempt paths.
+fn resolve_auth_deciding(
+    first_profile: Option<&serde_json::Value>,
+    retry_profile: Option<Option<&serde_json::Value>>,
+    target_hex: &str,
+    signer_hex: &str,
+    allow_bare: bool,
+    warn_sink: &mut dyn std::io::Write,
+) -> Result<Option<[String; 4]>, String> {
+    // First attempt — use a throwaway sink so no warning is emitted yet.
+    let mut first_sink: Vec<u8> = Vec::new();
+    if let Some(tag) =
+        resolve_auth_from_profile(first_profile, target_hex, signer_hex, &mut first_sink)
+    {
+        return Ok(Some(tag));
+    }
+    // First attempt failed. Try the retry profile when provided.
+    let retry = match retry_profile {
+        Some(p) => p,
+        None => {
+            // Caller says no retry needed (shouldn't happen in normal flow,
+            // but handle defensively by falling through to the failure path).
+            return handle_auth_failure(
+                first_profile,
+                target_hex,
+                signer_hex,
+                allow_bare,
+                warn_sink,
+            );
+        }
+    };
+    let mut retry_sink: Vec<u8> = Vec::new();
+    if let Some(tag) = resolve_auth_from_profile(retry, target_hex, signer_hex, &mut retry_sink) {
+        return Ok(Some(tag));
+    }
+    // Both attempts failed.
+    handle_auth_failure(retry, target_hex, signer_hex, allow_bare, warn_sink)
+}
+
+/// Apply the allow_bare decision after all fetch attempts have been exhausted.
+///
+/// `last_profile` is the profile from the most recent attempt (used to
+/// produce a precise failure message).
+fn handle_auth_failure(
+    last_profile: Option<&serde_json::Value>,
+    target_hex: &str,
+    signer_hex: &str,
+    allow_bare: bool,
+    warn_sink: &mut dyn std::io::Write,
+) -> Result<Option<[String; 4]>, String> {
+    let detail = auth_failure_detail(last_profile, target_hex, signer_hex);
+
+    if allow_bare {
+        let msg = format!(
+            "{detail}; proceeding without owner attestation (--admin) — \
+             this succeeds only if your key is a relay admin"
+        );
+        let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
+        Ok(None)
+    } else {
+        Err(format!(
+            "{detail}; refusing to send a bare request that the relay will reject — \
+             re-run once the target's profile has finished publishing, or pass --admin \
+             if your key is a relay admin"
+        ))
+    }
+}
+
+/// Extract a human-readable failure reason from a fetched kind:0 profile
+/// without appending any resolution-path suffix. Used by [`handle_auth_failure`]
+/// to produce a precise, suffix-free detail string.
+fn auth_failure_detail(
+    profile: Option<&serde_json::Value>,
+    target_hex: &str,
+    signer_hex: &str,
+) -> String {
+    let event = match profile {
+        None => return format!("no kind:0 profile found for target {target_hex}"),
+        Some(e) => e,
+    };
+    let tags = match event.get("tags").and_then(|v| v.as_array()) {
+        None => return format!("target {target_hex} kind:0 has no tags array"),
+        Some(t) => t,
+    };
+    match classify_owner_auth_tag(tags, signer_hex) {
+        Ok(_) => {
+            // Should not happen — caller only calls this on failure.
+            format!("could not extract owner-auth tag for target {target_hex}")
+        }
+        Err(failure) => failure.message(),
+    }
 }
 
 /// Pure extraction helper: require exactly one kind:0 tag whose first
@@ -876,6 +1020,214 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(text.trim()).expect("warning output must be valid JSON");
         assert!(parsed["warning"].is_string());
+    }
+
+    // --- (c3) resolve_auth_deciding: retry and allow_bare semantics ---
+    //
+    // The following tests exercise the pure sync core that implements the
+    // retry-then-fail-closed policy. They call `resolve_auth_deciding` directly
+    // with pre-built profile arguments — no relay, no async, no side effects.
+
+    fn make_valid_profile(signer: &str) -> serde_json::Value {
+        let sig = hex128('b');
+        json!({"tags": [["auth", signer, "conditions", sig]]})
+    }
+
+    fn make_bad_profile() -> serde_json::Value {
+        // Valid JSON but no auth tag — extraction always fails.
+        json!({"tags": [["p", hex64('x')]]})
+    }
+
+    // First attempt succeeds — no retry needed, no warning emitted.
+    #[test]
+    fn resolve_auth_deciding_first_success_returns_ok_some_no_warning() {
+        let target = hex64('t');
+        let signer = hex64('a');
+        let profile = make_valid_profile(&signer);
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(
+            Some(&profile),
+            None, // retry not needed
+            &target,
+            &signer,
+            false,
+            &mut sink,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "must return the extracted tag");
+        assert_no_warning(&sink);
+    }
+
+    // First fails, retry succeeds — tag extracted on second attempt, no warning.
+    #[test]
+    fn resolve_auth_deciding_retry_success_returns_ok_some_no_warning() {
+        let target = hex64('t');
+        let signer = hex64('a');
+        let bad = make_bad_profile();
+        let good = make_valid_profile(&signer);
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(
+            Some(&bad),
+            Some(Some(&good)),
+            &target,
+            &signer,
+            false,
+            &mut sink,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "must return the extracted tag");
+        assert_no_warning(&sink);
+    }
+
+    // Both attempts fail, allow_bare == false → Err with actionable message.
+    #[test]
+    fn resolve_auth_deciding_both_fail_no_admin_returns_err() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let bad = make_bad_profile();
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(
+            Some(&bad),
+            Some(Some(&bad)),
+            &target,
+            &signer,
+            false,
+            &mut sink,
+        );
+        assert!(
+            result.is_err(),
+            "must fail closed on double extraction failure"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("refusing to send"),
+            "error message must explain why request was blocked: {msg}"
+        );
+        assert!(
+            msg.contains("--admin"),
+            "error message must mention --admin escape hatch: {msg}"
+        );
+        // No warning on stderr when fail-closed.
+        assert_no_warning(&sink);
+    }
+
+    // Both attempts fail, allow_bare == true → Ok(None) + warning on sink.
+    #[test]
+    fn resolve_auth_deciding_both_fail_admin_returns_ok_none_with_warning() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let bad = make_bad_profile();
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(
+            Some(&bad),
+            Some(Some(&bad)),
+            &target,
+            &signer,
+            true,
+            &mut sink,
+        );
+        assert!(result.is_ok(), "admin flag must allow bare send");
+        assert!(result.unwrap().is_none(), "bare path returns None");
+        assert_one_json_warning(&sink, "proceeding without owner attestation");
+    }
+
+    // No kind:0 at all, allow_bare == false → Err names missing profile.
+    #[test]
+    fn resolve_auth_deciding_no_kind0_no_admin_returns_err_naming_target() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(None, Some(None), &target, &signer, false, &mut sink);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("no kind:0 profile"),
+            "error must name the missing-profile cause: {msg}"
+        );
+        assert!(
+            msg.contains(&target),
+            "error must include the target pubkey for actionability: {msg}"
+        );
+    }
+
+    // First fails, retry profile is None (sentinel "no retry") → falls through
+    // to handle_auth_failure with the first profile's detail.
+    #[test]
+    fn resolve_auth_deciding_no_retry_sentinel_falls_through_to_failure() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let bad = make_bad_profile();
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_deciding(
+            Some(&bad),
+            None, // caller says no retry
+            &target,
+            &signer,
+            false,
+            &mut sink,
+        );
+        assert!(result.is_err(), "must fail closed when no retry available");
+    }
+
+    // --- (c4) auth_failure_detail: precise message without resolution suffix ---
+
+    #[test]
+    fn auth_failure_detail_no_profile_names_target() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let detail = auth_failure_detail(None, &target, &signer);
+        assert!(detail.contains("no kind:0 profile"), "got: {detail}");
+        assert!(detail.contains(&target), "must name target: {detail}");
+        // No "proceeding without owner attestation" suffix.
+        assert!(
+            !detail.contains("proceeding"),
+            "detail must be suffix-free: {detail}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_detail_no_tags_array_names_target() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"kind": 0, "content": "{}"});
+        let detail = auth_failure_detail(Some(&profile), &target, &signer);
+        assert!(detail.contains("no tags array"), "got: {detail}");
+        assert!(
+            !detail.contains("proceeding"),
+            "detail must be suffix-free: {detail}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_detail_no_auth_tag_names_failure() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"tags": [["p", hex64('x')]]});
+        let detail = auth_failure_detail(Some(&profile), &target, &signer);
+        assert!(detail.contains("no \"auth\" tag"), "got: {detail}");
+        assert!(
+            !detail.contains("proceeding"),
+            "detail must be suffix-free: {detail}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_detail_ambiguous_tag_names_count() {
+        let signer = hex64('s');
+        let sig = hex128('b');
+        let profile = json!({"tags": [
+            ["auth", signer, "cond", sig],
+            ["auth", signer, "cond", sig],
+        ]});
+        let detail = auth_failure_detail(Some(&profile), &hex64('t'), &signer);
+        assert!(
+            detail.contains("2"),
+            "ambiguous detail must include count: {detail}"
+        );
+        assert!(
+            !detail.contains("proceeding"),
+            "detail must be suffix-free: {detail}"
+        );
     }
 
     // --- (d) NIP-11 self normalization: normalize_relay_self_hex ---
