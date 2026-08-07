@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 const OUTDIR = "test-results/invites-settings";
@@ -34,6 +34,15 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   await page.goto("/");
   await openSettings(page, "community-members");
+});
+
+test("opens a profile from a community member avatar", async ({ page }) => {
+  await page.getByRole("button", { name: "Open profile for alice" }).click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`/pulse\\?profile=${TEST_IDENTITIES.alice.pubkey}$`),
+  );
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
 test("capture: consolidated invites settings", async ({ page }) => {
@@ -95,15 +104,19 @@ test("capture: share-style community invite dialog", async ({ page }) => {
   await expect(
     dialog.getByRole("heading", { name: "Add someone", exact: true }),
   ).toHaveCount(0);
+  await expect(dialog.getByTestId("invite-options-divider")).toBeVisible();
   await expect(
-    dialog.getByText("Or share a link", { exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    dialog.getByText("Link settings", { exact: true }),
+    dialog.getByText("Or, copy a link", { exact: true }),
   ).toBeVisible();
+  await expect(dialog.getByText("Link settings", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
   await expect(page.getByTestId("member-role")).toHaveCount(0);
   await expect(page.getByTestId("confirm-add-member")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-url")).toHaveValue(
+    "https://alpha.example.com/invite/community-email-test",
+  );
   await expect(page.getByTestId("copy-invite-link")).toHaveText("Copy link");
   await expect(page.getByTestId("invite-link-ttl-trigger")).toHaveText(
     "3 days",

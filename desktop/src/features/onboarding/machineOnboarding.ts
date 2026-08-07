@@ -185,6 +185,12 @@ export function useMachineOnboardingState({
     continuingPubkeyRef.current = pubkey;
   }, []);
 
+  const continueWithRecoveredIdentity = React.useCallback((pubkey: string) => {
+    continuingPubkeyRef.current = pubkey;
+    setBootedLost(false);
+    setBootedLocked(false);
+  }, []);
+
   const reopen = React.useCallback(() => {
     clearMachineOnboardingCompletion(currentPubkey);
     setCompletedPubkey((pubkey) => (pubkey === currentPubkey ? null : pubkey));
@@ -224,7 +230,11 @@ export function useMachineOnboardingState({
       continuingPubkeyRef.current !== currentPubkey)
   ) {
     stage = "blocking";
-  } else if (identityLost || !hasCompletedCurrentPubkey) {
+  } else if (
+    identityLost ||
+    continuingPubkeyRef.current === currentPubkey ||
+    !hasCompletedCurrentPubkey
+  ) {
     stage = "onboarding";
   } else {
     stage = "ready";
@@ -233,6 +243,7 @@ export function useMachineOnboardingState({
   return {
     complete,
     continueWithIdentity,
+    continueWithRecoveredIdentity,
     currentPubkey,
     identityLost,
     queryClient,

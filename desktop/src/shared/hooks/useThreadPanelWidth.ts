@@ -45,7 +45,11 @@ function getInitialThreadPanelWidth(): number {
   }
 }
 
-export function useThreadPanelWidth() {
+export function useThreadPanelWidth(availableWidthPx?: number) {
+  const getAvailableWidth = React.useCallback(
+    () => availableWidthPx ?? getViewportWidth(),
+    [availableWidthPx],
+  );
   const [widthPx, setWidthPx] = React.useState<number>(() =>
     getInitialThreadPanelWidth(),
   );
@@ -79,7 +83,10 @@ export function useThreadPanelWidth() {
 
       const handlePointerMove = (moveEvent: PointerEvent) => {
         const deltaX = startX - moveEvent.clientX;
-        const nextWidth = clampThreadPanelWidth(startWidth + deltaX);
+        const nextWidth = clampAuxiliaryPanelWidth(
+          startWidth + deltaX,
+          getAvailableWidth(),
+        );
         setWidthPx(nextWidth);
       };
 
@@ -92,7 +99,7 @@ export function useThreadPanelWidth() {
       window.addEventListener("pointermove", handlePointerMove);
       window.addEventListener("pointerup", handlePointerUp, { once: true });
     },
-    [widthPx],
+    [getAvailableWidth, widthPx],
   );
 
   const onResetWidth = React.useCallback(() => {

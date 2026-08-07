@@ -657,6 +657,21 @@ pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
 
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 
+/// Maximum reactive context-recovery attempts per `run()`. A provider
+/// context-window 400 is recoverable — shrink history and retry — but the
+/// retry must be bounded: `max_rounds` defaults to `0` (unbounded), so without
+/// its own budget a request that stays oversized after every rescue would
+/// retry forever. On exhaustion the error surfaces to the caller, which is a
+/// visible failure rather than a silent infinite rescue.
+pub const MAX_CONTEXT_RECOVERIES_PER_RUN: u32 = 3;
+
+/// Floor for the reactive handoff's history-prompt budget, in bytes. Each
+/// recovery attempt halves the budget so the rescue summarize call can escape
+/// an overstated `max_context_tokens`, but halving must terminate: below this
+/// the prompt can no longer carry a useful summary, so the recovery gives up
+/// and surfaces the error instead of issuing ever-smaller doomed requests.
+pub const HANDOFF_MIN_PROMPT_BUDGET_BYTES: usize = 4 * 1024;
+
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
@@ -714,12 +729,27 @@ pub struct Config {
     /// operators lower/raise it for other models. Set via
     /// `BUZZ_AGENT_MAX_CONTEXT_TOKENS`.
     pub max_context_tokens: u64,
+    /// Maximum context-handoff attempts permitted within a single
+    /// `session/prompt` turn. Caps runaway compaction loops inside one turn;
+    /// does NOT limit handoffs across a session's lifetime — a long-lived
+    /// session can compact on every successive turn without hitting this bound.
+    /// Set via `BUZZ_AGENT_MAX_HANDOFFS`. Default 10.
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
     /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
     pub stop_max_rejections: u32,
+    /// Remind the model to publish when a turn is about to end without any
+    /// recognized attempt to post to Buzz. Default off; opt in per agent with
+    /// `BUZZ_AGENT_REQUIRE_REPLY=1`.
+    ///
+    /// Advisory only: at most `MAX_REPLY_NAGS` reminders (see `agent.rs`),
+    /// then the turn ends regardless. Bounded by the same
+    /// `stop_max_rejections` budget as `_Stop` hooks, which is the outer cap on
+    /// all end-turn objections — at the default 3 both reminders fit; at 1 only
+    /// one does; at 0 the guard is off with the hooks.
+    pub require_reply: bool,
     /// Hook server allowlist. See [`HookServers`] for variant semantics.
     /// Default (env unset/empty) is `None` — hooks are off unless the
     /// operator explicitly opts in.
@@ -851,6 +881,7 @@ impl Config {
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
+            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
@@ -893,6 +924,7 @@ impl Config {
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
+            require_reply: false,
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,

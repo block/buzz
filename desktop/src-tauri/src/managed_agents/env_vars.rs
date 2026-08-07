@@ -5,11 +5,13 @@
 //! Precedence: desktop parent env < persona env < agent env (last wins on
 //! key collision). See `runtime::spawn_agent_child`.
 //!
-//! A small set of *reserved* keys — Buzz's identity and secrets — are
-//! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
-//! freely overridable — those have dedicated UI fields, but power users
-//! may want to bypass them.
+//! A small set of *reserved* keys includes Buzz's identity, secrets, security
+//! gates, and control-plane values. Save-time validation rejects those keys.
+//! Runtime filtering strips old persisted overrides. Behavior knobs
+//! (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+//! overridable. Power users can still bypass their dedicated UI fields.
+//! `BUZZ_ACP_AGENTS` is reserved because Desktop applies harness-specific caps
+//! before it writes the provider launch policy.
 
 use std::collections::BTreeMap;
 
@@ -39,61 +41,9 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
         .any(|k| k.eq_ignore_ascii_case(key))
 }
 
-/// Env var keys that Buzz sets itself and users must not override from
-/// the persona/agent env_vars UI. Three categories:
-///
-/// 1. **Identity / secrets** — overriding would swap the agent's nsec or
-///    leak credentials.
-/// 2. **Code-execution surface** — overriding the binary/args lets the
-///    user run arbitrary code as the agent process.
-/// 3. **Security gates** — overriding the respond-to mode/allowlist or
-///    relay URL would silently break the saved security settings (the UI
-///    shows owner-only while the running agent answers anyone, for
-///    example), or redirect the agent to an attacker-controlled relay.
-///
-/// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
-/// overridable; those have dedicated UI fields but power users may want
-/// to bypass them.
-pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
-    // Identity / secrets.
-    "BUZZ_PRIVATE_KEY",
-    "NOSTR_PRIVATE_KEY",
-    "BUZZ_AUTH_TAG",
-    "BUZZ_API_TOKEN",
-    "BUZZ_ACP_PRIVATE_KEY",
-    "BUZZ_ACP_API_TOKEN",
-    // Relay URL: overriding would let a malicious config redirect the
-    // agent to an attacker-controlled relay.
-    "BUZZ_RELAY_URL",
-    // Code-execution surface: overriding would let the user run arbitrary
-    // binaries/args as the agent process.
-    "BUZZ_ACP_AGENT_COMMAND",
-    "BUZZ_ACP_AGENT_ARGS",
-    "BUZZ_ACP_MCP_COMMAND",
-    // Security gates: respond-to mode + allowlist + legacy owner-only
-    // fallback. Overriding would make the running agent's gate diverge
-    // from the saved/UI-visible settings.
-    "BUZZ_ACP_RESPOND_TO",
-    "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
-    "BUZZ_ACP_AGENT_OWNER",
-    // Readiness handoff: desktop is the ONLY readiness source. A saved or
-    // ambient env var must not be able to forge setup mode (NotReady) on a
-    // Ready agent or suppress it (empty/stale payload) on a NotReady one.
-    "BUZZ_ACP_SETUP_PAYLOAD",
-    // Desktop ownership markers: these brand every spawned harness with the
-    // launching Desktop instance. A user-supplied override would let a
-    // definition masquerade as a different instance or fake the nonce used
-    // for same-session sweep decisions.
-    "BUZZ_MANAGED_AGENT",
-    "BUZZ_MANAGED_AGENT_START_NONCE",
-];
-
-pub(crate) fn is_reserved_env_key(key: &str) -> bool {
-    RESERVED_ENV_KEYS
-        .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(key))
-}
+// Canonical reserved-key list + predicate, shared verbatim with `build.rs`.
+// See `reserved_env_keys.rs` for why this is `include!`d rather than a module.
+include!("reserved_env_keys.rs");
 
 /// Returns true if `key` is a well-formed POSIX-shaped env var name:
 /// `[A-Za-z_][A-Za-z0-9_]*`. This is a hard requirement, not a stylistic
@@ -220,6 +170,28 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
     Ok(())
 }
 
+/// Returns `true` when `key` is safe to show verbatim — not a credential.
+///
+/// Default-deny: every key NOT in this explicit allowlist is masked. Callers
+/// that display env values (baked-env UI, spawn-diff tooltip) share this
+/// single authority — no second list.
+///
+/// Allowlist (case-insensitive):
+/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
+    const SAFE_KEYS: &[&str] = &[
+        "BUZZ_AGENT_PROVIDER",
+        "BUZZ_AGENT_MODEL",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        "DATABRICKS_HOST",
+        "DATABRICKS_MODEL",
+    ];
+    let upper = key.to_ascii_uppercase();
+    SAFE_KEYS.iter().any(|safe| upper == *safe)
+}
+
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,
 /// JWT-ish tokens, certs etc., but small enough that a malformed IPC
 /// caller can't blow up the persona/agent JSON file. Tune up if real
@@ -305,29 +277,6 @@ pub(crate) fn live_persona_env(
         .and_then(|pid| personas.iter().find(|p| p.id == pid))
         .map(|p| p.env_vars.clone())
         .unwrap_or_default()
-}
-
-/// Resolve live env_vars for a linked persona, loading personas from disk.
-///
-/// Returns the persona's `env_vars` map if a persona_id is provided and found;
-/// returns an empty map if no persona is linked. Errors if the linked persona
-/// is missing. Used by the provider deploy path, which has no pre-loaded
-/// persona slice.
-pub(crate) fn resolve_persona_env(
-    app: &tauri::AppHandle,
-    persona_id: Option<&str>,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let Some(pid) = persona_id else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    let personas = super::load_personas(app).map_err(|e| {
-        format!("failed to load personas while resolving env for persona `{pid}`: {e}")
-    })?;
-    let persona = personas
-        .into_iter()
-        .find(|p| p.id == pid)
-        .ok_or_else(|| format!("persona `{pid}` not found while resolving env"))?;
-    Ok(persona.env_vars)
 }
 
 #[cfg(test)]

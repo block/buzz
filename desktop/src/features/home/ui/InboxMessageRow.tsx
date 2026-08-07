@@ -31,6 +31,7 @@ type InboxMessageRowProps = {
   isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
+  onEdit?: (message: InboxDisplayMessage) => void;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -48,6 +49,7 @@ export function InboxMessageRow({
   isFirst = false,
   isFocusHighlightVisible,
   message,
+  onEdit,
   onSelectReplyTarget,
   onToggleReaction,
   showUnreadBoundary = false,
@@ -116,7 +118,7 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {canReply || canToggleReactions ? (
+        {canReply || canToggleReactions || onEdit ? (
           <div
             className={cn(
               "absolute right-2 top-1 z-10",
@@ -126,6 +128,7 @@ export function InboxMessageRow({
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
+              onEdit={onEdit ? () => onEdit(message) : undefined}
               onReactionSelect={
                 canToggleReactions ? handleReactionSelect : undefined
               }

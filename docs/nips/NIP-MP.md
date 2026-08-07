@@ -181,7 +181,7 @@ A relay accepting `kind:30621` MUST validate the envelope at ingest. The rule na
 
 Rules 3 through 6 are evaluated in that order, so an oversized tag list is refused on count before any per-tag parse or set proportional to it is built.
 
-Three checks land in the Buzz validator together with the fixture wiring that exercises them: the `buzz-channel` and `buzz-visibility` bounds in rule 8, and rule 4's arity. The validator bounds `name` and `description` today, and reads element 1 of each member `a` tag while ignoring any element past it.
+The Buzz validator enforces all eight rules. The shared fixtures in [`NIP-MP.fixtures.json`](NIP-MP.fixtures.json) are wired as its test oracle: the relay's unit test suite runs every case against `validate_project_envelope` and asserts each `expect` outcome.
 
 **Duplicates are rejected, never normalized.** A relay cannot dedupe tags inside a signed event: rewriting the tag array changes the event id and invalidates the signature. The choices are reject, or accept and require every present and future consumer to apply a first-wins interpretation rule. Rejecting keeps every stored head canonical and spares all consumers a defensive parse.
 
@@ -297,7 +297,7 @@ Legacy `<owner>:<dtag>` repository routes remain valid and resolve to that repos
 
 ## Conformance Fixtures
 
-Two fixture files carry the machine-checkable contract. Neither has consumers yet; each states what its consumers are required to do.
+Two fixture files carry the machine-checkable contract. `NIP-MP.fixtures.json` is already wired as the relay ingest consumer; the remaining consumers listed below are Phase 2 work.
 
 ### Ingest
 

@@ -2,16 +2,23 @@ import type {
   Project,
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
+import { selectProjectRepository } from "@/features/projects/projectModels";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type ProjectsViewMode = "grid" | "list";
-export type ProjectsRepositoryScope = "all" | "mine" | "local";
+export type ProjectsRepositoryScope =
+  | "all"
+  | "mine"
+  | "local"
+  | "buzz"
+  | "linked";
 export type ProjectsWorkItemScope = "all" | "mine";
 export type ProjectsFilter =
   | "all"
   | "mine"
   | "local"
+  | "projects"
   | "repositories"
   | "prs"
   | "issues"
@@ -51,6 +58,7 @@ export function readStoredFilter(): ProjectsFilter {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
     return value === "mine" ||
       value === "local" ||
+      value === "projects" ||
       value === "repositories" ||
       value === "prs" ||
       value === "issues" ||
@@ -76,7 +84,14 @@ export function readStoredRepositoryScope(): ProjectsRepositoryScope {
     const value = globalThis.localStorage?.getItem(
       PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY,
     );
-    if (value === "mine" || value === "local") return value;
+    if (
+      value === "mine" ||
+      value === "local" ||
+      value === "buzz" ||
+      value === "linked"
+    ) {
+      return value;
+    }
     const legacyFilter = globalThis.localStorage?.getItem(
       PROJECTS_FILTER_STORAGE_KEY,
     );
@@ -244,7 +259,10 @@ export function projectPeople(
     ...new Set(
       [
         project.owner,
-        ...project.contributors,
+        ...project.repositories.flatMap((repository) => [
+          repository.owner,
+          ...repository.contributors,
+        ]),
         ...(summary?.participantPubkeys ?? []),
       ].map(normalizePubkey),
     ),
@@ -269,7 +287,7 @@ export function normalizeRepositoryUrl(url: string) {
 }
 
 export function getClonePathLabel(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
+  const cloneUrl = selectProjectRepository(project, null)?.cloneUrls[0];
   if (!cloneUrl) return "Clone path pending";
 
   try {
@@ -281,9 +299,7 @@ export function getClonePathLabel(project: Project) {
 }
 
 function repositoryIdentityKey(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
-  if (cloneUrl) return normalizeRepositoryUrl(cloneUrl);
-  return (project.name || project.dtag).trim().toLowerCase();
+  return project.id;
 }
 
 export function uniqueRepositories(projects: Project[]) {
@@ -325,8 +341,12 @@ export function isProjectMine(
   const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
   return (
     normalizePubkey(project.owner) === normalizedCurrentPubkey ||
-    project.contributors.some(
-      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+    project.repositories.some(
+      (repository) =>
+        normalizePubkey(repository.owner) === normalizedCurrentPubkey ||
+        repository.contributors.some(
+          (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+        ),
     )
   );
 }

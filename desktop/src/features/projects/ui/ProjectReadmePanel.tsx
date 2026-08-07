@@ -1,6 +1,19 @@
-import { BookOpen } from "lucide-react";
+import {
+  BookOpen,
+  CircleAlert,
+  CloudOff,
+  DownloadCloud,
+  ExternalLink,
+  GitBranch,
+  Globe,
+  Loader2,
+  LockKeyhole,
+  RefreshCw,
+} from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
+import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { Button } from "@/shared/ui/button";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import {
   baseName,
@@ -13,6 +26,7 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
+import { GitHubMark } from "./GitHubMark";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -78,9 +92,17 @@ function normalizeReadmeMarkdown(content: string) {
 
 export function ReadmePanel({
   file,
+  gitDataState,
+  externalHost,
+  externalUrl,
   sourceControls,
+  unavailableReason,
 }: {
   file: ProjectRepoFile | null;
+  gitDataState: "checking" | "available" | "empty" | "unavailable";
+  externalHost?: string;
+  externalUrl?: string | null;
+  unavailableReason?: ProjectRepoUnavailableReason;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
@@ -125,13 +147,146 @@ export function ReadmePanel({
     </>
   );
 
+  if (gitDataState === "checking") {
+    return (
+      <section className="overflow-hidden">
+        {header}
+        <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading repository…
+        </div>
+      </section>
+    );
+  }
+
+  if (gitDataState === "unavailable") {
+    const reason = unavailableReason ?? "unknown";
+    const unavailableContent = {
+      authentication: {
+        description:
+          "Buzz could not authenticate with this repository. Check your access and try again.",
+        icon: LockKeyhole,
+        title: "Repository access failed",
+      },
+      missing: {
+        description:
+          "The project announcement exists, but its git repository was not found on the Buzz relay.",
+        icon: CircleAlert,
+        title: "Repository not initialized",
+      },
+      network: {
+        description:
+          "The Buzz git service could not be reached. Check your connection and try again.",
+        icon: CloudOff,
+        title: "Couldn’t reach repository",
+      },
+      ref: {
+        description:
+          "The selected branch is advertised by the project but is missing from its git remote.",
+        icon: GitBranch,
+        title: "Branch unavailable",
+      },
+      unknown: {
+        description:
+          "Buzz could not load this repository. Try again or contact the project owner.",
+        icon: CircleAlert,
+        title: "Repository unavailable",
+      },
+    } satisfies Record<
+      ProjectRepoUnavailableReason,
+      {
+        description: string;
+        icon: typeof CircleAlert;
+        title: string;
+      }
+    >;
+    const unavailable = unavailableContent[reason];
+    const UnavailableIcon = unavailable.icon;
+
+    return (
+      <section className="overflow-hidden">
+        <div className="flex min-h-64 flex-col items-center justify-center p-8 text-center">
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground">
+            {externalHost === "github.com" ? (
+              <GitHubMark className="h-6 w-6" />
+            ) : externalHost ? (
+              <Globe className="h-6 w-6" />
+            ) : (
+              <UnavailableIcon className="h-6 w-6" />
+            )}
+          </div>
+          <h3 className="text-base font-semibold text-foreground">
+            {externalHost
+              ? `Code hosted on ${externalHost}`
+              : unavailable.title}
+          </h3>
+          <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+            {externalHost
+              ? "Clone this repository locally to explore its files, commits, and contributors in Buzz."
+              : unavailable.description}
+          </p>
+          {externalUrl ? (
+            <a
+              className="mt-2 max-w-lg truncate font-mono text-xs text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              href={externalUrl}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {externalUrl}
+            </a>
+          ) : null}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {!externalHost && sourceControls?.onFetch ? (
+              <Button
+                disabled={sourceControls.fetchPending}
+                onClick={sourceControls.onFetch}
+                size="sm"
+                variant="outline"
+              >
+                {sourceControls.fetchPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                {sourceControls.fetchPending ? "Retrying…" : "Retry"}
+              </Button>
+            ) : null}
+            {externalHost && sourceControls?.onCloneLocal ? (
+              <Button
+                disabled={sourceControls.clonePending}
+                onClick={sourceControls.onCloneLocal}
+                size="sm"
+              >
+                {sourceControls.clonePending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <DownloadCloud className="h-4 w-4" />
+                )}
+                {sourceControls.clonePending ? "Cloning…" : "Clone locally"}
+              </Button>
+            ) : null}
+            {externalUrl ? (
+              <Button asChild size="sm" variant="outline">
+                <a href={externalUrl} rel="noreferrer" target="_blank">
+                  <ExternalLink className="h-4 w-4" />
+                  Open on {externalHost}
+                </a>
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   if (!file?.previewContent) {
     return (
       <section className="overflow-hidden">
-        {sourceControls ? header : null}
+        {header}
         <div className="p-6 text-sm text-muted-foreground">
-          Add a README to this repository to describe setup, usage, and project
-          context.
+          {gitDataState === "empty"
+            ? "No files have been pushed to this repository yet."
+            : "Add a README to this repository to describe setup, usage, and project context."}
         </div>
       </section>
     );

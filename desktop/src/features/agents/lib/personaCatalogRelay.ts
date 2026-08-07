@@ -289,8 +289,14 @@ function publicationToPersona(
   isOwn: boolean,
 ): CatalogPersona {
   const timestamp = new Date(publication.createdAt * 1_000).toISOString();
-  const basePersona: AgentPersona = localPersona ?? {
-    id: `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
+  // The publication remains authoritative for catalog presentation. An added
+  // local copy contributes only the linkage id and selected state; merging the
+  // whole copy would leak local edits (notably its avatar) into the publisher's
+  // catalog entry.
+  const basePersona: AgentPersona = {
+    id:
+      localPersona?.id ??
+      `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
     displayName: publication.agent.displayName,
     avatarUrl: publication.agent.avatarUrl,
     systemPrompt: publication.agent.systemPrompt,
@@ -299,7 +305,7 @@ function publicationToPersona(
     provider: publication.agent.provider,
     namePool: publication.agent.namePool,
     isBuiltIn: false,
-    isActive: false,
+    isActive: localPersona?.isActive ?? false,
     shared: true,
     sourceTeam: null,
     envVars: {},

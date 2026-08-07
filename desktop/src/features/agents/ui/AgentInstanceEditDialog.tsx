@@ -11,6 +11,7 @@ import {
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   ManagedAgent,
@@ -26,6 +27,7 @@ import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
+  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -62,9 +64,10 @@ import {
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { CreateAgentRespondToField } from "./RespondToField";
+import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -75,7 +78,10 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
+import {
+  getProviderApiKeyEnvVar,
+  getProviderApiKeyLabel,
+} from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -89,11 +95,6 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
 
 export function AgentInstanceEditDialog({
   agent,
@@ -266,16 +267,10 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id that will actually be active after submit. When inheriting,
-  // resolve from the LINKED PERSONA's runtime — that is what will run once the
-  // override is cleared. Deriving from agent.agentCommand here is wrong for a
-  // pinned agent that just toggled "Inherit runtime from template": the override
-  // (e.g. a Claude pin) is still present on the record, so it would resolve to
-  // the old pin instead of the persona's runtime, hiding required credentials.
-  // Fall back to the agent.agentCommand dual-match (command path, then id) only
-  // when there is no linked persona or its runtime is unset. This single
-  // prospective id feeds BOTH the block-save gate (requiredEnvKeys) and the
-  // submit path so they never disagree on which runtime is being saved.
+  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
+  // (that is what runs once the override is cleared, not the current override).
+  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
+  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -306,6 +301,15 @@ export function AgentInstanceEditDialog({
 
   const llmProviderFieldVisible =
     runtimeSupportsLlmProviderSelection(prospectiveRuntimeId);
+
+  const prospectiveRuntime = runtimes.find(
+    (r) => r.id === prospectiveRuntimeId,
+  );
+  const runtimeCatalogStatus = runtimesQuery.isLoading
+    ? ("loading" as const)
+    : runtimesQuery.isError
+      ? ("error" as const)
+      : ("ready" as const);
 
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
@@ -339,9 +343,8 @@ export function AgentInstanceEditDialog({
     return () => cancelAnimationFrame(id);
   }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
 
-  // Provider + env to PERSIST on submit — also fed to the credential gate so
-  // gate, saved record, and spawn snapshot all agree on one resolved value.
-  // See resolveInheritedRuntimeSubmission for the inherit/transition contract.
+  // Provider + env to PERSIST on submit — also fed to the credential gate so gate, saved record,
+  // and spawn snapshot all agree on one resolved value. See resolveInheritedRuntimeSubmission.
   const inheritedSubmission = React.useMemo(
     () =>
       resolveInheritedRuntimeSubmission({
@@ -376,12 +379,8 @@ export function AgentInstanceEditDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
-  // Runtime/provider-required credential state, derived from the PROSPECTIVE
-  // post-submit runtime — see the hook for the inherit-transition rationale.
-  // Pass globalProvider so the hook uses it as a fallback when the per-agent
-  // provider is empty (global-provider-only configs must surface required keys).
-  // Pass globalEnvVars so keys satisfied by global config are excluded from
-  // requiredEnvKeys and do not block Save (display and gate agree).
+  // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
+  // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
       open,
@@ -394,6 +393,9 @@ export function AgentInstanceEditDialog({
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
@@ -907,7 +909,6 @@ export function AgentInstanceEditDialog({
             )}
           </div>
           <div className="space-y-5">
-            {/* Agent name */}
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -935,16 +936,15 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
-
-            {/* Who can send instructions */}
-            <CreateAgentRespondToField
+            <OwnerOnlyAccessField
+              accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
-              variant="persona"
             />
+            <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">
@@ -1061,14 +1061,11 @@ export function AgentInstanceEditDialog({
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
                 disabled={updateMutation.isPending}
+                envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={
-                  effectiveProvider === "anthropic"
-                    ? "Anthropic API Key"
-                    : "OpenAI API Key"
-                }
+                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,
@@ -1200,6 +1197,8 @@ export function AgentInstanceEditDialog({
                       parallelism={parallelism}
                       provider={effectiveProvider}
                       requiredEnvKeys={advancedRequiredEnvKeys}
+                      catalogStatus={runtimeCatalogStatus}
+                      selectedRuntime={prospectiveRuntime}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}

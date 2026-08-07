@@ -23,7 +23,7 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   await page.getByRole("button", { name: "Repositories", exact: true }).click();
   await page
     .locator(
-      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+      '[data-testid="repository-card-buzz"], [data-testid="repository-row-buzz"]',
     )
     .first()
     .click();

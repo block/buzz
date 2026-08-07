@@ -872,14 +872,14 @@ export function processTranscriptEvent(
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
       // the harness as [Base]/[System]/[Agent Memory — core]/[Channel Canvas].
-      // Each session/new event is keyed by (seq, timestamp) — the same dedup
-      // pair used by observerRelayStore — so distinct sessions each retain
-      // their own system-prompt card even across archive rebuilds where two
-      // processes may emit the same seq. turnId: null keeps it out of turn
-      // buckets; acpSource "session/new" lets the display grouper place it
-      // as a standalone card before the session's first turn.
+      // claude-agent-acp uses _meta.systemPrompt.append instead; both paths
+      // produce the same standalone card (turnId: null, acpSource "session/new");
+      // the bare field takes precedence when both are present.
       const params = asRecord(payload.params);
-      const systemPrompt = asString(params.systemPrompt);
+      const metaPrompt = asString(
+        asRecord(asRecord(params._meta).systemPrompt).append,
+      );
+      const systemPrompt = asString(params.systemPrompt) ?? metaPrompt;
       if (systemPrompt) {
         const sections = parseSystemPromptSections(systemPrompt);
         if (sections.length > 0) {

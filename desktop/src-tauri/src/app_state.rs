@@ -53,15 +53,13 @@ pub struct AppState {
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
+    pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
     /// through every call site.
     ///
     /// Set once during `setup()` in `lib.rs`; never cleared.
     pub app_handle: Mutex<Option<AppHandle>>,
-    /// Selected audio output device name. `None` = system default.
-    /// Used by `connect_audio_relay` and TTS pipeline when opening sinks.
-    pub audio_output_device: Mutex<Option<String>>,
     /// Port of the localhost media streaming proxy (set during setup).
     pub media_proxy_port: AtomicU16,
     /// Set when identity resolution detected a "keyring-locked" state: the
@@ -219,8 +217,8 @@ pub fn build_app_state() -> AppState {
         managed_agent_processes: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
+        huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
-        audio_output_device: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),
