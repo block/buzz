@@ -1,4 +1,4 @@
-import { CircleDot, FolderGit2, GitPullRequest, Radio } from "lucide-react";
+import { CircleDot, FolderGit2, Folders, GitPullRequest } from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -7,14 +7,13 @@ import type {
 } from "@/features/projects/hooks";
 
 export type ProjectsOverviewSection =
+  | "projects"
   | "repositories"
   | "prs"
-  | "local"
   | "issues";
 
 type ProjectsOverviewPanelProps = {
   children: React.ReactNode;
-  localRepositoryCount: number;
   metadata: React.ReactNode;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   projects: Project[];
@@ -27,7 +26,7 @@ function overviewStats(
 ) {
   return projects.reduce(
     (stats, project) => {
-      const summary = summaries?.[project.repoAddress];
+      const summary = summaries?.[project.id];
       return {
         issues: stats.issues + (summary?.issueCount ?? 0),
         prs: stats.prs + (summary?.prCount ?? 0),
@@ -50,7 +49,8 @@ function StatPill({
 }) {
   return (
     <button
-      className="flex flex-col rounded-lg border border-border/60 bg-card px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
+      className="flex flex-col rounded-lg border border-border/60 bg-transparent px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
+      data-testid="projects-overview-stat"
       onClick={onClick}
       type="button"
     >
@@ -69,7 +69,6 @@ function StatPill({
 
 export function ProjectsOverviewPanel({
   children,
-  localRepositoryCount,
   metadata,
   onSelectSection,
   projects,
@@ -78,11 +77,20 @@ export function ProjectsOverviewPanel({
   const stats = overviewStats(projects, summaries);
 
   return (
-    <section className="-mx-4 mb-4 bg-card">
+    <section className="-mx-4 mb-4" data-testid="projects-overview-panel">
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
         <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
           <StatPill
             count={projects.length}
+            icon={Folders}
+            label="Projects"
+            onClick={() => onSelectSection("projects")}
+          />
+          <StatPill
+            count={projects.reduce(
+              (count, project) => count + project.repositories.length,
+              0,
+            )}
             icon={FolderGit2}
             label="Repositories"
             onClick={() => onSelectSection("repositories")}
@@ -92,12 +100,6 @@ export function ProjectsOverviewPanel({
             icon={GitPullRequest}
             label="Pull requests"
             onClick={() => onSelectSection("prs")}
-          />
-          <StatPill
-            count={localRepositoryCount}
-            icon={Radio}
-            label="Local"
-            onClick={() => onSelectSection("local")}
           />
           <StatPill
             count={stats.issues}

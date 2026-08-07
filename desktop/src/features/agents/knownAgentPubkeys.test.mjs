@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeKnownAgentPubkeys } from "./knownAgentPubkeys.ts";
+import {
+  mergeKnownAgentPubkeys,
+  mergeOwnedAgentPubkeys,
+} from "./knownAgentPubkeys.ts";
 
 const MANAGED =
   "1111111111111111111111111111111111111111111111111111111111111111";
@@ -33,4 +36,27 @@ test("normalisesCaseAndWhitespace_dedupingAcrossSources", () => {
   );
 
   assert.deepEqual([...merged], [MANAGED]);
+});
+
+test("owned agents include managed and profile-declared agents", () => {
+  const merged = mergeOwnedAgentPubkeys(
+    [{ pubkey: MANAGED }],
+    {
+      [RELAY]: { ownerPubkey: " owner " },
+      other: { ownerPubkey: "somebody-else" },
+    },
+    "OWNER",
+  );
+
+  assert.deepEqual([...merged].sort(), [MANAGED, RELAY].sort());
+});
+
+test("owned agents exclude agents controlled by somebody else", () => {
+  const merged = mergeOwnedAgentPubkeys(
+    undefined,
+    { [RELAY]: { ownerPubkey: "somebody-else" } },
+    "owner",
+  );
+
+  assert.equal(merged.size, 0);
 });

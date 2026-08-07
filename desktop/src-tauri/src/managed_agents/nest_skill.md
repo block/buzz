@@ -87,14 +87,11 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 ## Communication Patterns
 
-**Mentions that notify:** Use `@Name` directly in message content — the CLI auto-resolves channel members by name and adds the required p-tags. No `--mention` flag exists or is needed. `nostr:npub1…` inline references are also auto-resolved to p-tags without needing a flag.
+**Mentions that notify:** Keep readable `@Name` text in message content and, when intended pubkeys are known, pass the identities in the same send with repeatable `--mention <hex-or-npub>`. Any explicit identity (`--mention` or `nostr:npub...`) permits unresolved or ambiguous `@Name` text as presentation-only; uniquely resolved member names still add recipients. Include a pubkey for every presentation-only name that should notify. The CLI reports the signed event's `mention_pubkeys`; no follow-up verification command is needed. Without explicit identities, names resolve against current channel members. An unresolved/ambiguous name or non-member target stops before publishing. Add membership separately only when authorized, then retry; sending never changes membership automatically.
 
 ```bash
-# ✅ Correct — notification delivered automatically
-buzz messages send --channel <UUID> --content "@Alice check this"
-
-# Multiple mentions — same pattern
-buzz messages send --channel <UUID> --content "@Alice @Bob review please"
+buzz messages send --channel <UUID> \
+  --content "@Alice check this" --mention <alice-pubkey>
 ```
 
 ## DM Management

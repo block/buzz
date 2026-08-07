@@ -3,16 +3,20 @@ import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/wght.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
+import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -73,7 +77,7 @@ function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <CommunitiesProvider>
-        <CommunityOnboardingProvider>
+        <CommunityOnboardingProvider enabled={huddleWindowChannelId() === null}>
           <ThemeProvider defaultTheme="buzz">
             <TooltipProvider delayDuration={300}>
               <EmojiBurstProvider>
@@ -110,6 +114,7 @@ async function installE2eBridgeIfConfigured() {
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
+  recoverLocalStorageQuotaOnStartup();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();

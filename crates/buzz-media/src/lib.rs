@@ -17,7 +17,7 @@ pub use bucket_index::{
     classify_key, fold_bucket_listing, BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass,
     Page, SweepError,
 };
-pub use config::MediaConfig;
+pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
 pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;

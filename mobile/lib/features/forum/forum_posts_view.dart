@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../channels/channel.dart';
 import '../channels/compose_bar.dart';
@@ -32,6 +33,10 @@ class ForumPostsView extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final postsAsync = ref.watch(forumPostsProvider(channel.id));
     final isComposing = useState(false);
+    // A queued attachment can finish after this view is popped. Capture the
+    // app-level provider container instead of retaining the route's WidgetRef.
+    final providerContainer = ProviderScope.containerOf(context, listen: false);
+    final forumDelivery = ForumEventDelivery.capture(providerContainer);
 
     // Periodic refresh (every 15s, matching desktop).
     useEffect(() {
@@ -61,7 +66,12 @@ class ForumPostsView extends HookConsumerWidget {
             body: postsAsync.when(
               loading: () => Padding(
                 padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-                child: const Center(child: CircularProgressIndicator()),
+                child: const Center(
+                  child: BuzzLoadingIndicator(
+                    size: 44,
+                    semanticLabel: 'Loading posts',
+                  ),
+                ),
               ),
               error: (e, _) => Padding(
                 padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
@@ -140,8 +150,7 @@ class ForumPostsView extends HookConsumerWidget {
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
                 }) async {
-                  await createForumPost(
-                    ref,
+                  await forumDelivery.createPost(
                     channelId: channel.id,
                     content: content,
                     mentionPubkeys: mentionPubkeys,

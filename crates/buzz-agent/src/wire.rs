@@ -148,6 +148,48 @@ pub fn goose_session_update(sid: &str, update: Value) -> Value {
     })
 }
 
+/// Build the `usage_update` payload for a `_goose/unstable/session/update`.
+///
+/// Shared by the two places that report usage — after each LLM round inside a
+/// turn, and once more when the turn completes — so the wire shape cannot drift
+/// between them. A consumer takes the high-water mark per session, so the
+/// mid-turn payloads are supersets of each other and the final one wins; a
+/// divergence in field names or units between the two call sites would instead
+/// show up as tokens silently vanishing, which is the failure this reporting
+/// exists to prevent.
+///
+/// All counts are SESSION-cumulative, matching goose, so buzz-acp's
+/// `UsageTracker` can compute per-turn deltas symmetrically for both agents.
+pub fn usage_update_payload(
+    accumulated_input_tokens: u64,
+    accumulated_output_tokens: u64,
+    accumulated_cached_input_tokens: u64,
+    accumulated_total: crate::types::TurnTotalState,
+    model: &str,
+) -> Value {
+    let mut update = json!({
+        "sessionUpdate": "usage_update",
+        // used: total tokens as a context-usage proxy;
+        // contextLimit: 0 (buzz-agent has no context limit tracking).
+        "used": accumulated_input_tokens.saturating_add(accumulated_output_tokens),
+        "contextLimit": 0u64,
+        "accumulatedInputTokens": accumulated_input_tokens,
+        "accumulatedOutputTokens": accumulated_output_tokens,
+        // A subset of accumulatedInputTokens, not an addition to it. Extends
+        // goose's usage_update shape; a consumer that does not know the field
+        // ignores it and prices exactly as it did before.
+        "accumulatedCachedInputTokens": accumulated_cached_input_tokens,
+        "model": model,
+    });
+    // Only when the cumulative is exactly known — never when Unseen (no total
+    // ever observed) or Unknown (at least one turn lacked a total). A goose
+    // consumer that doesn't recognise the field ignores it.
+    if let Some(total) = accumulated_total.exact_value() {
+        update["accumulatedTotalTokens"] = json!(total);
+    }
+    update
+}
+
 /// A `session/update` notification carrying a `update._meta.goose.<key>` field.
 /// Used to advertise `activeRunId` (so steer-capable clients can target the
 /// in-flight run) and `queuedSteer` (so they can correlate an accepted steer

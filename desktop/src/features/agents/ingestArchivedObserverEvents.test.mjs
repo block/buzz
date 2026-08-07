@@ -1106,4 +1106,84 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     );
     assert.equal(latestMs, Date.parse(TIMESTAMP));
   });
+
+  it("test_batch_envelope_inner_events_route_by_channel_id", async () => {
+    // A kind:"batch" envelope from the 1/s observer pacer must be unwrapped on
+    // the archive-ingest seam: inner events with a channelId land in the
+    // channel-scoped archive window, inner events without one fall through to
+    // the per-agent live store — and the envelope itself is never stored.
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const CHANNEL = "chan-batch";
+
+    const channelInner = makeObserverEvent({
+      seq: 21,
+      timestamp: "2026-01-01T00:21:00.000Z",
+      channelId: CHANNEL,
+    });
+    const liveInner = makeObserverEvent({
+      seq: 22,
+      timestamp: "2026-01-01T00:21:01.000Z",
+      channelId: null,
+      sessionId: null,
+    });
+    // Envelope metadata mirrors the last inner event (production shape).
+    const envelope = makeObserverEvent({
+      seq: 22,
+      timestamp: "2026-01-01T00:21:01.000Z",
+      kind: "batch",
+      channelId: CHANNEL,
+      payload: { events: [channelInner, liveInner] },
+    });
+
+    await ingestArchivedObserverEvents([makeRawEvent()], makeDecrypt(envelope));
+
+    const archived = _testGetArchivedChannelEvents(AGENT_PUBKEY, CHANNEL);
+    assert.equal(
+      archived.length,
+      1,
+      "channelId inner event must land in the archive window",
+    );
+    assert.equal(archived[0].seq, 21);
+    assert.equal(archived[0].kind, "acp_write");
+
+    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
+    assert.equal(
+      snap.events.length,
+      1,
+      "null-channelId inner event must land in the live store",
+    );
+    assert.equal(snap.events[0].seq, 22);
+    assert.notEqual(
+      snap.events[0].kind,
+      "batch",
+      "the batch envelope itself must never be stored",
+    );
+  });
+
+  it("test_malformed_batch_envelope_degrades_to_itself", async () => {
+    // A kind:"batch" envelope with no events array (harness bug shape) must
+    // degrade to the envelope itself rather than being silently dropped, so a
+    // batching defect stays visible in the session viewer.
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const CHANNEL = "chan-malformed-batch";
+
+    const envelope = makeObserverEvent({
+      seq: 31,
+      timestamp: "2026-01-01T00:31:00.000Z",
+      kind: "batch",
+      channelId: CHANNEL,
+      payload: {},
+    });
+
+    await ingestArchivedObserverEvents([makeRawEvent()], makeDecrypt(envelope));
+
+    const archived = _testGetArchivedChannelEvents(AGENT_PUBKEY, CHANNEL);
+    assert.equal(
+      archived.length,
+      1,
+      "malformed envelope must be stored as itself, not dropped",
+    );
+    assert.equal(archived[0].kind, "batch");
+    assert.equal(archived[0].seq, 31);
+  });
 });

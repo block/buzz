@@ -24,6 +24,8 @@ import {
   deriveAgentConfigFieldModel,
   getRenderableEffortField,
   hasRenderableAgentConfigField,
+  structuredEnvKeys,
+  filterBakedGenericRows,
 } from "@/features/agents/lib/agentConfigCore";
 import {
   getBakedProviderInheritLabel,
@@ -32,9 +34,11 @@ import {
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
+  CARD_MINT_KEY_ANNOTATIONS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
+  getProviderApiKeyLabel,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
@@ -50,10 +54,13 @@ import {
 } from "@/features/agents/ui/buzzAgentConfig";
 import {
   EffortSelectField,
+  NumericTuningFields,
   useEffortAutoClear,
+  type NumericDescriptor,
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import { CardMintKeyCue } from "./CardMintKeyCue";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
@@ -63,7 +70,6 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   preferred_runtime: null,
 };
 
-/** Baked env keys that route to structured controls, not the generic env editor. */
 const BAKED_STRUCTURED_KEYS = new Set([
   "BUZZ_AGENT_PROVIDER",
   "BUZZ_AGENT_MODEL",
@@ -74,7 +80,6 @@ const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
 type AgentConfigDisclosure =
   | "full"
   | "onboarding-essential"
@@ -85,13 +90,9 @@ type AgentConfigDisclosure =
 // - auto-select a valid model when the provider changes
 // - keep the model select usable during discovery
 // - preserve credential env vars across provider switches (the abandoned
-//   provider's key stays in env_vars — visible/deletable under Advanced —
-//   so flipping back never loses a typed key; spawned agents may therefore
-//   see credentials for providers they don't use)
+//   provider's key stays in env_vars — visible/deletable under Advanced)
 // - require a provider before model/effort are editable (no saveable
-//   invalid state — design principle #4). Note: legacy configs saved with
-//   a model but no provider are cleared by the pre-existing orphan-model
-//   effect on next edit — deliberate data healing, documented in PR.
+//   invalid state — design principle #4)
 const autoSelectModelOnProviderChange = true;
 const disableModelSelectDuringDiscovery = false;
 const preserveCredentialEnvVarsOnProviderChange = true;
@@ -105,12 +106,7 @@ export const CANONICAL_CONFIG_BEHAVIORS = {
   requireProviderForModelAndEffort,
 } as const;
 
-/**
- * Disclosure preset → the eight visibility decisions it owns. Full and
- * progressive defaults expose the same controls; the progressive preset
- * changes only when those controls are revealed. Exported for the contract
- * test.
- */
+/** Disclosure preset → the eight visibility decisions it owns. Exported for the contract test. */
 export function resolveDisclosure(disclosure: AgentConfigDisclosure) {
   const full = disclosure !== "onboarding-essential";
   return {
@@ -141,14 +137,7 @@ export function shouldRevealDependentConfigFields({
   );
 }
 
-/**
- * Determines whether the status line beneath the Model field should render.
- *
- * Discovery warnings bypass the `onboarding-essential` preset so that a
- * first-run failure is never silently invisible.  On the happy path
- * (`status === null`) the status line stays hidden in onboarding, keeping
- * the page clean.
- */
+/** Whether the status line under the Model field renders. Discovery warnings bypass onboarding-essential so first-run failures are never invisible. */
 export function shouldShowModelStatusMessage(
   showDescriptions: boolean,
   status: { message: string; tone: string } | null,
@@ -157,14 +146,8 @@ export function shouldShowModelStatusMessage(
 }
 
 /**
- * Whether the Model control should render given discovery state.
- *
- * Optional-model harnesses (Claude Code / Codex, `acpNative`) omit the control
- * while discovery is in flight and after a **confirmed successful empty**
- * catalog (IPC resolved, no usable options) — there is nothing useful to pick.
- * Discovery failures / unavailable runtimes keep the control so #2246 failure
- * UI can render. Full disclosure still shows the control when Custom model is
- * available. Required-model harnesses always render the control.
+ * Renders the Model control given discovery state. Optional-model harnesses omit it while
+ * discovery is loading or after confirmed successful empty; failures keep it for the #2246 UI.
  */
 export function shouldRenderModelControl({
   discoveredModelOptions,
@@ -271,6 +254,19 @@ export function AgentConfigFields({
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
+
+  const numericDescriptors = fieldModel.fields.filter(
+    (d): d is NumericDescriptor =>
+      (d.kind === "maxOutputTokens" ||
+        d.kind === "contextLimit" ||
+        d.kind === "maxRounds") &&
+      d.render === "control",
+  );
+  const allStructuredKeys = structuredEnvKeys([
+    ...(effortField ? [effortField] : []),
+    ...numericDescriptors,
+  ]);
+  const bakedEnvMap = Object.fromEntries(bakedEnv.map((e) => [e.key, e.value]));
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
     [bakedEnv],
@@ -303,8 +299,12 @@ export function AgentConfigFields({
     [bakedEnv],
   );
   const bakedGenericRows = React.useMemo<readonly InheritedEnvRow[]>(
-    () => bakedEnv.filter((e) => !BAKED_STRUCTURED_KEYS.has(e.key)),
-    [bakedEnv],
+    () =>
+      filterBakedGenericRows(bakedEnv, [
+        ...BAKED_STRUCTURED_KEYS,
+        ...allStructuredKeys,
+      ]),
+    [bakedEnv, allStructuredKeys],
   );
 
   const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
@@ -575,15 +575,14 @@ export function AgentConfigFields({
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
-    const effort = effortPersistenceKey
-      ? config.env_vars[effortPersistenceKey]
-      : undefined;
-    const merged = { ...next };
-    if (effortPersistenceKey && effort !== undefined) {
-      merged[effortPersistenceKey] = effort;
-    }
-    onConfigChange({ ...config, env_vars: merged });
+    onConfigChange({ ...config, env_vars: next });
   }
+
+  const handleNumericEnvVarChange = (key: string, value: string) => {
+    const next = { ...config.env_vars, [key]: value };
+    if (value === "") delete next[key];
+    onConfigChange({ ...config, env_vars: next });
+  };
 
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
@@ -741,12 +740,40 @@ export function AgentConfigFields({
     </div>
   ) : null;
 
+  const advancedEditorBlock = (
+    <>
+      <EnvVarsEditor
+        fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
+        hiddenKeys={[
+          ...(apiKeyEnvVar ? [apiKeyEnvVar] : []),
+          ...allStructuredKeys,
+        ]}
+        inheritedRows={bakedGenericRows}
+        inheritedRowsLabel="build"
+        keyAnnotations={CARD_MINT_KEY_ANNOTATIONS}
+        label="Environment variables"
+        onChange={handleEnvVarsChange}
+        requiredKeys={advancedRequiredEnvKeys}
+        value={config.env_vars}
+      />
+      {numericDescriptors.length > 0 ? (
+        <NumericTuningFields
+          descriptors={numericDescriptors}
+          envVars={config.env_vars}
+          inheritedEnvVars={bakedEnvMap}
+          onEnvVarChange={handleNumericEnvVarChange}
+        />
+      ) : null}
+    </>
+  );
+
   const dependentContent = (
     <>
       {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
             disabled={false}
+            envVarName={apiKeyEnvVar}
             inheritedLabel={
               apiKeyFileSatisfied
                 ? "Set in runtime config"
@@ -754,11 +781,7 @@ export function AgentConfigFields({
             }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={
-              effectiveProvider === "anthropic"
-                ? "Anthropic API Key"
-                : "OpenAI API Key"
-            }
+            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
             onValueChange={(value) =>
               onConfigChange({
                 ...config,
@@ -869,6 +892,7 @@ export function AgentConfigFields({
 
       {showAdvancedFields ? (
         <div className={cn(blockClassName, "space-y-3")}>
+          <CardMintKeyCue envVars={config.env_vars} />
           <button
             aria-expanded={advancedOpen}
             className={cn(
@@ -907,38 +931,12 @@ export function AgentConfigFields({
                       : PROGRESSIVE_FIELDS_TRANSITION
                   }
                 >
-                  <EnvVarsEditor
-                    fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-                    hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
-                    inheritedRows={bakedGenericRows}
-                    inheritedRowsLabel="build"
-                    label="Environment variables"
-                    onChange={handleEnvVarsChange}
-                    requiredKeys={advancedRequiredEnvKeys}
-                    value={Object.fromEntries(
-                      Object.entries(config.env_vars).filter(
-                        ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
-                      ),
-                    )}
-                  />
+                  {advancedEditorBlock}
                 </motion.div>
               ) : null}
             </AnimatePresence>
           ) : advancedOpen ? (
-            <EnvVarsEditor
-              fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-              hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
-              inheritedRows={bakedGenericRows}
-              inheritedRowsLabel="build"
-              label="Environment variables"
-              onChange={handleEnvVarsChange}
-              requiredKeys={advancedRequiredEnvKeys}
-              value={Object.fromEntries(
-                Object.entries(config.env_vars).filter(
-                  ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
-                ),
-              )}
-            />
+            advancedEditorBlock
           ) : null}
         </div>
       ) : null}

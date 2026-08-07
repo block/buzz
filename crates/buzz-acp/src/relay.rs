@@ -106,9 +106,12 @@ const REQ_PACING_INTERVAL: Duration = Duration::from_millis(125);
 /// blocked for more than one REQ's worth of I/O between drain ticks.
 const DRAIN_BUDGET_PER_ITER: usize = 1;
 /// Maximum observer telemetry frames parked while the rate-limit gate is armed
-/// (or the socket is down). The upstream pacer feeds at most ~6 frames/s, so
-/// this covers ~40 s of gating; beyond that the oldest frames are dropped with
-/// visible accounting (`gated_observer_dropped`).
+/// (or the socket is down). The upstream publisher ships at most ONE batched
+/// frame per second GLOBALLY (one publish slot per tick, regardless of how
+/// many channels are active), so this covers ~4 minutes of gating; beyond that
+/// the oldest frames are dropped with visible accounting
+/// (`gated_observer_dropped`). Note each dropped frame may carry a whole batch
+/// of events, so event-level loss is larger than the frame count.
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
@@ -400,6 +403,19 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
+    ///
+    /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
+    /// Returns the bridge response as a `serde_json::Value` (usually `{ "count": n }`).
+    pub async fn count(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/count", &body_bytes).await?;
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))

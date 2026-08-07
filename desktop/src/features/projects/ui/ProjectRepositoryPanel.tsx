@@ -35,6 +35,10 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
+  PROJECT_DETAIL_PANEL_CLASS,
+  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+} from "./projectPanelStyles";
+import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
   RepoSyncActionButton,
@@ -550,7 +554,7 @@ function FileContentPanel({
   const directorySegments = pathSegments.slice(0, -1);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
@@ -614,6 +618,7 @@ export function RepositoryFilesPanel({
   profiles,
   fallbackAuthorPubkey,
   sourceControls,
+  unavailableMessage,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -623,6 +628,7 @@ export function RepositoryFilesPanel({
   fallbackAuthorPubkey?: string;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
+  unavailableMessage?: string;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
@@ -679,21 +685,26 @@ export function RepositoryFilesPanel({
   // remote/local toggle must stay reachable when one source fails to load.
   const stateMessage = isLoading
     ? "Loading repository files…"
-    : error
-      ? "Could not load the repository file tree."
-      : files.length === 0
-        ? "No files have been pushed yet."
-        : null;
+    : unavailableMessage
+      ? unavailableMessage
+      : error
+        ? "Could not load the repository file tree."
+        : files.length === 0
+          ? "No files have been pushed yet."
+          : null;
   if (stateMessage) {
     if (!sourceControls) {
       return (
-        <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+        <div
+          className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+          data-project-detail-panel
+        >
           {stateMessage}
         </div>
       );
     }
     return (
-      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+      <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
@@ -733,7 +744,7 @@ export function RepositoryFilesPanel({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
         {sourceControls ? (
           <>

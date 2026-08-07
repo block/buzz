@@ -53,25 +53,31 @@ function emitMockMessage(
   page: Page,
   channelName: string,
   content: string,
-  options: { extraTags?: string[][] } = {},
+  options: { extraTags?: string[][]; parentEventId?: string } = {},
 ) {
   return page.evaluate(
-    ({ channelName, content, extraTags }) => {
+    ({ channelName, content, extraTags, parentEventId }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
             extraTags?: string[][];
+            parentEventId?: string;
           }) => unknown;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) {
         throw new Error("Mock message emitter is unavailable.");
       }
-      emit({ channelName, content, extraTags });
+      return emit({ channelName, content, extraTags, parentEventId });
     },
-    { channelName, content, extraTags: options.extraTags },
+    {
+      channelName,
+      content,
+      extraTags: options.extraTags,
+      parentEventId: options.parentEventId,
+    },
   );
 }
 
@@ -177,7 +183,7 @@ async function openReviewWithPostedTimecode(
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
     page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
   ).toBeVisible();
@@ -232,7 +238,7 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
   const composerPoster = composer.getByAltText("Video attachment bbbb");
@@ -763,6 +769,55 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(
     threadReviewDialog.getByTestId("video-review-comments"),
   ).toContainText("Color pass looks right");
+});
+
+test("video replies in threads open the review comments view", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const root = (await emitMockMessage(
+    page,
+    "general",
+    "Can you review this cut?",
+  )) as { id: string };
+  const videoReply = (await emitMockMessage(
+    page,
+    "general",
+    `![video](${VIDEO_URL})`,
+    {
+      parentEventId: root.id,
+    },
+  )) as { id: string };
+  await emitMockMessage(page, "general", "[00:01] Tighten this transition.", {
+    parentEventId: videoReply.id,
+  });
+
+  const threadSummary = page.locator(`[data-thread-head-id="${root.id}"]`);
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadReplies = threadPanel.getByTestId("message-thread-replies");
+  const reviewButton = threadReplies.getByRole("button", {
+    name: "Open video review",
+  });
+  await expect(reviewButton).toBeVisible();
+  await reviewButton.click();
+
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(
+    reviewDialog.getByTestId("video-review-comments-panel"),
+  ).toBeVisible();
+  await expect(reviewDialog.getByTestId("message-composer")).toBeVisible();
+  await expect(reviewDialog.getByTestId("video-review-comments")).toContainText(
+    "Tighten this transition.",
+  );
 });
 
 test("narrow inline videos hide playback speed control", async ({ page }) => {

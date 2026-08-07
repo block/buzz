@@ -65,6 +65,23 @@ These constraints ensure a buggy or malicious hook cannot trap the agent.
 Hooks are **off by default**. The operator must explicitly opt in via
 `MCP_HOOK_SERVERS`.
 
+### Not a hook: the reply guard
+
+`buzz-agent` has one in-process objection at the `_Stop` gate that is **not** an
+MCP hook and exposes no hook tool: the reply guard
+(`BUZZ_AGENT_REQUIRE_REPLY=1`), which reminds the model to publish when a turn is
+about to end with nothing posted to Buzz. There is no `_ReplyGuard` tool to
+implement and no server to allowlist — the env var and the recognition contract
+are documented in
+[crates/buzz-agent/README.md](../crates/buzz-agent/README.md#reply-guard).
+
+It is mentioned here only because it shares this lifecycle point and this
+budget: its reminders count against `BUZZ_AGENT_STOP_MAX_REJECTIONS` like any
+hook objection, and a round carrying both a hook objection and a reminder costs
+one rejection and delivers both texts. Setting the budget to 0 disables both.
+That the gate can carry in-process objections alongside hook output is
+deliberate; hooks see no difference.
+
 ## Implementing a Hook
 
 Any MCP server can expose hooks. Example: a test-runner server that blocks

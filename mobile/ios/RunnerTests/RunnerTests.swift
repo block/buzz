@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import UIKit
 import XCTest
@@ -5,6 +6,230 @@ import XCTest
 @testable import Buzz
 
 class RunnerTests: XCTestCase {
+
+  func testRelativeTrackInsertionTimesPreserveAudioDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 1, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1.5, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.audio ?? .invalid,
+        CMTime(seconds: 0.5, preferredTimescale: 600)
+      ),
+      0
+    )
+  }
+
+  func testRelativeTrackInsertionTimesPreserveVideoDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 2, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.video,
+        CMTime(seconds: 1, preferredTimescale: 600)
+      ),
+      0
+    )
+    XCTAssertEqual(CMTimeCompare(times.audio ?? .invalid, .zero), 0)
+  }
+
+  func testRelativeTrackInsertionTimesZeroBasesVideoWithoutAudio() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 3, preferredTimescale: 600),
+      audioStart: nil
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertNil(times.audio)
+  }
+
+  @MainActor
+  func testExpandedAttachmentSurfaceDismissesKeyboard() {
+    let window = KeyboardDismissalSpyWindow()
+
+    NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(in: window)
+
+    XCTAssertTrue(window.didForceEndEditing)
+  }
+
+  func testExpandedAttachmentSurfaceMeasuresKeyboardOverlap() {
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        )
+      ),
+      300
+    )
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(x: 0, y: 844, width: 390, height: 0)
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuReturnsToKeyboardDismissedAnchor() {
+    let anchorBounds = CGRect(x: 0, y: 0, width: 44, height: 44)
+
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: true
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 340)
+    )
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: false
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 300)
+    )
+  }
+
+  func testAttachmentMenuKeepsKeyboardWhenMenuFitsAboveTrigger() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 320, y: 480, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        safeAreaInsets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuDismissesKeyboardAndRepositionsInCompactHeight() {
+    let sourceRect = CGRect(x: 760, y: 168, width: 44, height: 44)
+    let keyboardDismissalOffset =
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: sourceRect,
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 228,
+          width: 844,
+          height: 162
+        ),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      )
+
+    XCTAssertEqual(keyboardDismissalOffset, 162)
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.sourceRect(
+        sourceRect,
+        keyboardDismissalOffset: keyboardDismissalOffset
+      ),
+      sourceRect.offsetBy(dx: 0, dy: 162)
+    )
+  }
+
+  func testAttachmentMenuDoesNotMoveWithoutSoftwareKeyboard() {
+    XCTAssertEqual(
+      NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
+        sourceRect: CGRect(x: 760, y: 168, width: 44, height: 44),
+        containerBounds: CGRect(x: 0, y: 0, width: 844, height: 390),
+        safeAreaInsets: UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59),
+        keyboardLayoutFrame: CGRect(x: 0, y: 390, width: 844, height: 0),
+        menuHeight: NativeAttachmentMenuLayout.size(
+          compatibleWith: UITraitCollection(
+            preferredContentSizeCategory: .large
+          )
+        ).height
+      ),
+      0
+    )
+  }
+
+  func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
+    let traits = UITraitCollection(preferredContentSizeCategory: .large)
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertEqual(size.width, 216)
+    XCTAssertEqual(size.height, 264)
+    XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
+    XCTAssertEqual(
+      NativeAttachmentMenuLayout.itemHeight(compatibleWith: traits),
+      52
+    )
+    XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
+    XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
+  func testNativeAttachmentMenuUsesInterAndSharedPopoverChrome() {
+    let font = NativeAttachmentMenuTypography.font(
+      forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
+    )
+    var didSelect = false
+    let button = makeNativeAttachmentMenuButton(
+      title: "Photos",
+      symbol: "photo",
+      action: { didSelect = true }
+    )
+    let titleLabel = button.subviews.compactMap { $0 as? UILabel }.first
+
+    XCTAssertTrue(font.fontName.hasPrefix("Inter"))
+    XCTAssertTrue(titleLabel?.font.fontName.hasPrefix("Inter") == true)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.cornerRadius, 20)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.borderWidth, 1)
+    XCTAssertEqual(NativeAttachmentPopoverStyle.shadowOpacity, 0.18)
+
+    button.sendActions(for: .primaryActionTriggered)
+    XCTAssertTrue(didSelect)
+  }
+
+  func testNativeAttachmentMenuGrowsAndScrollsForAccessibilityText() {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let itemHeight = NativeAttachmentMenuLayout.itemHeight(
+      compatibleWith: traits
+    )
+    let contentHeight = NativeAttachmentMenuLayout.contentHeight(
+      compatibleWith: traits
+    )
+    let size = NativeAttachmentMenuLayout.size(compatibleWith: traits)
+
+    XCTAssertGreaterThan(itemHeight, 52)
+    XCTAssertGreaterThan(contentHeight, 264)
+    XCTAssertEqual(
+      size.height,
+      min(contentHeight, NativeAttachmentMenuLayout.maximumHeight)
+    )
+    XCTAssertLessThanOrEqual(
+      size.height,
+      NativeAttachmentMenuLayout.maximumHeight
+    )
+  }
 
   func testDynamicIslandQrScannerRecognizesTallSafeAreas() {
     for safeAreaTopInset in [51, 59, 62] {
@@ -225,6 +450,15 @@ class RunnerTests: XCTestCase {
     let url = try XCTUnwrap(
       Bundle(for: RunnerTests.self).url(forResource: name, withExtension: fileExtension))
     return try Data(contentsOf: url)
+  }
+}
+
+private final class KeyboardDismissalSpyWindow: UIWindow {
+  private(set) var didForceEndEditing = false
+
+  override func endEditing(_ force: Bool) -> Bool {
+    didForceEndEditing = force
+    return true
   }
 }
 

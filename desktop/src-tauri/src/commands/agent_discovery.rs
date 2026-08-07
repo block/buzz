@@ -1,12 +1,11 @@
-use std::io::Read;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
     managed_agents::{
         command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, InstallStepResult,
-        ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
+        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
+        RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
     nostr_convert,
     relay::query_relay,
@@ -22,24 +21,13 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
+/// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
+/// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
+/// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
+/// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
+/// Pure planning function: never spawns a process. Tests use it to assert commands without real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
@@ -167,7 +155,6 @@ pub async fn save_custom_harness(
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
-        // Security: no user-supplied avatar URL in catalog entries.
         avatar_url: String::new(),
         availability,
         command: command_opt,
@@ -177,6 +164,9 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
         install_hint: definition.install_hint,
         install_instructions_url: definition.install_instructions_url,
         can_auto_install: false,
@@ -186,8 +176,8 @@ pub async fn save_custom_harness(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Custom,
-        // Carry definition env back so the edit form can read and preserve it.
         definition_env: definition.env,
+        max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
     })
 }
 
@@ -236,10 +226,12 @@ pub async fn install_acp_runtime(
     // returns (Guard impl Drop) — so Phase 2's restart path runs outside
     // the guard and cannot re-enter the mutex.
     let runtime_id_clone = runtime_id.clone();
-    let install_result =
-        tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id_clone))
-            .await
-            .map_err(|e| format!("install task panicked: {e}"))??;
+    let app_clone = app.clone();
+    let install_result = tokio::task::spawn_blocking(move || {
+        install_acp_runtime_blocking(&runtime_id_clone, &app_clone)
+    })
+    .await
+    .map_err(|e| format!("install task panicked: {e}"))??;
 
     if !install_result.success {
         return Ok(install_result);
@@ -259,12 +251,21 @@ pub async fn install_acp_runtime(
         steps: install_result.steps,
         restarted_count,
         failed_restart_count,
+        log_path: install_result.log_path,
     })
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
-fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+///
+/// The reporter is built here rather than by the caller so this run's log
+/// session starts only once the concurrency guard is held and the runtime id is
+/// resolved to its canonical catalog form: a rejected install must not rotate a
+/// running one's log, and the log filename is derived from that id.
+fn install_acp_runtime_blocking(
+    runtime_id: &str,
+    app: &tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
     // Re-fetch the login-shell PATH so a Node.js installation that happened
     // after app launch (or after a previous failed install) is visible to this
     // run and to the subsequent discover_acp_providers call.
@@ -297,6 +298,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     let runtime = crate::managed_agents::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
 
+    let reporter = InstallReporter::for_run(app, runtime.id);
+
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
@@ -306,16 +309,11 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
+                let result = run_install_command_with_retry("cli", cmd, &reporter);
                 let success = result.success;
                 steps.push(result);
                 if !success {
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    return Ok(reporter.failed(steps));
                 }
             }
         }
@@ -325,10 +323,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // For the codex runtime, "found" is not enough — the resolved binary must also
     // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
     // the new npm install so the CODEX_CONFIG spawn contract works correctly.
-    let adapter_path = runtime
-        .commands
-        .iter()
-        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    let adapter_path = resolve_adapter_path(runtime.commands, runtime.adapter_install_commands);
     let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
@@ -340,13 +335,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
         if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
-                steps.push(*step);
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                reporter.record_step(&mut steps, *step);
+                return Ok(reporter.failed(steps));
             }
         }
 
@@ -359,40 +349,31 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                 Ok(Some(command)) => command,
                 Ok(None) => cmd.to_string(),
                 Err(step) => {
-                    steps.push(*step);
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    reporter.record_step(&mut steps, *step);
+                    return Ok(reporter.failed(steps));
                 }
             };
 
-            let mut result = run_install_command_with_retry("adapter", &planned);
+            let mut result = run_install_command_with_retry("adapter", &planned, &reporter);
             if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
                 result.hint = npm_eacces_hint(&result.stderr, cmd);
             }
             let success = result.success;
             steps.push(result);
             if !success {
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                return Ok(reporter.failed(steps));
             }
         }
     }
 
-    post_install_verification::run(runtime_id, &mut steps);
+    post_install_verification::run(runtime_id, &mut steps, &reporter);
 
     Ok(InstallRuntimeResult {
         success: steps.iter().all(|step| step.success),
         steps,
         restarted_count: 0,
         failed_restart_count: 0,
+        log_path: reporter.log_path(),
     })
 }
 
@@ -862,72 +843,6 @@ pub(crate) fn install_shell_from(
     resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
 }
 
-/// Maximum number of attempts for a transient-looking install command.
-const INSTALL_MAX_ATTEMPTS: u32 = 3;
-
-/// Run an install command, retrying transient failures with backoff.
-///
-/// Runtime installs pull artifacts over the network — Goose's `curl … | bash`
-/// fetches a native release-asset tarball from GitHub's CDN with no retry of
-/// its own, and the npm adapter installs hit the registry. A single blip there
-/// currently fails onboarding outright. This retries a command that ran to
-/// completion but exited nonzero (the transient-download signature) up to
-/// `INSTALL_MAX_ATTEMPTS` times. Failures with no exit code — a timeout or a
-/// shell that never spawned — are not retried, since re-running them just costs
-/// the user more time without a plausible path to success.
-fn run_install_command_with_retry(step: &str, command: &str) -> InstallStepResult {
-    run_install_with_retry(
-        INSTALL_MAX_ATTEMPTS,
-        |_attempt| run_install_command(step, command),
-        std::thread::sleep,
-    )
-}
-
-/// Core retry loop, decoupled from the real command runner and clock so it can
-/// be unit-tested without spawning shells or sleeping. `run` receives the
-/// 1-based attempt number.
-fn run_install_with_retry(
-    max_attempts: u32,
-    mut run: impl FnMut(u32) -> InstallStepResult,
-    mut sleep: impl FnMut(std::time::Duration),
-) -> InstallStepResult {
-    let mut attempt = 1;
-    loop {
-        let result = run(attempt);
-        if result.success || !install_failure_is_retryable(&result) || attempt >= max_attempts {
-            return if attempt > 1 && !result.success {
-                annotate_retry_attempts(result, attempt)
-            } else {
-                result
-            };
-        }
-        sleep(install_retry_backoff(attempt));
-        attempt += 1;
-    }
-}
-
-/// Only retry commands that actually ran and exited nonzero — the signature of
-/// a transient download failure. A missing exit code means the command timed
-/// out or the shell failed to spawn, neither of which a retry is likely to fix.
-fn install_failure_is_retryable(result: &InstallStepResult) -> bool {
-    !result.success && result.exit_code.is_some()
-}
-
-/// Linear backoff: 3s before attempt 2, 6s before attempt 3.
-fn install_retry_backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_secs(3 * attempt as u64)
-}
-
-/// Prefix the surfaced error so the UI shows the install was retried rather than
-/// failed on a single unlucky attempt.
-fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> InstallStepResult {
-    result.stderr = format!(
-        "install failed after {attempts} attempts (retried with backoff)\n{}",
-        result.stderr
-    );
-    result
-}
-
 /// Returns `true` when `command` is a Windows-native PowerShell invocation
 /// (i.e. begins with `powershell.exe`). These commands must NOT be routed
 /// through Git Bash: the Bash login shell prepends POSIX dirs to PATH, so
@@ -1081,185 +996,18 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
     install_shell_command(command)
 }
 
-fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let mut cmd = match build_install_command(command) {
-        Ok(cmd) => cmd,
-        Err(hint) => {
-            return InstallStepResult {
-                step: step.to_string(),
-                command: command.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: "no suitable shell found for install commands".to_string(),
-                exit_code: None,
-                hint: Some(hint),
-            };
-        }
-    };
-
-    let mut child = match cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return InstallStepResult {
-                step: step.to_string(),
-                command: command.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: format!("failed to spawn shell: {e}"),
-                exit_code: None,
-                hint: None,
-            };
-        }
-    };
-
-    // Drain stdout/stderr on background threads to prevent pipe buffer deadlock.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut pipe) = stdout_pipe {
-            let _ = pipe.read_to_string(&mut buf);
-        }
-        buf
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut pipe) = stderr_pipe {
-            let _ = pipe.read_to_string(&mut buf);
-        }
-        buf
-    });
-
-    // Save the PID before moving `child` into the wait thread so we can
-    // kill the process on timeout.
-    let child_pid = child.id();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wait_thread = std::thread::spawn(move || {
-        let status = child.wait();
-        let _ = tx.send(status);
-    });
-
-    // 5-minute timeout for install commands.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            // Timeout: kill the child process via its PID, then join all
-            // threads so nothing leaks.
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(child_pid as i32, libc::SIGTERM);
-            }
-            #[cfg(windows)]
-            {
-                let _ = crate::managed_agents::taskkill_tree(child_pid);
-            }
-            drop(rx);
-            let _ = wait_thread.join();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return InstallStepResult {
-                step: step.to_string(),
-                command: command.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: "install command timed out after 5 minutes".to_string(),
-                exit_code: None,
-                hint: None,
-            };
-        }
-
-        match rx.recv_timeout(std::time::Duration::from_millis(200).min(remaining)) {
-            Ok(Ok(status)) => {
-                let _ = wait_thread.join();
-                let stdout = stdout_thread.join().unwrap_or_default();
-                let stderr_raw = stderr_thread.join().unwrap_or_default();
-                return InstallStepResult {
-                    step: step.to_string(),
-                    command: command.to_string(),
-                    success: status.success(),
-                    stdout: truncate_output(stdout),
-                    stderr: truncate_output(stderr_raw),
-                    exit_code: status.code(),
-                    hint: None,
-                };
-            }
-            Ok(Err(e)) => {
-                let _ = wait_thread.join();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return InstallStepResult {
-                    step: step.to_string(),
-                    command: command.to_string(),
-                    success: false,
-                    stdout: String::new(),
-                    stderr: format!("failed to check process status: {e}"),
-                    exit_code: None,
-                    hint: None,
-                };
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Still running; loop and check deadline again.
-                continue;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                // wait_thread dropped sender without sending — shouldn't happen.
-                let _ = wait_thread.join();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return InstallStepResult {
-                    step: step.to_string(),
-                    command: command.to_string(),
-                    success: false,
-                    stdout: String::new(),
-                    stderr: "internal error: wait thread disconnected".to_string(),
-                    exit_code: None,
-                    hint: None,
-                };
-            }
-        }
-    }
-}
-
-/// Cap output to head + tail to avoid flooding the UI with large error dumps,
-/// while preserving the most useful parts of the output.
-fn truncate_output(s: String) -> String {
-    const HEAD: usize = 512;
-    const TAIL: usize = 1024;
-    const LIMIT: usize = HEAD + TAIL;
-    if s.len() <= LIMIT {
-        return s;
-    }
-    let head_end = floor_char_boundary(&s, HEAD);
-    let tail_start = floor_char_boundary(&s, s.len().saturating_sub(TAIL));
-    let omitted = tail_start - head_end;
-    format!(
-        "{}\n... ({omitted} bytes omitted) ...\n{}",
-        &s[..head_end],
-        &s[tail_start..]
-    )
-}
-
-fn floor_char_boundary(s: &str, mut index: usize) -> usize {
-    index = index.min(s.len());
-    while index > 0 && !s.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
+// ── install command execution ─────────────────────────────────────────────────
+mod install_capture;
+mod install_exec;
+mod install_report;
+use install_exec::run_install_command_with_retry;
+use install_report::InstallReporter;
 
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
 mod managed_node;
 use managed_node::{
     ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
-    npm_eacces_hint,
+    npm_eacces_hint, resolve_adapter_path,
 };
 
 #[tauri::command]
@@ -1389,7 +1137,8 @@ mod tests {
     /// plan_adapter_install is the pure install-plan seam used by
     /// install_acp_runtime_blocking. These tests verify:
     ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
-    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - A current 1.x binary (Available) → None (no reinstall)
+    ///   - A 1.x binary below the floor → install plan returned
     ///   - Missing binary (None path) → catalog install commands returned
     #[cfg(unix)]
     #[test]
@@ -1429,10 +1178,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("codex-acp");
-        // Simulate 1.x adapter: outputs version and exits 0
+        // Simulate the minimum supported adapter version.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
@@ -1443,7 +1192,32 @@ mod tests {
 
         assert!(
             plan.is_none(),
-            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+            "current codex adapter must not trigger install plan (no reinstall needed)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_updates_older_1x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // A 1.x adapter below MIN_CODEX_ACP_VERSION must still be reinstalled.
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
+
+        assert!(
+            plan.is_some(),
+            "older 1.x codex adapter must trigger update plan"
         );
     }
 
@@ -1954,7 +1728,7 @@ mod tests {
     #[test]
     fn test_powershell_command_argv_exact() {
         // Catalog format: body wrapped in one outer double-quote pair (Bash-layer serialization).
-        let body = "irm https://chatgpt.com/codex/install.ps1 | iex";
+        let body = "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-codex.ps1'; Invoke-RestMethod https://chatgpt.com/codex/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE";
         let cmd = super::install_powershell_command(&format!(
             r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "{body}""#
         ));
@@ -1984,12 +1758,12 @@ mod tests {
         );
     }
 
-    /// Claude Code catalog command (discovery.rs:107) must dequote to the bare pipeline.
+    /// Claude Code catalog command must dequote to the two-step download-then-execute body.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_claude_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -2000,22 +1774,22 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "irm https://claude.ai/install.ps1 | iex",
+                "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Claude catalog command must be dequoted correctly"
         );
     }
 
-    /// Goose Windows catalog command (discovery.rs:78) must dequote to a bare pipeline
-    /// with a literal `$env:` prefix — no backslash before the dollar sign.
-    /// This proves the `\$` → `$` escape fix: post-#2750 the spawn is native and
+    /// Goose Windows catalog command must dequote to the two-step download-then-execute body
+    /// with the `$env:CONFIGURE` prefix intact — no backslash before the dollar sign.
+    /// This proves the `\$` → `$` contract: post-#2750 the spawn is native and
     /// PowerShell receives the body verbatim, so a residual `\` would produce
     /// `\$env:CONFIGURE='false'` which is a malformed statement.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_goose_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -2026,131 +1800,9 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
+                "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Goose catalog command must dequote with bare $env: (no backslash before $)"
-        );
-    }
-
-    // ── install retry ─────────────────────────────────────────────────────────
-
-    /// Build an `InstallStepResult` with just the fields the retry loop reads.
-    fn step_result(success: bool, exit_code: Option<i32>, stderr: &str) -> InstallStepResult {
-        InstallStepResult {
-            step: "cli".to_string(),
-            command: "curl … | bash".to_string(),
-            success,
-            stdout: String::new(),
-            stderr: stderr.to_string(),
-            exit_code,
-            hint: None,
-        }
-    }
-
-    #[test]
-    fn test_retryable_only_for_nonzero_exit() {
-        // Ran to completion but exited nonzero — the transient-download signature.
-        assert!(install_failure_is_retryable(&step_result(
-            false,
-            Some(1),
-            ""
-        )));
-        // No exit code — timeout or shell-never-spawned; retry won't help.
-        assert!(!install_failure_is_retryable(&step_result(false, None, "")));
-        // Success is never retryable.
-        assert!(!install_failure_is_retryable(&step_result(
-            true,
-            Some(0),
-            ""
-        )));
-    }
-
-    #[test]
-    fn test_retry_backoff_is_linear() {
-        assert_eq!(install_retry_backoff(1), std::time::Duration::from_secs(3));
-        assert_eq!(install_retry_backoff(2), std::time::Duration::from_secs(6));
-    }
-
-    #[test]
-    fn test_retry_stops_on_first_success() {
-        let mut calls = 0;
-        let mut sleeps = 0;
-        let result = run_install_with_retry(
-            3,
-            |_| {
-                calls += 1;
-                step_result(true, Some(0), "")
-            },
-            |_| sleeps += 1,
-        );
-        assert!(result.success);
-        assert_eq!(calls, 1, "a first-attempt success must not re-run");
-        assert_eq!(sleeps, 0, "no backoff sleep when nothing is retried");
-    }
-
-    #[test]
-    fn test_retry_recovers_after_transient_failure() {
-        let mut calls = 0;
-        let result = run_install_with_retry(
-            3,
-            |attempt| {
-                calls += 1;
-                // Fail the first attempt with a nonzero exit, then succeed.
-                step_result(attempt >= 2, Some(if attempt >= 2 { 0 } else { 1 }), "blip")
-            },
-            |_| {},
-        );
-        assert!(result.success);
-        assert_eq!(calls, 2, "should retry once then succeed");
-        // A recovered install must not carry the retry-failure annotation.
-        assert!(!result.stderr.contains("attempts"));
-    }
-
-    #[test]
-    fn test_retry_does_not_retry_unretryable_failure() {
-        let mut calls = 0;
-        let result = run_install_with_retry(
-            3,
-            |_| {
-                calls += 1;
-                step_result(false, None, "timed out")
-            },
-            |_| {},
-        );
-        assert!(!result.success);
-        assert_eq!(calls, 1, "a failure with no exit code must not be retried");
-        assert_eq!(
-            result.stderr, "timed out",
-            "unretried failure is unannotated"
-        );
-    }
-
-    #[test]
-    fn test_retry_exhausts_attempts_and_annotates() {
-        let mut calls = 0;
-        let mut sleeps = 0;
-        let result = run_install_with_retry(
-            3,
-            |_| {
-                calls += 1;
-                step_result(false, Some(1), "download failed")
-            },
-            |_| sleeps += 1,
-        );
-        assert!(!result.success);
-        assert_eq!(calls, 3, "must try exactly max_attempts times");
-        assert_eq!(
-            sleeps, 2,
-            "backoff sleeps between attempts, not after the last"
-        );
-        assert!(
-            result.stderr.contains("after 3 attempts"),
-            "exhausted retries must surface the attempt count, got: {}",
-            result.stderr
-        );
-        assert!(
-            result.stderr.contains("download failed"),
-            "original stderr must be preserved"
         );
     }
 }

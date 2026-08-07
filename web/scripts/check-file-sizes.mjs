@@ -29,5 +29,4 @@ await runFileSizeCheck({
   projectRoot,
   rules,
   label: "Web",
-  scriptPath: "web/scripts/check-file-sizes.mjs",
 });

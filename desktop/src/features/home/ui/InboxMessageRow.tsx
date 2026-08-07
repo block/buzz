@@ -9,6 +9,7 @@ import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAu
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -30,12 +31,14 @@ type InboxMessageRowProps = {
   isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
+  onEdit?: (message: InboxDisplayMessage) => void;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  showUnreadBoundary?: boolean;
 };
 
 export function InboxMessageRow({
@@ -46,8 +49,10 @@ export function InboxMessageRow({
   isFirst = false,
   isFocusHighlightVisible,
   message,
+  onEdit,
   onSelectReplyTarget,
   onToggleReaction,
+  showUnreadBoundary = false,
 }: InboxMessageRowProps) {
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
@@ -89,6 +94,7 @@ export function InboxMessageRow({
 
   return (
     <div className="relative px-2">
+      {showUnreadBoundary ? <UnreadDivider /> : null}
       {message.isSelected ? (
         <div
           aria-hidden="true"
@@ -112,7 +118,7 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {canReply || canToggleReactions ? (
+        {canReply || canToggleReactions || onEdit ? (
           <div
             className={cn(
               "absolute right-2 top-1 z-10",
@@ -122,6 +128,7 @@ export function InboxMessageRow({
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
+              onEdit={onEdit ? () => onEdit(message) : undefined}
               onReactionSelect={
                 canToggleReactions ? handleReactionSelect : undefined
               }

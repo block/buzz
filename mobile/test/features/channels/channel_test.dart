@@ -195,4 +195,50 @@ void main() {
       expect(updated.archivedAt, newDate);
     });
   });
+
+  group('Channel.canAddMembers', () {
+    Channel make({required String channelType, required String visibility}) =>
+        Channel(
+          id: '1',
+          name: 'c',
+          channelType: channelType,
+          visibility: visibility,
+          description: '',
+          createdBy: 'x',
+          createdAt: DateTime(2025),
+          memberCount: 2,
+        );
+
+    test('open channels accept adds from anyone', () {
+      final channel = make(channelType: 'stream', visibility: 'open');
+      expect(channel.canAddMembers(null), isTrue);
+      expect(channel.canAddMembers('member'), isTrue);
+    });
+
+    test('private channels accept adds only from owners/admins', () {
+      final channel = make(channelType: 'stream', visibility: 'private');
+      expect(channel.canAddMembers('owner'), isTrue);
+      expect(channel.canAddMembers('admin'), isTrue);
+      expect(channel.canAddMembers('member'), isFalse);
+      expect(channel.canAddMembers('bot'), isFalse);
+      expect(channel.canAddMembers(null), isFalse);
+    });
+
+    test('DMs never accept adds', () {
+      expect(
+        make(channelType: 'dm', visibility: 'open').canAddMembers('owner'),
+        isFalse,
+      );
+      expect(
+        make(channelType: 'dm', visibility: 'private').canAddMembers('owner'),
+        isFalse,
+      );
+    });
+
+    test('unknown visibility fails closed for non-elevated callers', () {
+      final channel = make(channelType: 'stream', visibility: 'mystery');
+      expect(channel.canAddMembers('member'), isFalse);
+      expect(channel.canAddMembers('owner'), isTrue);
+    });
+  });
 }

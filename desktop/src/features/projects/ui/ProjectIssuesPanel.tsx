@@ -4,8 +4,8 @@ import { toast } from "sonner";
 
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
-  type Project,
   type ProjectIssue,
+  type Repository as Project,
   useCreateProjectIssueCommentMutation,
   useProjectIssuesQuery,
 } from "@/features/projects/hooks";
@@ -15,15 +15,18 @@ import {
 } from "@/features/profile/lib/identity";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import { ProjectIssueCommentTimeline } from "./ProjectIssueCommentTimeline";
+import { ProjectOriginReference } from "./ProjectOriginReference";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
@@ -64,29 +67,6 @@ function issueMembers(
         profile?.displayName?.trim() || profile?.nip05Handle?.trim() || null,
     };
   });
-}
-
-function AuthorIdentity({
-  profiles,
-  pubkey,
-  role,
-}: {
-  profiles?: UserProfileLookup;
-  pubkey: string;
-  role?: React.ReactNode;
-}) {
-  const profile = profiles?.[normalizePubkey(pubkey)];
-  return (
-    <ProfileIdentityButton
-      align="center"
-      avatarSize="xs"
-      avatarUrl={profile?.avatarUrl ?? null}
-      isAgent={profile?.isAgent === true}
-      label={resolveUserLabel({ profiles, pubkey })}
-      pubkey={pubkey}
-      role={role}
-    />
-  );
 }
 
 function IssueRow({
@@ -140,10 +120,15 @@ function IssueRow({
       trailing={
         <>
           {issue.comments.length > 0 ? (
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+            <button
+              aria-label={`View ${issue.comments.length} comments`}
+              className="flex items-center gap-1 rounded-md text-xs text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={onOpen}
+              type="button"
+            >
               <MessageSquare className="h-3.5 w-3.5" />
               {issue.comments.length}
-            </span>
+            </button>
           ) : null}
           <ProjectFeedRowCluster>
             <ProjectFeedRowMonoCell
@@ -158,14 +143,17 @@ function IssueRow({
   );
 }
 
-function IssueDetail({
+/** Full issue conversation and comment composer. */
+export function ProjectIssueDetail({
   issue,
   profiles,
   project,
+  stackMetaRail = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
+  stackMetaRail?: boolean;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
@@ -198,13 +186,22 @@ function IssueDetail({
   );
 
   return (
-    <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div
+      className={cn(
+        "grid",
+        !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
+      )}
+    >
       <div className="min-w-0 divide-y divide-border/50">
         <header className="space-y-3 p-4">
           <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <p className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <CircleDot className="h-3.5 w-3.5" />
               Issue from {authorLabel}
+              <ProjectOriginReference
+                agentName={issue.originAgentName}
+                channelId={issue.channelId}
+              />
             </p>
             <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
               {issue.title}{" "}
@@ -214,54 +211,39 @@ function IssueDetail({
             </h3>
           </div>
           {issue.content ? (
-            <Markdown
-              className="text-sm"
-              content={issue.content}
-              interactive={false}
-            />
+            <ProjectRichContent content={issue.content} tags={issue.tags} />
           ) : null}
         </header>
 
         <section className="space-y-3 p-4">
+          <ProjectIssueCommentTimeline
+            comments={issue.comments}
+            key={issue.id}
+            profiles={profiles}
+          />
           <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
             <MessageSquare className="h-3.5 w-3.5" />
             Add Your Comment
           </h4>
-          {issue.comments.length > 0 ? (
-            <div className="space-y-3">
-              {issue.comments.map((item) => (
-                <article key={item.id}>
-                  <div className="mb-2">
-                    <AuthorIdentity
-                      profiles={profiles}
-                      pubkey={item.author}
-                      role={relativeTime(item.createdAt)}
-                    />
-                  </div>
-                  <Markdown
-                    className="text-sm"
-                    content={item.content}
-                    interactive={false}
-                  />
-                </article>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No comments yet.</p>
-          )}
-          <ForumComposer
-            className="border border-border/60 bg-background/45"
-            disabled={commentMutation.isPending}
-            isSending={commentMutation.isPending}
-            members={members}
-            onSubmit={handleCommentSubmit}
-            placeholder="Add a comment…"
-            profiles={profiles}
-          />
+          <div data-testid="project-issue-comment-composer">
+            <ForumComposer
+              className="border border-border/60 bg-background/45"
+              disabled={commentMutation.isPending}
+              isSending={commentMutation.isPending}
+              members={members}
+              onSubmit={handleCommentSubmit}
+              placeholder="Add a comment…"
+              profiles={profiles}
+            />
+          </div>
         </section>
       </div>
 
-      <IssueMetaRail issue={issue} profiles={profiles} />
+      <IssueMetaRail
+        issue={issue}
+        profiles={profiles}
+        stacked={stackMetaRail}
+      />
     </div>
   );
 }
@@ -271,16 +253,23 @@ function IssueDetail({
 function IssueMetaRail({
   issue,
   profiles,
+  stacked = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
+  stacked?: boolean;
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
 
   return (
-    <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+    <aside
+      className={cn(
+        "space-y-6 border-border/60 p-4",
+        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
+      )}
+    >
       <OverviewRailSection title="Status">
         <span
           className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
@@ -365,7 +354,7 @@ export function ProjectIssuesPanel({
 
   if (selectedIssue) {
     return (
-      <IssueDetail
+      <ProjectIssueDetail
         issue={selectedIssue}
         profiles={profiles}
         project={project}
