@@ -26,6 +26,41 @@ fn common_binary_paths_probes_legacy_goose_install_dir() {
     );
 }
 
+/// Codex Desktop installs its bundled CLI to `%LOCALAPPDATA%\OpenAI\Codex\bin`,
+/// not `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`. Only the `Programs` variant
+/// was probed, so a Buzz process that inherited a PATH predating the Codex
+/// installer's registry write reported Codex as not installed.
+///
+/// Asserts the probe list for the same reason as the Goose case above:
+/// `common_binary_paths` is a process-lifetime `OnceLock`.
+#[cfg(windows)]
+#[test]
+fn common_binary_paths_probes_codex_desktop_install_dir() {
+    use std::path::PathBuf;
+
+    let local = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA is always set on Windows");
+    let local = PathBuf::from(local);
+    let desktop_dir = local.join("OpenAI").join("Codex").join("bin");
+    let standalone_dir = local
+        .join("Programs")
+        .join("OpenAI")
+        .join("Codex")
+        .join("bin");
+
+    let probed = super::super::common_binary_paths();
+
+    assert!(
+        probed.contains(&desktop_dir),
+        "Codex Desktop install dir {} must be probed, got: {probed:?}",
+        desktop_dir.display()
+    );
+    assert!(
+        probed.contains(&standalone_dir),
+        "standalone Codex install dir {} must stay probed, got: {probed:?}",
+        standalone_dir.display()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn resolve_command_prefers_buzz_managed_npm_shim_over_path() {
