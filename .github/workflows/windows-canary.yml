@@ -16,7 +16,6 @@ permissions:
 jobs:
   build:
     name: Build Windows canary
-    if: github.repository == 'block/buzz'
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
