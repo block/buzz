@@ -34,6 +34,21 @@ pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result
     Ok(())
 }
 
+/// Report whether a live (non-tombstoned) kind:30620 definition exists.
+///
+/// The relay omits soft-deleted events from query results, so an empty result
+/// set means the workflow was never created or has since been deleted.
+async fn workflow_exists(client: &BuzzClient, workflow_id: &str) -> Result<bool, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [30620],
+        "#d": [workflow_id],
+        "limit": 1
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    Ok(!events.is_empty())
+}
+
 /// Get a single workflow definition.
 pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<(), CliError> {
     validate_uuid(workflow_id)?;
@@ -125,6 +140,20 @@ pub async fn cmd_update_workflow(
     let channel_uuid = parse_uuid(channel_id)?;
     let wf_uuid = parse_uuid(workflow_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
+
+    // Refuse to update a workflow that no longer exists. kind:30620 is
+    // parameterized-replaceable, so publishing a definition for a deleted
+    // workflow is a valid NIP-33 republish at the protocol level — the relay
+    // accepts it and re-upserts the `workflows` row, silently resurrecting a
+    // deleted workflow with a freshly issued webhook secret. `update` means
+    // "modify an existing workflow", so the absence of a live definition is a
+    // not-found error here rather than an implicit create.
+    // See https://github.com/block/buzz/issues/4864.
+    if !workflow_exists(client, workflow_id).await? {
+        return Err(CliError::NotFound(format!(
+            "workflow not found: {workflow_id}"
+        )));
+    }
 
     let builder = buzz_sdk::build_workflow_update(channel_uuid, wf_uuid, &yaml_definition)
         .map_err(sdk_err)?;
