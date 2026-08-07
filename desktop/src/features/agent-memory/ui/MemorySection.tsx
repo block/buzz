@@ -1,13 +1,22 @@
 import * as React from "react";
 import { AlertTriangle, Brain, ChevronDown, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 
 import { useAgentMemoryGraph } from "@/features/agent-memory/hooks";
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
-import type { EngramEntry } from "@/shared/api/tauriEngrams";
+import {
+  parseMemoryProposal,
+  type MemoryProposal,
+} from "@/features/agent-memory/lib/memoryProposal";
+import {
+  type EngramEntry,
+  reviewMemoryProposal,
+} from "@/shared/api/tauriEngrams";
 import { cn } from "@/shared/lib/cn";
 import { Button, type ButtonProps } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { Textarea } from "@/shared/ui/textarea";
 
 const MEMORY_LIST_PREVIEW_LIMIT = 3;
 
@@ -126,10 +135,159 @@ function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
             <MemoryStaleErrorBanner onRetry={() => query.refetch()} />
           ) : null}
 
+          <MemoryProposalList
+            agentPubkey={agentPubkey}
+            entries={query.data.memories}
+            memories={query.data.memories}
+            onReviewed={() => query.refetch()}
+          />
           <MemoryGraphView graph={graph} truncated={query.data.truncated} />
         </>
       ) : null}
     </section>
+  );
+}
+
+function MemoryProposalList({
+  agentPubkey,
+  entries,
+  memories,
+  onReviewed,
+}: {
+  agentPubkey: string;
+  entries: EngramEntry[];
+  memories: EngramEntry[];
+  onReviewed: () => Promise<unknown>;
+}) {
+  const proposals = entries.flatMap((entry) => {
+    const proposal = parseMemoryProposal(entry.slug, entry.body);
+    return proposal ? [{ entry, proposal }] : [];
+  });
+  if (proposals.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-2" data-testid="memory-proposal-list">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Memory review
+      </p>
+      {proposals.map(({ entry, proposal }) => (
+        <MemoryProposalCard
+          agentPubkey={agentPubkey}
+          entry={entry}
+          key={entry.eventId}
+          previousValue={
+            memories.find((memory) => memory.slug === proposal.targetSlug)
+              ?.body ?? null
+          }
+          proposal={proposal}
+          onReviewed={onReviewed}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MemoryProposalCard({
+  agentPubkey,
+  entry,
+  previousValue,
+  proposal,
+  onReviewed,
+}: {
+  agentPubkey: string;
+  entry: EngramEntry;
+  previousValue: string | null;
+  proposal: MemoryProposal;
+  onReviewed: () => Promise<unknown>;
+}) {
+  const [content, setContent] = React.useState(proposal.content);
+  const [busy, setBusy] = React.useState(false);
+  const decide = async (decision: "approve" | "reject" | "undo") => {
+    setBusy(true);
+    try {
+      await reviewMemoryProposal({
+        agentPubkey,
+        proposalSlug: entry.slug,
+        proposalEventId: entry.eventId,
+        proposalBody: entry.body,
+        decision,
+        editedContent: decision === "approve" ? content : undefined,
+        previousValue: proposal.previousValue ?? previousValue,
+      });
+      toast.success(
+        decision === "approve"
+          ? "Memory approved"
+          : decision === "reject"
+            ? "Memory rejected"
+            : "Memory change undone",
+      );
+      await onReviewed();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Memory review failed",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <article
+      className="space-y-3 rounded-2xl border border-border/70 bg-muted/30 p-4"
+      data-testid="memory-proposal-card"
+    >
+      <div>
+        <div className="flex flex-wrap gap-1.5 text-2xs uppercase tracking-wide text-muted-foreground">
+          <span>{proposal.kind}</span>
+          <span>·</span>
+          <span>{proposal.scope}</span>
+          <span>·</span>
+          <span>{proposal.status}</span>
+        </div>
+        <p className="mt-1 text-sm font-semibold">
+          <MemorySlugTitle slug={proposal.targetSlug} />
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">{proposal.reason}</p>
+        <p className="mt-1 text-2xs text-muted-foreground">
+          {proposal.evidenceIds.length} evidence item
+          {proposal.evidenceIds.length === 1 ? "" : "s"}
+        </p>
+      </div>
+      {proposal.status === "proposed" ? (
+        <>
+          <Textarea
+            aria-label="Proposed memory"
+            disabled={busy}
+            onChange={(event) => setContent(event.target.value)}
+            value={content}
+          />
+          <div className="flex gap-2">
+            <Button
+              disabled={busy || content.trim().length === 0}
+              onClick={() => decide("approve")}
+              size="sm"
+            >
+              Approve
+            </Button>
+            <Button
+              disabled={busy}
+              onClick={() => decide("reject")}
+              size="sm"
+              variant="outline"
+            >
+              Reject
+            </Button>
+          </div>
+        </>
+      ) : proposal.status === "approved" ? (
+        <Button
+          disabled={busy}
+          onClick={() => decide("undo")}
+          size="sm"
+          variant="outline"
+        >
+          Undo
+        </Button>
+      ) : null}
+    </article>
   );
 }
 
