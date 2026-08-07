@@ -144,6 +144,12 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
+    /// ACP v2 session identifier for this prompt turn. Used to derive
+    /// per-message `messageId` values that are unique within the ACP session.
+    /// Distinct from `session_id` (which is the ACP session); this is a
+    /// per-`session/prompt` random token so that IDs from one prompt invocation
+    /// never collide with those from another even within the same session.
+    pub run_id: String,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -460,13 +466,23 @@ impl RunCtx<'_> {
                 self.emit_usage_update().await;
             }
 
-            // Stable per-round message IDs for ACP v2 ContentChunk compliance.
+            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
             // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
-            // that belong to the same logical message must share the same ID.
+            // that belong to the same logical message must share the same ID, and
+            // IDs must be unique per message within the ACP session.
+            //
             // A provider round produces at most one thought and one assistant
-            // message, so one ID per round is the right granularity.
+            // message (the parsers collapse all provider output into one
+            // LlmResponse.reasoning string and one LlmResponse.text string).
+            // These are two *distinct* logical messages, so they get distinct IDs.
+            //
+            // `run_id` is a fresh random token per `session/prompt` invocation,
+            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
+            // unique within the ACP session even across multiple prompts.
+            //
             // ACP v1 allows the field, so this is a backwards-safe addition.
-            let round_msg_id = format!("round-{round}");
+            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
+            let message_msg_id = format!("{}-message-{round}", self.run_id);
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -474,7 +490,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
-                            "messageId": &round_msg_id,
+                            "messageId": &thought_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -489,7 +505,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
-                            "messageId": &round_msg_id,
+                            "messageId": &message_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),

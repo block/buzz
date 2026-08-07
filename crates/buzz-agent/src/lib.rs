@@ -714,6 +714,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         history: &mut history,
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
+        run_id,
         last_request_input_tokens: &mut last_request_input_tokens,
         last_request_history_bytes: &mut last_request_history_bytes,
         turn_input_tokens: &mut turn_input_tokens,

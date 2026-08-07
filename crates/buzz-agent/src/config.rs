@@ -102,12 +102,16 @@ fn strip_catalog_prefix(model: &str) -> &str {
 /// https://platform.claude.com/docs/en/build-with-claude/thinking and
 /// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models):
 ///
-/// **Adaptive families — `thinking:{type:"adaptive"}` required to activate effort control**:
-///   - Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6: thinking is OFF by default.
+/// **Adaptive families — `thinking:{type:"adaptive"}` activates effort control**:
+///
+///   - Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6: status **Off** — thinking is OFF by default;
 ///     `thinking:{type:"adaptive"}` is required to enable thinking; without it no thinking occurs.
-///   - Opus 5, Sonnet 5, Fable 5, Mythos 5, Mythos Preview: thinking is ON with NO config.
-///     We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
-/// In both sub-buckets: `output_config: {effort}` controls depth, clamped per-model.
+///   - Opus 5, Sonnet 5: status **On** — thinking is on by default (can be disabled);
+///     we still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///   - Fable 5, Mythos 5, Mythos Preview: status **Always on** — thinking cannot be disabled;
+///     we still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// In both sub-buckets `output_config: {effort}` controls depth, clamped per-model.
 /// Also sends `thinking: {display:"summarized"}` so thinking text is always visible in the
 /// observer feed (without this, Anthropic defaults to `display:"omitted"` on newest models).
 ///
@@ -164,8 +168,11 @@ pub fn anthropic_thinking_config(
             None,
         )
     } else if is_adaptive_thinking_model(model) {
-        // Adaptive families: thinking must be explicitly enabled via type:"adaptive".
-        // output_config.effort controls the depth. Both fields are required together.
+        // Adaptive families: we always send type:"adaptive" to activate output_config.effort.
+        // Sub-bucket A (Off: Opus 4.6/4.7/4.8, Sonnet 4.6): this field is required to enable
+        // thinking at all. Sub-bucket B (On: Opus 5/Sonnet 5) and sub-bucket C (Always on:
+        // Fable 5/Mythos 5/Mythos Preview): thinking is already on; we send the field so
+        // output_config.effort is honoured, not to enable thinking.
         // Apply per-model effort clamping: if the requested level exceeds the model's
         // doc-verified maximum, clamp down to the highest supported level with a warning.
         let clamped = clamp_adaptive_effort(model, effort);
@@ -596,16 +603,20 @@ fn is_manual_budget_model(model: &str) -> bool {
 /// Returns true for Claude model families that use adaptive thinking (doc-verified against
 /// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models).
 ///
-/// **Sub-bucket A — thinking ON with no config** (always-on):
-///   Opus 5, Sonnet 5, Fable 5, Mythos 5, Mythos Preview.
-///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
-///
-/// **Sub-bucket B — thinking OFF until `thinking:{type:"adaptive"}` is sent**:
+/// **Sub-bucket A — status Off (thinking OFF until `thinking:{type:"adaptive"}` is sent)**:
 ///   Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6.
 ///
-/// Both sub-buckets accept the same request shape. The distinction matters only when
-/// thinking effort is NOT configured: sub-bucket A models still produce thinking even
-/// without us sending the field; sub-bucket B models do not.
+/// **Sub-bucket B — status On (thinking on by default; can be disabled)**:
+///   Opus 5, Sonnet 5.
+///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// **Sub-bucket C — status Always on (thinking cannot be disabled)**:
+///   Fable 5, Mythos 5, Mythos Preview.
+///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// All three sub-buckets accept the same request shape. The distinction matters only when
+/// thinking effort is NOT configured: sub-bucket B/C models still produce thinking even
+/// without us sending the field; sub-bucket A models do not.
 ///
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
@@ -622,10 +633,10 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
         || model.starts_with("claude-sonnet-5")
         // Sonnet 4.6 exactly (not Sonnet 4.5 or earlier — not in the adaptive table).
         || model.starts_with("claude-sonnet-4-6")
-        // Fable 5 and Mythos 5 (always-on adaptive thinking, July 2025).
+        // Fable 5 and Mythos 5 (Always on — thinking cannot be disabled, July 2025).
         || model.starts_with("claude-fable-5")
         || model.starts_with("claude-mythos-5")
-        // Mythos Preview (default-on adaptive thinking, July 2025).
+        // Mythos Preview (Always on — thinking cannot be disabled, July 2025).
         // Note: xhigh is NOT available on Mythos Preview — clamp_adaptive_effort handles this.
         || model.starts_with("claude-mythos-preview")
 }
