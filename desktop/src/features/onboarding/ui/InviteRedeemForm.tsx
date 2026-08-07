@@ -54,7 +54,7 @@ type InviteRedeemFormProps = {
   initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
-  onConnect?: (relayWsUrl: string, token?: string) => void;
+  onConnect?: (relayWsUrl: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
   placeholder?: string;
   variant?: "add-community" | "default" | "onboarding-spotlight";
@@ -76,8 +76,6 @@ export function InviteRedeemForm({
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
   );
-  const [apiToken, setApiToken] = React.useState("");
-  const [showApiToken, setShowApiToken] = React.useState(false);
   const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
   const [policyTarget, setPolicyTarget] = React.useState<{
     relayWsUrl: string;
@@ -158,7 +156,7 @@ export function InviteRedeemForm({
         try {
           const policy = await getJoinPolicy(normalizedRelayUrl, "native");
           if (!policy) {
-            onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+            onConnect?.(normalizedRelayUrl);
             return;
           }
 
@@ -187,7 +185,7 @@ export function InviteRedeemForm({
             return;
           }
 
-          onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+          onConnect?.(normalizedRelayUrl);
         } catch (policyFetchError) {
           setPolicyError(inviteErrorMessage(policyFetchError));
         } finally {
@@ -252,7 +250,6 @@ export function InviteRedeemForm({
     [
       ageConfirmed,
       agreementConfirmed,
-      apiToken,
       bareCodeRelayUrl,
       joinPolicy,
       normalizedRelayUrl,
@@ -467,55 +464,6 @@ export function InviteRedeemForm({
             value={bareCodeRelayUrl}
           />
         </div>
-      ) : null}
-
-      {isAddCommunity && normalizedRelayUrl ? (
-        showApiToken ? (
-          <div className="space-y-1.5 text-left">
-            <div className="flex items-center justify-between gap-3">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="community-api-token"
-              >
-                API token
-                <span className="ml-1 text-xs font-normal text-muted-foreground">
-                  (optional)
-                </span>
-              </label>
-              <button
-                className="text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                onClick={() => {
-                  setApiToken("");
-                  setShowApiToken(false);
-                }}
-                type="button"
-              >
-                Remove
-              </button>
-            </div>
-            <Input
-              autoComplete="off"
-              className="h-10 bg-background"
-              data-testid="community-api-token"
-              disabled={isRedeeming}
-              id="community-api-token"
-              onChange={(event) => setApiToken(event.target.value)}
-              placeholder="buzz_…"
-              type="password"
-              value={apiToken}
-            />
-          </div>
-        ) : (
-          <button
-            className="w-fit text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            data-testid="community-api-token-reveal"
-            disabled={isRedeeming}
-            onClick={() => setShowApiToken(true)}
-            type="button"
-          >
-            Use an API token
-          </button>
-        )
       ) : null}
 
       {policyError ? (

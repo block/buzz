@@ -10,7 +10,12 @@ import {
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
-import { useAddChannelMembersMutation } from "@/features/channels/hooks";
+import {
+  useAddChannelMembersMutation,
+  useCanAddChannelMembers,
+} from "@/features/channels/hooks";
+import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
+import { dmThreadAgentMentionError } from "@/features/messages/lib/dmThreadAgentMentionError";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
 import {
   prepareBackgroundMediaUpload,
@@ -87,10 +92,6 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
-const DM_THREAD_AGENT_MENTION_ERROR =
-  "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
-const DM_THREAD_MEMBERS_LOADING_ERROR =
-  "Checking conversation members. Try again in a moment.";
 export function useMentionSendFlow({
   channelId,
   channelLinks,
@@ -136,6 +137,7 @@ export function useMentionSendFlow({
     };
   }, []);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
+  const canInviteNonMembers = useCanAddChannelMembers(channelId);
   const attachAgentMutation = useAttachManagedAgentToChannelMutation(channelId);
   const createPersonaAgentMutation =
     useCreateChannelManagedAgentMutation(channelId);
@@ -684,32 +686,17 @@ export function useMentionSendFlow({
     (
       trimmed: string,
       capturedThreadContext: SendMessageWithMentionFlowInput["capturedThreadContext"],
-    ) => {
-      if (channelType !== "dm" || capturedThreadContext == null) {
-        return null;
-      }
-
-      if (mentions.extractMentionPersonas(trimmed).length > 0) {
-        return DM_THREAD_AGENT_MENTION_ERROR;
-      }
-
-      const agentPubkeys = mentions
-        .extractMentionPubkeys(trimmed)
-        .filter(mentions.isAgentPubkey);
-      if (agentPubkeys.length === 0) {
-        return null;
-      }
-
-      if (!mentions.hasResolvedMembers) {
-        return DM_THREAD_MEMBERS_LOADING_ERROR;
-      }
-
-      return agentPubkeys.some(
-        (pubkey) => !mentions.memberPubkeys.has(normalizePubkey(pubkey)),
-      )
-        ? DM_THREAD_AGENT_MENTION_ERROR
-        : null;
-    },
+    ) =>
+      dmThreadAgentMentionError({
+        trimmed,
+        isThreadReply: capturedThreadContext != null,
+        channelType,
+        extractMentionPersonas: mentions.extractMentionPersonas,
+        extractMentionPubkeys: mentions.extractMentionPubkeys,
+        isAgentPubkey: mentions.isAgentPubkey,
+        hasResolvedMembers: mentions.hasResolvedMembers,
+        memberPubkeys: mentions.memberPubkeys,
+      }),
     [
       channelType,
       mentions.extractMentionPersonas,
@@ -889,6 +876,12 @@ export function useMentionSendFlow({
 
   const handleInviteNonMembers = React.useCallback(() => {
     if (!pendingNonMemberSend) return;
+    // The dialog hides Invite in this case; this guards the keyboard/programmatic
+    // path so we surface the reason instead of a raw relay rejection.
+    if (!canInviteNonMembers) {
+      setNonMemberPromptError(PRIVATE_CHANNEL_ADD_DENIED_MESSAGE);
+      return;
+    }
 
     const invitedPubkeys = new Set(
       pendingNonMemberSend.nonMemberPubkeys.map(normalizePubkey),
@@ -963,6 +956,7 @@ export function useMentionSendFlow({
     });
   }, [
     addMembersMutation,
+    canInviteNonMembers,
     completeSend,
     getManagedAgentsByPubkey,
     mentions.isAgentPubkey,
@@ -975,25 +969,29 @@ export function useMentionSendFlow({
   }, []);
 
   return {
-    dismissNonMemberPrompt,
-    isInvitePending:
-      isMentionSendPending ||
-      isCompleteSendPending ||
-      addMembersMutation.isPending ||
-      attachAgentMutation.isPending ||
-      createPersonaAgentMutation.isPending ||
-      startAgentMutation.isPending,
     isPreparingMentionSend:
       isMentionSendPending ||
       isCompleteSendPending ||
       attachAgentMutation.isPending ||
       createPersonaAgentMutation.isPending ||
       startAgentMutation.isPending,
-    nonMemberPromptError,
-    pendingNonMemberNames,
-    pendingNonMemberSend,
+    /** Spread straight into `NonMemberMentionDialog`. */
+    nonMemberPromptProps: {
+      canInvite: canInviteNonMembers,
+      error: nonMemberPromptError,
+      isInvitePending:
+        isMentionSendPending ||
+        isCompleteSendPending ||
+        addMembersMutation.isPending ||
+        attachAgentMutation.isPending ||
+        createPersonaAgentMutation.isPending ||
+        startAgentMutation.isPending,
+      names: pendingNonMemberNames,
+      onDismiss: dismissNonMemberPrompt,
+      onDoNothing: handleSendWithoutInviting,
+      onInvite: handleInviteNonMembers,
+      open: pendingNonMemberSend !== null,
+    },
     sendMessageWithMentionFlow,
-    sendWithoutInviting: handleSendWithoutInviting,
-    inviteNonMembers: handleInviteNonMembers,
   };
 }

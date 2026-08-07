@@ -338,6 +338,71 @@ export function isObserverEventAfter(
   return candidate.seq > stored.seq;
 }
 
+// Observer event kind for a batch envelope wrapping multiple events. The ACP
+// harness publishes one frame per second; everything that accumulated between
+// ticks arrives as `{ kind: "batch", payload: { events: [...] } }` with every
+// inner event carrying its own seq/timestamp. Inner events are processed
+// exactly as unbatched ones; the envelope itself is never stored.
+const OBSERVER_BATCH_KIND = "batch";
+
+// Expand a decrypted observer event into its inner events when it is a batch
+// envelope; a non-batch event passes through as a single-element array. A
+// malformed envelope (no events array) degrades to the envelope itself so a
+// harness bug cannot silently blank the session viewer.
+function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
+  if (parsed.kind !== OBSERVER_BATCH_KIND) {
+    return [parsed];
+  }
+  const payload = parsed.payload as { events?: unknown } | null;
+  const events = Array.isArray(payload?.events)
+    ? (payload.events as ObserverEvent[])
+    : null;
+  return events && events.length > 0 ? events : [parsed];
+}
+
+// Per-event processing shared by every event a live frame carries (one for a
+// plain frame, many for a batch envelope).
+function processLiveObserverEvent(agentPubkey: string, parsed: ObserverEvent) {
+  // Track the latest-live-session-id per (agent, channel) on the live path.
+  // Only set when the parsed event carries both a sessionId and channelId,
+  // so we never attribute a session to the wrong channel.
+  if (parsed.sessionId && parsed.channelId) {
+    const key = liveSessionKey(agentPubkey, parsed.channelId);
+    const stored = latestLiveSessionByAgentChannel.get(key);
+    // Advance only when this event sorts strictly AFTER the stored one via
+    // isObserverEventAfter (timestamp then seq — same ordering as
+    // compareObserverEvents). This prevents late-arriving live frames from
+    // older sessions from regressing the latest-live id, while also
+    // correctly advancing on a same-timestamp frame with a higher seq.
+    if (!stored || isObserverEventAfter(parsed, stored)) {
+      latestLiveSessionByAgentChannel.set(key, {
+        sessionId: parsed.sessionId,
+        timestamp: parsed.timestamp,
+        seq: parsed.seq,
+      });
+    }
+  }
+  appendAgentEvent(agentPubkey, parsed);
+  const managementRequest = parseAgentManagementRequest(parsed.payload);
+  if (managementRequest) {
+    for (const listener of agentManagementListeners) {
+      listener(agentPubkey, managementRequest);
+    }
+  }
+  if (parsed.kind === "session_config_captured") {
+    void putAgentSessionConfig(agentPubkey, parsed.payload);
+    onSessionConfigCaptured?.(agentPubkey);
+  } else if (parsed.kind === "control_result") {
+    dispatchControlResult(agentPubkey, parsed.payload);
+  } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
+    void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
+      (error) => {
+        console.debug("Late/untracked lifecycle frame dropped:", error);
+      },
+    );
+  }
+}
+
 async function handleRelayObserverEvent(
   event: RelayEvent,
   activeGeneration: number,
@@ -372,43 +437,8 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
-    // Track the latest-live-session-id per (agent, channel) on the live path.
-    // Only set when the parsed event carries both a sessionId and channelId,
-    // so we never attribute a session to the wrong channel.
-    if (parsed.sessionId && parsed.channelId) {
-      const key = liveSessionKey(agentPubkey, parsed.channelId);
-      const stored = latestLiveSessionByAgentChannel.get(key);
-      // Advance only when this event sorts strictly AFTER the stored one via
-      // isObserverEventAfter (timestamp then seq — same ordering as
-      // compareObserverEvents). This prevents late-arriving live frames from
-      // older sessions from regressing the latest-live id, while also
-      // correctly advancing on a same-timestamp frame with a higher seq.
-      if (!stored || isObserverEventAfter(parsed, stored)) {
-        latestLiveSessionByAgentChannel.set(key, {
-          sessionId: parsed.sessionId,
-          timestamp: parsed.timestamp,
-          seq: parsed.seq,
-        });
-      }
-    }
-    appendAgentEvent(agentPubkey, parsed);
-    const managementRequest = parseAgentManagementRequest(parsed.payload);
-    if (managementRequest) {
-      for (const listener of agentManagementListeners) {
-        listener(agentPubkey, managementRequest);
-      }
-    }
-    if (parsed.kind === "session_config_captured") {
-      void putAgentSessionConfig(agentPubkey, parsed.payload);
-      onSessionConfigCaptured?.(agentPubkey);
-    } else if (parsed.kind === "control_result") {
-      dispatchControlResult(agentPubkey, parsed.payload);
-    } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
-      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
-        (error) => {
-          console.debug("Late/untracked lifecycle frame dropped:", error);
-        },
-      );
+    for (const inner of unwrapObserverBatch(parsed)) {
+      processLiveObserverEvent(agentPubkey, inner);
     }
   } catch (error) {
     if (activeGeneration !== generation) {
@@ -676,20 +706,22 @@ export async function ingestArchivedObserverEvents(
     }
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
-      // Route archived events to the channel-scoped archive window (no cap)
-      // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
-      // Events without a channelId fall through to the live store so they
-      // remain visible in the agent's general transcript.
-      if (parsed.channelId) {
-        const added = appendArchivedChannelEvent(
-          agentPubkey,
-          parsed.channelId,
-          parsed,
-        );
-        if (added) archiveChanged = true;
-      } else {
-        // Live path already calls notifyListeners() inside appendAgentEvent.
-        appendAgentEvent(agentPubkey, parsed);
+      for (const inner of unwrapObserverBatch(parsed)) {
+        // Route archived events to the channel-scoped archive window (no cap)
+        // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
+        // Events without a channelId fall through to the live store so they
+        // remain visible in the agent's general transcript.
+        if (inner.channelId) {
+          const added = appendArchivedChannelEvent(
+            agentPubkey,
+            inner.channelId,
+            inner,
+          );
+          if (added) archiveChanged = true;
+        } else {
+          // Live path already calls notifyListeners() inside appendAgentEvent.
+          appendAgentEvent(agentPubkey, inner);
+        }
       }
     } catch {
       // Silently drop decrypt failures — same as live path error handling.

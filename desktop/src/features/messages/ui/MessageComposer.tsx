@@ -329,8 +329,8 @@ function MessageComposerImpl({
   }, [isDeferredEditPending, onDeferredEditPendingChange]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
+    if (editTarget && media.isUploading) return onCancelEdit?.();
     if (editTarget) {
-      // Preserve the user's in-flight draft while editing another message.
       preEditSnapshotRef.current = {
         content: syncComposerContentFromEditor(),
         pendingImeta: [...media.pendingImetaRef.current],
@@ -555,6 +555,7 @@ function MessageComposerImpl({
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
       isSendingRef.current ||
+      isUploadingRef.current ||
       mentionSendFlow.isPreparingMentionSend
     ) {
       return;
@@ -804,14 +805,13 @@ function MessageComposerImpl({
   const sendDisabled = React.useMemo(
     () =>
       composerDisabled ||
-      (editTarget !== null && media.isUploading) ||
+      media.isUploading ||
       mentionSendFlow.isPreparingMentionSend ||
       (isContentEmpty &&
         media.pendingImeta.length === 0 &&
         media.queuedAttachments.length === 0),
     [
       composerDisabled,
-      editTarget,
       media.isUploading,
       mentionSendFlow.isPreparingMentionSend,
       isContentEmpty,
@@ -1007,15 +1007,7 @@ function MessageComposerImpl({
         </div>
       </footer>
 
-      <NonMemberMentionDialog
-        error={mentionSendFlow.nonMemberPromptError}
-        isInvitePending={mentionSendFlow.isInvitePending}
-        names={mentionSendFlow.pendingNonMemberNames}
-        onDismiss={mentionSendFlow.dismissNonMemberPrompt}
-        onDoNothing={mentionSendFlow.sendWithoutInviting}
-        onInvite={mentionSendFlow.inviteNonMembers}
-        open={mentionSendFlow.pendingNonMemberSend !== null}
-      />
+      <NonMemberMentionDialog {...mentionSendFlow.nonMemberPromptProps} />
 
       {linkEditor.card}
       {linkEditor.dialog}

@@ -535,13 +535,13 @@ export type AcpRuntimeCatalogEntry = {
   /** "builtin" (compiled in), "preset" (PATH-probed, not editable), or "custom" (user JSON). Controls UI editability. */
   source: "builtin" | "preset" | "custom";
   /**
-   * Definition-level environment variables for `source: custom` entries.
-   *
-   * Populated by the backend from `HarnessDefinition.env` so the edit form can
-   * read them back without losing existing env vars on save. Always absent/empty
-   * for `builtin` and `preset` entries.
+   * Definition-level env vars for `source: custom` entries. Populated from
+   * `HarnessDefinition.env` so saves don't erase existing vars. Absent for
+   * builtin/preset entries.
    */
   definitionEnv?: Record<string, string>;
+  /** Spawn-time parallelism cap; absent for uncapped harnesses. */
+  maxParallelism?: number;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

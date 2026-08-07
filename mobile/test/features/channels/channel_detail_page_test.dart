@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -27,6 +28,7 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -1465,6 +1467,16 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // History requests are deliberately scheduled after the current frame.
+      // Advance the test clock until the capped chain has settled.
+      for (
+        var frame = 0;
+        frame < 8 && messagesNotifier.fetchOlderCalls < 4;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 1));
+      }
+
       expect(messagesNotifier.fetchOlderCalls, 4);
       final unreadButton = find.byKey(
         const ValueKey('channel-jump-to-oldest-unread'),
@@ -1757,6 +1769,143 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'keeps the followed tail anchored through composer and keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final messages = [
+          for (var i = 0; i < 20; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: i.isEven ? 'alice' : 'bob',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final latestMessage = find.byKey(
+          const ValueKey('channel-message-group-msg19'),
+        );
+        final composerDock = find.byKey(
+          const ValueKey('channel-composer-dock'),
+        );
+        final compactDockHeight = tester.getSize(composerDock).height;
+
+        expect(latestMessage, findsOneWidget);
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.getSize(composerDock).height,
+          greaterThan(compactDockHeight),
+        );
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(latestMessage, findsOneWidget);
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'does not realign a user-detached timeline on keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final messages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.drag(messageList, const Offset(0, 300));
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 39'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 39'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+        final positions = tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemPositionsNotifier!
+            .itemPositions
+            .value;
+        expect(
+          positions.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+          ),
+          isFalse,
+        );
+      },
+    );
 
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
@@ -2254,6 +2403,82 @@ void main() {
       );
     });
 
+    testWidgets(
+      'keeps membership and huddle rows evenly spaced with authored messages',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'message-alice',
+                pubkey: 'alice',
+                content: 'First message',
+                createdAt: 1000,
+              ),
+              _textMsg(
+                id: 'message-bob',
+                pubkey: 'bob',
+                content: 'Second message',
+                createdAt: 1010,
+              ),
+              _systemMsg(
+                id: 'membership-carol',
+                payload: {
+                  'type': 'member_joined',
+                  'actor': 'alice',
+                  'target': 'carol',
+                },
+                createdAt: 1020,
+              ),
+              _huddleMsg(
+                id: 'huddle-dave',
+                kind: EventKind.huddleStarted,
+                pubkey: 'dave',
+                createdAt: 1030,
+              ),
+              _textMsg(
+                id: 'message-erin',
+                pubkey: 'erin',
+                content: 'Third message',
+                createdAt: 1040,
+              ),
+            ],
+            users: {
+              for (final name in ['alice', 'bob', 'carol', 'dave', 'erin'])
+                name: UserProfile(pubkey: name, displayName: name),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        Rect avatarRect(String rowKey) => tester.getRect(
+          find
+              .descendant(
+                of: find.byKey(ValueKey(rowKey)),
+                matching: find.byType(CircleAvatar),
+              )
+              .first,
+        );
+
+        final avatars = [
+          avatarRect('message-row-message-alice'),
+          avatarRect('message-row-message-bob'),
+          avatarRect('system-message-row-membership-carol'),
+          avatarRect('system-message-row-huddle-dave'),
+          avatarRect('message-row-message-erin'),
+        ];
+        final authoredMessageGap = avatars[1].top - avatars[0].bottom;
+
+        for (var index = 2; index < avatars.length; index++) {
+          expect(
+            avatars[index].top - avatars[index - 1].bottom,
+            closeTo(authoredMessageGap, 1),
+            reason: 'row $index should use the authored-message gap',
+          );
+        }
+      },
+    );
+
     testWidgets('renders member_joined (self-join) system event', (
       tester,
     ) async {
@@ -2278,6 +2503,118 @@ void main() {
         tester.getSize(find.byType(CircleAvatar)),
         const Size.square(messageAvatarSize),
       );
+    });
+
+    testWidgets('opens a profile sheet from a membership system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys-membership-avatar',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('alice'), findsNothing);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      await tester.ensureVisible(find.text('Copy public key'));
+      await tester.pumpAndSettle();
+      final copyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      tester.widget<GestureDetector>(copyAction).onTap!();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('opens a profile sheet from a huddle system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'sys-huddle-avatar',
+              kind: EventKind.huddleStarted,
+              pubkey: 'alice',
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+    });
+
+    testWidgets('opens a profile sheet from a generic system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys-removed-avatar',
+              payload: {
+                'type': 'member_removed',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar).first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 
     testWidgets('renders member_joined (added by other) system event', (

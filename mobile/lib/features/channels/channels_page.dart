@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' show max, min, pi;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -19,6 +20,7 @@ import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
@@ -65,6 +67,14 @@ const double _kChannelLeadingWidth = 22.0;
 const double _kChannelIconSize = 18.0;
 const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
+const double _kSectionSpacingTightening = Grid.half;
+const double _kSectionHeaderVerticalPadding =
+    _kChannelRowVerticalPadding - _kSectionSpacingTightening;
+// Section headers include touch targets for their actions, so their visual
+// centre sits lower than a channel row's. This keeps an expanded section's
+// final row equally spaced from the following divider.
+const double _kExpandedSectionTrailingPadding =
+    11.0 - _kSectionSpacingTightening;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
 
@@ -74,22 +84,22 @@ const double _kChannelLabelInset =
 /// sections while the labels stay on [_kChannelLabelInset].
 const double _kDmAvatarSize = _kChannelIconSize;
 
-const double _kTopSectionAvatarSize = 32.0;
+const double _kTopSectionAvatarSize = 40.0;
+const double _kTopSectionBottomPadding = Grid.xxs;
 
-/// The top section's avatars are 32dp circles, which fill their box edge to
+/// The top section's avatars are 40dp circles, which fill their box edge to
 /// edge; the channel rows below lead with an 18dp glyph left-aligned in a 22dp
 /// box at [_kChannelSectionInset]. Edge-aligning the two leaves the circles
 /// looking pushed outward, so the bar is pulled in to sit the avatar's centre
-/// on the channel-icon column (12 + 16 = 28dp against the glyph's ~29dp). Its
-/// label gap is derived separately so both labels land on the same 50dp column.
+/// near the channel-icon column.
 const double _kTopSectionInset = Grid.twelve;
-const double _kTopSectionLabelGap =
-    _kChannelLabelInset - _kTopSectionInset - _kTopSectionAvatarSize;
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
 const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
 const Curve _kSectionCollapseCurve = Curves.easeInCubic;
 const double _kSectionCollapsedScaleY = 0.98;
+const double _kHeaderFrostScrollDistance = Grid.xxl;
+const double _kHeaderFrostMaxBlurSigma = 23.12;
 
 class _UnreadChannelState {
   final Set<String> ids;
@@ -145,9 +155,20 @@ _UnreadChannelState _computeUnreadChannelState({
 }
 
 class ChannelsPage extends HookConsumerWidget {
-  const ChannelsPage({required this.settingsPageBuilder, super.key});
+  const ChannelsPage({
+    required this.settingsPageBuilder,
+    required this.onSettingsTransitionProgress,
+    this.tabReselection,
+    super.key,
+  });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Reports the Settings route's raw animation progress from 0 to 1.
+  final ValueChanged<double> onSettingsTransitionProgress;
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -157,6 +178,59 @@ class ChannelsPage extends HookConsumerWidget {
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
         .value;
+    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w600,
+      color: navigationPrimaryForeground(context),
+    );
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      titleStyle: headerTitleStyle,
+      bottomHeight: _kTopSectionBottomPadding,
+    );
+    final channelsScrollController = useScrollController();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final headerFrostProgress = useState(0.0);
+    useEffect(() {
+      void updateHeaderTreatment() {
+        final nextProgress = !channelsScrollController.hasClients
+            ? 0.0
+            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+        if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
+          headerFrostProgress.value = nextProgress;
+        }
+      }
+
+      channelsScrollController.addListener(updateHeaderTreatment);
+      return () =>
+          channelsScrollController.removeListener(updateHeaderTreatment);
+    }, [channelsScrollController]);
+    useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void scrollToTop() {
+        if (!channelsScrollController.hasClients) return;
+        final position = channelsScrollController.position;
+        if (position.pixels <= position.minScrollExtent + 0.5) return;
+        if (reducedMotion) {
+          channelsScrollController.jumpTo(position.minScrollExtent);
+          return;
+        }
+        unawaited(
+          channelsScrollController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+
+      tabReselection.addListener(scrollToTop);
+      return () => tabReselection.removeListener(scrollToTop);
+    }, [tabReselection, channelsScrollController, reducedMotion]);
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
@@ -223,32 +297,65 @@ class ChannelsPage extends HookConsumerWidget {
       return timer.cancel;
     }, [isReconnectingWithContent]);
 
+    void openCommunitySwitcher() {
+      unawaited(HapticFeedback.selectionClick());
+      ref.invalidate(communityIconProvider);
+      showBuzzModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (_) => const _CommunitySwitcherSheet(),
+      );
+    }
+
+    final topSectionGradient = context.appColors.topSectionGradient;
+    final usesPinnedGradient = topSectionGradient != null;
+
     return FrostedScaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: usesPinnedGradient
+          ? Colors.transparent
+          : context.colors.surface,
+      backgroundGradient: topSectionGradient,
       appBar: FrostedAppBar(
         horizontalInset: _kTopSectionInset,
-        // Under a Buzz theme the community + account avatar strip carries the
-        // branded gradient, the way desktop paints it across the sidebar. Null
-        // under every other theme, leaving the default frosted fill.
-        gradient: context.appColors.topSectionGradient,
-        leading: _CommunityIndicator(
-          onTap: () {
-            ref.invalidate(communityIconProvider);
-            showModalBottomSheet<void>(
-              context: context,
-              showDragHandle: true,
-              builder: (_) => const _CommunitySwitcherSheet(),
-            );
-          },
+        // Let the full Buzz gradient show at rest. Once the list begins to
+        // move beneath this row, build up blur over the first 64dp of scroll
+        // without adding the usual white frosted wash. The Buzz list is
+        // transparent, so the blurred pixels remain a continuation of the
+        // pinned gradient instead of turning into a white header.
+        frosted: !usesPinnedGradient || headerFrostProgress.value > 0,
+        frostedSurfaceOpacity: usesPinnedGradient ? 0 : 0.5,
+        frostedBlurSigma: usesPinnedGradient
+            ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
+            : 20,
+        showBottomDivider: false,
+        leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        titleStyle: headerTitleStyle,
+        title: _CommunityHeaderTitle(
+          style: headerTitleStyle,
+          onTap: openCommunitySwitcher,
         ),
-        title: const SizedBox.shrink(),
         actions: [
-          ProfileAvatar(
-            onTap: () => Navigator.of(
-              context,
-            ).push(MaterialPageRoute<void>(builder: settingsPageBuilder)),
+          SizedBox(
+            width: Grid.xl,
+            height: Grid.xl,
+            child: Center(
+              child: ProfileAvatar(
+                size: _kTopSectionAvatarSize,
+                onTap: () {
+                  unawaited(HapticFeedback.lightImpact());
+                  Navigator.of(context).push(
+                    _SettingsPageRoute(
+                      builder: settingsPageBuilder,
+                      onTransitionProgress: onSettingsTransitionProgress,
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
         ],
+        bottomHeight: _kTopSectionBottomPadding,
+        bottom: const SizedBox.expand(),
       ),
       body: _ChannelsBody(
         channels: channels,
@@ -257,9 +364,96 @@ class ChannelsPage extends HookConsumerWidget {
         sessionStatus: sessionState.status,
         showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
+        topSectionHeight: topSectionHeight,
+        usesPinnedGradient: usesPinnedGradient,
+        scrollController: channelsScrollController,
         onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
         onSelectChannel: openChannel,
       ),
     );
+  }
+}
+
+/// A custom route deliberately avoids [MaterialPageRoute]'s platform exit
+/// transition on Home. Settings has a centered scale-and-fade transition, not
+/// a lateral page push.
+class _SettingsPageRoute extends PageRouteBuilder<void> {
+  _SettingsPageRoute({
+    required WidgetBuilder builder,
+    required this.onTransitionProgress,
+  }) : super(
+         pageBuilder: (context, animation, secondaryAnimation) =>
+             builder(context),
+         transitionsBuilder: _buildSettingsTransition,
+         opaque: false,
+         transitionDuration: const Duration(milliseconds: 190),
+         reverseTransitionDuration: const Duration(milliseconds: 190),
+       );
+
+  final ValueChanged<double> onTransitionProgress;
+
+  Animation<double>? _progressAnimation;
+
+  @override
+  void install() {
+    super.install();
+    _progressAnimation = animation?..addListener(_reportProgress);
+    _reportProgress();
+  }
+
+  void _reportProgress() {
+    onTransitionProgress(_progressAnimation?.value ?? 0);
+  }
+
+  @override
+  void dispose() {
+    _progressAnimation?.removeListener(_reportProgress);
+    super.dispose();
+  }
+
+  static Widget _buildSettingsTransition(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (MediaQuery.disableAnimationsOf(context)) return child;
+
+    final incoming = CurvedAnimation(
+      parent: animation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeOutCubic,
+    );
+    return FadeTransition(
+      key: const ValueKey('settings-transition-opacity'),
+      opacity: _SettingsOpacityAnimation(incoming),
+      child: RepaintBoundary(
+        key: const ValueKey('settings-transition-layer'),
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 1.04, end: 1).animate(incoming),
+          alignment: Alignment.center,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Keeps Settings already composed on entry while retaining a complete exit
+/// fade. Reading the parent live also keeps opacity synchronized with scale on
+/// the route's first frame.
+class _SettingsOpacityAnimation extends Animation<double>
+    with AnimationWithParentMixin<double> {
+  _SettingsOpacityAnimation(this.parent);
+
+  @override
+  final Animation<double> parent;
+
+  @override
+  double get value {
+    final progress = parent.value;
+    return parent.status == AnimationStatus.reverse
+        ? progress
+        : 0.8 + (0.2 * progress);
   }
 }

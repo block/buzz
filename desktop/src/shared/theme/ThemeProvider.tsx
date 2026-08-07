@@ -60,6 +60,11 @@ type ThemeContextValue = {
   setTheme: (name: string) => void;
   setAccentColor: (color: string) => void;
   setFollowSystem: (enabled: boolean) => void;
+  applyAppearance: (appearance: {
+    theme: SyntaxThemeName;
+    accent: string;
+    followSystem: boolean;
+  }) => void;
 };
 
 type ThemeProviderProps = {
@@ -618,6 +623,31 @@ export function ThemeProvider({
     setFollowSystemState(enabled);
   }, []);
 
+  const applyAppearance = useCallback(
+    (appearance: {
+      theme: SyntaxThemeName;
+      accent: string;
+      followSystem: boolean;
+    }) => {
+      // Write the complete preference before updating state so applyTheme reads
+      // the target community's accent in the same batch, never the previous one.
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, appearance.theme);
+        window.localStorage.setItem(ACCENT_STORAGE_KEY, appearance.accent);
+        window.localStorage.setItem(
+          FOLLOW_SYSTEM_KEY,
+          appearance.followSystem ? "true" : "false",
+        );
+      } catch {
+        // Keep the active appearance responsive even if the local cache is full.
+      }
+      setSelectedTheme(appearance.theme);
+      setAccentColorState(appearance.accent);
+      setFollowSystemState(appearance.followSystem);
+    },
+    [],
+  );
+
   const value: ThemeContextValue = {
     themeName: effectiveTheme,
     selectedThemeName: selectedTheme,
@@ -630,6 +660,7 @@ export function ThemeProvider({
     setTheme,
     setAccentColor,
     setFollowSystem,
+    applyAppearance,
   };
 
   return (

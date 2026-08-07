@@ -97,7 +97,10 @@ class _SystemMessageRow extends ConsumerWidget {
           isArchived: isArchived,
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          padding: EdgeInsets.only(
+            top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
+            bottom: usesMessageStyleLayout ? 0 : Grid.xxs,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -341,10 +344,14 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _UserAvatar(
-          profile: userCache[displayPubkey.toLowerCase()],
-          pubkey: displayPubkey,
-          size: messageAvatarSize,
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showUserProfileSheet(context, displayPubkey),
+          child: _UserAvatar(
+            profile: userCache[displayPubkey.toLowerCase()],
+            pubkey: displayPubkey,
+            size: messageAvatarSize,
+          ),
         ),
         const SizedBox(width: messageAvatarContentGap),
         Expanded(
@@ -449,12 +456,23 @@ Widget _systemEventAvatar(
       height: 20,
       child: Stack(
         children: [
-          SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+            child: SmallAvatar(
+              pubkey: event.actorPubkey!,
+              userCache: userCache,
+            ),
+          ),
           Positioned(
             left: 12,
-            child: SmallAvatar(
-              pubkey: event.targetPubkey!,
-              userCache: userCache,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showUserProfileSheet(context, event.targetPubkey!),
+              child: SmallAvatar(
+                pubkey: event.targetPubkey!,
+                userCache: userCache,
+              ),
             ),
           ),
         ],
@@ -463,7 +481,11 @@ Widget _systemEventAvatar(
   }
 
   if (event.actorPubkey != null) {
-    return SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+      child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+    );
   }
 
   // Fallback: generic icon when no actor is available.

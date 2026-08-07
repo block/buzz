@@ -11,13 +11,14 @@ void main() {
   Future<Widget> buildHome({
     int unreadInboxCount = 0,
     bool disableAnimations = false,
+    Gradient? topSectionGradient,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
       overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       child: MaterialApp(
-        theme: AppTheme.light(),
+        theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(
             context,
@@ -67,6 +68,46 @@ void main() {
     expect(
       quickActionRect.center.dy,
       closeTo(homeDestinationRect.center.dy, 0.01),
+    );
+  });
+
+  testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (
+    tester,
+  ) async {
+    const gradient = LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [Colors.yellow, Colors.blue],
+    );
+    await tester.pumpWidget(await buildHome(topSectionGradient: gradient));
+    await tester.pump();
+
+    final backdrop = find.byKey(
+      const ValueKey('home-settings-transition-backdrop'),
+    );
+    final decoration =
+        tester.widget<DecoratedBox>(backdrop).decoration as BoxDecoration;
+    expect(decoration.gradient, gradient);
+    expect(
+      find.byKey(const ValueKey('home-settings-transition-scale')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Transform>(
+            find.byKey(const ValueKey('home-settings-transition-scale')),
+          )
+          .transform
+          .getMaxScaleOnAxis(),
+      1,
+    );
+    expect(
+      tester
+          .widget<Opacity>(
+            find.byKey(const ValueKey('home-settings-transition-opacity')),
+          )
+          .opacity,
+      1,
     );
   });
 

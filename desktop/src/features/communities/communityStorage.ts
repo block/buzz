@@ -6,6 +6,8 @@ const COMMUNITIES_KEY = "buzz-communities";
 const ACTIVE_COMMUNITY_KEY = "buzz-active-community-id";
 const LEGACY_WORKSPACES_KEY = "buzz-workspaces";
 const LEGACY_ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
+const COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY =
+  "buzz-community-discovery-after-leave";
 
 /**
  * Expand a leading `~` to the user's home directory. The backend rejects
@@ -57,6 +59,9 @@ export function loadCommunities(): Community[] {
     if (!Array.isArray(parsed)) {
       return [];
     }
+    if (parsed.length > 0) {
+      localStorage.removeItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY);
+    }
     // Migration: older builds stored the user's `nsec` in localStorage and
     // re-applied it to the backend on every reload, which silently overwrote
     // any `import_identity` result with the original generated key. The
@@ -82,10 +87,37 @@ export function loadCommunities(): Community[] {
 }
 
 export function saveCommunities(communities: Community[]): boolean {
-  return setLocalStorageItemWithRecovery(
+  const didSave = setLocalStorageItemWithRecovery(
     COMMUNITIES_KEY,
     JSON.stringify(communities),
   );
+  if (didSave && communities.length > 0) {
+    localStorage.removeItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY);
+  }
+  return didSave;
+}
+
+export function loadCommunityDiscoveryAfterLeave(
+  storage: Storage = localStorage,
+): boolean {
+  return storage.getItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY) === "1";
+}
+
+export function markCommunityDiscoveryAfterLeave(
+  storage: Storage = localStorage,
+): boolean {
+  if (typeof window !== "undefined" && storage === window.localStorage) {
+    return setLocalStorageItemWithRecovery(
+      COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY,
+      "1",
+    );
+  }
+  try {
+    storage.setItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY, "1");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function clearCommunityStorage(storage: Storage = localStorage): void {

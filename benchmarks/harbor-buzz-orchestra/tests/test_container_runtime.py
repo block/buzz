@@ -372,6 +372,37 @@ async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
     assert bool(probed) == (condition == "M1-hello-world")
 
 
+async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
+    tmp_path, monkeypatch
+):
+    """Task text is untrusted payload: `:%normal! @a` in a task statement must
+    not be fed to member-name resolution (it would fail and kill the trial).
+    An explicit --mention pins delivery to the orchestrator's pubkey."""
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    calls = []
+
+    async def buzz_json(credential, trial, *args):
+        calls.append(args)
+        return {}
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+
+    await rt._send(
+        trial.user,
+        trial,
+        "@orch-1 run `:%normal! @a` on the file",
+        mention=orch.nostr_pubkey,
+    )
+    assert calls[-1][-2:] == ("--mention", "pubkey-orch-1")
+
+    # Without an explicit mention the send is unchanged (name resolution).
+    await rt._send(trial.user, trial, "plain content")
+    assert "--mention" not in calls[-1]
+    assert calls[-1][-2:] == ("--content", "plain content")
+
+
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")

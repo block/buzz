@@ -66,13 +66,69 @@ test.describe("community rail", () => {
     await expect(buttonA).toBeVisible();
     await expect(buttonB).toBeVisible();
 
-    // The active community is marked via aria-current.
+    // The active community is marked semantically and with a persistent rail.
     await expect(buttonA).toHaveAttribute("aria-current", "true");
     await expect(buttonB).not.toHaveAttribute("aria-current", "true");
-    await expect(buttonA.locator(":scope > span").first()).toHaveCSS(
+    const activeIndicator = page.getByTestId(
+      `community-rail-active-${COMMUNITY_A.id}`,
+    );
+    await expect(activeIndicator).toBeVisible();
+    await expect(
+      page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
+    ).toHaveCount(0);
+    await expect(activeIndicator).toHaveCSS("height", "20px");
+    await expect(activeIndicator).toHaveCSS("width", "4px");
+    await expect(
+      buttonA.locator(":scope > span:not([data-testid])").first(),
+    ).toHaveCSS("opacity", "1");
+    await expect(buttonB.locator(":scope > span").first()).toHaveCSS(
       "opacity",
       "1",
     );
+    const [activeStyle, inactiveStyle] = await Promise.all(
+      [buttonA, buttonB].map((button) =>
+        button
+          .locator(":scope > span:not([data-testid])")
+          .first()
+          .evaluate((element) => {
+            const style = getComputedStyle(element);
+            return {
+              backgroundColor: style.backgroundColor,
+              borderRadius: style.borderRadius,
+              color: style.color,
+              outlineColor: style.outlineColor,
+              outlineStyle: style.outlineStyle,
+              outlineWidth: style.outlineWidth,
+            };
+          }),
+      ),
+    );
+    expect(activeStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(activeStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(activeStyle.borderRadius).toBe("12px");
+    expect(activeStyle.color).toBe(inactiveStyle.color);
+    expect(activeStyle.outlineColor).toBe(inactiveStyle.outlineColor);
+    expect(activeStyle.outlineStyle).toBe("solid");
+    expect(activeStyle.outlineWidth).toBe("2px");
+    expect(inactiveStyle.outlineStyle).toBe("solid");
+    expect(inactiveStyle.outlineWidth).toBe("2px");
+
+    const inactiveIcon = buttonB.locator(":scope > span").first();
+    await buttonB.hover();
+    await expect(inactiveIcon).toHaveCSS("outline-width", "2px");
+    const hoverStyle = await inactiveIcon.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        color: style.color,
+        outlineStyle: style.outlineStyle,
+      };
+    });
+    expect(hoverStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(hoverStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(hoverStyle.color).toBe(inactiveStyle.color);
+    expect(hoverStyle.outlineStyle).toBe("solid");
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
@@ -231,6 +287,9 @@ test.describe("community rail", () => {
       menu.getByRole("menuitem", { name: "Community settings" }),
     ).toBeVisible();
     await expect(
+      menu.getByRole("menuitem", { name: "Leave community" }),
+    ).toBeVisible();
+    await expect(
       menu.getByRole("menuitem", { name: "Add a community" }),
     ).toBeVisible();
     await expect(menu.getByRole("separator")).toHaveCount(1);
@@ -290,6 +349,9 @@ test.describe("community rail", () => {
     await expect(
       page.getByRole("dialog", { name: "Edit Community" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Leave Community" }),
+    ).toHaveCount(0);
   });
 
   test("switches the active community on click", async ({ page }) => {
@@ -717,11 +779,12 @@ test.describe("community rail", () => {
     await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
     await page.getByTestId("channel-general").click();
 
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
     await page
-      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
-      .click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Community settings" }).click();
-    await page.getByRole("button", { name: "Remove Community" }).click();
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
 
     await expect(page).toHaveURL(randomUrl);
     await expect
@@ -759,6 +822,74 @@ test.describe("community rail", () => {
 
     // The app settles into the new community once apply completes.
     await expect(buttonB).toHaveAttribute("aria-current", "true");
+  });
+
+  test("leaving the final community returns to setup without resetting identity", async ({
+    context,
+    page,
+  }) => {
+    await installMockBridge(page, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__),
+      )
+      .toBe("function");
+    const identityBefore = await page.evaluate(async () =>
+      window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+    );
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect(page.getByTestId("community-choice-join")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.localStorage.getItem("buzz-communities")),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-community-discovery-after-leave"),
+        ),
+      )
+      .toBe("1");
+
+    const relaunchPage = await context.newPage();
+    await installMockBridge(relaunchPage, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await relaunchPage.goto("/");
+    await expect(
+      relaunchPage.getByText("Join or create a community"),
+    ).toBeVisible();
+    await expect(relaunchPage.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(() =>
+          window.localStorage.getItem("buzz-communities"),
+        ),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(async () =>
+          window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+        ),
+      )
+      .toEqual(identityBefore);
   });
 
   test("hides the rail with a single community", async ({ page }) => {
