@@ -1118,6 +1118,103 @@ async fn test_kind0_nip05_sync() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// Regression test for #2385: a `/query` filter listing multiple `#h` channels
+/// must return events from every listed accessible channel, not just the
+/// lexicographically-first one. Also covers the `/count` fallback path, which
+/// shared the same single-channel pinning.
+#[tokio::test]
+#[ignore]
+async fn test_query_multi_h_filter_returns_all_listed_channels() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+
+    let channel_a = create_test_channel(&keys).await;
+    let channel_b = create_test_channel(&keys).await;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let content_a = format!("multi-h A {}", uuid::Uuid::new_v4());
+    let content_b = format!("multi-h B {}", uuid::Uuid::new_v4());
+    let ok_a = client
+        .send_text_message(&keys, &channel_a, &content_a, 9)
+        .await
+        .expect("send to channel A");
+    assert!(
+        ok_a.accepted,
+        "channel A message rejected: {}",
+        ok_a.message
+    );
+    let ok_b = client
+        .send_text_message(&keys, &channel_b, &content_b, 9)
+        .await
+        .expect("send to channel B");
+    assert!(
+        ok_b.accepted,
+        "channel B message rejected: {}",
+        ok_b.message
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let http_client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [9],
+        "#h": [&channel_a, &channel_b],
+    }]);
+    let body = serde_json::to_string(&filters).unwrap();
+
+    let query_resp = http_client
+        .post(format!("{}/query", http))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("multi-#h query");
+    assert!(
+        query_resp.status().is_success(),
+        "multi-#h query failed: {}",
+        query_resp.status()
+    );
+    let events: Vec<serde_json::Value> = query_resp.json().await.expect("query json");
+    let contents: Vec<&str> = events
+        .iter()
+        .filter_map(|e| e["content"].as_str())
+        .collect();
+    assert!(
+        contents.contains(&content_a.as_str()),
+        "channel A event missing from multi-#h query result: {contents:?}"
+    );
+    assert!(
+        contents.contains(&content_b.as_str()),
+        "channel B event missing from multi-#h query result: {contents:?}"
+    );
+
+    let count_resp = http_client
+        .post(format!("{}/count", http))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("multi-#h count");
+    assert!(
+        count_resp.status().is_success(),
+        "multi-#h count failed: {}",
+        count_resp.status()
+    );
+    let count_body: serde_json::Value = count_resp.json().await.expect("count json");
+    let count = count_body["count"].as_u64().unwrap_or(0);
+    assert!(
+        count >= 2,
+        "multi-#h count should include both channels' events, got {count}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): default policy ("anyone") allows a third party to add an agent.
 #[tokio::test]
 #[ignore]
