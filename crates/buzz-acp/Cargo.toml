@@ -62,6 +62,9 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# Disposable profile directories for isolated Claude adapters
+tempfile = "3"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
