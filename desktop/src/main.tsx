@@ -81,22 +81,24 @@ function renderApp() {
           SecurityError from localStorage can't blank the whole window. */}
       <RootErrorBoundary>
         <CommunitiesProvider>
-        <CommunityOnboardingProvider enabled={huddleWindowChannelId() === null}>
-          <ThemeProvider defaultTheme="buzz">
-            <TooltipProvider delayDuration={300}>
-              <EmojiBurstProvider>
-                <PoofBurstProvider>
-                  <UpdaterProvider>
-                    <App />
-                    <NostrBindConsentDialog />
-                  </UpdaterProvider>
-                  <Toaster />
-                </PoofBurstProvider>
-              </EmojiBurstProvider>
-            </TooltipProvider>
-          </ThemeProvider>
-        </CommunityOnboardingProvider>
-      </CommunitiesProvider>
+          <CommunityOnboardingProvider
+            enabled={huddleWindowChannelId() === null}
+          >
+            <ThemeProvider defaultTheme="buzz">
+              <TooltipProvider delayDuration={300}>
+                <EmojiBurstProvider>
+                  <PoofBurstProvider>
+                    <UpdaterProvider>
+                      <App />
+                      <NostrBindConsentDialog />
+                    </UpdaterProvider>
+                    <Toaster />
+                  </PoofBurstProvider>
+                </EmojiBurstProvider>
+              </TooltipProvider>
+            </ThemeProvider>
+          </CommunityOnboardingProvider>
+        </CommunitiesProvider>
       </RootErrorBoundary>
     </React.StrictMode>,
   );

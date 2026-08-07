@@ -28,14 +28,19 @@ function createThrowingStorage(initial = {}) {
 }
 
 function patchLocalStorage(storage) {
-  const original = window.localStorage;
-  Object.defineProperty(window, "localStorage", {
+  globalThis.window ??= {};
+  const original = globalThis.window.localStorage;
+  Object.defineProperty(globalThis.window, "localStorage", {
     configurable: true,
     writable: true,
     value: storage,
   });
   return () => {
-    Object.defineProperty(window, "localStorage", {
+    if (original === undefined) {
+      delete globalThis.window.localStorage;
+      return;
+    }
+    Object.defineProperty(globalThis.window, "localStorage", {
       configurable: true,
       writable: true,
       value: original,
