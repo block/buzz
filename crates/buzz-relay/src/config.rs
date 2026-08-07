@@ -227,10 +227,6 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
-    /// Require Blossom kind:24242 `t=get` auth plus relay membership before
-    /// serving media GET/HEAD. Default off for staged client rollout.
-    pub require_media_get_auth: bool,
-
     /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
@@ -433,6 +429,31 @@ fn ensure_git_path(
         )));
     }
     Ok(git_repo_path)
+}
+
+/// Env vars that once gated authenticated media reads.
+///
+/// `BUZZ_REQUIRE_MEDIA_GET_AUTH` was the real flag; `BUZZ_REQUIRE_MEDIA_READ_AUTH`
+/// was documented in `.env.example` as an accepted alias but was never read by
+/// the relay. Media reads are now unconditionally authenticated, so both are
+/// inert and an operator still setting either — especially to `false` — holds a
+/// belief about their deployment that is no longer true.
+const INERT_MEDIA_READ_AUTH_VARS: [&str; 2] = [
+    "BUZZ_REQUIRE_MEDIA_GET_AUTH",
+    "BUZZ_REQUIRE_MEDIA_READ_AUTH",
+];
+
+/// Which of `names` are present, so startup can warn that they do nothing.
+///
+/// `lookup` is injected rather than calling `std::env::var` directly: process
+/// env is global mutable state, so a test that set real vars would race every
+/// other test in the binary.
+fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>) -> Vec<&'a str> {
+    names
+        .iter()
+        .copied()
+        .filter(|name| lookup(name).is_some())
+        .collect()
 }
 
 impl Config {
@@ -776,14 +797,13 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
-        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
-            .map(|v| {
-                v == "true"
-                    || v == "1"
-                    || v.eq_ignore_ascii_case("yes")
-                    || v.eq_ignore_ascii_case("on")
-            })
-            .unwrap_or(false);
+        for name in inert_env_vars(&INERT_MEDIA_READ_AUTH_VARS, |n| std::env::var(n).ok()) {
+            warn!(
+                "{name} is set but is no longer read — GET/HEAD /media/* always require \
+                 Blossom t=get auth plus relay membership. Remove it; a value of `false` \
+                 does not re-open unauthenticated media reads."
+            );
+        }
 
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
@@ -1003,7 +1023,6 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
-            require_media_get_auth,
             audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
@@ -1034,6 +1053,59 @@ mod tests {
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Look up against a fixed set, standing in for process env.
+    fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    /// The case that matters: an operator who pinned the old flag to `false`
+    /// must be told it is inert, not left believing media reads are still open.
+    #[test]
+    fn inert_media_read_auth_vars_are_reported_even_when_false() {
+        let found = inert_env_vars(
+            &INERT_MEDIA_READ_AUTH_VARS,
+            env_of(&[("BUZZ_REQUIRE_MEDIA_GET_AUTH", "false")]),
+        );
+
+        assert_eq!(found, vec!["BUZZ_REQUIRE_MEDIA_GET_AUTH"]);
+    }
+
+    /// `BUZZ_REQUIRE_MEDIA_READ_AUTH` was advertised in `.env.example` as an
+    /// accepted alias but the relay never read it, so operators may hold it
+    /// today. It warns too.
+    #[test]
+    fn inert_media_read_auth_vars_include_the_documented_alias() {
+        let found = inert_env_vars(
+            &INERT_MEDIA_READ_AUTH_VARS,
+            env_of(&[
+                ("BUZZ_REQUIRE_MEDIA_GET_AUTH", "true"),
+                ("BUZZ_REQUIRE_MEDIA_READ_AUTH", "false"),
+            ]),
+        );
+
+        assert_eq!(
+            found,
+            vec![
+                "BUZZ_REQUIRE_MEDIA_GET_AUTH",
+                "BUZZ_REQUIRE_MEDIA_READ_AUTH"
+            ]
+        );
+    }
+
+    #[test]
+    fn inert_media_read_auth_vars_stay_quiet_when_unset() {
+        let found = inert_env_vars(
+            &INERT_MEDIA_READ_AUTH_VARS,
+            env_of(&[("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "true")]),
+        );
+
+        assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
 
     #[test]
     fn defaults_are_valid() {
@@ -1071,10 +1143,6 @@ mod tests {
         assert!(
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
-        );
-        assert!(
-            !config.require_media_get_auth,
-            "require_media_get_auth should default to false for staged client rollout"
         );
         assert_eq!(
             config.media.s3_addressing_style,

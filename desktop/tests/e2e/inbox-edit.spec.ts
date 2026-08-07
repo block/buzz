@@ -230,7 +230,7 @@ test("editing an immediate attachment reply preserves its media tags", async ({
   const detail = page.getByTestId("home-inbox-detail");
   await expect(detail).toContainText("Inbox thread root.");
 
-  await detail.getByRole("button", { name: "Attach image" }).click();
+  await detail.getByRole("button", { name: "Attach file" }).click();
   await expect(detail.getByTestId("message-composer")).toContainText(
     ATTACHMENT_FILENAME,
   );

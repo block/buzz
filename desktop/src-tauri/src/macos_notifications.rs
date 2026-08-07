@@ -8,6 +8,7 @@
 
 use std::{
     collections::VecDeque,
+    path::Path,
     ptr::NonNull,
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
@@ -128,7 +129,7 @@ pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
         // objc2 cannot turn that exception into a Rust error, so do not call
         // into the framework at all in this environment.
         eprintln!(
-            "buzz-desktop: macOS notifications disabled because the process has no bundle identifier"
+            "buzz-desktop: macOS notifications disabled because the process is not running from an app bundle"
         );
         return Ok(());
     }
@@ -293,7 +294,30 @@ pub(crate) fn take_pending_activations() -> Result<Vec<serde_json::Value>, Strin
 }
 
 fn is_bundled_application() -> bool {
-    NSBundle::mainBundle().bundleIdentifier().is_some()
+    let bundle = NSBundle::mainBundle();
+    bundle.bundleIdentifier().is_some()
+        && bundle.executablePath().is_some_and(|executable_path| {
+            is_application_bundle_layout(
+                Path::new(&bundle.bundlePath().to_string()),
+                Path::new(&executable_path.to_string()),
+            )
+        })
+}
+
+fn is_application_bundle_layout(bundle_path: &Path, executable_path: &Path) -> bool {
+    let Some(macos_path) = executable_path.parent() else {
+        return false;
+    };
+    let Some(contents_path) = macos_path.parent() else {
+        return false;
+    };
+
+    bundle_path
+        .extension()
+        .is_some_and(|extension| extension == "app")
+        && macos_path.file_name() == Some("MacOS".as_ref())
+        && contents_path.file_name() == Some("Contents".as_ref())
+        && contents_path.parent() == Some(bundle_path)
 }
 
 fn target_from_response(response: &UNNotificationResponse) -> Option<serde_json::Value> {
@@ -311,10 +335,12 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_bundled_application, parse_target, permission_state, queue_activation,
-        take_pending_activations, NotificationPermissionState, MAX_PENDING_ACTIVATIONS,
+        is_application_bundle_layout, is_bundled_application, parse_target, permission_state,
+        queue_activation, take_pending_activations, NotificationPermissionState,
+        MAX_PENDING_ACTIVATIONS,
     };
     use objc2_user_notifications::UNAuthorizationStatus;
+    use std::path::Path;
 
     #[test]
     fn activation_queue_is_bounded_and_drained() {
@@ -334,6 +360,26 @@ mod tests {
     #[test]
     fn cargo_test_process_is_not_treated_as_bundled() {
         assert!(!is_bundled_application());
+    }
+
+    #[test]
+    fn requires_the_executable_to_use_the_app_bundle_layout() {
+        assert!(is_application_bundle_layout(
+            Path::new("/Applications/Buzz.app"),
+            Path::new("/Applications/Buzz.app/Contents/MacOS/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/tmp/Fake.app"),
+            Path::new("/tmp/Fake.app/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/Users/developer/buzz/desktop/src-tauri/target/debug"),
+            Path::new("/Users/developer/buzz/desktop/src-tauri/target/debug/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/Applications/Buzz.app"),
+            Path::new("/Applications/Other.app/Contents/MacOS/buzz-desktop"),
+        ));
     }
 
     #[test]

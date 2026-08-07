@@ -1126,8 +1126,6 @@ export async function nip44DecryptFromSelf(
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
 
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
-
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");
 }
