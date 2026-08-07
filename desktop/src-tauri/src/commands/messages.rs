@@ -473,6 +473,9 @@ async fn resolve_thread_ref(
     Ok(events::ThreadRef {
         root_event_id: root_eid,
         parent_event_id: parent_eid,
+        // The parent event is already fetched, so its signer rides along as the
+        // NIP-10 reply `p` tag — the reply notifies the author it replies to.
+        parent_author: Some(parent.pubkey),
     })
 }
 

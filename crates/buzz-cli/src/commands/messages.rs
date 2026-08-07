@@ -77,9 +77,17 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
+    // NIP-10 reply `p` tag: the parent event is already fetched, so its signer
+    // rides along and the reply notifies the author it replies to.
+    let parent_author = event
+        .get("pubkey")
+        .and_then(|v| v.as_str())
+        .and_then(|hex| nostr::PublicKey::parse(hex).ok());
+
     Ok(ThreadRef {
         root_event_id: root_eid,
         parent_event_id: parent_eid,
+        parent_author,
     })
 }
 
