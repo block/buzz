@@ -2985,27 +2985,6 @@ test("first-run onboarding keeps the shell hidden and lands on private Welcome a
   await expectWelcomeGuideIntro(page);
 });
 
-function retryToast(page: Page, title: string) {
-  return page
-    .locator("[data-sonner-toast][data-removed='false']")
-    .filter({ hasText: title });
-}
-
-async function retryToastAction(
-  page: Page,
-  { command, title }: { command: string; title: string },
-) {
-  const activeToast = retryToast(page, title);
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-  const before = await commandCount(page, command);
-  await activeToast
-    .getByRole("button", { name: "Retry" })
-    .dispatchEvent("click");
-  await expect.poll(() => commandCount(page, command)).toBeGreaterThan(before);
-}
-
 async function commandCount(page: Page, command: string) {
   return page.evaluate(
     (target) =>
@@ -3015,16 +2994,14 @@ async function commandCount(page: Page, command: string) {
   );
 }
 
-test("failed starter channel retries recreate actionable toasts", async ({
+test("failed public starter channel setup does not show a retry toast", async ({
   page,
 }) => {
   const starterError = "Mock starter channel setup failed.";
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError, starterError],
-    },
+    { ensureStarterChannelsErrors: [starterError, starterError] },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -3033,45 +3010,12 @@ test("failed starter channel retries recreate actionable toasts", async ({
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
-  const title = "Couldn't set up starter channels";
-  const activeToast = retryToast(page, title);
-  await expect(activeToast).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(activeToast).toContainText(starterError);
   await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-});
-
-test("successful starter channel retry clears its actionable toast", async ({
-  page,
-}) => {
-  const starterError = "Mock starter channel setup failed.";
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError],
-    },
-    { skipOnboardingSeed: true },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await completeProfileOnboarding(page);
-
-  const title = "Couldn't set up starter channels";
-  await expect(retryToast(page, title)).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(retryToast(page, title)).toHaveCount(0);
-  await expectWelcomeView(page);
-  await expectStarterChannels(page);
+    page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Couldn't set up starter channels" }),
+  ).toHaveCount(0);
+  expect(await commandCount(page, "ensure_starter_channels")).toBe(2);
 });
 
 test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
