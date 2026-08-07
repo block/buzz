@@ -66,4 +66,28 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Send a direct message from the workflow owner to a recipient.
+    ///
+    /// - `community_id`: the server-resolved community that owns the workflow
+    ///   run driving this side effect (same tenancy rules as [`send_message`]).
+    /// - `recipient_pubkey`: hex-encoded pubkey of the DM recipient
+    /// - `text`: message body (must not be empty/whitespace-only)
+    /// - `author_pubkey`: hex-encoded pubkey of the workflow owner
+    ///
+    /// The relay finds or creates the owner↔recipient DM channel (the same
+    /// idempotent path as a kind:41010 DM-open command) and emits a kind:9
+    /// message into it, signed by the relay keypair with `p` tags attributing
+    /// the owner and addressing the recipient.
+    ///
+    /// Returns the event ID hex string on success.
+    ///
+    /// [`send_message`]: ActionSink::send_message
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
