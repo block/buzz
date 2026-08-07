@@ -330,6 +330,52 @@ function extractCommentColor(
   return fallback;
 }
 
+/**
+ * Scopes searched, in priority order, for the color inline code borrows.
+ *
+ * Keywords carry a theme's most recognizable accent — GitHub Light's crimson
+ * `#d73a49`, Dracula's pink `#ff79c6` — which is exactly the signal a `code`
+ * span should pick up. The trailing entries cover the few themes that never
+ * style a bare `keyword` scope.
+ */
+const INLINE_CODE_SCOPES = [
+  "keyword",
+  "storage",
+  "keyword.control",
+  "storage.type",
+] as const;
+
+/**
+ * First foreground color whose scope matches one of `scopePriority`, matching
+ * either the scope itself or a dotted child of it (`keyword.operator` matches
+ * `keyword`). Priority is by wanted scope, not by position in the theme, so a
+ * theme that styles `storage` before `keyword` still yields its keyword color.
+ */
+function extractScopeColor(
+  settings: ReadonlyArray<ThemeSetting> | undefined,
+  scopePriority: readonly string[],
+  fallback: string,
+): string {
+  if (!settings) return fallback;
+
+  for (const wanted of scopePriority) {
+    for (const setting of settings) {
+      if (!setting.scope || !setting.settings?.foreground) continue;
+      const scopes = Array.isArray(setting.scope)
+        ? setting.scope
+        : [setting.scope];
+      for (const scope of scopes) {
+        const name = scope.trim();
+        if (name === wanted || name.startsWith(`${wanted}.`)) {
+          return setting.settings.foreground;
+        }
+      }
+    }
+  }
+
+  return fallback;
+}
+
 function stripAlpha(color: string): string {
   if (color.length === 9 && color.startsWith("#")) {
     return color.slice(0, 7);
@@ -381,6 +427,8 @@ export interface ThemeInfo {
   bg: string;
   fg: string;
   comment: string;
+  /** Keyword accent, used as the source color for inline code. */
+  keyword: string;
   added: string | null;
   deleted: string | null;
   modified: string | null;
@@ -410,6 +458,7 @@ export function extractThemeInfo(
     bg,
     fg,
     comment: extractCommentColor(tokenSettings, fg),
+    keyword: extractScopeColor(tokenSettings, INLINE_CODE_SCOPES, fg),
     ...gitColors,
     terminalPalette: extractTerminalPalette(theme),
   };
