@@ -12,6 +12,13 @@
       in tauri.conf.json. The body paints its own themed background once the app
       CSS loads, so this never shows through after boot.
 
+      The linked stylesheet (boot.css) applies the initial black background.
+      Keeping it as a <link> rather than an inline <style> prevents Tauri's
+      build-time asset processing from adding a 'sha256-…' source to style-src:
+      per the CSP spec a hash in a directive makes the browser ignore
+      'unsafe-inline', which would block TipTap's runtime stylesheet injection
+      and emoji-mart's shadow-root styles in packaged builds.
+
       The inline script below reads the cached theme background (same
       `buzz-theme-cache` entry ThemeProvider writes) and applies it synchronously
       so the boot color matches the themed loading gate — no black flash on light
@@ -20,11 +27,7 @@
       that ThemeProvider applies moments later — no wrong-scheme flash before
       it loads.
     -->
-    <style>
-      html {
-        background-color: #000;
-      }
-    </style>
+    <link rel="stylesheet" href="/boot.css" />
     <script>
       (() => {
         var cached, bg, parsed;
