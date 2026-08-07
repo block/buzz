@@ -6004,6 +6004,7 @@ mod tests {
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
+            &[],
             false,
         )
         .await
@@ -6061,6 +6062,7 @@ mod tests {
         let acp = AcpClient::spawn(
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
+            &[],
             &[],
             false,
         )
