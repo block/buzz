@@ -302,7 +302,8 @@ export function AgentDefinitionDialog({
   }, [defaultRuntime, isCreateMode, open, runtime, runtimesLoading]);
 
   function handleOpenChange(next: boolean) {
-    if (!next) {
+    // The catalog may veto embedded close requests; preserve the draft until unmount.
+    if (!next && !embedded) {
       setDisplayName("");
       setAvatarUrl("");
       setSystemPrompt("");
@@ -948,8 +949,6 @@ export function AgentDefinitionDialog({
           open={isAddHarnessOpen}
         />
 
-        {isCreateMode ? createRunSection : null}
-
         <div className="space-y-3">
           <button
             aria-expanded={showAdvancedFields}
@@ -958,7 +957,8 @@ export function AgentDefinitionDialog({
             type="button"
           >
             <span>Advanced</span>
-            {localModeGate.missingEnvKeys.some((key) =>
+            {(isCreateMode && createSubmitBlocked) ||
+            localModeGate.missingEnvKeys.some((key) =>
               advancedRequiredEnvKeys.includes(key),
             ) ? (
               <span
@@ -987,6 +987,7 @@ export function AgentDefinitionDialog({
                 transition={advancedFieldsTransition}
               >
                 <PersonaAdvancedFields
+                  afterRespondTo={isCreateMode ? createRunSection : undefined}
                   behaviorDraft={behaviorDraft}
                   disabled={isPending}
                   envVars={envVars}

@@ -463,6 +463,31 @@ test("the new agent card opens unified create, catalog, and import flows", async
   await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
 });
 
+test("embedded create keeps its draft when discard is cancelled", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+
+  const dialog = page.getByTestId("persona-dialog");
+  const name = dialog.locator("#persona-display-name");
+  const instructions = dialog.locator("#persona-system-prompt");
+  await name.fill("Draft Keeper");
+  await instructions.fill("Preserve this draft through confirmation.");
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  const discardDialog = page.getByTestId("discard-create-agent-dialog");
+  await expect(discardDialog).toBeVisible();
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click();
+
+  await expect(dialog).toBeVisible();
+  await expect(name).toHaveValue("Draft Keeper");
+  await expect(instructions).toHaveValue(
+    "Preserve this draft through confirmation.",
+  );
+});
+
 test("the new team card offers create and import", async ({ page }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
