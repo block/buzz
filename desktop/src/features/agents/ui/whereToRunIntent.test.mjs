@@ -44,6 +44,27 @@ test("complete provider config allows submit", () => {
   assert.equal(canSubmitWhereToRun(providerDraft()), true);
 });
 
+test("OpenClaw room-picker config blocks submit until a room is selected", () => {
+  const openclaw = providerDraft({
+    runOn: "openclaw",
+    probedProvider: {
+      ok: true,
+      config_schema: {
+        properties: {
+          rooms: { type: "string", format: "buzz-room-picker" },
+        },
+        required: ["rooms"],
+      },
+    },
+    providerConfig: { rooms: "" },
+  });
+  assert.equal(canSubmitWhereToRun(openclaw), false);
+  assert.equal(
+    canSubmitWhereToRun({ ...openclaw, providerConfig: { rooms: "room-a" } }),
+    true,
+  );
+});
+
 test("local never gates submit", () => {
   assert.equal(canSubmitWhereToRun(emptyWhereToRunDraft), true);
 });

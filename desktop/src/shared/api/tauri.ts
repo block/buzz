@@ -169,6 +169,7 @@ type RawCreateManagedAgentResponse = {
   private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
+  enrollment_command: string | null;
 };
 
 type RawManagedAgentLog = {
@@ -878,6 +879,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
     privateKeyNsec: response.private_key_nsec,
     profileSyncError: response.profile_sync_error,
     spawnError: response.spawn_error,
+    enrollmentCommand: response.enrollment_command,
   };
 }
 

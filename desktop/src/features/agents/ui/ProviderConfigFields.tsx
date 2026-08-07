@@ -31,20 +31,22 @@ export function ProviderConfigFields({
   schema,
   config,
   onChange,
+  excludeKeys = [],
 }: {
   schema: Record<string, unknown>;
   config: Record<string, string>;
   onChange: (config: Record<string, string>) => void;
+  excludeKeys?: string[];
 }) {
   const properties = (schema as Record<string, unknown>)?.properties ?? {};
   const required = new Set<string>(
     ((schema as Record<string, unknown>)?.required as string[]) ?? [],
   );
 
-  const entries = Object.entries(properties) as [
+  const entries = (Object.entries(properties) as [
     string,
     Record<string, unknown>,
-  ][];
+  ][]).filter(([key]) => !excludeKeys.includes(key));
 
   if (entries.length === 0) {
     return null;

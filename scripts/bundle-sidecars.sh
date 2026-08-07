@@ -29,6 +29,13 @@ else
     EXE=""
 fi
 
+# The fork's unsigned DMG build also produces the OpenClaw backend. Keep this
+# optional so release and platform builds that do not produce it retain their
+# existing sidecar set.
+if [[ -f "$SRC_DIR/buzz-backend-openclaw${EXE}" ]]; then
+    SIDECARS+=(buzz-backend-openclaw)
+fi
+
 missing=()
 for bin in "${SIDECARS[@]}"; do
     [[ -f "$SRC_DIR/${bin}${EXE}" ]] || missing+=("${bin}${EXE}")

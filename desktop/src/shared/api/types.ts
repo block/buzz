@@ -400,6 +400,11 @@ export type BackendProviderProbeResult = {
   version?: string;
   description?: string;
   config_schema?: Record<string, unknown>;
+  enrollment?: {
+    operation: "enroll";
+    one_time: true;
+    credential_fields?: string[];
+  };
 };
 
 export type RelayMeshConfig = {
@@ -450,6 +455,7 @@ export type CreateManagedAgentResponse = {
   privateKeyNsec: string;
   profileSyncError: string | null;
   spawnError: string | null;
+  enrollmentCommand: string | null;
 };
 
 export type ManagedAgentLog = {
