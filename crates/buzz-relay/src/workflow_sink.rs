@@ -258,6 +258,8 @@ impl ActionSink for RelayActionSink {
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
+                Tag::parse(["actor", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
@@ -698,6 +700,18 @@ mod integration_tests {
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
+        let actor = stored.event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("actor"))
+                .then(|| parts.get(1).map(String::as_str))
+                .flatten()
+        });
+
+        assert_eq!(
+            actor,
+            Some(author_hex.as_str()),
+            "workflow owner must be explicitly attributed for ACP authorization"
+        );
 
         assert!(
             p_tag_targets.contains(&author_hex.as_str()),
