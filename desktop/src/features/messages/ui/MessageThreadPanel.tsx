@@ -45,7 +45,6 @@ import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
-import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useAnchoredScroll } from "./useAnchoredScroll";
@@ -110,7 +109,6 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadRepliesPending?: boolean;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
-  threadTypingPubkeys: string[];
   videoReviewContextsByMessageId?: ReadonlyMap<string, VideoReviewContext>;
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
@@ -230,7 +228,6 @@ export function MessageThreadPanel({
   threadRepliesPending = false,
   threadUnreadCount,
   threadReplyUnreadCounts,
-  threadTypingPubkeys,
   activityAccessoryContent,
   activityAccessoryVisible,
   widthPx,
@@ -255,9 +252,9 @@ export function MessageThreadPanel({
   );
   const hasConstrainedColumn = columnMaxWidthPx != null;
   // Whether the composer dock trades its quiet-state spacer for the
-  // conditional activity accessory (agent working and/or someone typing).
-  const hasComposerBottomActivity =
-    activityAccessoryVisible || threadTypingPubkeys.length > 0;
+  // conditional activity accessory (agent working and/or someone typing —
+  // ChannelPane folds thread typers into the strip and its visibility).
+  const hasComposerBottomActivity = activityAccessoryVisible;
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -913,22 +910,14 @@ export function MessageThreadPanel({
               className={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
               visible={hasComposerBottomActivity}
             >
-              <div className="mx-auto flex w-full max-w-4xl items-center gap-2 overflow-visible pl-2">
-                {activityAccessoryVisible && activityAccessoryContent ? (
-                  <div className="flex min-w-0 flex-1 overflow-visible">
-                    {activityAccessoryContent}
-                  </div>
-                ) : null}
-                {threadTypingPubkeys.length > 0 ? (
-                  <TypingIndicatorRow
-                    channel={channel}
-                    className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                    currentPubkey={currentPubkey}
-                    profiles={profiles}
-                    typingPubkeys={threadTypingPubkeys}
-                    variant="activity"
-                  />
-                ) : null}
+              {/* No mx-auto/max-w column here: the composer above spans the
+                  full pane width, so the activity row must too or the typing
+                  group floats toward the pane's center. Mirrors
+                  ChannelComposerActivityRow: ONE strip hosts the pills and the
+                  typing group as slot siblings (the strip is built by
+                  ChannelPane, thread typers included). */}
+              <div className="flex w-full items-center overflow-visible">
+                {activityAccessoryContent}
               </div>
             </ComposerActivityAccessory>
           </div>

@@ -130,6 +130,28 @@ export function reportChannelBotTyping(
   notify();
 }
 
+/**
+ * First-seen timestamp (ms) of the agent's channel-scoped typing entry, or
+ * null when the agent is not typing there.
+ *
+ * Raw registry read: unlike `getAgentWorkingState`, this does NOT fold
+ * typing under observer precedence — an observer-backed surface (the
+ * composer activity pill) uses it to relabel IN PLACE to "is typing…" while
+ * a turn is in flight, instead of the agent spawning a second, separate
+ * typing-group item.
+ */
+export function getAgentChannelTypingSince(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): number | null {
+  if (!agentPubkey || !channelId) {
+    return null;
+  }
+  return (
+    typingByChannel.get(channelId)?.get(normalizePubkey(agentPubkey)) ?? null
+  );
+}
+
 function computeAgentWorkingState(
   agentPubkey: string,
   channelId: string | null,

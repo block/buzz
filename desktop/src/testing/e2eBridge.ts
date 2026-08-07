@@ -1252,6 +1252,12 @@ declare global {
       channelId: string;
       turnId: string;
       kind?: "turn_started" | "turn_completed";
+      /**
+       * Explicit event timestamp (epoch ms). The composer strip orders pills
+       * by turn START anchor, so tests seed well-separated starts to make
+       * the order deterministic. Defaults to now.
+       */
+      atMs?: number;
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -10281,11 +10287,12 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     turnId,
     kind = "turn_started",
+    atMs,
   }) => {
     seedTurnSeq += 1;
     const event = {
       seq: seedTurnSeq,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(atMs ?? Date.now()).toISOString(),
       kind,
       agentIndex: 0,
       channelId,

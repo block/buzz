@@ -40,13 +40,131 @@ function makeMessage(overrides = {}) {
   };
 }
 
-test("getActivityHeadline formats tool titles and assistant text", () => {
-  assert.equal(getActivityHeadline(makeTool()), "Send Message · abc");
+test("getActivityHeadline formats tool actions tersely and assistant text", () => {
+  // Tool items use the terse action tier (verb + object), not label · preview.
+  assert.equal(getActivityHeadline(makeTool()), "Sent abc");
   assert.equal(
     getActivityHeadline(makeMessage({ text: "First line\nSecond line" })),
     "First line",
   );
   assert.equal(getActivityHeadline(makeMessage({ text: "   " })), "Responding");
+});
+
+test("getActivityHeadline basenames path-like tool objects", () => {
+  assert.equal(
+    getActivityHeadline(
+      makeTool({
+        title: "Read file",
+        toolName: "dev__read_file",
+        buzzToolName: null,
+        args: { path: "src/agents/ui/foo.ts" },
+        descriptor: {
+          renderClass: "file-read",
+          label: "Read file",
+          preview: "src/agents/ui/foo.ts",
+          action: { verb: "Read", object: "src/agents/ui/foo.ts" },
+          source: "harness",
+          groupKey: "read_file",
+        },
+      }),
+    ),
+    "Read foo.ts",
+  );
+  assert.equal(
+    getActivityHeadline(
+      makeTool({
+        title: "Edit file",
+        toolName: "dev__str_replace",
+        buzzToolName: null,
+        args: { path: "desktop/src/features/channels/ui/ChannelPane.tsx" },
+        descriptor: {
+          renderClass: "file-edit",
+          label: "Edited file",
+          preview: "desktop/src/features/channels/ui/ChannelPane.tsx",
+          action: {
+            verb: "Edited",
+            object: "desktop/src/features/channels/ui/ChannelPane.tsx",
+          },
+          source: "harness",
+          groupKey: "file-edit:str_replace",
+        },
+      }),
+    ),
+    "Edited ChannelPane.tsx",
+  );
+});
+
+test("getActivityHeadline renders plan and thought items in past tense", () => {
+  // Bare "Plan" / "Thinking" titles must not headline next to the past-tense
+  // tool verbs ("Read foo.ts", "Ran …").
+  assert.equal(
+    getActivityHeadline({
+      id: "plan:1",
+      type: "plan",
+      renderClass: "plan",
+      title: "Plan",
+      text: "1. Do the thing",
+      timestamp: baseTimestamp,
+    }),
+    "Created plan",
+  );
+  assert.equal(
+    getActivityHeadline({
+      id: "plan:1:update:x",
+      type: "plan",
+      renderClass: "plan",
+      title: "Plan updated",
+      text: "Now doing step 2",
+      timestamp: baseTimestamp,
+      isUpdate: true,
+      targetId: "plan:1",
+    }),
+    "Updated plan",
+  );
+  assert.equal(
+    getActivityHeadline({
+      id: "thought:1",
+      type: "thought",
+      renderClass: "thought",
+      title: "Thinking",
+      text: "hmm",
+      timestamp: baseTimestamp,
+    }),
+    "Thought",
+  );
+  assert.equal(
+    getActivityHeadline({
+      id: "thought:2",
+      type: "thought",
+      renderClass: "thought",
+      title: "Plan",
+      text: "plan-shaped thought",
+      timestamp: baseTimestamp,
+    }),
+    "Planned",
+  );
+});
+
+test("getActivityHeadline keeps shell commands whole (no basenaming)", () => {
+  assert.equal(
+    getActivityHeadline(
+      makeTool({
+        title: "Shell",
+        toolName: "dev__shell",
+        buzzToolName: null,
+        args: { command: "cat src/agents/ui/foo.ts" },
+        descriptor: {
+          renderClass: "shell",
+          label: "Ran command",
+          preview: "cat src/agents/ui/foo.ts",
+          action: { verb: "Ran", object: "cat src/agents/ui/foo.ts" },
+          source: "harness",
+          groupKey: "shell:command",
+        },
+      }),
+    ),
+    "Ran cat src/agents/ui/foo.ts",
+  );
 });
 
 test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () => {
@@ -111,7 +229,7 @@ test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () =>
   );
 });
 
-test("getActivityHeadline uses semantic tool descriptors", () => {
+test("getActivityHeadline falls back to label · preview when a descriptor has no action", () => {
   assert.equal(
     getActivityHeadline(
       makeTool({
@@ -225,7 +343,7 @@ test("two-tier headline: metadata excluded when spine work is present", () => {
     "System prompt should not headline when spine work exists",
   );
   assert.ok(
-    headlines.some((h) => h?.includes("Send Message")),
+    headlines.some((h) => h?.includes("Sent")),
     "Tool headline should appear",
   );
 });

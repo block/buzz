@@ -2,6 +2,7 @@ import * as React from "react";
 import { Hash, LogIn } from "lucide-react";
 import { AnimatePresence } from "motion/react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { ComposerDockBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { ComposerUploadProgressOverlay } from "@/features/messages/ui/ComposerUploadProgressOverlay";
@@ -36,10 +37,12 @@ import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout"
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
-import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
-import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
+import { ChannelComposerActivityRow } from "@/features/channels/ui/ChannelComposerActivityRow";
+import { useThreadComposerActivity } from "@/features/channels/ui/useThreadComposerActivity";
+import { ComposerActivityAccessory } from "@/features/messages/ui/ComposerActivityAccessory";
+import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerBanner,
@@ -397,32 +400,24 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
     !isSinglePanelView;
-  const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
-  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
-    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(() => {
-    if (!openThreadHeadId) return [];
-    return botTypingEntries
-      .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
-  const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+    composerWorkingBotPubkeys.length > 0 ||
+    typingPubkeys.length > 0 ||
+    hasCardMintActivity;
+  const {
+    combinedTypingPubkeys: combinedThreadTypingPubkeys,
+    hasActivity: hasThreadComposerActivity,
+    pillBotPubkeys: threadPillBotPubkeys,
+  } = useThreadComposerActivity({
+    botTypingEntries,
+    channelId: activeChannel?.id ?? null,
+    threadHeadId: openThreadHeadId,
+    typingPubkeys: threadTypingPubkeys,
+  });
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -793,21 +788,16 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                {/* The activity accessory is anchored in the dock's reserved
-                    bottom rail, so fading it cannot change the observed
-                    overlay height or move the conversation. Its natural
-                    content height remains responsive. */}
-                <ChannelComposerActivityAccessory
-                  agents={activityAgents}
-                  channel={activeChannel}
-                  currentPubkey={currentPubkey}
-                  onOpenAgentSession={onOpenAgentSession}
-                  openAgentSessionPubkey={openAgentSessionPubkey}
-                  profiles={profiles}
-                  typingPubkeys={typingPubkeys}
-                  visible={hasComposerBottomActivity}
-                  workingBotPubkeys={composerWorkingBotPubkeys}
-                />
+                <ComposerActivityAccessory visible={hasComposerBottomActivity}>
+                  <ChannelComposerActivityRow
+                    agents={activityAgents}
+                    channel={activeChannel}
+                    currentPubkey={currentPubkey}
+                    onOpenAgentSession={onOpenAgentSession}
+                    profiles={profiles}
+                    typingPubkeys={typingPubkeys}
+                  />
+                </ComposerActivityAccessory>
               </div>
             </div>
           )}
@@ -893,18 +883,27 @@ export const ChannelPane = React.memo(function ChannelPane({
                   threadHeadMessage.id,
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
-                activityAccessoryVisible={hasThreadComposerBotActivity}
+                activityAccessoryVisible={hasThreadComposerActivity}
                 activityAccessoryContent={
-                  hasThreadComposerBotActivity ? (
+                  hasThreadComposerActivity ? (
                     <BotActivityComposerAction
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
                       onOpenAgentSession={onOpenAgentSession}
-                      openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
-                      variant="inline"
+                      typingBotPubkeys={threadPillBotPubkeys}
+                      typingIndicator={
+                        combinedThreadTypingPubkeys.length > 0 ? (
+                          <TypingIndicatorRow
+                            channel={activeChannel}
+                            className="min-w-0 shrink px-0 py-0 sm:px-0"
+                            currentPubkey={currentPubkey}
+                            profiles={profiles}
+                            typingPubkeys={combinedThreadTypingPubkeys}
+                          />
+                        ) : null
+                      }
+                      workingBotPubkeys={threadPillBotPubkeys}
                     />
                   ) : null
                 }
