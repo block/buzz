@@ -801,6 +801,7 @@ name = "buzz-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atomic-write-file",
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
