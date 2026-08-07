@@ -202,8 +202,23 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   const bannerBox = await banner.boundingBox();
   const personaMentionBox = await personaMention.boundingBox();
   const composerBox = await composer.boundingBox();
+  const dockBackdropBox = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .boundingBox();
+  const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const guidanceBackdrop = page.getByTestId(
+    "welcome-composer-guidance-backdrop",
+  );
+  const guidanceBackdropBox = await guidanceBackdrop.boundingBox();
 
-  if (!bannerBox || !personaMentionBox || !composerBox) {
+  if (
+    !bannerBox ||
+    !personaMentionBox ||
+    !composerBox ||
+    !dockBackdropBox ||
+    !guidanceBackdropBox
+  ) {
     throw new Error("Could not measure welcome composer banner layout");
   }
 
@@ -212,11 +227,40 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
   expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
+  expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
+  expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
+  expect(
+    Math.abs(
+      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
+    ),
+  ).toBeLessThanOrEqual(1);
+  const [guidanceZIndex, backdropZIndex] = await Promise.all([
+    guidanceLayer.evaluate((element) =>
+      Number(window.getComputedStyle(element).zIndex),
+    ),
+    page
+      .getByTestId("composer-dock-backdrop")
+      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
+  ]);
+  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  expect(
+    await page
+      .getByTestId("channel-composer-overlay")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(1);
+  expect(
+    await page
+      .getByTestId("composer-dock-backdrop")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(0);
 
   const radii = await banner.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
       backdropFilter: styles.backdropFilter,
+      backgroundColor: styles.backgroundColor,
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
       filter: styles.filter,
@@ -227,11 +271,24 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
       willChange: styles.willChange,
     };
   });
+  const composerBackgroundColor = await composer.evaluate(
+    (element) => window.getComputedStyle(element).backgroundColor,
+  );
+  const dockBackdropFilter = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .evaluate((element) => window.getComputedStyle(element).backdropFilter);
+  const guidanceBackdropFilter = await guidanceBackdrop.evaluate(
+    (element) => window.getComputedStyle(element).backdropFilter,
+  );
 
   expect(radii.topLeft).toBe(radii.topRight);
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
   expect(radii.backdropFilter).toBe("none");
+  expect(radii.backgroundColor).not.toBe(composerBackgroundColor);
+  expect(dockBackdropFilter).not.toBe("none");
+  expect(guidanceBackdropFilter).toBe(dockBackdropFilter);
   expect(radii.filter).toBe("none");
   expect(radii.transform).toBe("none");
   expect(radii.willChange).toBe("auto");
@@ -385,6 +442,11 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
 ) {
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const channelIntro = page.getByTestId("message-channel-intro");
+  const composer = page.getByTestId("message-composer");
+  const initialComposerBox = await composer.boundingBox();
+  if (!initialComposerBox) {
+    throw new Error("Could not measure the Welcome composer");
+  }
 
   await page.getByTestId("message-input").fill("Thanks @Fizz");
   await page.getByTestId("send-message").click();
@@ -403,6 +465,17 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
   await expect(channelIntro).toBeVisible();
+  const completeComposerBox = await composer.boundingBox();
+  expect(completeComposerBox).not.toBeNull();
+  expect(
+    Math.abs((completeComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
+  await expect(banner).toHaveCount(0, { timeout: 6_000 });
+  const hiddenComposerBox = await composer.boundingBox();
+  expect(hiddenComposerBox).not.toBeNull();
+  expect(
+    Math.abs((hiddenComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
 }
 
 async function getMockChannels(page: Page) {
