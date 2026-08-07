@@ -26,9 +26,11 @@ pub enum NormalizeRelayUrlError {
 /// Canonicalize a WebSocket relay URL for use as a runtime identity key.
 ///
 /// This is the sole normalizer for `(agent, relay)` process identity. It keeps
-/// the WebSocket scheme, lowercases DNS hosts, folds all loopback spellings to
-/// `127.0.0.1`, removes default ports and a root slash, and preserves non-root
-/// paths and queries. It deliberately is **not** the NIP-42 AUTH comparison
+/// the WebSocket scheme and Host authority, lowercases DNS hosts, removes default
+/// ports and a root slash, and preserves non-root paths and queries. Host authority
+/// is load-bearing because the relay derives the community boundary from it, so
+/// `localhost`, `127.0.0.1`, and `[::1]` remain distinct. It deliberately is
+/// **not** the NIP-42 AUTH comparison
 /// helper in `buzz-auth`: AUTH validation is a security boundary with narrower
 /// equivalence rules and must not be widened by runtime-key canonicalization.
 ///
@@ -48,15 +50,7 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> 
     }
 
     let host = url.host().ok_or(NormalizeRelayUrlError::MissingHost)?;
-    let loopback = match host {
-        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-        Host::Ipv4(address) => address.is_loopback(),
-        Host::Ipv6(address) => address.is_loopback(),
-    };
-    if loopback {
-        url.set_host(Some("127.0.0.1"))
-            .map_err(|_| NormalizeRelayUrlError::MissingHost)?;
-    } else if let Host::Domain(domain) = host {
+    if let Host::Domain(domain) = host {
         let lowercase = domain.to_ascii_lowercase();
         url.set_host(Some(&lowercase))
             .map_err(|_| NormalizeRelayUrlError::MissingHost)?;
@@ -82,13 +76,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_spellings_have_one_identity() {
+    fn host_derived_community_authorities_remain_distinct() {
         let ipv6 = normalize_relay_url("wss://[::1]/").unwrap();
         let ipv4 = normalize_relay_url("wss://127.0.0.1/").unwrap();
         let localhost = normalize_relay_url("wss://localhost/").unwrap();
-        assert_eq!(ipv6, ipv4);
-        assert_eq!(ipv4, localhost);
-        assert_eq!(localhost, "wss://127.0.0.1");
+        assert_eq!(ipv6, "wss://[::1]");
+        assert_eq!(ipv4, "wss://127.0.0.1");
+        assert_eq!(localhost, "wss://localhost");
+        assert_ne!(localhost, ipv4);
+        assert_ne!(ipv4, ipv6);
     }
 
     #[test]

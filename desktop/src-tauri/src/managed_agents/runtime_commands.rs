@@ -656,6 +656,14 @@ mod tests {
     }
 
     #[test]
+    fn runtime_key_distinguishes_host_derived_communities() {
+        let pubkey = "aa".repeat(32);
+        let localhost = ManagedAgentRuntimeKey::new(&pubkey, "ws://localhost:3000").unwrap();
+        let ipv4 = ManagedAgentRuntimeKey::new(&pubkey, "ws://127.0.0.1:3000").unwrap();
+        assert_ne!(localhost, ipv4);
+    }
+
+    #[test]
     fn runtime_key_canonicalizes_hex_pubkeys() {
         let key = ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example").unwrap();
         assert_eq!(key.pubkey, "aa".repeat(32));
