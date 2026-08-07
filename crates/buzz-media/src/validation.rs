@@ -62,20 +62,18 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
 
 /// MIME types blocked from the generic file-upload path.
 ///
-/// These are the formats a browser (or the desktop webview) will *execute* or
-/// *render as active content* if it ever reaches them with the wrong response
-/// headers. We serve generic files with `Content-Disposition: attachment` +
-/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`, which already
-/// neutralises them — this allowlist-of-denials is defence in depth, so a future
-/// header regression can't turn an uploaded blob into a stored-XSS vector.
+/// Generic files are already served with `Content-Disposition: attachment` +
+/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`. This deny
+/// list is defence in depth against a future header regression.
 ///
-/// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
-/// blocked because there's no legitimate reason to host them inline in chat and
-/// they're a malware-distribution risk.
+/// HTML / XHTML are intentionally **not** blocked: agents commonly produce
+/// self-contained HTML reports, and the download headers already prevent
+/// in-origin rendering. SVG and JavaScript stay blocked (SVG can execute via
+/// `<img>`; JS has no legitimate chat-attachment use). Native executables are
+/// blocked as a malware-distribution risk.
 const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
-    // Active web content — stored-XSS vectors.
-    "text/html",
-    "application/xhtml+xml",
+    // Active web content — stored-XSS vectors that can still execute via
+    // embedding even when served as attachments.
     "image/svg+xml",
     "application/javascript",
     "text/javascript",
@@ -136,6 +134,8 @@ fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
         "application/json" => "json",
         "text/csv" => "csv",
         "text/plain" => "txt",
+        "text/html" => "html",
+        "application/xhtml+xml" => "xhtml",
         _ => return None,
     };
     Some(ext)
@@ -2586,15 +2586,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_file_html_rejected() {
-        // HTML is a stored-XSS carrier — blocked even though headers neutralise it.
+    fn test_validate_file_html_accepted_as_download() {
+        // HTML documents are common agent/report attachments. They take the
+        // generic file path and are served as downloads (attachment + nosniff
+        // + CSP) — not rendered in-origin.
         let config = test_config();
-        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        let result = validate_file_content(html, &config);
-        assert!(
-            matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
-            "expected DisallowedContentType(text/html), got {result:?}"
-        );
+        let html = b"<!DOCTYPE html><html><body><h1>report</h1></body></html>";
+        let (mime, ext) = validate_file_content(html, &config).expect("html accepted");
+        assert_eq!(mime, "text/html");
+        assert_eq!(ext, "html");
+        assert!(!serve_inline(&mime), "html must force download");
     }
 
     #[test]
