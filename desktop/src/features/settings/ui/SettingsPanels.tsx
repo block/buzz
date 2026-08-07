@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
@@ -94,6 +95,7 @@ import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { VoiceSettingsCard } from "./VoiceSettingsCard";
+import { LanguageSetting } from "./LanguageSetting";
 
 export type SettingsSection =
   | "profile"
@@ -143,7 +145,7 @@ export function isSettingsSection(value: unknown): value is SettingsSection {
 
 export type SettingsSectionDescriptor = {
   value: SettingsSection;
-  label: string;
+  labelKey: string;
   icon: LucideIcon;
   /** If set, this section is only visible when the feature is enabled */
   featureGate?: string;
@@ -167,85 +169,85 @@ export type SettingsPanelProps = {
 export const settingsSections: SettingsSectionDescriptor[] = [
   {
     value: "appearance",
-    label: "Appearance",
+    labelKey: "settings.nav.sections.appearance",
     icon: MonitorCog,
   },
   {
     value: "profile",
-    label: "Profile",
+    labelKey: "settings.nav.sections.profile",
     icon: UserRound,
   },
   {
     value: "notifications",
-    label: "Notifications",
+    labelKey: "settings.nav.sections.notifications",
     icon: BellRing,
   },
   {
     value: "voice",
-    label: "Voice",
+    labelKey: "settings.nav.sections.voice",
     icon: Volume2,
   },
   {
     value: "experimental",
-    label: "Experiments",
+    labelKey: "settings.nav.sections.experimental",
     icon: FlaskConical,
   },
   {
     value: "agents",
-    label: "Agents",
+    labelKey: "settings.nav.sections.agents",
     icon: Bot,
     featureGate: "managed-agents",
   },
   {
     value: "channel-templates",
-    label: "Channel templates",
+    labelKey: "settings.nav.sections.channelTemplates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
   {
     value: "compute",
-    label: "Compute",
+    labelKey: "settings.nav.sections.compute",
     icon: Cpu,
   },
   {
     value: "shortcuts",
-    label: "Shortcuts",
+    labelKey: "settings.nav.sections.shortcuts",
     icon: Keyboard,
   },
   {
     value: "hosted-communities",
-    label: "Hosted communities",
+    labelKey: "settings.nav.sections.hostedCommunities",
     icon: MessagesSquare,
   },
   {
     value: "community-members",
-    label: "Invites",
+    labelKey: "settings.nav.sections.communityMembers",
     icon: Ticket,
   },
   {
     value: "moderation",
-    label: "Moderation",
+    labelKey: "settings.nav.sections.moderation",
     icon: ShieldAlert,
   },
   {
     value: "custom-emoji",
-    label: "Custom emoji",
+    labelKey: "settings.nav.sections.customEmoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local archive",
+    labelKey: "settings.nav.sections.localArchive",
     icon: Archive,
   },
   {
     value: "mobile",
-    label: "Mobile",
+    labelKey: "settings.nav.sections.mobile",
     icon: Smartphone,
   },
   {
     value: "updates",
-    label: "Updates",
+    labelKey: "settings.nav.sections.updates",
     icon: Download,
   },
 ];
@@ -427,6 +429,7 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  const { t } = useTranslation();
   const {
     setTheme,
     selectedThemeName,
@@ -541,8 +544,8 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose a theme for Buzz."
+        title={t("settings.appearance.title")}
+        description={t("settings.appearance.description")}
       />
 
       {/* Mode, theme, and accent are saved per community
@@ -577,9 +580,21 @@ function ThemeSettingsCard() {
       <div className="mb-4 flex gap-2">
         {(
           [
-            { mode: "system" as const, label: "System", Icon: SunMoon },
-            { mode: "light" as const, label: "Light", Icon: Sun },
-            { mode: "dark" as const, label: "Dark", Icon: Moon },
+            {
+              mode: "system" as const,
+              label: t("settings.appearance.system"),
+              Icon: SunMoon,
+            },
+            {
+              mode: "light" as const,
+              label: t("settings.appearance.light"),
+              Icon: Sun,
+            },
+            {
+              mode: "dark" as const,
+              label: t("settings.appearance.dark"),
+              Icon: Moon,
+            },
           ] as const
         ).map(({ mode, label, Icon }) => (
           <button
@@ -701,6 +716,7 @@ function ThemeSettingsCard() {
 
       <LinkPreviewStyleSetting />
       <ThreadLayoutSetting />
+      <LanguageSetting />
     </section>
   );
 }
@@ -781,18 +797,18 @@ function LinkPreviewStyleSetting() {
 
 const THREAD_VIEW_MODE_OPTIONS: {
   value: ThreadViewMode;
-  label: string;
-  description: string;
+  labelKey: string;
+  descriptionKey: string;
 }[] = [
   {
     value: "focus",
-    label: "Focus",
-    description: "Threads open over the channel, full width",
+    labelKey: "settings.appearance.threadFocus",
+    descriptionKey: "settings.appearance.threadFocusDescription",
   },
   {
     value: "split",
-    label: "Split",
-    description: "Threads open in a side panel next to the channel",
+    labelKey: "settings.appearance.threadSplit",
+    descriptionKey: "settings.appearance.threadSplitDescription",
   },
 ];
 
@@ -802,6 +818,7 @@ const THREAD_VIEW_MODE_OPTIONS: {
  * carry its own description.
  */
 function ThreadLayoutSetting() {
+  const { t } = useTranslation();
   const threadViewMode = useThreadViewMode();
   // The "(all communities)" qualifier contrasts with the per-community theme
   // controls above; it's only meaningful when the user has multiple
@@ -818,7 +835,7 @@ function ThreadLayoutSetting() {
       <SettingsOptionRow>
         <div className="min-w-0">
           <p className="text-sm font-medium">
-            Thread layout
+            {t("settings.appearance.threadLayout")}
             {showCommunityScope ? (
               <span className="font-normal text-muted-foreground">
                 {" "}
@@ -827,7 +844,7 @@ function ThreadLayoutSetting() {
             ) : null}
           </p>
           <p className="text-sm font-normal text-muted-foreground">
-            {activeOption.description}
+            {t(activeOption.descriptionKey)}
           </p>
         </div>
         <DropdownMenu modal={false}>
@@ -839,7 +856,7 @@ function ThreadLayoutSetting() {
               type="button"
               variant="ghost"
             >
-              <span className="truncate">{activeOption.label}</span>
+              <span className="truncate">{t(activeOption.labelKey)}</span>
               <ChevronDown className="h-4 w-4 text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
@@ -857,9 +874,9 @@ function ThreadLayoutSetting() {
                   value={option.value}
                 >
                   <span className="flex min-w-0 flex-col">
-                    <span className="font-medium">{option.label}</span>
+                    <span className="font-medium">{t(option.labelKey)}</span>
                     <span className="text-2xs text-muted-foreground">
-                      {option.description}
+                      {t(option.descriptionKey)}
                     </span>
                   </span>
                 </DropdownMenuRadioItem>
@@ -882,9 +899,12 @@ function AccentPickerContent({
   isDark: boolean;
   setAccentColor: (value: string) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="shrink-0 px-1 pb-2 pt-1">
-      <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+      <h3 className="mb-2 text-sm font-medium">
+        {t("settings.appearance.accentColor")}
+      </h3>
       <div className="flex flex-wrap gap-2 p-1">
         {ACCENT_COLORS.map((color) => {
           const isNeutral = color.value === NEUTRAL_ACCENT;

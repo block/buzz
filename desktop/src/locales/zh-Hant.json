@@ -1,0 +1,184 @@
+{
+  "settings": {
+    "nav": {
+      "backToApp": "返回",
+      "groups": {
+        "personal": "個人",
+        "communities": "社群",
+        "app": "App"
+      },
+      "sectionsLabel": "{{group}} 設定",
+      "sections": {
+        "appearance": "外觀",
+        "profile": "個人檔案",
+        "notifications": "通知",
+        "voice": "語音",
+        "experimental": "實驗功能",
+        "agents": "Agents",
+        "channelTemplates": "頻道範本",
+        "compute": "Compute",
+        "shortcuts": "捷徑",
+        "hostedCommunities": "託管社群",
+        "communityMembers": "邀請",
+        "moderation": "管理",
+        "customEmoji": "自訂 emoji",
+        "localArchive": "本機存檔",
+        "mobile": "手機",
+        "updates": "更新"
+      }
+    },
+    "access": {
+      "checking": "正在檢查邀請權限…",
+      "error": "無法檢查邀請設定。",
+      "retry": "重試",
+      "unavailable": "邀請設定暫時無法使用。中繼復原可能仍在進行中。"
+    },
+    "appearance": {
+      "title": "外觀",
+      "description": "為 Buzz 選擇主題。",
+      "system": "系統",
+      "light": "淺色",
+      "dark": "深色",
+      "accentColor": "重點顏色",
+      "threadLayout": "討論串佈局",
+      "threadFocus": "聚焦",
+      "threadFocusDescription": "討論串以全寬度覆蓋頻道打開",
+      "threadSplit": "分割",
+      "threadSplitDescription": "討論串在頻道旁邊嘅側邊面板打開"
+    },
+    "language": {
+      "label": "語言",
+      "description": "選擇 Buzz 使用的語言。",
+      "system": "跟隨系統",
+      "english": "英文",
+      "traditionalChinese": "繁體中文",
+      "simplifiedChinese": "簡體中文"
+    }
+  },
+  "sidebar": {
+    "primary": {
+      "inbox": "收件匣",
+      "pulse": "Pulse",
+      "projects": "Projects",
+      "agents": "Agents",
+      "workflows": "Workflows"
+    },
+    "community": {
+      "notConnected": "未連接",
+      "connecting": "連接中…",
+      "connected": "已連接",
+      "reconnecting": "正在重新連接 relay…",
+      "stalled": "連線中斷 — relay 無回應",
+      "disconnected": "已中斷連接 relay",
+      "noCommunity": "沒有社群",
+      "community": "社群",
+      "actions": "社群操作",
+      "copyUrl": "複製社群網址",
+      "invite": "邀請加入社群",
+      "settings": "社群設定",
+      "add": "新增社群",
+      "switch": "切換社群",
+      "edit": "編輯 {{name}}"
+    },
+    "channel": {
+      "closeDirectMessage": "關閉 DM",
+      "newComments_one": "新留言",
+      "newComments_other": "新留言",
+      "unread": "未讀",
+      "copy": "複製",
+      "copyName": "複製 Channel 名稱",
+      "copyId": "複製 Channel ID",
+      "nameCopied": "已複製 Channel 名稱",
+      "idCopied": "已複製 Channel ID",
+      "markAsRead": "標為已讀",
+      "markUnread": "標為未讀",
+      "mute": "靜音 Channel",
+      "unmute": "取消靜音 Channel",
+      "star": "星標 Channel",
+      "unstar": "取消星標 Channel",
+      "leave": "離開頻道",
+      "archive": "封存頻道",
+      "delete": "刪除頻道"
+    }
+  },
+  "composer": {
+    "toolbar": {
+      "formatting": "格式",
+      "toggleFormatting": "切換格式",
+      "closeFormatting": "關閉格式",
+      "mention": "提及",
+      "attachFile": "附加檔案",
+      "sending": "傳送中",
+      "sendMessage": "傳送訊息"
+    },
+    "format": {
+      "bold": "粗體",
+      "italic": "斜體",
+      "strikethrough": "刪除線",
+      "code": "程式碼",
+      "codeBlock": "程式碼區塊",
+      "link": "連結",
+      "bulletList": "項目清單",
+      "orderedList": "編號清單",
+      "quote": "引用",
+      "spoiler": "劇透",
+      "enterUrl": "輸入網址：",
+      "linkText": "連結文字："
+    },
+    "banner": {
+      "editing": "改緊訊息",
+      "cancelEdit": "取消編輯",
+      "replying": "回覆緊 {{author}}",
+      "cancelReply": "取消回覆"
+    },
+    "actions": {
+      "more": "更多選項",
+      "edit": "編輯訊息",
+      "markRead": "標示為已讀",
+      "markUnread": "標示為未讀",
+      "followThread": "追蹤討論串",
+      "unfollowThread": "取消追蹤討論串",
+      "copyMessage": "複製訊息",
+      "messageCopied": "訊息已複製到 clipboard",
+      "remindLater": "遲啲提醒我",
+      "copyLink": "複製連結",
+      "linkCopied": "已複製連結",
+      "report": "舉報訊息",
+      "delete": "刪除訊息",
+      "openReactions": "查看 reactions",
+      "react": "加 reaction",
+      "reply": "回覆"
+    },
+    "delete": {
+      "title": "刪除訊息？",
+      "description": "會永久刪除呢個訊息，冇得復原。",
+      "cancel": "取消",
+      "confirm": "刪除"
+    },
+    "mention": {
+      "agent": "agent",
+      "teamAgents_one": "team · {{count}} 個 agent",
+      "teamAgents_other": "team · {{count}} 個 agents",
+      "managedBy": "由 {{owner}} 管理",
+      "notInChannel": "唔喺 channel",
+      "managedByNotInChannel": "由 {{owner}} 管理 · 唔喺 channel"
+    }
+  },
+  "agents": {
+    "title": "Agents",
+    "description": "設定同管理你啲 agents。",
+    "defaults": "Agent 預設",
+    "setDefaults": "設定 agent 預設值",
+    "stopRunning": "停止 agents",
+    "actions": "Agent 操作",
+    "dropToImport": "拖放 .agent.json 或 .agent.png 匯入",
+    "unknown": "不明 agents",
+    "custom": "自訂 agents",
+    "configurationMissing": "未有 configuration",
+    "newAgent": "新增 agent",
+    "createAgent": "建立 agent",
+    "discoverAgents": "探索 agents",
+    "import": "匯入",
+    "profile": "{{name}} 嘅 agent profile"
+  }
+}

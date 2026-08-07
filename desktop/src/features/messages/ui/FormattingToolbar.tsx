@@ -13,6 +13,7 @@ import {
   SquareCode,
   Strikethrough,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -129,6 +130,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   disabled = false,
   onLinkButton,
 }: FormattingToolbarProps) {
+  const { t } = useTranslation();
   const pendingSelectionRef = React.useRef<FormattingSelectionRange | null>(
     null,
   );
@@ -254,18 +256,18 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
     const hasSelection = from !== to;
 
     if (hasSelection) {
-      const url = window.prompt("Enter URL:");
+      const url = window.prompt(t("composer.format.enterUrl"));
       if (url) {
         editor.chain().focus().setLink({ href: url }).run();
       }
     } else {
-      const url = window.prompt("Enter URL:");
+      const url = window.prompt(t("composer.format.enterUrl"));
       if (url) {
-        const label = window.prompt("Link text:", url) || url;
+        const label = window.prompt(t("composer.format.linkText"), url) || url;
         editor.chain().focus().insertContent(`[${label}](${url})`).run();
       }
     }
-  }, [editor, formattingChain, onLinkButton, restorePendingSelection]);
+  }, [editor, formattingChain, onLinkButton, restorePendingSelection, t]);
 
   const toggleBulletList = React.useCallback(() => {
     formattingChain()
@@ -320,66 +322,66 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const items = [
     {
       icon: Bold,
-      label: "Bold",
+      label: t("composer.format.bold"),
       shortcut: "⌘B",
       action: toggleBold,
       active: activeStates.bold,
     },
     {
       icon: Italic,
-      label: "Italic",
+      label: t("composer.format.italic"),
       shortcut: "⌘I",
       action: toggleItalic,
       active: activeStates.italic,
     },
     {
       icon: Strikethrough,
-      label: "Strikethrough",
+      label: t("composer.format.strikethrough"),
       shortcut: "⌘⇧X",
       action: toggleStrike,
       active: activeStates.strike,
     },
     {
       icon: Code,
-      label: "Code",
+      label: t("composer.format.code"),
       shortcut: "⌘E",
       action: toggleCode,
       active: activeStates.code,
     },
     {
       icon: SquareCode,
-      label: "Code block",
+      label: t("composer.format.codeBlock"),
       action: toggleCodeBlock,
       active: activeStates.codeBlock,
     },
     {
       icon: Link,
-      label: "Link",
+      label: t("composer.format.link"),
       shortcut: "⌘K",
       action: toggleLink,
       active: activeStates.link,
     },
     {
       icon: List,
-      label: "Bullet list",
+      label: t("composer.format.bulletList"),
       action: toggleBulletList,
       active: activeStates.bulletList,
     },
     {
       icon: ListOrdered,
-      label: "Ordered list",
+      label: t("composer.format.orderedList"),
       action: toggleOrderedList,
       active: activeStates.orderedList,
     },
     {
       icon: Quote,
-      label: "Quote",
+      label: t("composer.format.quote"),
       action: toggleBlockquote,
       active: activeStates.blockquote,
     },
     {
       icon: HatGlasses,
-      label: "Spoiler",
+      label: t("composer.format.spoiler"),
       action: toggleSpoiler,
       active: activeStates.spoiler,
     },

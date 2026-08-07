@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
 import {
@@ -72,6 +73,7 @@ export const AGENT_CARD_GRID_COLUMNS_CLASS =
 export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3 [@container(max-width:40rem)]:justify-center`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
+  const { t } = useTranslation();
   const {
     actionErrorMessage,
     actionNoticeMessage,
@@ -139,7 +141,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {isDragOver ? (
         <div className="pointer-events-none absolute -inset-1 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 backdrop-blur-sm">
           <p className="text-sm font-medium text-primary">
-            Drop .agent.json or .agent.png to import
+            {t("agents.dropToImport")}
           </p>
         </div>
       ) : null}
@@ -207,7 +209,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               defaultModel={defaultModel}
               groupKey="__unknown__"
-              label="Unknown agents"
+              label={t("agents.unknown")}
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
@@ -222,7 +224,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               defaultModel={defaultModel}
               groupKey="__ungrouped__"
-              label="Custom agents"
+              label={t("agents.custom")}
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
@@ -285,6 +287,7 @@ function AgentPersonaCard({
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
+  const { t } = useTranslation();
   const title = persona.displayName;
   const modelLabel = resolveAgentCardModelLabel({
     agent,
@@ -307,7 +310,7 @@ function AgentPersonaCard({
         avatarUrl,
         isAgentCardAvatarLoading(Boolean(agent), profileQuery.isPending),
       )}
-      ariaLabel={`${title} agent profile`}
+      ariaLabel={t("agents.profile", { name: title })}
       avatar={
         agent ? (
           <AgentRuntimeAvatarControl
@@ -360,7 +363,7 @@ function AgentPersonaCard({
         agent?.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
-            Configuration missing
+            {t("agents.configurationMissing")}
           </Badge>
         ) : null
       }
@@ -388,6 +391,7 @@ function StandaloneAgentCard({
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
 }) {
+  const { t } = useTranslation();
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
@@ -399,7 +403,7 @@ function StandaloneAgentCard({
 
   return (
     <AgentIdentityCard
-      ariaLabel={`${title} agent profile`}
+      ariaLabel={t("agents.profile", { name: title })}
       avatar={
         <AgentRuntimeAvatarControl
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
@@ -440,7 +444,7 @@ function StandaloneAgentCard({
         agent.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
-            Configuration missing
+            {t("agents.configurationMissing")}
           </Badge>
         ) : null
       }
@@ -459,27 +463,31 @@ function NewAgentCard({
   onDiscover: () => void;
   onImport: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard ariaLabel="New agent" dataTestId="new-agent-card" />
+        <CreateIdentityCard
+          ariaLabel={t("agents.newAgent")}
+          dataTestId="new-agent-card"
+        />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
         <DropdownMenuItem disabled={isPending} onClick={onCreate}>
-          Create agent
+          {t("agents.createAgent")}
         </DropdownMenuItem>
         <DropdownMenuItem disabled={isPending} onClick={onDiscover}>
-          Discover agents
+          {t("agents.discoverAgents")}
         </DropdownMenuItem>
         <DropdownMenuItem
           data-testid="import-agent-snapshot-menu-item"
           disabled={isPending}
           onClick={onImport}
         >
-          Import
+          {t("agents.import")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

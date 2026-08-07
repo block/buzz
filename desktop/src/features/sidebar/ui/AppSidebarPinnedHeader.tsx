@@ -1,4 +1,5 @@
 import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -89,6 +90,7 @@ export function AppSidebarPrimaryMenu({
   onSelectWorkflows,
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
+  const { t } = useTranslation();
   return (
     <SidebarHeader
       className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
@@ -101,7 +103,7 @@ export function AppSidebarPrimaryMenu({
             className="data-[active=true]:font-normal"
             isActive={selectedView === "home"}
             onClick={onSelectHome}
-            tooltip="Inbox"
+            tooltip={t("sidebar.primary.inbox")}
             type="button"
           >
             <Inbox
@@ -112,7 +114,7 @@ export function AppSidebarPrimaryMenu({
             <SidebarMenuLabel
               className={selectedView !== "home" ? "opacity-80" : undefined}
             >
-              Inbox
+              {t("sidebar.primary.inbox")}
             </SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
@@ -130,11 +132,11 @@ export function AppSidebarPrimaryMenu({
               data-testid="open-pulse-view"
               isActive={selectedView === "pulse"}
               onClick={onSelectPulse}
-              tooltip="Pulse"
+              tooltip={t("sidebar.primary.pulse")}
               type="button"
             >
               <Activity className="h-4 w-4" />
-              <SidebarMenuLabel>Pulse</SidebarMenuLabel>
+              <SidebarMenuLabel>{t("sidebar.primary.pulse")}</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
@@ -144,11 +146,13 @@ export function AppSidebarPrimaryMenu({
               data-testid="open-projects-view"
               isActive={selectedView === "projects"}
               onClick={onSelectProjects}
-              tooltip="Projects"
+              tooltip={t("sidebar.primary.projects")}
               type="button"
             >
               <FolderGit2 className="h-4 w-4" />
-              <SidebarMenuLabel>Projects</SidebarMenuLabel>
+              <SidebarMenuLabel>
+                {t("sidebar.primary.projects")}
+              </SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
@@ -158,7 +162,7 @@ export function AppSidebarPrimaryMenu({
             data-testid="open-agents-view"
             isActive={selectedView === "agents"}
             onClick={onSelectAgents}
-            tooltip="Agents"
+            tooltip={t("sidebar.primary.agents")}
             type="button"
           >
             <Bot
@@ -169,7 +173,7 @@ export function AppSidebarPrimaryMenu({
             <SidebarMenuLabel
               className={selectedView !== "agents" ? "opacity-80" : undefined}
             >
-              Agents
+              {t("sidebar.primary.agents")}
             </SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
@@ -179,11 +183,13 @@ export function AppSidebarPrimaryMenu({
               data-testid="open-workflows-view"
               isActive={selectedView === "workflows"}
               onClick={onSelectWorkflows}
-              tooltip="Workflows"
+              tooltip={t("sidebar.primary.workflows")}
               type="button"
             >
               <Zap className="h-4 w-4" />
-              <SidebarMenuLabel>Workflows</SidebarMenuLabel>
+              <SidebarMenuLabel>
+                {t("sidebar.primary.workflows")}
+              </SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>
