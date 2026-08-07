@@ -5,7 +5,7 @@ mod error;
 mod links;
 mod validate;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -352,7 +352,11 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n  buzz messages send --channel <UUID> --content-file report.md",
+        group = ArgGroup::new("message_content")
+            .required(true)
+            .multiple(false)
+            .args(["content", "content_file"])
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -360,7 +364,10 @@ pub enum MessagesCmd {
         channel: String,
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
-        content: String,
+        content: Option<String>,
+        /// Read the message text from a UTF-8 file.
+        #[arg(long)]
+        content_file: Option<String>,
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
@@ -2051,6 +2058,40 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn messages_send_accepts_exactly_one_content_source() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--content-file",
+            "report.md",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--content",
+            "inline",
+            "--content-file",
+            "report.md",
+        ])
+        .is_err());
     }
 
     #[test]

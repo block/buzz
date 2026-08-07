@@ -561,9 +561,28 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+fn resolve_message_content(
+    content: Option<&str>,
+    content_file: Option<&str>,
+) -> Result<String, CliError> {
+    match (content, content_file) {
+        (Some(value), None) => read_or_stdin(value),
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| {
+            CliError::Usage(format!("failed to read message content file {path:?}: {e}"))
+        }),
+        (Some(_), Some(_)) => Err(CliError::Usage(
+            "--content and --content-file cannot be used together".into(),
+        )),
+        (None, None) => Err(CliError::Usage(
+            "one of --content or --content-file is required".into(),
+        )),
+    }
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
-    pub content: String,
+    pub content: Option<String>,
+    pub content_file: Option<String>,
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
     pub broadcast: bool,
@@ -571,23 +590,16 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
-pub async fn cmd_send_message(
-    client: &BuzzClient,
-    mut p: SendMessageParams,
-) -> Result<(), CliError> {
-    // Allow '-' to read content from stdin. This keeps callers from having to
-    // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
-    // quoting — the source of countless self-inflicted command-substitution
-    // bugs for agent and human users alike.
-    p.content = read_or_stdin(&p.content)?;
-    validate_content_size(&p.content)?;
+pub async fn cmd_send_message(client: &BuzzClient, p: SendMessageParams) -> Result<(), CliError> {
+    let content = resolve_message_content(p.content.as_deref(), p.content_file.as_deref())?;
+    validate_content_size(&content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
-    let stripped = strip_code_regions(&p.content);
+    let stripped = strip_code_regions(&content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
     // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
     // as presentation-only, matching Desktop's separate visible-label and p-tag model.
@@ -595,7 +607,7 @@ pub async fn cmd_send_message(
     // every intended identity whose visible label cannot be resolved uniquely.
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
-        resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
+        resolve_content_mentions(client, &p.channel_id, &content, has_explicit_mentions).await?;
     let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
@@ -628,9 +640,9 @@ pub async fn cmd_send_message(
         media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
-        p.content.clone()
+        content.clone()
     } else {
-        format!("{}{media_content}", p.content)
+        format!("{content}{media_content}")
     };
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
@@ -875,6 +887,7 @@ pub async fn dispatch(
         MessagesCmd::Send {
             channel,
             content,
+            content_file,
             kind,
             reply_to,
             broadcast,
@@ -886,6 +899,7 @@ pub async fn dispatch(
                 SendMessageParams {
                     channel_id: channel,
                     content,
+                    content_file,
                     kind,
                     reply_to,
                     broadcast,
@@ -995,7 +1009,7 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_message_content, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1011,6 +1025,61 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn message_content_file_reads_utf8_verbatim() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-message-content-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let expected = "# Review\n\nLiteral `code` and $variables.\n";
+        std::fs::write(&path, expected).unwrap();
+
+        let actual = resolve_message_content(None, path.to_str()).unwrap();
+
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn message_content_file_reports_missing_file_as_usage_error() {
+        let error =
+            resolve_message_content(None, Some("missing-message-content-file.md")).unwrap_err();
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
+        assert!(error.to_string().contains("message content file"));
+    }
+
+    #[test]
+    fn message_content_file_rejects_invalid_utf8() {
+        let path = std::env::temp_dir().join(format!(
+            "buzz-message-content-invalid-utf8-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+
+        let error = resolve_message_content(None, path.to_str()).unwrap_err();
+
+        std::fs::remove_file(path).unwrap();
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
+        assert!(error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("valid utf-8"));
+    }
+
+    #[test]
+    fn message_content_source_rejects_both_or_neither() {
+        assert!(resolve_message_content(Some("inline"), Some("message.md")).is_err());
+        assert!(resolve_message_content(None, None).is_err());
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
