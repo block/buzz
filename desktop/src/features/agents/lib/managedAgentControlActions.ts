@@ -35,6 +35,31 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
+/** Provider-backed instance with a live remote deployment id. */
+export function isProviderDeployedManagedAgent(
+  agent: Pick<ManagedAgent, "backend" | "backendAgentId">,
+): boolean {
+  return agent.backend.type === "provider" && Boolean(agent.backendAgentId);
+}
+
+/**
+ * When a persona card's primary instance is provider-deployed, Delete must
+ * remove the managed agent (with force_remote_delete) instead of cascading
+ * persona deletion, which the backend refuses for live remote deployments.
+ */
+export function providerDeployedAgentForPersonaDelete(
+  personaId: string,
+  managedAgents: readonly ManagedAgent[],
+  profileAgent?: ManagedAgent,
+): ManagedAgent | null {
+  const candidates = managedAgents.filter((agent) => agent.personaId === personaId);
+  const primary = profileAgent ?? candidates[0];
+  if (primary && isProviderDeployedManagedAgent(primary)) {
+    return primary;
+  }
+  return null;
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
