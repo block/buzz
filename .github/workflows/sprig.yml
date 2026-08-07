@@ -139,6 +139,17 @@ jobs:
           TITLE="Sprig (rolling)"
           NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
+          # `edit` fails with "release not found" until the rolling release
+          # exists, so the first run on any repo — this one included, and every
+          # fork — needs to create it. `create` is skipped once it is there so
+          # the tag keeps pointing at the release GitHub already knows.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" \
+              --target "$SHA" \
+              --prerelease \
+              --title "$TITLE" \
+              --notes "$NOTES"
+
           gh release edit "$TAG" \
             --prerelease \
             --title "$TITLE" \
