@@ -9,6 +9,7 @@ import {
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
+import { useTranslation } from "react-i18next";
 
 /**
  * The "Delete message?" confirmation. Single definition shared by every
@@ -26,24 +27,25 @@ export function DeleteMessageConfirmDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete message?</AlertDialogTitle>
+          <AlertDialogTitle>{t("composer.delete.title")}</AlertDialogTitle>
           <AlertDialogDescription>
-            This will permanently delete this message and cannot be undone.
+            {t("composer.delete.description")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {t("composer.delete.cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button onClick={onConfirm} type="button" variant="destructive">
-              Delete
+              {t("composer.delete.confirm")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

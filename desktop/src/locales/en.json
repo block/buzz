@@ -1,0 +1,180 @@
+{
+  "settings": {
+    "nav": {
+      "backToApp": "Back to app",
+      "groups": {
+        "personal": "Personal",
+        "communities": "Communities",
+        "app": "App"
+      },
+      "sectionsLabel": "{{group}} settings sections",
+      "sections": {
+        "appearance": "Appearance",
+        "profile": "Profile",
+        "notifications": "Notifications",
+        "experimental": "Experiments",
+        "agents": "Agents",
+        "channelTemplates": "Channel templates",
+        "compute": "Compute",
+        "shortcuts": "Shortcuts",
+        "hostedCommunities": "Hosted communities",
+        "communityMembers": "Invites",
+        "moderation": "Moderation",
+        "customEmoji": "Custom emoji",
+        "localArchive": "Local archive",
+        "mobile": "Mobile",
+        "updates": "Updates"
+      }
+    },
+    "access": {
+      "checking": "Checking invite permissions…",
+      "error": "Invite settings could not be checked.",
+      "retry": "Try again",
+      "unavailable": "Invite settings are unavailable. Relay recovery may still be in progress."
+    },
+    "appearance": {
+      "title": "Appearance",
+      "description": "Choose a theme for Buzz.",
+      "system": "System",
+      "light": "Light",
+      "dark": "Dark",
+      "accentColor": "Accent color",
+      "threadLayout": "Thread layout",
+      "threadFocus": "Focus",
+      "threadFocusDescription": "Threads open over the channel, full width",
+      "threadSplit": "Split",
+      "threadSplitDescription": "Threads open in a side panel next to the channel"
+    },
+    "language": {
+      "label": "Language",
+      "description": "Choose the language used by Buzz.",
+      "english": "English"
+    }
+  },
+  "sidebar": {
+    "primary": {
+      "inbox": "Inbox",
+      "pulse": "Pulse",
+      "projects": "Projects",
+      "agents": "Agents",
+      "workflows": "Workflows"
+    },
+    "community": {
+      "notConnected": "Not connected",
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "reconnecting": "Reconnecting to relay…",
+      "stalled": "Connection lost — relay is not responding",
+      "disconnected": "Disconnected from relay",
+      "noCommunity": "No community",
+      "community": "Community",
+      "actions": "Community actions",
+      "copyUrl": "Copy community URL",
+      "invite": "Invite to community",
+      "settings": "Community settings",
+      "add": "Add a community",
+      "switch": "Switch community",
+      "edit": "Edit {{name}}"
+    },
+    "channel": {
+      "closeDirectMessage": "Close direct message",
+      "newComments_one": "new comment",
+      "newComments_other": "new comments",
+      "unread": "unread",
+      "copy": "Copy",
+      "copyName": "Copy channel name",
+      "copyId": "Copy channel ID",
+      "nameCopied": "Channel name copied to clipboard",
+      "idCopied": "Channel ID copied to clipboard",
+      "markAsRead": "Mark as read",
+      "markUnread": "Mark unread",
+      "mute": "Mute channel",
+      "unmute": "Unmute channel",
+      "star": "Star channel",
+      "unstar": "Unstar channel",
+      "leave": "Leave channel",
+      "archive": "Archive channel",
+      "delete": "Delete channel"
+    }
+  },
+  "composer": {
+    "toolbar": {
+      "formatting": "Formatting",
+      "toggleFormatting": "Toggle formatting",
+      "closeFormatting": "Close formatting",
+      "mention": "Mention someone",
+      "attachFile": "Attach file",
+      "sending": "Sending",
+      "sendMessage": "Send message"
+    },
+    "format": {
+      "bold": "Bold",
+      "italic": "Italic",
+      "strikethrough": "Strikethrough",
+      "code": "Code",
+      "codeBlock": "Code block",
+      "link": "Link",
+      "bulletList": "Bullet list",
+      "orderedList": "Ordered list",
+      "quote": "Quote",
+      "spoiler": "Spoiler",
+      "enterUrl": "Enter URL:",
+      "linkText": "Link text:"
+    },
+    "banner": {
+      "editing": "Editing message",
+      "cancelEdit": "Cancel edit",
+      "replying": "Replying to {{author}}",
+      "cancelReply": "Cancel reply"
+    },
+    "actions": {
+      "more": "More actions",
+      "edit": "Edit message",
+      "markRead": "Mark read",
+      "markUnread": "Mark unread",
+      "followThread": "Follow thread",
+      "unfollowThread": "Unfollow thread",
+      "copyMessage": "Copy message",
+      "messageCopied": "Message copied to clipboard",
+      "remindLater": "Remind me later",
+      "copyLink": "Copy link",
+      "linkCopied": "Link copied to clipboard",
+      "report": "Report message",
+      "delete": "Delete message",
+      "openReactions": "Open reactions",
+      "react": "React",
+      "reply": "Reply"
+    },
+    "delete": {
+      "title": "Delete message?",
+      "description": "This will permanently delete this message and cannot be undone.",
+      "cancel": "Cancel",
+      "confirm": "Delete"
+    },
+    "mention": {
+      "agent": "agent",
+      "teamAgents_one": "team · {{count}} agent",
+      "teamAgents_other": "team · {{count}} agents",
+      "managedBy": "managed by {{owner}}",
+      "notInChannel": "not in channel",
+      "managedByNotInChannel": "managed by {{owner}} · not in channel"
+    }
+  },
+  "agents": {
+    "title": "Agents",
+    "description": "Set up and manage your agents.",
+    "defaults": "Agent defaults",
+    "setDefaults": "Set agent defaults",
+    "stopRunning": "Stop running agents",
+    "actions": "Agent actions",
+    "dropToImport": "Drop .agent.json or .agent.png to import",
+    "unknown": "Unknown agents",
+    "custom": "Custom agents",
+    "configurationMissing": "Configuration missing",
+    "newAgent": "New agent",
+    "createAgent": "Create agent",
+    "discoverAgents": "Discover agents",
+    "import": "Import",
+    "profile": "{{name}} agent profile"
+  }
+}

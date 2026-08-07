@@ -1,0 +1,180 @@
+{
+  "settings": {
+    "nav": {
+      "backToApp": "返回应用",
+      "groups": {
+        "personal": "个人",
+        "communities": "社区",
+        "app": "应用"
+      },
+      "sectionsLabel": "{{group}}设置项",
+      "sections": {
+        "appearance": "外观",
+        "profile": "个人资料",
+        "notifications": "通知",
+        "experimental": "实验",
+        "agents": "Agents",
+        "channelTemplates": "频道模板",
+        "compute": "Compute",
+        "shortcuts": "快捷键",
+        "hostedCommunities": "托管的社区",
+        "communityMembers": "邀请",
+        "moderation": "管理",
+        "customEmoji": "自定义 Emoji",
+        "localArchive": "本地存档",
+        "mobile": "移动端",
+        "updates": "更新"
+      }
+    },
+    "access": {
+      "checking": "正在检查邀请权限…",
+      "error": "无法检查邀请设置。",
+      "retry": "重试",
+      "unavailable": "邀请设置不可用。中继恢复可能仍在进行中。"
+    },
+    "appearance": {
+      "title": "外观",
+      "description": "选择 Buzz 的主题。",
+      "system": "跟随系统",
+      "light": "浅色",
+      "dark": "深色",
+      "accentColor": "强调色",
+      "threadLayout": "Thread 布局",
+      "threadFocus": "焦点",
+      "threadFocusDescription": "Thread 在频道上方打开，全宽显示",
+      "threadSplit": "分屏",
+      "threadSplitDescription": "Thread 在频道旁边的侧面板打开"
+    },
+    "language": {
+      "label": "语言",
+      "description": "选择 Buzz 使用的语言。",
+      "english": "英文"
+    }
+  },
+  "sidebar": {
+    "primary": {
+      "inbox": "收件箱",
+      "pulse": "动态",
+      "projects": "项目",
+      "agents": "Agents",
+      "workflows": "Workflows"
+    },
+    "community": {
+      "notConnected": "未连接",
+      "connecting": "连接中…",
+      "connected": "已连接",
+      "reconnecting": "正在重新连接中继…",
+      "stalled": "连接丢失 - 中继无响应",
+      "disconnected": "已断开中继连接",
+      "noCommunity": "无社区",
+      "community": "社区",
+      "actions": "社区操作",
+      "copyUrl": "复制社区链接",
+      "invite": "邀请加入社区",
+      "settings": "社区设置",
+      "add": "添加社区",
+      "switch": "切换社区",
+      "edit": "编辑{{name}}"
+    },
+    "channel": {
+      "closeDirectMessage": "关闭私信",
+      "newComments_one": "条新评论",
+      "newComments_other": "条新评论",
+      "unread": "未读",
+      "copy": "复制",
+      "copyName": "复制频道名称",
+      "copyId": "复制频道 ID",
+      "nameCopied": "频道名称已复制到剪贴板",
+      "idCopied": "频道 ID 已复制到剪贴板",
+      "markAsRead": "标为已读",
+      "markUnread": "标为未读",
+      "mute": "静音频道",
+      "unmute": "取消静音",
+      "star": "星标频道",
+      "unstar": "取消星标频道",
+      "leave": "离开频道",
+      "archive": "归档频道",
+      "delete": "删除频道"
+    }
+  },
+  "composer": {
+    "toolbar": {
+      "formatting": "格式",
+      "toggleFormatting": "切换格式",
+      "closeFormatting": "关闭格式",
+      "mention": "提及某人",
+      "attachFile": "添加文件",
+      "sending": "发送中",
+      "sendMessage": "发送消息"
+    },
+    "format": {
+      "bold": "加粗",
+      "italic": "斜体",
+      "strikethrough": "删除线",
+      "code": "代码",
+      "codeBlock": "代码块",
+      "link": "链接",
+      "bulletList": "无序列表",
+      "orderedList": "有序列表",
+      "quote": "引用",
+      "spoiler": "隐藏内容",
+      "enterUrl": "输入 URL：",
+      "linkText": "链接文字："
+    },
+    "banner": {
+      "editing": "正在编辑消息",
+      "cancelEdit": "取消编辑",
+      "replying": "正在回复 {{author}}",
+      "cancelReply": "取消回复"
+    },
+    "actions": {
+      "more": "更多",
+      "edit": "编辑消息",
+      "markRead": "标记已读",
+      "markUnread": "标记未读",
+      "followThread": "关注讨论",
+      "unfollowThread": "取消关注讨论",
+      "copyMessage": "复制消息",
+      "messageCopied": "消息已复制到剪贴板",
+      "remindLater": "稍后提醒",
+      "copyLink": "复制链接",
+      "linkCopied": "链接已复制到剪贴板",
+      "report": "举报消息",
+      "delete": "删除消息",
+      "openReactions": "打开回应",
+      "react": "回应",
+      "reply": "回复"
+    },
+    "delete": {
+      "title": "删除消息？",
+      "description": "将永久删除此消息，且无法撤销。",
+      "cancel": "取消",
+      "confirm": "删除"
+    },
+    "mention": {
+      "agent": "agent",
+      "teamAgents_one": "团队 · {{count}} 个 agent",
+      "teamAgents_other": "团队 · {{count}} 个 agent",
+      "managedBy": "由 {{owner}} 管理",
+      "notInChannel": "不在频道中",
+      "managedByNotInChannel": "由 {{owner}} 管理 · 不在频道中"
+    }
+  },
+  "agents": {
+    "title": "Agents",
+    "description": "设置和管理您的 agents。",
+    "defaults": "Agent 默认设置",
+    "setDefaults": "设置 agent 默认值",
+    "stopRunning": "停止运行中的 agent",
+    "actions": "Agent 操作",
+    "dropToImport": "拖放 .agent.json 或 .agent.png 文件以导入",
+    "unknown": "未知 agents",
+    "custom": "自定义 agents",
+    "configurationMissing": "缺少配置",
+    "newAgent": "新建 agent",
+    "createAgent": "创建 agent",
+    "discoverAgents": "发现 agents",
+    "import": "导入",
+    "profile": "{{name}} agent 资料"
+  }
+}
