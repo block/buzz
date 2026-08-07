@@ -12,6 +12,71 @@ import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test(
+    'surfaces live thread replies that arrive after the history fetch',
+    () async {
+      const rootId = 'thread-root';
+      const args = ThreadRepliesArgs(channelId: _channelId, rootId: rootId);
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [
+            _event(
+              id: 'history',
+              createdAt: 10,
+              extraTags: const [
+                ['e', rootId],
+              ],
+            ),
+          ],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      // These providers are auto-dispose: a bare `read` does not retain them,
+      // so the subscription would be torn down before the assertions run. Hold
+      // a listener for the life of the test, exactly as a mounted widget does.
+      final sub = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      addTearDown(sub.close);
+
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['history'],
+      );
+
+      // The reply the open thread used to never see.
+      relaySession.emit(
+        _event(
+          id: 'live',
+          createdAt: 20,
+          extraTags: const [
+            ['e', rootId],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      expect(
+        container
+            .read(threadRepliesWithLocalProvider(args))
+            .value
+            ?.map((event) => event.id),
+        ['history', 'live'],
+      );
+      // Live subscription must not re-request history.
+      expect(relaySession.liveFilters.last.limit, 0);
+    },
+  );
+
+  test(
     'keeps live events that arrive while initial history is loading',
     () async {
       final relaySession = _RecordingRelaySessionNotifier();
@@ -385,7 +450,13 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      // Auto-dispose: hold a listener so the provider is not torn down while
+      // still awaiting its live subscription, as a mounted widget would.
+      final threadSub = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      addTearDown(threadSub.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -464,7 +535,13 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      // Auto-dispose: hold a listener so the provider is not torn down while
+      // still awaiting its live subscription, as a mounted widget would.
+      final threadSub = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+      );
+      addTearDown(threadSub.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
