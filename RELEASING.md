@@ -224,7 +224,7 @@ which strips infra libraries over-bundled by linuxdeploy (they crash on
 Mesa 25+ / GLib 2.88 distros; see
 [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665))
 and re-signs the artifact. As a result the AppImage relies on the
-host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
+host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72. Community-switch SEGVs: see docs/linux-rendering-troubleshooting.md (#3488).
 (Ubuntu 22.04 or newer). The `release-linux` job builds inside a
 `ubuntu:22.04` container for broad GLIBC compatibility.
 

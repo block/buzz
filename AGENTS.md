@@ -514,6 +514,10 @@ reconnects preserve pending avatar verification work):
 community-scoped data, you must add its reset to `resetCommunityState()`.**
 Failure to do so causes data from the old community to leak into the new one.
 
+On Linux, community switches can also trip a WebKit/GStreamer segfault
+(`gst_value_set_int_range_step`); see `docs/linux-rendering-troubleshooting.md`
+and #3488 — that is a host/media-stack issue, not a missing reset.
+
 Key files:
 - `desktop/src/app/App.tsx` — community key, init gate, remount boundary
 - `desktop/src/features/communities/useCommunityInit.ts` — `resetCommunityState()`, applies config to Tauri backend
