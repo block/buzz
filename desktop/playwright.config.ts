@@ -107,6 +107,7 @@ export default defineConfig({
         "**/project-commit-detail.spec.ts",
         "**/project-inbox.spec.ts",
         "**/project-issue-comments.spec.ts",
+        "**/project-issue-assignee-screenshots.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",

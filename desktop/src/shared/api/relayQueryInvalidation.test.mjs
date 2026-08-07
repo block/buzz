@@ -63,6 +63,7 @@ test("relay invalidation separates relay project queries from local repo work", 
     ["project", "project-1", "pull-requests"],
     ["projects", "issues", ["project-1"]],
     ["projects", "activity-summaries", ["addr-1"]],
+    ["projects", "work-items", ["addr-1"]],
   ]) {
     assert.equal(isRelayDependentQueryKey(queryKey), true, queryKey.join("/"));
   }

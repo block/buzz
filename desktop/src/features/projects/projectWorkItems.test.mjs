@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
+import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries.ts";
 import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 
 // ── Work-item deduplication ─────────────────────────────────────────────────
@@ -11,7 +13,9 @@ import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 // production function with a stubbed fetchEvents to verify the dedup contract
 // end-to-end, not just the filter algorithm in isolation.
 
-const REPO_OWNER = "a".repeat(64);
+const OWNER_SECRET = new Uint8Array(32).fill(1);
+const AUTHOR_SECRET = new Uint8Array(32).fill(2);
+const REPO_OWNER = getPublicKey(OWNER_SECRET);
 const REPO_DTAG = "relay";
 const REPO_ADDRESS = `30617:${REPO_OWNER}:${REPO_DTAG}`;
 
@@ -26,6 +30,66 @@ const projectA = {
 const projectB = {
   repositories: [{ repoAddress: REPO_ADDRESS }],
 };
+
+test("assignment queries require a repository coordinate", async () => {
+  let queryCount = 0;
+  const events = await fetchIssueAssignmentEvents(
+    [{ id: "a".repeat(64) }],
+    [],
+    async () => {
+      queryCount += 1;
+      return [];
+    },
+  );
+
+  assert.deepEqual(events, []);
+  assert.equal(queryCount, 0);
+});
+
+test("assignment queries batch exact writer filters at the relay boundary", async () => {
+  const roots = Array.from({ length: 11 }, (_, index) =>
+    finalizeEvent(
+      {
+        kind: 1621,
+        created_at: index + 1,
+        content: `Issue ${index}`,
+        tags: [["a", REPO_ADDRESS]],
+      },
+      new Uint8Array(32).fill(index + 2),
+    ),
+  );
+  const requestSizes = [];
+
+  await fetchIssueAssignmentEvents(roots, [REPO_ADDRESS], async (filters) => {
+    assert.ok(Array.isArray(filters));
+    requestSizes.push(filters.length);
+    for (const filter of filters) {
+      assert.equal(filter.authors.length, 1);
+    }
+    return [];
+  });
+
+  assert.deepEqual(requestSizes, [10, 2]);
+});
+
+test("assignment queries skip malformed relay roots before field access", async () => {
+  let queryCount = 0;
+  await fetchIssueAssignmentEvents(
+    [
+      { id: null, pubkey: REPO_OWNER, tags: [] },
+      { id: "a".repeat(64), pubkey: null, tags: [] },
+      { id: "b".repeat(64), pubkey: REPO_OWNER, tags: null },
+      { id: "c".repeat(64), pubkey: REPO_OWNER, tags: [null] },
+    ],
+    [REPO_ADDRESS],
+    async () => {
+      queryCount += 1;
+      return [];
+    },
+  );
+
+  assert.equal(queryCount, 0);
+});
 
 // Minimal valid NIP-34 issue event for the shared repo.
 function makeIssue(id, updatedAt = 100) {
@@ -136,4 +200,154 @@ test("fetchProjectsWorkItems returns a single row for a PR present in both proje
   );
   // Sanity: the stub was actually called (proves we ran the production path).
   assert.ok(callCount >= 1, "fetchEvents must have been called");
+});
+
+const ASSIGNEE = "c".repeat(64);
+
+const assignedIssue = finalizeEvent(
+  {
+    kind: 1621,
+    created_at: 100,
+    content: "Investigate the failure",
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Fix the thing"],
+    ],
+  },
+  AUTHOR_SECRET,
+);
+const ASSIGNED_ISSUE_ID = assignedIssue.id;
+
+const assignmentEvent = finalizeEvent(
+  {
+    kind: 32001,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", ASSIGNED_ISSUE_ID],
+      ["e", ASSIGNED_ISSUE_ID, "", "root"],
+      ["p", ASSIGNEE, "", "assignee"],
+      ["a", REPO_ADDRESS],
+    ],
+  },
+  OWNER_SECRET,
+);
+
+test("aggregate work-item queries fetch and project issue assignments", async () => {
+  const filters = [];
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    filters.push(...requestFilters);
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return [assignedIssue];
+    }
+    if (requestFilters.some((filter) => filter.kinds.includes(32001))) {
+      return [assignmentEvent];
+    }
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(result.issues.items.length, 1);
+  assert.equal(result.issues.items[0].issue.assignee, ASSIGNEE);
+  assert.equal(result.issues.items[0].issue.assignedBy, REPO_OWNER);
+  assert.deepEqual(result.issues.failedSections, []);
+  assert.ok(
+    filters.some(
+      (filter) =>
+        filter.kinds.length === 1 &&
+        filter.kinds[0] === 32001 &&
+        filter.authors?.length === 1 &&
+        filter.authors[0] === REPO_OWNER &&
+        filter["#a"]?.[0] === REPO_ADDRESS &&
+        filter["#d"]?.length === 1 &&
+        filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
+        filter.limit === 1,
+    ),
+    "aggregate query must scope the repository-owner head by author and issue",
+  );
+  assert.ok(
+    filters.some(
+      (filter) =>
+        filter.kinds.length === 1 &&
+        filter.kinds[0] === 32001 &&
+        filter.authors?.length === 1 &&
+        filter.authors[0] === assignedIssue.pubkey &&
+        filter["#a"]?.[0] === REPO_ADDRESS &&
+        filter["#d"]?.length === 1 &&
+        filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
+        filter.limit === 1,
+    ),
+    "aggregate query must scope the issue-author head by author and issue",
+  );
+});
+
+test("author-scoped assignment filters stay complete across the relay page clamp", async () => {
+  const roots = Array.from({ length: 1_001 }, (_, index) =>
+    finalizeEvent(
+      {
+        kind: 1621,
+        created_at: index + 1,
+        content: `Issue ${index}`,
+        tags: [["a", REPO_ADDRESS]],
+      },
+      AUTHOR_SECRET,
+    ),
+  );
+  const assignmentFilters = [];
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return roots;
+    }
+    assignmentFilters.push(
+      ...requestFilters.filter((filter) => filter.kinds.includes(32001)),
+    );
+    return [];
+  };
+
+  await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(assignmentFilters.length, 4);
+  const filterShapes = assignmentFilters
+    .map((filter) => [filter.authors[0], filter["#d"].length, filter.limit])
+    .sort(
+      (left, right) =>
+        left[0].localeCompare(right[0]) || Number(right[1]) - Number(left[1]),
+    );
+  const expectedAuthors = [assignedIssue.pubkey, REPO_OWNER].sort();
+  assert.deepEqual(
+    filterShapes,
+    expectedAuthors.flatMap((author) => [
+      [author, 1_000, 1_000],
+      [author, 1, 1],
+    ]),
+  );
+});
+
+test("assignment query failure preserves issues and reports partial data", async () => {
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return [assignedIssue];
+    }
+    if (requestFilters.some((filter) => filter.kinds.includes(32001))) {
+      throw new Error("assignment query unavailable");
+    }
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(result.issues.items.length, 1);
+  assert.equal(result.issues.items[0].issue.assignee, null);
+  assert.deepEqual(result.issues.failedSections, ["assignees"]);
+  assert.deepEqual(result.pullRequests.failedSections, []);
 });

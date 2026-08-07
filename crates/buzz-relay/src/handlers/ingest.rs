@@ -16,24 +16,25 @@ use buzz_core::kind::{
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_ISSUE_ASSIGNEE,
+    KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -357,6 +358,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_PULL_REQUEST
         | KIND_GIT_PR_UPDATE
         | KIND_GIT_ISSUE
+        | KIND_GIT_ISSUE_ASSIGNEE
         | KIND_GIT_STATUS_OPEN
         | KIND_GIT_STATUS_MERGED
         | KIND_GIT_STATUS_CLOSED
@@ -493,6 +495,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            // Buzz extension (not NIP-34): issue assignment follow-on event.
+            // Addressed by its `e`-tag reference to the issue, same as the
+            // status kinds above — global, not `h`-tag channel-scoped.
+            | KIND_GIT_ISSUE_ASSIGNEE
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -959,6 +965,202 @@ async fn validate_forum_vote_target(
             return Err("target event has no channel".to_string());
         }
         _ => {}
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IssueAssignmentEnvelope {
+    issue_id: Vec<u8>,
+    issue_id_hex: String,
+    repo_address: String,
+    repo_owner: String,
+}
+
+/// Validate the signed public contract for Buzz issue routing (kind:32001).
+///
+/// The kind records an issue author's or repository owner's routing decision.
+/// It deliberately does not represent acceptance, work in progress, or
+/// completion; those are separate job-protocol events. Exact tag cardinality
+/// prevents ambiguous readers from resolving the same signed event differently.
+fn validate_issue_assignment_envelope(event: &Event) -> Result<IssueAssignmentEnvelope, String> {
+    if !event.content.is_empty() {
+        return Err("issue assignment content must be empty".to_string());
+    }
+    if event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+    {
+        return Err("issue assignments must not carry an h tag".to_string());
+    }
+
+    let e_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("e"))
+        .collect();
+    if e_tags.len() != 1 {
+        return Err("issue assignment requires exactly one e tag".to_string());
+    }
+    let e = e_tags[0].as_slice();
+    if e.len() != 4
+        || !e[2].is_empty()
+        || e[3] != "root"
+        || e[1].len() != 64
+        || !e[1].chars().all(|c| c.is_ascii_hexdigit())
+        || e[1] != e[1].to_ascii_lowercase()
+    {
+        return Err(
+            "issue assignment e tag must be [e, <lowercase-64-hex>, \"\", root]".to_string(),
+        );
+    }
+    let issue_id =
+        hex::decode(&e[1]).map_err(|_| "invalid issue assignment event id".to_string())?;
+
+    let d_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+        .collect();
+    if d_tags.len() != 1 || d_tags[0].as_slice().len() != 2 || d_tags[0].as_slice()[1] != e[1] {
+        return Err("issue assignment requires exactly one [d, <issue-event-id>] tag".to_string());
+    }
+
+    let a_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("a"))
+        .collect();
+    if a_tags.len() != 1 {
+        return Err("issue assignment requires exactly one a tag".to_string());
+    }
+    let a = a_tags[0].as_slice();
+    if a.len() != 2 {
+        return Err("issue assignment a tag must have exactly two fields".to_string());
+    }
+    let coordinate: Vec<_> = a[1].splitn(3, ':').collect();
+    let repo_id_is_valid = coordinate.get(2).is_some_and(|repo_id| {
+        !repo_id.is_empty()
+            && repo_id.len() <= 64
+            && !repo_id.starts_with('.')
+            && !repo_id.contains("..")
+            && repo_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    });
+    if coordinate.len() != 3
+        || coordinate[0] != "30617"
+        || coordinate[1].len() != 64
+        || !coordinate[1].chars().all(|c| c.is_ascii_hexdigit())
+        || coordinate[1] != coordinate[1].to_ascii_lowercase()
+        || !repo_id_is_valid
+    {
+        return Err(
+            "issue assignment a tag must be 30617:<lowercase-owner-pubkey>:<repo-id>".to_string(),
+        );
+    }
+
+    let p_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+        .collect();
+    let assignee_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("assignee"))
+        .collect();
+    match (p_tags.as_slice(), assignee_tags.as_slice()) {
+        ([p], []) => {
+            let p = p.as_slice();
+            if p.len() != 4
+                || !p[2].is_empty()
+                || p[3] != "assignee"
+                || p[1].len() != 64
+                || !p[1].chars().all(|c| c.is_ascii_hexdigit())
+                || p[1] != p[1].to_ascii_lowercase()
+            {
+                return Err(
+                    "assignee p tag must be [p, <lowercase-64-hex>, \"\", assignee]".to_string(),
+                );
+            }
+        }
+        ([], [marker]) if marker.as_slice() == ["assignee", "none"] => {}
+        _ => {
+            return Err(
+                "issue assignment requires exactly one assignee p tag or [assignee, none]"
+                    .to_string(),
+            )
+        }
+    };
+
+    Ok(IssueAssignmentEnvelope {
+        issue_id,
+        issue_id_hex: e[1].clone(),
+        repo_address: a[1].clone(),
+        repo_owner: coordinate[1].to_string(),
+    })
+}
+
+fn validate_issue_assignment_target(
+    root: &Event,
+    envelope: &IssueAssignmentEnvelope,
+) -> Result<(), String> {
+    if event_kind_u32(root) != KIND_GIT_ISSUE {
+        return Err("issue assignment target must be a kind:1621 issue".to_string());
+    }
+    if root.id.to_hex() != envelope.issue_id_hex {
+        return Err("issue assignment e tag does not match its issue root".to_string());
+    }
+
+    let root_a_tags: Vec<_> = root
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("a"))
+        .collect();
+    if root_a_tags.len() != 1
+        || root_a_tags[0].as_slice().len() < 2
+        || root_a_tags[0].as_slice()[1] != envelope.repo_address
+    {
+        return Err("issue assignment repository does not match its issue root".to_string());
+    }
+    Ok(())
+}
+
+fn issue_assignment_actor_is_authorized(
+    event: &Event,
+    root: &Event,
+    envelope: &IssueAssignmentEnvelope,
+) -> bool {
+    event.pubkey == root.pubkey || event.pubkey.to_hex() == envelope.repo_owner
+}
+
+async fn validate_issue_assignment(
+    community_id: CommunityId,
+    event: &Event,
+    state: &AppState,
+) -> Result<(), IngestError> {
+    let envelope = validate_issue_assignment_envelope(event)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    let root = state
+        .db
+        .get_event_by_id(community_id, &envelope.issue_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db error: {e}")))?
+        .ok_or_else(|| {
+            IngestError::Rejected(format!(
+                "invalid: issue assignment target {} was not found",
+                envelope.issue_id_hex
+            ))
+        })?;
+    validate_issue_assignment_target(&root.event, &envelope)
+        .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    if !issue_assignment_actor_is_authorized(event, &root.event, &envelope) {
+        return Err(IngestError::AuthFailed(
+            "restricted: only the issue author or repository owner can assign or unassign issues"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -2403,6 +2605,10 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_GIT_ISSUE_ASSIGNEE {
+        validate_issue_assignment(tenant.community(), &event, state).await?;
+    }
+
     if kind_u32 == KIND_STREAM_MESSAGE_DIFF {
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
@@ -3208,6 +3414,17 @@ mod tests {
     }
 
     #[test]
+    fn issue_assignment_is_global_and_requires_message_write_scope() {
+        let dummy = make_dummy_event();
+        assert!(is_global_only_kind(KIND_GIT_ISSUE_ASSIGNEE));
+        assert!(!requires_h_channel_scope(KIND_GIT_ISSUE_ASSIGNEE));
+        assert_eq!(
+            required_scope_for_kind(KIND_GIT_ISSUE_ASSIGNEE, &dummy).unwrap(),
+            Scope::MessagesWrite,
+        );
+    }
+
+    #[test]
     fn long_form_is_in_scope_allowlist() {
         let dummy = make_dummy_event();
         assert!(
@@ -3631,6 +3848,188 @@ mod tests {
         assert!(validate_diff_event(&event).is_err());
     }
 
+    #[test]
+    fn issue_assignment_envelope_accepts_assignment_and_unassignment() {
+        let owner = nostr::Keys::generate();
+        let assignee = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let assignee_hex = assignee.public_key().to_hex();
+        let issue = "e".repeat(64);
+        let repo = format!("30617:{owner_hex}:demo");
+
+        let assigned = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee_hex, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&assigned).unwrap();
+        assert_eq!(envelope.issue_id_hex, issue);
+        assert_eq!(envelope.repo_address, repo);
+        assert_eq!(envelope.repo_owner, owner_hex);
+
+        let unassigned = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["assignee", "none"],
+                &["a", &repo],
+            ],
+        );
+        assert!(validate_issue_assignment_envelope(&unassigned).is_ok());
+    }
+
+    #[test]
+    fn issue_assignment_envelope_rejects_ambiguous_or_noncanonical_tags() {
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let assignee = nostr::Keys::generate().public_key().to_hex();
+        let extra_recipient = nostr::Keys::generate().public_key().to_hex();
+        let issue = "e".repeat(64);
+        let repo = format!("30617:{owner_hex}:demo");
+
+        let ambiguous = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["p", &extra_recipient],
+                &["a", &repo],
+            ],
+        );
+        assert!(validate_issue_assignment_envelope(&ambiguous).is_err());
+
+        let stray_channel = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["assignee", "none"],
+                &["a", &repo],
+                &["h", "00000000-0000-0000-0000-000000000000"],
+            ],
+        );
+        assert!(validate_issue_assignment_envelope(&stray_channel).is_err());
+
+        let wrong_replacement_key = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &"f".repeat(64)],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        assert!(validate_issue_assignment_envelope(&wrong_replacement_key).is_err());
+    }
+
+    #[test]
+    fn issue_assignment_authority_is_issue_author_or_repo_owner_and_root_bound() {
+        let owner = nostr::Keys::generate();
+        let reporter = nostr::Keys::generate();
+        let attacker = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let assignee = nostr::Keys::generate().public_key().to_hex();
+        let repo = format!("30617:{owner_hex}:demo");
+        let root = make_event_with_keys(
+            &reporter,
+            KIND_GIT_ISSUE,
+            "body",
+            &[&["a", &repo], &["subject", "Issue"]],
+        );
+        let issue = root.id.to_hex();
+        let owner_assignment = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&owner_assignment).unwrap();
+        assert!(validate_issue_assignment_target(&root, &envelope).is_ok());
+        assert!(issue_assignment_actor_is_authorized(
+            &owner_assignment,
+            &root,
+            &envelope
+        ));
+
+        let reporter_assignment = make_event_with_keys(
+            &reporter,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&reporter_assignment).unwrap();
+        assert!(validate_issue_assignment_target(&root, &envelope).is_ok());
+        assert!(issue_assignment_actor_is_authorized(
+            &reporter_assignment,
+            &root,
+            &envelope
+        ));
+
+        let attacker_assignment = make_event_with_keys(
+            &attacker,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&attacker_assignment).unwrap();
+        assert!(!issue_assignment_actor_is_authorized(
+            &attacker_assignment,
+            &root,
+            &envelope
+        ));
+
+        let wrong_repo_root = make_event_with_keys(
+            &reporter,
+            KIND_GIT_ISSUE,
+            "body",
+            &[&["a", &format!("30617:{owner_hex}:other")]],
+        );
+        let wrong_repo_assignment = make_event_with_keys(
+            &owner,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &wrong_repo_root.id.to_hex()],
+                &["e", &wrong_repo_root.id.to_hex(), "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&wrong_repo_assignment).unwrap();
+        assert!(validate_issue_assignment_target(&wrong_repo_root, &envelope).is_err());
+    }
+
     fn make_dummy_event() -> Event {
         let keys = nostr::Keys::generate();
         nostr::EventBuilder::new(nostr::Kind::Custom(9), "")
@@ -3641,13 +4040,22 @@ mod tests {
 
     fn make_event_with_tags(kind: u32, content: &str, tags: &[&[&str]]) -> Event {
         let keys = nostr::Keys::generate();
+        make_event_with_keys(&keys, kind, content, tags)
+    }
+
+    fn make_event_with_keys(
+        keys: &nostr::Keys,
+        kind: u32,
+        content: &str,
+        tags: &[&[&str]],
+    ) -> Event {
         let nostr_tags: Vec<nostr::Tag> = tags
             .iter()
             .map(|t| nostr::Tag::parse(t.iter().copied()).unwrap())
             .collect();
         nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), content)
             .tags(nostr_tags)
-            .sign_with_keys(&keys)
+            .sign_with_keys(keys)
             .unwrap()
     }
 

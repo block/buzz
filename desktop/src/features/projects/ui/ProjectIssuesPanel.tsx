@@ -53,6 +53,7 @@ function issueMembers(
     ...new Set([
       project.owner,
       issue.author,
+      ...(issue.assignee ? [issue.assignee] : []),
       ...project.contributors,
       ...issue.recipients,
     ]),
@@ -80,6 +81,9 @@ function IssueRow({
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+  const assigneeLabel = issue.assignee
+    ? resolveUserLabel({ profiles, pubkey: issue.assignee })
+    : null;
   const status = issueStatusVisual(issue.status);
 
   return (
@@ -101,6 +105,12 @@ function IssueRow({
           </span>
           <span>·</span>
           <span>{issue.status}</span>
+          {assigneeLabel ? (
+            <>
+              <span>·</span>
+              <span>assigned to {assigneeLabel}</span>
+            </>
+          ) : null}
           {issue.labels.map((label) => (
             <span
               className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs"
@@ -191,6 +201,7 @@ export function ProjectIssueDetail({
         "grid",
         !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
       )}
+      data-testid="project-issue-detail"
     >
       <div className="min-w-0 divide-y divide-border/50">
         <header className="space-y-3 p-4">
@@ -261,6 +272,12 @@ function IssueMetaRail({
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+  const assigneeProfile = issue.assignee
+    ? profiles?.[normalizePubkey(issue.assignee)]
+    : null;
+  const assigneeLabel = issue.assignee
+    ? resolveUserLabel({ profiles, pubkey: issue.assignee })
+    : null;
   const status = issueStatusVisual(issue.status);
 
   return (
@@ -287,6 +304,20 @@ function IssueMetaRail({
           label={authorLabel}
           pubkey={issue.author}
         />
+      </OverviewRailSection>
+      <OverviewRailSection title="Assignee">
+        {issue.assignee && assigneeLabel ? (
+          <ProfileIdentityButton
+            align="center"
+            avatarSize="xs"
+            avatarUrl={assigneeProfile?.avatarUrl ?? null}
+            isAgent={assigneeProfile?.isAgent === true}
+            label={assigneeLabel}
+            pubkey={issue.assignee}
+          />
+        ) : (
+          <span className="text-xs text-muted-foreground">Unassigned</span>
+        )}
       </OverviewRailSection>
       {issue.labels.length > 0 ? (
         <OverviewRailSection title="Labels">

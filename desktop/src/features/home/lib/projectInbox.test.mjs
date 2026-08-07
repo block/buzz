@@ -91,7 +91,7 @@ test("recognizes project roots and project thread activity", () => {
   );
 });
 
-test("resolves the canonical project root from status and comment events", () => {
+test("resolves the canonical project root from status, comment, and assignment events", () => {
   assert.deepEqual(getProjectInboxReference(feedItem()), {
     repoAddress: REPO_ADDRESS,
     rootId: PR_ID,
@@ -110,6 +110,24 @@ test("resolves the canonical project root from status and comment events", () =>
     {
       repoAddress: REPO_ADDRESS,
       rootId: PR_ID,
+    },
+  );
+  assert.deepEqual(
+    getProjectInboxReference(
+      feedItem({
+        id: "a".repeat(64),
+        kind: 32001,
+        tags: [
+          ["d", ISSUE_ID],
+          ["e", ISSUE_ID, "", "root"],
+          ["p", REVIEWER, "", "assignee"],
+          ["a", REPO_ADDRESS],
+        ],
+      }),
+    ),
+    {
+      repoAddress: REPO_ADDRESS,
+      rootId: ISSUE_ID,
     },
   );
 });

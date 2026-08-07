@@ -19,6 +19,7 @@ import {
   type ProjectPullRequest,
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
+import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries";
 
 type RepositoryReference = {
   repoAddress: string;
@@ -34,6 +35,7 @@ type ProjectRepository<TProject extends ProjectReference> =
 /** Optional event groups that can fail without discarding root work items. */
 export type ProjectWorkItemSection =
   | "comments"
+  | "assignees"
   | "pull-request-updates"
   | "statuses";
 
@@ -85,40 +87,52 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       ),
     ),
   ];
-  const [rootResult, updateResult, commentResult, statusResult] =
-    await Promise.allSettled([
-      fetchEvents({
-        kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [KIND_GIT_PR_UPDATE],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-      fetchEvents({
-        kinds: [
-          KIND_GIT_STATUS_OPEN,
-          KIND_GIT_STATUS_MERGED,
-          KIND_GIT_STATUS_CLOSED,
-          KIND_GIT_STATUS_DRAFT,
-        ],
-        "#a": repoAddresses,
-        limit: 2_000,
-      }),
-    ]);
-
-  if (rootResult.status === "rejected") {
-    throw rootResult.reason instanceof Error
-      ? rootResult.reason
+  const rootPromise = fetchEvents({
+    kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
+    "#a": repoAddresses,
+    limit: 2_000,
+  });
+  const optionalResultsPromise = Promise.allSettled([
+    fetchEvents({
+      kinds: [KIND_GIT_PR_UPDATE],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [KIND_TEXT_NOTE],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+    fetchEvents({
+      kinds: [
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#a": repoAddresses,
+      limit: 2_000,
+    }),
+  ]);
+  let rootEvents: RelayEvent[];
+  try {
+    rootEvents = await rootPromise;
+  } catch (error) {
+    await optionalResultsPromise;
+    throw error instanceof Error
+      ? error
       : new Error("Could not load project issues and pull requests.");
   }
+  const issueRoots = rootEvents.filter(
+    (event) => event.kind === KIND_GIT_ISSUE,
+  );
+  // Preserve the same settled-section shape as the optional event groups so
+  // assignment relay failures can be reported without discarding issue roots.
+  const assigneeResultPromise = Promise.allSettled([
+    fetchIssueAssignmentEvents(issueRoots, repoAddresses, fetchEvents),
+  ]).then(([result]) => result);
+  const [[updateResult, commentResult, statusResult], assigneeResult] =
+    await Promise.all([optionalResultsPromise, assigneeResultPromise]);
 
   const updateEvents =
     updateResult.status === "fulfilled" ? updateResult.value : [];
@@ -126,10 +140,13 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
     commentResult.status === "fulfilled" ? commentResult.value : [];
   const statusEvents =
     statusResult.status === "fulfilled" ? statusResult.value : [];
-  const rootsByRepo = groupByRepoAddress(rootResult.value);
+  const assigneeEvents =
+    assigneeResult.status === "fulfilled" ? assigneeResult.value : [];
+  const rootsByRepo = groupByRepoAddress(rootEvents);
   const updatesByRepo = groupByRepoAddress(updateEvents);
   const commentsByRepo = groupByRepoAddress(commentEvents);
   const statusesByRepo = groupByRepoAddress(statusEvents);
+  const assigneesByRepo = groupByRepoAddress(assigneeEvents);
 
   const pullRequests = projects
     .flatMap((project) =>
@@ -174,6 +191,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           ),
           statusesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
+          assigneesByRepo.get(repository.repoAddress) ?? [],
         ).map((issue) => ({ issue, project, repository })),
       ),
     )
@@ -204,11 +222,15 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   if (updateResult.status === "rejected") {
     pullRequestFailedSections.unshift("pull-request-updates");
   }
+  const issueFailedSections = [...sharedFailedSections];
+  if (assigneeResult.status === "rejected") {
+    issueFailedSections.push("assignees");
+  }
 
   return {
     issues: {
       items: issues,
-      failedSections: sharedFailedSections,
+      failedSections: issueFailedSections,
     },
     pullRequests: {
       items: pullRequests,

@@ -90,6 +90,11 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Issue routing (the signing identity must be the issue author or repo owner)
+buzz issues assign --issue <event-id> --repo-owner <hex> --repo-id my-repo --assignee <human-or-agent-pubkey>
+buzz issues assign --issue <event-id> --repo-owner <hex> --repo-id my-repo --unassign
+buzz issues assignments --repo-owner <hex> --repo-id my-repo --assignee <human-or-agent-pubkey>
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -97,6 +102,14 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+`issues assign` reads both authorized author-scoped heads before signing so
+rapid and cross-author reassignments advance monotonically. A concurrent
+dominated write exits with the standard write-conflict code (5) instead of
+reporting false success. If a network retry receives `duplicate`, the CLI
+verifies that the submitted event is the globally current head before treating
+the retry as idempotent success. `issues assignments` resolves those heads
+before applying `--assignee` or `--limit`, so stale routing state is not listed.
 
 ## Commands
 
@@ -157,6 +170,12 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
+| `issues` | `create` | Create a NIP-34 issue |
+| | `get` | Get an issue by event ID |
+| | `list` | List issues for a repository |
+| | `assign` | Assign or unassign a human or agent (Buzz kind:32001) |
+| | `assignments` | List current assignments, optionally by assignee |
+| | `status` | Set NIP-34 issue status |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |

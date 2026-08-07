@@ -67,6 +67,9 @@ function IssueHeader({
   project: Project;
 }) {
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+  const assigneeLabel = issue.assignee
+    ? resolveUserLabel({ profiles, pubkey: issue.assignee })
+    : null;
 
   return (
     <div className="-mt-0.5 min-w-0 flex-1">
@@ -83,6 +86,7 @@ function IssueHeader({
           pubkey={issue.author}
           testId={authorTestId}
         />
+        {assigneeLabel ? ` · assigned to ${assigneeLabel}` : null}
         {includeDate ? (
           ` · ${issue.status}`
         ) : (

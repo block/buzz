@@ -260,6 +260,34 @@ test("first-event request resolves null when EOSE arrives without an event", asy
   assert.equal(subscriptions.has(requestedSubId), false);
 });
 
+test("history requests preserve exact multi-filter NIP-01 boundaries", async () => {
+  resetAll(0);
+  const subscriptions = new Map();
+  const filters = [
+    { kinds: [32001], authors: ["a".repeat(64)], "#d": ["1"], limit: 1 },
+    { kinds: [32001], authors: ["b".repeat(64)], "#d": ["2"], limit: 1 },
+  ];
+  let payload;
+
+  const events = await requestHistoryGated(
+    subscriptions,
+    async (request) => {
+      payload = request;
+      const subscription = subscriptions.get(request[1]);
+      window.clearTimeout(subscription.timeout);
+      subscriptions.delete(request[1]);
+      subscription.resolve([]);
+    },
+    async () => {},
+    filters,
+    25_000,
+  );
+
+  assert.deepEqual(events, []);
+  assert.equal(payload[0], "REQ");
+  assert.deepEqual(payload.slice(2), filters);
+});
+
 test("production CLOSED handler removes terminal live subscriptions", () => {
   let readyCalls = 0;
   const subscriptions = new Map([

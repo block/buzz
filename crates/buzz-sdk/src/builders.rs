@@ -1,4 +1,4 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -6,8 +6,8 @@
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_ISSUE_ASSIGNEE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
@@ -1113,6 +1113,43 @@ pub fn build_git_issue(
     }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
+}
+
+/// Build a Buzz issue-assignment event (kind:32001).
+///
+/// `Some(pubkey)` assigns the issue to that human or agent identity. `None`
+/// emits the explicit unassignment marker. Assignment is routing metadata;
+/// agent execution remains a separate kind:43001–43006 job lifecycle.
+///
+/// Before updating an existing assignment, callers must query the current
+/// `(kind, d)` heads for both authorized writers and apply
+/// `custom_created_at(max(now, latest_head + 1))` to the returned builder.
+/// This prevents a same-second or cross-author update from losing the global
+/// event-ID tie-break. Dominated concurrent writes must be surfaced as
+/// conflicts rather than success.
+pub fn build_git_issue_assignment(
+    repo: &GitRepoCoord,
+    issue: &str,
+    assignee: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let root = check_hex_exact(issue, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    let mut tags = vec![tag(&["d", &root])?, tag(&["e", &root, "", "root"])?];
+    if let Some(pubkey) = assignee {
+        let pubkey = check_pubkey_hex(pubkey, "assignee")?;
+        tags.push(tag(&["p", &pubkey, "", "assignee"])?);
+    } else {
+        tags.push(tag(&["assignee", "none"])?);
+    }
+    tags.push(tag(&["a", &a_value])?);
+
+    // rust-nostr removes author-self `p` tags by default. Self-assignment is a
+    // valid routing decision, so this builder must opt in explicitly.
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE_ASSIGNEE as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
@@ -3426,6 +3463,55 @@ mod tests {
         };
         let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_and_unassignment_have_canonical_tags() {
+        let owner = "a".repeat(64);
+        let assignee = "b".repeat(64);
+        let issue = "e".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+
+        let assigned = sign(
+            build_git_issue_assignment(&repo, &issue, Some(&assignee.to_uppercase())).unwrap(),
+        );
+        assert_eq!(assigned.kind.as_u16(), 32001);
+        assert_eq!(assigned.content, "");
+        assert!(has_tag(&assigned, "d", &issue));
+        assert!(has_tag(&assigned, "e", &issue));
+        assert!(has_tag(&assigned, "a", &format!("30617:{owner}:repo")));
+        assert!(assigned
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["p", assignee.as_str(), "", "assignee"] }));
+
+        let unassigned = sign(build_git_issue_assignment(&repo, &issue, None).unwrap());
+        assert!(unassigned
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["assignee", "none"] }));
+        assert!(!unassigned
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("p")));
+
+        let self_keys = keys();
+        let self_owner = self_keys.public_key().to_hex();
+        let self_repo = GitRepoCoord {
+            owner: self_owner.clone(),
+            id: "repo".to_string(),
+        };
+        let self_assigned = build_git_issue_assignment(&self_repo, &issue, Some(&self_owner))
+            .unwrap()
+            .sign_with_keys(&self_keys)
+            .unwrap();
+        assert!(self_assigned
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["p", self_owner.as_str(), "", "assignee"] }));
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
 import type {
   RelaySubscription,
   RelaySubscriptionFilter,
+  RelaySubscriptionFilters,
 } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -25,7 +26,7 @@ export async function requestHistoryGated(
   subscriptions: Map<string, RelaySubscription>,
   sendRaw: (payload: unknown[]) => Promise<void>,
   closeSubscription: (subId: string) => Promise<void>,
-  filter: RelaySubscriptionFilter,
+  filters: RelaySubscriptionFilters,
   historyTimeoutMs: number,
 ): Promise<RelayEvent[]> {
   // Await the gate before issuing REQ; op timeout starts after the wait.
@@ -47,7 +48,8 @@ export async function requestHistoryGated(
       timeout,
     });
 
-    void sendRaw(["REQ", subId, filter]).catch((error) => {
+    const requestFilters = Array.isArray(filters) ? filters : [filters];
+    void sendRaw(["REQ", subId, ...requestFilters]).catch((error) => {
       window.clearTimeout(timeout);
       subscriptions.delete(subId);
       reject(

@@ -39,10 +39,8 @@ import type {
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import type { ProjectIssue } from "./projectIssues.mjs";
-import {
-  nextProjectIssueCommentCreatedAt,
-  projectIssueEventsToIssues,
-} from "./projectIssues.mjs";
+import { nextProjectIssueCommentCreatedAt } from "./projectIssues.mjs";
+import { fetchProjectIssues } from "./projectIssueQueries";
 import type {
   ProjectPullRequest,
   ProjectPullRequestCommentAnchor,
@@ -220,35 +218,6 @@ async function fetchRepoState(project: Repository): Promise<RepoState | null> {
   });
 
   return events.length > 0 ? eventToRepoState(events[0]) : null;
-}
-
-async function fetchProjectIssues(
-  project: Repository,
-): Promise<ProjectIssue[]> {
-  const [issueEvents, statusEvents, commentEvents] = await Promise.all([
-    relayClient.fetchEvents({
-      kinds: [KIND_GIT_ISSUE],
-      "#a": [project.repoAddress],
-      limit: 200,
-    }),
-    relayClient.fetchEvents({
-      kinds: [
-        KIND_GIT_STATUS_OPEN,
-        KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_CLOSED,
-        KIND_GIT_STATUS_DRAFT,
-      ],
-      "#a": [project.repoAddress],
-      limit: 500,
-    }),
-    relayClient.fetchEvents({
-      kinds: [KIND_TEXT_NOTE],
-      "#a": [project.repoAddress],
-      limit: 500,
-    }),
-  ]);
-
-  return projectIssueEventsToIssues(issueEvents, statusEvents, commentEvents);
 }
 
 async function fetchProjectPullRequests(
