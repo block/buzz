@@ -111,7 +111,7 @@ fn strip_catalog_prefix(model: &str) -> &str {
 ///   - Fable 5, Mythos 5, Mythos Preview: status **Always on** — thinking cannot be disabled;
 ///     we still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
 ///
-/// In both sub-buckets `output_config: {effort}` controls depth, clamped per-model.
+/// In all three sub-buckets `output_config: {effort}` controls depth, clamped per-model.
 /// Also sends `thinking: {display:"summarized"}` so thinking text is always visible in the
 /// observer feed (without this, Anthropic defaults to `display:"omitted"` on newest models).
 ///
@@ -2330,7 +2330,7 @@ mod tests {
 
     #[test]
     fn anthropic_thinking_config_mythos_preview_emits_adaptive_and_effort() {
-        // Mythos Preview — default-on adaptive thinking.
+        // Mythos Preview — Always on adaptive thinking.
         let (thinking, output_config) =
             anthropic_thinking_config("claude-mythos-preview", ThinkingEffort::Low, 32_768);
         let t = thinking.expect("thinking must be present for claude-mythos-preview");

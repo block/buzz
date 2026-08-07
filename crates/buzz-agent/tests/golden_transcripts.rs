@@ -819,7 +819,6 @@ async fn test_cancel_notification_no_reply() {
 ///
 /// Additional invariants verified here:
 /// - The thought and assistant message IDs are **distinct** (two logical messages).
-/// - IDs are stable: repeated collection of the same round's chunks yields the same value.
 /// - IDs do **not** recur across two consecutive `session/prompt` calls in the same
 ///   ACP session (`run_id` is fresh per prompt, so no cross-turn collision).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

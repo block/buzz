@@ -831,6 +831,13 @@ async fn acquire_session(
     if s.busy {
         return Err("prompt already in flight");
     }
+    // Generate the run id before mutating session state. On RNG failure we reject
+    // the prompt cleanly: the session stays idle and the caller can retry. Generating
+    // after `s.busy = true` with `?` would wedge the session permanently busy.
+    let run_id = format!(
+        "run_{}",
+        session_token().map_err(|_| "rng failure; retry prompt")?
+    );
     s.busy = true;
     let (tx, rx) = watch::channel(false);
     s.cancel_tx = tx;
@@ -840,7 +847,6 @@ async fn acquire_session(
     // Fresh run id + steer channel for this turn. The run id lets steer-capable
     // clients target *this* turn (rejecting steers aimed at a turn that already
     // ended); the channel carries mid-turn injections to the run loop.
-    let run_id = format!("run_{}", session_token().unwrap_or_else(|_| "x".into()));
     s.active_run_id = Some(run_id.clone());
     let (steer_tx, steer_rx) = mpsc::unbounded_channel();
     s.steer_tx = Some(steer_tx);
