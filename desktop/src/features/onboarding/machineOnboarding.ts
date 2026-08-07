@@ -176,6 +176,12 @@ export function useMachineOnboardingState({
         completionKey(MACHINE_ONBOARDING_COMPLETION_STORAGE_KEY, pubkey),
         "true",
       );
+      // Completing onboarding for this pubkey ends the "continuing" state.
+      // Without clearing it the stage below stays pinned to "onboarding"
+      // forever, so the flow can never reach "ready".
+      if (continuingPubkeyRef.current === pubkey) {
+        continuingPubkeyRef.current = null;
+      }
       setCompletedPubkey(pubkey);
     },
     [currentPubkey],
