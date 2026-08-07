@@ -940,7 +940,7 @@ test("video replies in threads open the review comments view", async ({
   await expect(nestedVideoSummary).toBeVisible();
   await expect(threadReplies.locator("video")).toHaveAttribute(
     "preload",
-    "auto",
+    "metadata",
   );
   await nestedVideoSummary.click();
   const outsideTimecode = threadReplies.getByRole("button", {

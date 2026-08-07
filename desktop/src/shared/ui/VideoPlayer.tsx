@@ -968,7 +968,6 @@ export function VideoPlayer({
   const showInlineSpeedControl =
     inlineRenderedWidth !== null &&
     inlineRenderedWidth >= INLINE_SPEED_CONTROL_MIN_WIDTH;
-  const shouldWarmReviewMedia = timecodedComments.length > 0;
   const inlineSurfaceStyle: React.CSSProperties = {
     aspectRatio: String(inlineAspectRatio),
     maxHeight: 256,
@@ -1003,7 +1002,7 @@ export function VideoPlayer({
             className="h-full w-full object-cover"
             playsInline
             poster={poster}
-            preload={shouldWarmReviewMedia ? "auto" : "metadata"}
+            preload="metadata"
             src={src}
             onClick={started ? handleTogglePlay : undefined}
             onDurationChange={(event) =>
