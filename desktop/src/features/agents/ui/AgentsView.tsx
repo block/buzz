@@ -19,6 +19,7 @@ import { TeamShareDialog } from "./TeamShareDialog";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
+import { RelayAgentsSection } from "./RelayAgentsSection";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
@@ -83,6 +84,11 @@ export function AgentsView() {
       refetchManagedAgents: agents.refetchManagedAgents,
       refetchRelayAgents: agents.refetchRelayAgents,
     },
+  );
+
+  const managedPubkeys = React.useMemo(
+    () => new Set(agents.managedAgents.map((agent) => agent.pubkey)),
+    [agents.managedAgents],
   );
 
   const isActionPending =
@@ -272,6 +278,13 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
+              }}
+            />
+
+            <RelayAgentsSection
+              managedPubkeys={managedPubkeys}
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
             />
 
