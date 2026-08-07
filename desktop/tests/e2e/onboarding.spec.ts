@@ -1036,6 +1036,64 @@ test("first-community choices route join, create, owner, and member intents", as
   await expect(page.getByTestId("invite-redeem-submit")).toBeEnabled();
 });
 
+test("hosted onboarding collapses transient history and goes back without pushing", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(
+    page,
+    {
+      builderlabAuth: {
+        email: "owner@example.com",
+        expiresAt: "2099-01-01T00:00:00Z",
+      },
+      builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
+      builderlabCommunities: [
+        {
+          id: "owned-community",
+          name: "North Star",
+          normalized_host: "north-star.communities.buzz.xyz",
+        },
+      ],
+    },
+    {
+      relayWsUrl: "ws://localhost:3000",
+      skipOnboardingSeed: true,
+      skipCommunitySeed: true,
+    },
+  );
+  await page.goto("/");
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+
+  await page.getByTestId("community-choice-create").click();
+  await expect(page.getByText("North Star")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community-owned$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+
+  await page.goForward();
+  await expect(page.getByText("North Star")).toBeVisible();
+  const historyLength = await page.evaluate(() => window.history.length);
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+  await expect
+    .poll(() => page.evaluate(() => window.history.length))
+    .toBe(historyLength);
+});
+
 test("first-community owner can connect an existing hosted community", async ({
   page,
 }) => {
@@ -1410,7 +1468,7 @@ test("first-community explains when the local identity belongs to another accoun
   ).toBeVisible();
 });
 
-test("back clears Builderlab auth before returning to first-community choices", async ({
+test("back preserves Builderlab auth when returning to first-community choices", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -1439,8 +1497,17 @@ test("back clears Builderlab auth before returning to first-community choices", 
 
   await page.getByTestId("community-choice-create").click();
   await page.getByRole("button", { name: "Back" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
   await page.getByTestId("community-choice-create").click();
-  await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Community name" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_COMMANDS__ ?? []))
+    .not.toContain("clear_builderlab_auth");
 });
 
 test("first-community shows the scenario cards for localhost", async ({
@@ -1557,6 +1624,58 @@ test("first-community direct join reaches profile", async ({ page }) => {
       }, COMMUNITY_ONBOARDING_TRANSACTION_STORAGE_KEY),
     )
     .toEqual({ communityCount: 1, transactionMatchesOnlyCommunity: true });
+});
+
+test("mouse history traverses community choice, profile, and team routes", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(page).toHaveURL(/#\/onboarding\/community$/);
+  await page.getByRole("button", { name: /Join a community/ }).click();
+  await expect(page).toHaveURL(/#\/onboarding\/community-join$/);
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("invite-redeem-input")).toBeVisible();
+
+  await page
+    .getByTestId("invite-redeem-input")
+    .fill("wss://history.communities.buzz.xyz");
+  await page.getByTestId("invite-redeem-submit").click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/profile$/);
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await page.getByTestId("community-profile-next").click();
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/team$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await page.goForward();
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toBeVisible();
 });
 
 test("community onboarding reuses an existing relay profile", async ({

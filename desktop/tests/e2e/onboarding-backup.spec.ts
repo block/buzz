@@ -117,6 +117,17 @@ test("key view reveals explicitly; options copy explicitly", async ({
   await page.getByTestId("backup-return-to-onboarding").click();
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
+
+  // The visible Back control returns to identity, not the options screen that
+  // was opened temporarily. Browser Forward still restores this key view.
+  await page.getByTestId("onboarding-back").click();
+  await expect(
+    page.getByRole("button", { name: "Continue setup" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/identity$/);
+  await page.goForward();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
+
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
 });

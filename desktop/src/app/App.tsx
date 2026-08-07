@@ -31,6 +31,14 @@ import {
   resolveProfileCheckAction,
   isTransactionStillConnecting,
 } from "@/features/onboarding/communityOnboarding";
+import {
+  OnboardingHistoryProvider,
+  useOnboardingHistory,
+} from "@/features/onboarding/OnboardingHistory";
+import {
+  isMachineOnboardingRouteStep,
+  type MachineOnboardingRouteStep,
+} from "@/features/onboarding/onboardingRoute";
 import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
 import {
   MachineOnboardingFlow,
@@ -291,11 +299,9 @@ function AppReady({
 
 function CommunityApp({
   currentPubkey,
-  onBackToMachineConfig,
   sharedIdentity,
 }: {
   currentPubkey: string | null;
-  onBackToMachineConfig: () => void;
   sharedIdentity: boolean;
 }) {
   const {
@@ -516,10 +522,8 @@ function CommunityApp({
       // Show welcome setup for first-run users with no communities
       appContent = (
         <WelcomeSetup
+          canReturnToMachineConfig={!isFindingCommunityAfterLeave}
           initialPage={resumeFirstCommunityPage ?? undefined}
-          onBack={
-            isFindingCommunityAfterLeave ? undefined : onBackToMachineConfig
-          }
         />
       );
     } else if ("error" in community && community.error) {
@@ -601,9 +605,25 @@ function CommunityApp({
   );
 }
 
+function machinePageForRoute(
+  step: MachineOnboardingRouteStep,
+): MachineOnboardingPage {
+  if (step === "identity") return "identity";
+  if (step === "key-import") return "key-import";
+  if (
+    step === "backup" ||
+    step === "backup-options" ||
+    step === "backup-password"
+  ) {
+    return "backup";
+  }
+  return step === "agents" ? "setup" : "config";
+}
+
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   const { activeCommunity } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
+  const onboardingHistory = useOnboardingHistory();
   const machine = useMachineOnboardingState({
     activeCommunityPubkey: activeCommunity
       ? (activeCommunity.pubkey ?? null)
@@ -614,26 +634,53 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     useState<MachineOnboardingPage>();
   const [postOnboardingNav, setPostOnboardingNav] =
     useState<PostOnboardingNavigation | null>(null);
-
-  const reopenMachineConfig = useCallback(() => {
-    setMachineInitialPage("config");
-    machine.reopen();
-  }, [machine.reopen]);
+  const postOnboardingNavRef = useRef<PostOnboardingNavigation | null>(null);
 
   const completeMachineOnboarding = useCallback(
     (pubkey?: string) => {
       setMachineInitialPage(undefined);
+      if (postOnboardingNavRef.current) {
+        onboardingHistory.exit("/");
+      } else if (!activeCommunity) {
+        onboardingHistory.reset("community");
+      } else if (onboardingHistory.step) {
+        onboardingHistory.exit("/");
+      }
       machine.complete(pubkey);
     },
-    [machine.complete],
+    [activeCommunity, machine.complete, onboardingHistory],
   );
 
   const navigateAfterOnboarding = useCallback(
     (nav: PostOnboardingNavigation) => {
+      postOnboardingNavRef.current = nav;
       setPostOnboardingNav(nav);
     },
     [],
   );
+
+  useEffect(() => {
+    const step = onboardingHistory.step;
+    if (machine.stage === "ready" && isMachineOnboardingRouteStep(step)) {
+      setMachineInitialPage(machinePageForRoute(step));
+      machine.reopen();
+      return;
+    }
+    if (
+      machine.stage === "onboarding" &&
+      step &&
+      !isMachineOnboardingRouteStep(step)
+    ) {
+      setMachineInitialPage(undefined);
+      machine.complete(machine.currentPubkey ?? undefined);
+    }
+  }, [
+    machine.complete,
+    machine.currentPubkey,
+    machine.reopen,
+    machine.stage,
+    onboardingHistory.step,
+  ]);
 
   // Execute the pending navigation once the RouterProvider is mounted (i.e.
   // machine.stage transitions to "ready").  We wait for the ready stage rather
@@ -645,6 +692,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         to: postOnboardingNav.to,
         search: postOnboardingNav.search ?? {},
       });
+      postOnboardingNavRef.current = null;
       setPostOnboardingNav(null);
     }
   }, [machine.stage, postOnboardingNav]);
@@ -686,7 +734,6 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return (
       <CommunityApp
         currentPubkey={machine.currentPubkey}
-        onBackToMachineConfig={reopenMachineConfig}
         sharedIdentity={sharedIdentity}
       />
     );
@@ -736,7 +783,9 @@ export function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <MachineBootstrap sharedIdentity={sharedIdentity} />
+      <OnboardingHistoryProvider>
+        <MachineBootstrap sharedIdentity={sharedIdentity} />
+      </OnboardingHistoryProvider>
     </QueryClientProvider>
   );
 }

@@ -75,6 +75,88 @@ async function readGlobalConfigSetterCallCount(
   });
 }
 
+test("mouse history traverses machine onboarding routes", async ({ page }) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await expect(page).toHaveURL(/#\/onboarding\/backup$/);
+  await passThroughBackupStep(page);
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/agents$/);
+
+  await page.goBack();
+  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/backup$/);
+  await page.goForward();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/defaults$/);
+  await page.goBack();
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+});
+
+test("completed machine onboarding cannot be reopened from browser history", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { acpRuntimesCatalog: [] },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await expect(page).toHaveURL(/#\/onboarding\/backup$/);
+  await passThroughBackupStep(page);
+  await expect(page).toHaveURL(/#\/onboarding\/agents$/);
+  await page.getByTestId("onboarding-setup-skip").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  const completionKey = await page.evaluate(() =>
+    Object.keys(window.localStorage).find((key) =>
+      key.startsWith("buzz-machine-onboarding-complete.v2:"),
+    ),
+  );
+  expect(completionKey).not.toBeNull();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => (key ? window.localStorage.getItem(key) : null),
+        completionKey,
+      ),
+    )
+    .toBe("true");
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { name: "Join or create a community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-backup")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => (key ? window.localStorage.getItem(key) : null),
+        completionKey,
+      ),
+    )
+    .toBe("true");
+});
+
 test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await installMockBridge(
     page,

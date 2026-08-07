@@ -173,10 +173,7 @@ export function HostedCommunityOnboarding({
     });
 
   const goBack = () => {
-    void run("Signing out…", async () => {
-      await clearBuilderlabAuth();
-      onBack();
-    });
+    onBack();
   };
 
   const connectIdentity = () =>

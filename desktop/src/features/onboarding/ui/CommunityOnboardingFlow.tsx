@@ -6,6 +6,12 @@ import {
   markCommunityOnboardingComplete,
   useCommunityOnboarding,
 } from "@/features/onboarding/communityOnboarding";
+import { useOnboardingHistory } from "@/features/onboarding/OnboardingHistory";
+import {
+  isCommunitySetupRouteStep,
+  isMachineOnboardingRouteStep,
+  type CommunitySetupRouteStep,
+} from "@/features/onboarding/onboardingRoute";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
@@ -62,6 +68,14 @@ const ENTERING_CURTAIN_FADE_MS = 500;
  * fade anyway rather than stranding the user on the onboarding screen.
  */
 const ENTERING_CURTAIN_MAX_WAIT_MS = 8_000;
+
+function routeForFirstCommunityPage(
+  page: "join" | "member" | "owned" | undefined,
+): CommunitySetupRouteStep {
+  if (page === "member") return "community-member";
+  if (page === "owned") return "community-owned";
+  return "community-join";
+}
 
 const NEUTRAL_EMOJI_PICKER_THEME_VARS = {
   "--buzz-emoji-picker-rgb-background":
@@ -149,6 +163,7 @@ export function CommunityOnboardingFlow({
   onConnect: () => void;
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
+  const onboardingHistory = useOnboardingHistory();
   const queryClient = useQueryClient();
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
@@ -173,6 +188,11 @@ export function CommunityOnboardingFlow({
   const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
   const [avatarEditorDialogHeight, setAvatarEditorDialogHeight] =
     React.useState<number | null>(null);
+  const hasReachedTeamRef = React.useRef(
+    transaction?.stage === "team-intro" ||
+      transaction?.stage === "finalizing" ||
+      transaction?.stage === "entering",
+  );
 
   // Also fetch on "entering": the curtain is a fresh mount of this component,
   // so the team-intro fetch from the pre-curtain instance isn't in this state.
@@ -240,8 +260,9 @@ export function CommunityOnboardingFlow({
     if (!relayUrl) return;
     const identity = await getIdentity();
     markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+    onboardingHistory.exit("/");
     clear();
-  }, [clear, relayUrl]);
+  }, [clear, onboardingHistory, relayUrl]);
   const finalize = React.useCallback(async () => {
     if (isPending || !relayUrl) return;
     setIsPending(true);
@@ -260,7 +281,7 @@ export function CommunityOnboardingFlow({
         // entry — it exists for the Home-route fallback, and leaving it would
         // yank a later Home visit back to Welcome.
         takePendingWelcomeChannelForDirectEntry();
-        window.location.hash = `/channels/${result.focusChannelId}`;
+        onboardingHistory.exit(`/channels/${result.focusChannelId}`);
         markCommunityOnboardingComplete(identity.pubkey, relayUrl);
         // Keep this screen mounted as a curtain over the loading app; the
         // "entering" stage fades it out once Welcome reports ready.
@@ -275,13 +296,22 @@ export function CommunityOnboardingFlow({
       });
       setIsPending(false);
     }
-  }, [finish, isPending, queryClient, relayUrl, update]);
+  }, [finish, isPending, onboardingHistory, queryClient, relayUrl, update]);
 
   const backToProfile = React.useCallback(() => {
-    if (isPending) return;
+    if (isPending || !transaction) return;
     setStarterChannelFailureCount(0);
-    update({ stage: "profile", error: undefined });
-  }, [isPending, update]);
+    update({ stage: "profile", error: undefined }, transaction.id);
+    onboardingHistory.back("profile");
+  }, [isPending, onboardingHistory, transaction, update]);
+
+  const backToCommunitySetup = React.useCallback(() => {
+    if (isPending || !transaction) return;
+    onboardingHistory.back(
+      routeForFirstCommunityPage(transaction.firstCommunityPage),
+    );
+    void onCancel();
+  }, [isPending, onboardingHistory, onCancel, transaction]);
 
   const isProfileStage = transaction?.stage === "profile";
   React.useEffect(() => {
@@ -304,6 +334,70 @@ export function CommunityOnboardingFlow({
     transaction?.stage === "team-intro" ||
     transaction?.stage === "finalizing" ||
     transaction?.stage === "entering";
+
+  React.useEffect(() => {
+    if (!transaction) return;
+    const step = onboardingHistory.step;
+
+    if (transaction.stage === "profile") {
+      if (step === "profile") return;
+      if (step === "team" && hasReachedTeamRef.current) {
+        update({ stage: "team-intro", error: undefined }, transaction.id);
+        return;
+      }
+      if (isMachineOnboardingRouteStep(step)) return;
+      if (
+        onboardingHistory.direction === "backward" &&
+        (step === null || isCommunitySetupRouteStep(step))
+      ) {
+        onCancel();
+        return;
+      }
+      if (step === null && transaction.source !== "first-community") {
+        onboardingHistory.push("profile");
+        return;
+      }
+      if (step === null) {
+        onboardingHistory.replace("profile");
+        return;
+      }
+      if (isCommunitySetupRouteStep(step)) {
+        onboardingHistory.push("profile");
+        return;
+      }
+      onboardingHistory.replace("profile");
+      return;
+    }
+
+    if (transaction.stage !== "team-intro") return;
+    hasReachedTeamRef.current = true;
+    if (step === "team") return;
+    if (isMachineOnboardingRouteStep(step)) return;
+    if (step === "profile" && onboardingHistory.direction === "backward") {
+      update({ stage: "profile", error: undefined }, transaction.id);
+      return;
+    }
+    if (
+      onboardingHistory.direction === "backward" &&
+      (step === null || isCommunitySetupRouteStep(step))
+    ) {
+      onCancel();
+      return;
+    }
+    if (step === null) {
+      onboardingHistory.replace("team");
+      return;
+    }
+    onboardingHistory.push("team");
+  }, [
+    onboardingHistory.direction,
+    onboardingHistory.push,
+    onboardingHistory.replace,
+    onboardingHistory.step,
+    onCancel,
+    transaction,
+    update,
+  ]);
 
   // Seed display name and avatar from the relay profile when the profile step
   // is shown. This covers the case where the skip raced or was bypassed (e.g.,
@@ -427,6 +521,8 @@ export function CommunityOnboardingFlow({
         deferredAvatar?.cancel();
         throw error;
       }
+      hasReachedTeamRef.current = true;
+      onboardingHistory.push("team");
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
       if (isRelayMembershipDeniedError(error)) {
@@ -584,7 +680,7 @@ export function CommunityOnboardingFlow({
                   className="h-9 w-20 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="community-profile-back"
                   disabled={isPending || isUploadingAvatar}
-                  onClick={onCancel}
+                  onClick={backToCommunitySetup}
                   type="button"
                   variant="ghost"
                 >

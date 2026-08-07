@@ -851,6 +851,12 @@ test.describe("community rail", () => {
       .click();
 
     await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page).toHaveURL(/#\/onboarding\/community$/);
+    await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect(page.getByTestId("community-choice-join")).toBeVisible();
+    await page.goBack();
+    await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page).toHaveURL(/#\/onboarding\/community$/);
     await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
     await expect(page.getByTestId("community-choice-join")).toBeVisible();
     await expect

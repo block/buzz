@@ -272,6 +272,7 @@ test("phone recovery continues to harness setup without creating or restarting",
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await expect(page).toHaveURL(/#\/onboarding\/key-import$/);
   await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
 
@@ -281,6 +282,15 @@ test("phone recovery continues to harness setup without creating or restarting",
     );
   });
 
+  await expect(
+    page.getByRole("heading", { name: "Set up your agent harnesses" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/onboarding\/agents$/);
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/onboarding\/key-import$/);
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#\/onboarding\/agents$/);
   await expect(
     page.getByRole("heading", { name: "Set up your agent harnesses" }),
   ).toBeVisible();

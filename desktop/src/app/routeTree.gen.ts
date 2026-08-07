@@ -14,6 +14,7 @@ import { Route as agentsRouteImport } from "./routes/agents";
 import { Route as indexRouteImport } from "./routes/index";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
 import { Route as projectsDotprojectIdRouteImport } from "./routes/projects.$projectId";
+import { Route as onboardingRouteImport } from "./routes/onboarding";
 import { Route as messagesDotnewRouteImport } from "./routes/messages.new";
 import { Route as channelsDotchannelIdRouteImport } from "./routes/channels.$channelId";
 import { Route as channelsDotchannelIdDotpostsDotpostIdRouteImport } from "./routes/channels.$channelId.posts.$postId";
@@ -63,6 +64,11 @@ const projectsDotprojectIdRoute = projectsDotprojectIdRouteImport.update({
   path: "/projects/$projectId",
   getParentRoute: () => rootRouteImport,
 } as any);
+const onboardingRoute = onboardingRouteImport.update({
+  id: "/onboarding/$step",
+  path: "/onboarding/$step",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const messagesDotnewRoute = messagesDotnewRouteImport.update({
   id: "/messages/new",
   path: "/messages/new",
@@ -90,6 +96,7 @@ export interface FileRoutesByFullPath {
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
+  "/onboarding/$step": typeof onboardingRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
+  "/onboarding/$step": typeof onboardingRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
   "/messages/new": typeof messagesDotnewRoute;
+  "/onboarding/$step": typeof onboardingRoute;
   "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
@@ -135,6 +144,7 @@ export interface FileRouteTypes {
     | "/workflows"
     | "/channels/$channelId"
     | "/messages/new"
+    | "/onboarding/$step"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
@@ -149,6 +159,7 @@ export interface FileRouteTypes {
     | "/workflows"
     | "/channels/$channelId"
     | "/messages/new"
+    | "/onboarding/$step"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
@@ -163,6 +174,7 @@ export interface FileRouteTypes {
     | "/workflows"
     | "/channels/$channelId"
     | "/messages/new"
+    | "/onboarding/$step"
     | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
@@ -178,6 +190,7 @@ export interface RootRouteChildren {
   workflowsRoute: typeof workflowsRoute;
   channelsDotchannelIdRoute: typeof channelsDotchannelIdRoute;
   messagesDotnewRoute: typeof messagesDotnewRoute;
+  onboardingRoute: typeof onboardingRoute;
   projectsDotprojectIdRoute: typeof projectsDotprojectIdRoute;
   workflowsDotworkflowIdRoute: typeof workflowsDotworkflowIdRoute;
   channelsDotchannelIdDotpostsDotpostIdRoute: typeof channelsDotchannelIdDotpostsDotpostIdRoute;
@@ -248,6 +261,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof projectsDotprojectIdRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/onboarding/$step": {
+      id: "/onboarding/$step";
+      path: "/onboarding/$step";
+      fullPath: "/onboarding/$step";
+      preLoaderRoute: typeof onboardingRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/messages/new": {
       id: "/messages/new";
       path: "/messages/new";
@@ -282,6 +302,7 @@ const rootRouteChildren: RootRouteChildren = {
   workflowsRoute: workflowsRoute,
   channelsDotchannelIdRoute: channelsDotchannelIdRoute,
   messagesDotnewRoute: messagesDotnewRoute,
+  onboardingRoute: onboardingRoute,
   projectsDotprojectIdRoute: projectsDotprojectIdRoute,
   workflowsDotworkflowIdRoute: workflowsDotworkflowIdRoute,
   channelsDotchannelIdDotpostsDotpostIdRoute:
