@@ -913,7 +913,7 @@ export function VideoPlayer({
     },
     [duration, setReviewCurrentTime, setReviewOpen],
   );
-  useRegisterVideoReview(reviewContext?.rootEventId, openReviewAt);
+  useRegisterVideoReview(reviewContext, persistedReviewKey, openReviewAt);
 
   const handleOpenReview = React.useCallback(
     (event?: React.SyntheticEvent) => {

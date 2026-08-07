@@ -1010,6 +1010,76 @@ test("video replies in threads open the review comments view", async ({
   );
 });
 
+test("message timecodes deterministically open the first attached video", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const videoMessage = (await emitMockMessage(
+    page,
+    "general",
+    `![first video](${VIDEO_URL})\n\n![second video](${PORTRAIT_VIDEO_URL})`,
+    {
+      extraTags: [
+        [
+          "imeta",
+          `url ${VIDEO_URL}`,
+          "m video/mp4",
+          `x ${VIDEO_SHA}`,
+          "dim 160x80",
+          "duration 12.5",
+          "filename first-cut.mp4",
+        ],
+        [
+          "imeta",
+          `url ${PORTRAIT_VIDEO_URL}`,
+          "m video/mp4",
+          `x ${PORTRAIT_VIDEO_SHA}`,
+          "dim 80x160",
+          "duration 12.5",
+          "filename second-cut.mp4",
+        ],
+      ],
+    },
+  )) as { id: string };
+  await emitMockMessage(page, "general", "[00:01] Check this frame.", {
+    parentEventId: videoMessage.id,
+  });
+
+  const threadSummary = page.locator(
+    `[data-thread-head-id="${videoMessage.id}"]`,
+  );
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  const inlineVideos = threadHead.locator("video");
+  await expect(inlineVideos).toHaveCount(2);
+  const firstVideoSrc = await inlineVideos.nth(0).getAttribute("src");
+  const secondVideoSrc = await inlineVideos.nth(1).getAttribute("src");
+  expect(firstVideoSrc).toBeTruthy();
+  expect(firstVideoSrc).not.toBe(secondVideoSrc);
+
+  await threadPanel
+    .getByTestId("message-thread-replies")
+    .getByRole("button", { name: "Jump to 00:01" })
+    .click();
+
+  const reviewVideo = page.getByTestId("video-review-dialog").locator("video");
+  await expect(reviewVideo).toHaveAttribute("src", firstVideoSrc ?? "");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).currentTime),
+    )
+    .toBe(1);
+});
+
 test("narrow inline videos hide playback speed control", async ({ page }) => {
   await installVideoReviewHarness(page);
 
