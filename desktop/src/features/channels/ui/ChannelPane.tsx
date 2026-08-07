@@ -42,7 +42,7 @@ import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
-  WelcomeComposerBanner,
+  WelcomeComposerGuidanceLayer,
   WELCOME_COMPOSER_BANNER_DISMISS_DURATION_SECONDS,
   WELCOME_COMPOSER_BANNER_HIDE_BUFFER_MS,
   WELCOME_COMPOSER_BANNER_SUCCESS_SETTLE_MS,
@@ -737,18 +737,18 @@ export const ChannelPane = React.memo(function ChannelPane({
                   hasComposerBottomActivity && "composer-dock--with-activity",
                 )}
               >
+                {isActiveWelcomeChannel && !timeoutState.active ? (
+                  <WelcomeComposerGuidanceLayer
+                    settingUp={welcomeKickoffSettingUp}
+                    state={welcomeComposerBannerState}
+                  >
+                    {welcomeKickoffStage}
+                  </WelcomeComposerGuidanceLayer>
+                ) : null}
                 {timeoutState.active ? (
                   <ComposerTimeoutBanner
                     expiresAtMs={timeoutState.expiresAtMs}
                   />
-                ) : isActiveWelcomeChannel ? (
-                  <div className="relative">
-                    {welcomeKickoffStage}
-                    <WelcomeComposerBanner
-                      settingUp={welcomeKickoffSettingUp}
-                      state={welcomeComposerBannerState}
-                    />
-                  </div>
                 ) : null}
                 <ComposerDockBackdrop gutterClassName="inset-x-5" />
                 <MessageComposer
