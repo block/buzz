@@ -3,8 +3,8 @@ import test, { mock } from "node:test";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CommunityThemeSyncManager,
+  communityThemeHydrationRemote,
   isNewerCommunityThemeCoordinate,
-  shouldSeedCommunityTheme,
 } from "./communityThemeSync.ts";
 
 const preference = {
@@ -104,6 +104,146 @@ test("fetch distinguishes absent remote state from unreadable existing state", a
   }
 });
 
+test("live replacement delivered during empty onboarding fetch prevents default seeding", async () => {
+  const remotePreference = { ...preference, theme: "dracula" };
+  const updates = [];
+  let liveCallback;
+  globalThis.window ??= {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke(command) {
+      if (command === "nip44_decrypt_from_self") {
+        return Promise.resolve(JSON.stringify(remotePreference));
+      }
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+    liveCallback = callback;
+    return Promise.resolve(async () => {});
+  });
+  mock.method(relayClient, "fetchEvents", async () => {
+    liveCallback(
+      relayEvent({
+        id: "existing-theme",
+        content: "ciphertext",
+        created_at: 456,
+      }),
+    );
+    return [];
+  });
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result, unsubscribe } = await manager.subscribeAndFetch(
+      (remote) => {
+        updates.push(remote);
+      },
+    );
+
+    assert.deepEqual(result, {
+      status: "valid",
+      remote: {
+        preference: remotePreference,
+        createdAt: 456,
+        eventId: "existing-theme",
+      },
+    });
+    assert.deepEqual(updates, [result.remote]);
+    await unsubscribe();
+  } finally {
+    delete globalThis.window.__TAURI_INTERNALS__;
+    mock.reset();
+  }
+});
+
+test("failed live setup cannot authorize hydration publishing", async () => {
+  mock.method(relayClient, "subscribeLive", () =>
+    Promise.reject(new Error("subscription failed")),
+  );
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result } = await manager.subscribeAndFetch(() => {});
+
+    assert.deepEqual(result, { status: "absent" });
+    assert.equal(communityThemeHydrationRemote(result), null);
+  } finally {
+    mock.reset();
+  }
+});
+
+test("buffered live delivery cannot authorize hydration publishing", async () => {
+  let liveCallback;
+  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+    liveCallback = callback;
+    return Promise.resolve(async () => {});
+  });
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
+
+    // RelayClientSession may not invoke this callback until its event batch
+    // flushes after the empty history result has already resolved.
+    assert.equal(typeof liveCallback, "function");
+    assert.deepEqual(result, { status: "absent" });
+    assert.equal(communityThemeHydrationRemote(result), null);
+    await unsubscribe();
+  } finally {
+    mock.reset();
+  }
+});
+
+test("unreadable live state cannot authorize hydration publishing", async () => {
+  let liveCallback;
+  globalThis.window ??= {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke(command) {
+      if (command === "nip44_decrypt_from_self") {
+        return Promise.reject(new Error("unsupported payload"));
+      }
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+    liveCallback = callback;
+    return Promise.resolve(async () => {});
+  });
+  mock.method(relayClient, "fetchEvents", async () => {
+    liveCallback(relayEvent({ content: "future-ciphertext" }));
+    return [];
+  });
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
+
+    assert.deepEqual(result, { status: "absent" });
+    assert.equal(communityThemeHydrationRemote(result), null);
+    await unsubscribe();
+  } finally {
+    delete globalThis.window.__TAURI_INTERNALS__;
+    mock.reset();
+  }
+});
+
+test("apparently ready live setup cannot authorize hydration publishing", async () => {
+  // RelayClientSession currently also resolves subscribeLive for terminal
+  // CLOSED and its readiness timeout, so resolution is not proof of coverage.
+  mock.method(relayClient, "subscribeLive", () =>
+    Promise.resolve(async () => {}),
+  );
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
+
+    assert.deepEqual(result, { status: "absent" });
+    assert.equal(communityThemeHydrationRemote(result), null);
+    await unsubscribe();
+  } finally {
+    mock.reset();
+  }
+});
+
 test("fetch reports relay failures as unavailable rather than absent", async () => {
   mock.method(relayClient, "fetchEvents", () =>
     Promise.reject(new Error("offline")),
@@ -116,10 +256,19 @@ test("fetch reports relay failures as unavailable rather than absent", async () 
   }
 });
 
-test("only confirmed absence permits seeding relay state", () => {
-  assert.equal(shouldSeedCommunityTheme({ status: "absent" }), true);
-  assert.equal(shouldSeedCommunityTheme({ status: "invalid" }), false);
-  assert.equal(shouldSeedCommunityTheme({ status: "unavailable" }), false);
+test("hydration applies only valid remote state", () => {
+  const remote = {
+    preference,
+    createdAt: 123,
+    eventId: "remote-theme",
+  };
+  assert.equal(communityThemeHydrationRemote({ status: "absent" }), null);
+  assert.equal(communityThemeHydrationRemote({ status: "invalid" }), null);
+  assert.equal(communityThemeHydrationRemote({ status: "unavailable" }), null);
+  assert.equal(
+    communityThemeHydrationRemote({ status: "valid", remote }),
+    remote,
+  );
 });
 
 test("acknowledged coordinates use relay same-second ordering", () => {

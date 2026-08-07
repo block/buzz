@@ -179,8 +179,11 @@ export function sameCommunityThemePreference(
 export function communityThemeApplyExpectation(
   preference: CommunityThemePreference,
   current: CommunityThemePreference,
+  preserveNoop = false,
 ): CommunityThemePreference | null {
-  return sameCommunityThemePreference(preference, current) ? null : preference;
+  return preserveNoop || !sameCommunityThemePreference(preference, current)
+    ? preference
+    : null;
 }
 
 /**

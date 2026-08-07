@@ -163,6 +163,19 @@ test("already-applied relay state leaves the next user edit publishable", () => 
   );
 });
 
+test("no-op initialization remains programmatic", () => {
+  const expectation = communityThemeApplyExpectation(
+    DEFAULT_COMMUNITY_THEME,
+    DEFAULT_COMMUNITY_THEME,
+    true,
+  );
+
+  assert.equal(
+    communityThemePersistenceAction(expectation, DEFAULT_COMMUNITY_THEME),
+    "acknowledge",
+  );
+});
+
 test("community switch defers stale outgoing appearance persistence", () => {
   const outgoing = {
     ...DEFAULT_COMMUNITY_THEME,
