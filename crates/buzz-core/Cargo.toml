@@ -20,6 +20,7 @@ uuid       = { workspace = true }
 chrono     = { workspace = true }
 hex        = { workspace = true }
 hmac       = { workspace = true }
+http       = { workspace = true }
 sha2       = { workspace = true }
 rand              = { workspace = true }
 subtle            = { workspace = true }

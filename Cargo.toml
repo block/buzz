@@ -47,6 +47,7 @@ tokio-util  = { version = "0.7", features = ["rt", "codec"] }
 
 # HTTP + WebSocket
 axum        = { version = "0.8", features = ["ws", "macros"] }
+http        = "1"
 tower       = { version = "0.5", features = ["timeout", "util", "limit"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "timeout", "fs"] }
 

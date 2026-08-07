@@ -111,10 +111,9 @@ impl McpLaunchConfigDocument {
                     )));
                 }
                 for header in headers {
-                    if header.name.trim().is_empty()
-                        || header.name.contains(['\r', '\n', '\0'])
+                    if http::HeaderName::from_bytes(header.name.as_bytes()).is_err()
                         || header.value.is_empty()
-                        || header.value.contains(['\r', '\n', '\0'])
+                        || http::HeaderValue::from_bytes(header.value.as_bytes()).is_err()
                     {
                         return Err(McpConfigError::Invalid(format!(
                             "remote MCP server '{name}' has an invalid header configuration"
@@ -472,6 +471,30 @@ mod tests {
                 headers: vec![McpHttpHeaderConfig {
                     name: "Authorization".to_string(),
                     value: "Bearer safe\r\nInjected: true".to_string(),
+                }],
+            },
+            ConfiguredMcpServer::Http {
+                name: "whitespace-header-name".to_string(),
+                url: "https://mcp.example.test/mcp".to_string(),
+                headers: vec![McpHttpHeaderConfig {
+                    name: "Bad Header".to_string(),
+                    value: "value".to_string(),
+                }],
+            },
+            ConfiguredMcpServer::Http {
+                name: "colon-header-name".to_string(),
+                url: "https://mcp.example.test/mcp".to_string(),
+                headers: vec![McpHttpHeaderConfig {
+                    name: "Bad:Header".to_string(),
+                    value: "value".to_string(),
+                }],
+            },
+            ConfiguredMcpServer::Http {
+                name: "control-header-value".to_string(),
+                url: "https://mcp.example.test/mcp".to_string(),
+                headers: vec![McpHttpHeaderConfig {
+                    name: "Authorization".to_string(),
+                    value: "Bearer \u{0001}secret".to_string(),
                 }],
             },
         ] {
