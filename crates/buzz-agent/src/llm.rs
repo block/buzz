@@ -139,10 +139,7 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
-        // Compute the base per-request timeout once. For known slow-generation
-        // models (e.g. claude-fable) this may be larger than cfg.llm_timeout
-        // when the env var was not set explicitly; see Config::effective_llm_timeout.
-        let base_timeout = cfg.effective_llm_timeout(effective_model);
+        let base_timeout = cfg.llm_timeout;
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
@@ -303,11 +300,6 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
-        // Handoff summarization is bounded by the generic llm_timeout, not the
-        // model-aware slow-model default: summaries are small requests unlikely
-        // to approach the 240 s window, and we don't want to hold the handoff
-        // path open for 600 s on a slow model when the actual call completes
-        // in seconds.
         let base_timeout = cfg.llm_timeout;
         match cfg.provider {
             Provider::Anthropic => {
@@ -1867,6 +1859,11 @@ enum TimeoutPhase {
 /// the attempt that fired; this is computed by `escalated_timeout` and may be
 /// larger than `cfg.llm_timeout` when earlier attempts already timed out.
 /// Connect timeouts use `LLM_CONNECT_TIMEOUT`.
+///
+/// This message appears in the terminal error produced by `classify_transport_error`
+/// (transport-phase timeout, always terminal) and `classify_body_read_error`
+/// (body-read timeout, terminal only on the final attempt — earlier attempts
+/// are retried with an escalated budget before reaching this message).
 fn timeout_message(
     is_connect: bool,
     per_request_timeout: std::time::Duration,
@@ -1920,8 +1917,11 @@ fn classify_transport_error(
 ///
 /// A timeout here means the total per-request budget expired during body
 /// streaming — headers (and possibly some body bytes) arrived but the response
-/// did not complete within the window. Any other body-decode failure preserves
-/// the `"body read: ..."` prefix expected by callers and existing tests.
+/// did not complete within the window. Non-final-attempt body timeouts are
+/// retried with an escalated budget before this function is called, so the
+/// message is only produced on the final attempt. Any other body-decode failure
+/// preserves the `"body read: ..."` prefix expected by callers and existing
+/// tests.
 ///
 /// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
 /// the attempt that fired; it is the `escalated_timeout` for that attempt and
@@ -2035,7 +2035,7 @@ where
     // budget on the next attempt. Non-timeout retryable failures (429, 5xx,
     // connect resets) are not evidence of a slow model and do NOT escalate.
     let mut timeout_failures: u32 = 0;
-    for attempt in 0..MAX_RETRIES {
+    'attempt: for attempt in 0..MAX_RETRIES {
         let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match apply(
             http.post(url)
@@ -2151,6 +2151,7 @@ where
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
                     if buf.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+                        // Size overflow: not a timeout, not retryable.
                         return Err(PostError::Agent(AgentError::Llm(format!(
                             "response exceeded {MAX_LLM_RESPONSE_BYTES} bytes"
                         ))));
@@ -2159,6 +2160,24 @@ where
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // A timeout during body streaming means the total
+                    // per-request budget expired mid-body (headers arrived but
+                    // the response stalled). Retry with an escalated budget,
+                    // same as a transport-phase timeout — the server may be
+                    // slow to flush, not permanently broken.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
@@ -2170,7 +2189,15 @@ where
         return serde_json::from_slice(&buf)
             .map_err(|e| PostError::Agent(AgentError::Llm(format!("json: {e}"))));
     }
-    unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
+    // Unreachable in practice: every iteration either returns or continues.
+    // A fallthrough here would mean MAX_RETRIES was 0, which is rejected at
+    // config validation. Return a terminal error rather than panic so the
+    // invariant is not load-bearing.
+    Err(PostError::Agent(terminal_llm_error(
+        call_start.elapsed(),
+        MAX_RETRIES,
+        "exhausted retries",
+    )))
 }
 
 pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
@@ -2323,7 +2350,7 @@ async fn openrouter_post(
     // Count prior timeout failures for per-attempt budget escalation; see
     // `escalated_timeout` for the doubling strategy.
     let mut timeout_failures: u32 = 0;
-    for attempt in 0..MAX_RETRIES {
+    'attempt: for attempt in 0..MAX_RETRIES {
         let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match http
             .post(url)
@@ -2488,11 +2515,27 @@ async fn openrouter_post(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // Body-read timeout: retry with escalated budget, same as
+                    // transport-phase timeouts — see the corresponding arm in
+                    // `post()` for the full rationale.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: openrouter body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
                         &classify_body_read_error(&e, per_request_timeout),
-                    ))
+                    ));
                 }
             }
         }
@@ -2651,7 +2694,6 @@ mod tests {
             hints_enabled: true,
             thinking_effort: None,
             prompt_caching: true,
-            llm_timeout_explicit: true,
         }
     }
 
@@ -4564,6 +4606,95 @@ mod tests {
             accepts.load(Ordering::SeqCst),
             MAX_RETRIES,
             "server must see exactly MAX_RETRIES attempts — 499 must be retried"
+        );
+    }
+
+    /// A body-read timeout on the first attempt triggers a retry under an
+    /// escalated budget, and the call succeeds on the second attempt.
+    ///
+    /// The stub sends HTTP 200 headers for the first request, writes a partial
+    /// body, then stalls long enough to exhaust the base timeout (1 s).  On the
+    /// second request it sends a complete response immediately.  The test asserts
+    /// that `post()` returns success and that the server saw exactly 2 requests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                // Drain the incoming request headers on every attempt.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare a 64-byte body, send only 4 bytes,
+                    // then stall for 3 s — long enough to outlast the 1 s
+                    // base timeout and trigger a body-read timeout.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"s",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // Connection closes here; the client has already timed out.
+                    continue;
+                }
+
+                // Second attempt: complete a valid JSON response immediately.
+                let body = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // No client-level timeout — per-request timeout is applied inside post().
+        let client = Client::builder().build().unwrap();
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({"model": "x"}),
+            false,
+            // Small base timeout so the body stall triggers quickly.
+            Duration::from_secs(1),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object response: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
         );
     }
 

@@ -778,11 +778,6 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
-    /// `true` when `BUZZ_AGENT_LLM_TIMEOUT_SECS` was explicitly present in the
-    /// environment. When `false`, `effective_llm_timeout` may return a longer
-    /// model-aware default for known slow-generation models; when `true`, the
-    /// operator's explicit value is used as-is for every model.
-    pub llm_timeout_explicit: bool,
 }
 
 impl Config {
@@ -866,7 +861,6 @@ impl Config {
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
             llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
-            llm_timeout_explicit: env("BUZZ_AGENT_LLM_TIMEOUT_SECS").is_some(),
             tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 660)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
@@ -916,7 +910,6 @@ impl Config {
             max_rounds: 0,
             max_output_tokens: 1,
             llm_timeout: Duration::from_secs(30),
-            llm_timeout_explicit: false,
             tool_timeout: Duration::from_secs(30),
             mcp_init_timeout: Duration::from_secs(30),
             mcp_max_restart_attempts: 0,
@@ -1021,45 +1014,6 @@ impl Config {
         }
         Ok(())
     }
-
-    /// Effective per-request LLM timeout for the given model.
-    ///
-    /// When the operator has set `BUZZ_AGENT_LLM_TIMEOUT_SECS` explicitly, that
-    /// value is authoritative regardless of model — the operator knows their
-    /// deployment's characteristics better than the heuristic below.
-    ///
-    /// When the timeout was *not* explicitly set and the model is a known
-    /// slow-generation model (currently the `claude-fable` family), the
-    /// default is raised to 600 s.  These models run non-streaming
-    /// (`"stream": false`) and can take several minutes to produce a complete
-    /// response; with the generic 240 s default the first byte of the
-    /// response body never arrives before the client-side timeout fires,
-    /// causing the retry loop to re-run the full bet three times before
-    /// failing the turn.
-    ///
-    /// All other models get `self.llm_timeout` (the configured default,
-    /// currently 240 s when unset).
-    pub fn effective_llm_timeout(&self, effective_model: &str) -> Duration {
-        if self.llm_timeout_explicit {
-            return self.llm_timeout;
-        }
-        let model = strip_catalog_prefix(effective_model);
-        if is_slow_generation_model(model) {
-            return Duration::from_secs(600);
-        }
-        self.llm_timeout
-    }
-}
-
-/// Returns `true` for model families known to produce full responses slowly
-/// enough that the generic 240 s read-timeout fires before the first byte
-/// arrives on non-streaming (`"stream": false`) calls.
-///
-/// Currently: the `claude-fable` generation.  Add new families here as they
-/// are identified; `strip_catalog_prefix` has already been applied to `model`
-/// before this function is called.
-fn is_slow_generation_model(model: &str) -> bool {
-    model.starts_with("claude-fable")
 }
 
 fn env(k: &str) -> Option<String> {
@@ -2828,100 +2782,5 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
-    }
-
-    // ---- effective_llm_timeout tests ----------------------------------------
-
-    /// Build a minimal Config with a known llm_timeout and explicit flag for
-    /// the effective_llm_timeout tests.
-    fn timeout_cfg(llm_timeout_secs: u64, explicit: bool) -> Config {
-        Config {
-            provider: Provider::Anthropic,
-            system_prompt: String::new(),
-            api_key: "key".into(),
-            model: "claude-opus-4-7".into(),
-            base_url: "https://api.anthropic.com".into(),
-            anthropic_api_version: "2023-06-01".into(),
-            openai_api: OpenAiApi::Auto,
-            prefer_mesh_for_auto: false,
-            max_rounds: 0,
-            max_output_tokens: 1024,
-            llm_timeout: Duration::from_secs(llm_timeout_secs),
-            llm_timeout_explicit: explicit,
-            tool_timeout: Duration::from_secs(30),
-            mcp_init_timeout: Duration::from_secs(30),
-            mcp_max_restart_attempts: 3,
-            mcp_restart_base_ms: 500,
-            mcp_restart_max_ms: 30_000,
-            max_sessions: 1,
-            max_line_bytes: 4 * 1024 * 1024,
-            max_history_bytes: 16 * 1024 * 1024,
-            max_tool_result_text_bytes: 50 * 1024,
-            max_context_tokens: 200_001,
-            max_handoffs: 0,
-            max_parallel_tools: 1,
-            hook_timeout: Duration::from_secs(1),
-            stop_max_rejections: 0,
-            require_reply: false,
-            hook_servers: HookServers::None,
-            hints_enabled: false,
-            thinking_effort: None,
-            prompt_caching: false,
-        }
-    }
-
-    /// An explicit env override wins for any model, including slow ones.
-    #[test]
-    fn effective_llm_timeout_explicit_wins_for_slow_model() {
-        let cfg = timeout_cfg(120, true);
-        assert_eq!(
-            cfg.effective_llm_timeout("claude-fable-5"),
-            Duration::from_secs(120),
-            "explicit override must be respected for claude-fable models"
-        );
-    }
-
-    /// An explicit env override wins for fast/unknown models too.
-    #[test]
-    fn effective_llm_timeout_explicit_wins_for_fast_model() {
-        let cfg = timeout_cfg(999, true);
-        assert_eq!(
-            cfg.effective_llm_timeout("claude-opus-4-7"),
-            Duration::from_secs(999),
-            "explicit override must be respected for non-slow models"
-        );
-    }
-
-    /// When not explicit, `claude-fable-*` models get the elevated 600 s default.
-    #[test]
-    fn effective_llm_timeout_slow_model_gets_elevated_default() {
-        let cfg = timeout_cfg(240, false);
-        assert_eq!(
-            cfg.effective_llm_timeout("claude-fable-5"),
-            Duration::from_secs(600),
-            "claude-fable-5 must get the 600s slow-model default"
-        );
-    }
-
-    /// Catalog prefixes are stripped before the slow-model check.
-    #[test]
-    fn effective_llm_timeout_catalog_prefix_stripped_for_slow_model() {
-        let cfg = timeout_cfg(240, false);
-        assert_eq!(
-            cfg.effective_llm_timeout("goose-claude-fable-5"),
-            Duration::from_secs(600),
-            "goose-claude-fable-5 must be recognised as a slow model after prefix stripping"
-        );
-    }
-
-    /// When not explicit, non-slow models get the configured llm_timeout.
-    #[test]
-    fn effective_llm_timeout_non_slow_model_gets_configured_default() {
-        let cfg = timeout_cfg(240, false);
-        assert_eq!(
-            cfg.effective_llm_timeout("claude-opus-4-7"),
-            Duration::from_secs(240),
-            "non-slow model must return the configured llm_timeout"
-        );
     }
 }
