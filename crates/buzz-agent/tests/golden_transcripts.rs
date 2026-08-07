@@ -808,3 +808,87 @@ async fn test_cancel_notification_no_reply() {
 
     h.shutdown().await;
 }
+
+/// ACP v2 ContentChunk compliance: both `agent_thought_chunk` and
+/// `agent_message_chunk` must carry `messageId` and `content` when the
+/// client negotiates protocol version 2.
+///
+/// ACP v2 requires `ContentChunk.messageId` (required in v2 schema at
+/// agentclientprotocol/agent-client-protocol schema/v2/schema.json @d13d1baa).
+/// ACP v1 allows the field, so adding it is backwards-safe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_acp_v2_chunks_carry_message_id() {
+    // OpenAI Responses API: reasoning item + text item. Both emitted chunks
+    // must have messageId + content on a v2 connection.
+    let url = spawn_fake_llm(vec![responses_reasoning_response(
+        "Thinking about it.",
+        "Here is my response.",
+    )])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("OPENAI_COMPAT_API_KEY", "test"),
+        ("OPENAI_COMPAT_MODEL", "fake-model"),
+        ("OPENAI_COMPAT_API", "responses"),
+        ("OPENAI_COMPAT_BASE_URL", &url),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await; // negotiates protocolVersion: 2
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think and respond" }],
+            }),
+        )
+        .await;
+
+    let updates = collect_updates_until_done(&mut h, p).await;
+
+    // Both chunk types must be present.
+    let thought = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .expect("agent_thought_chunk must be emitted");
+    let message = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .expect("agent_message_chunk must be emitted");
+
+    // ACP v2 ContentChunk compliance: messageId must be present and non-empty.
+    let thought_id = thought["messageId"]
+        .as_str()
+        .expect("agent_thought_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !thought_id.is_empty(),
+        "agent_thought_chunk messageId must not be empty"
+    );
+
+    let message_id = message["messageId"]
+        .as_str()
+        .expect("agent_message_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !message_id.is_empty(),
+        "agent_message_chunk messageId must not be empty"
+    );
+
+    // Both chunks from the same provider round share the same messageId.
+    assert_eq!(
+        thought_id, message_id,
+        "thought and message chunks from the same provider round must share messageId"
+    );
+
+    // content must be present and non-empty on both.
+    assert_eq!(
+        thought["content"]["text"], "Thinking about it.",
+        "agent_thought_chunk content text mismatch"
+    );
+    assert_eq!(
+        message["content"]["text"], "Here is my response.",
+        "agent_message_chunk content text mismatch"
+    );
+
+    h.shutdown().await;
+}

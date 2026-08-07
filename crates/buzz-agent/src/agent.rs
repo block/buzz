@@ -460,6 +460,13 @@ impl RunCtx<'_> {
                 self.emit_usage_update().await;
             }
 
+            // Stable per-round message IDs for ACP v2 ContentChunk compliance.
+            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
+            // that belong to the same logical message must share the same ID.
+            // A provider round produces at most one thought and one assistant
+            // message, so one ID per round is the right granularity.
+            // ACP v1 allows the field, so this is a backwards-safe addition.
+            let round_msg_id = format!("round-{round}");
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -467,6 +474,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
+                            "messageId": &round_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -481,6 +489,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
+                            "messageId": &round_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),

@@ -98,20 +98,25 @@ fn strip_catalog_prefix(model: &str) -> &str {
 
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
-/// API shape selection (per Anthropic extended-thinking support table,
-/// https://platform.claude.com/docs/en/build-with-claude/extended-thinking, July 2025):
+/// API shape selection (per Anthropic thinking docs and per-model support table,
+/// https://platform.claude.com/docs/en/build-with-claude/thinking and
+/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models):
 ///
-/// **Adaptive families** — `thinking: {type:"adaptive"}` + `output_config: {effort}`.
-/// These models use adaptive thinking; `thinking:{type:"adaptive"}` is required to enable
-/// thinking — without it requests run without thinking even when `output_config.effort` is set.
-/// Doc-verified (extended-thinking table): Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5.x, Sonnet 4.6.
-/// Matched by explicit version strings (no wildcard over version numbers).
+/// **Adaptive families — `thinking:{type:"adaptive"}` required to activate effort control**:
+///   - Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6: thinking is OFF by default.
+///     `thinking:{type:"adaptive"}` is required to enable thinking; without it no thinking occurs.
+///   - Opus 5, Sonnet 5, Fable 5, Mythos 5, Mythos Preview: thinking is ON with NO config.
+///     We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+/// In both sub-buckets: `output_config: {effort}` controls depth, clamped per-model.
+/// Also sends `thinking: {display:"summarized"}` so thinking text is always visible in the
+/// observer feed (without this, Anthropic defaults to `display:"omitted"` on newest models).
 ///
 /// **Manual-budget families** — `thinking: {type:"enabled", budget_tokens}`.
 /// `budget_tokens` is clamped to `min(level_budget, max_output_tokens - 1024)` to preserve
 /// at least 1024 answer tokens. If the result is < 1024 (i.e., `max_output_tokens <= 2047`),
 /// thinking is omitted entirely with a `warn!`.
 /// Doc-verified: claude-3* (legacy), claude-opus-4-5 (effort page: "uses manual thinking").
+/// Also sends `display:"summarized"` to ensure thinking text is returned.
 ///
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
@@ -155,7 +160,7 @@ pub fn anthropic_thinking_config(
             return (None, None);
         }
         (
-            Some(json!({ "type": "enabled", "budget_tokens": budget })),
+            Some(json!({ "type": "enabled", "budget_tokens": budget, "display": "summarized" })),
             None,
         )
     } else if is_adaptive_thinking_model(model) {
@@ -165,7 +170,7 @@ pub fn anthropic_thinking_config(
         // doc-verified maximum, clamp down to the highest supported level with a warning.
         let clamped = clamp_adaptive_effort(model, effort);
         (
-            Some(json!({ "type": "adaptive" })),
+            Some(json!({ "type": "adaptive", "display": "summarized" })),
             Some(json!({ "effort": clamped.anthropic_effort_str() })),
         )
     } else {
@@ -588,21 +593,19 @@ fn is_manual_budget_model(model: &str) -> bool {
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
 
-/// Returns true for Claude model families that use adaptive thinking (doc-verified, July 2025).
+/// Returns true for Claude model families that use adaptive thinking (doc-verified against
+/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models).
 ///
-/// Sources: https://platform.claude.com/docs/en/build-with-claude/extended-thinking (support table)
-///          https://platform.claude.com/docs/en/build-with-claude/effort (effort page)
+/// **Sub-bucket A — thinking ON with no config** (always-on):
+///   Opus 5, Sonnet 5, Fable 5, Mythos 5, Mythos Preview.
+///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
 ///
-/// Adaptive thinking models:
-///   Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5.x, Sonnet 4.6,
-///   Fable 5, Mythos 5, Mythos Preview.
+/// **Sub-bucket B — thinking OFF until `thinking:{type:"adaptive"}` is sent**:
+///   Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6.
 ///
-/// These models support `thinking: {type:"adaptive"}` + `output_config: {effort}`. Sending
-/// `thinking:{type:"adaptive"}` is required to activate `output_config.effort` — without it
-/// the effort field is ignored even on models that may reason by default. Some of these models
-/// also reason with no config at all (e.g., Fable 5, Mythos 5 always-on; Mythos Preview
-/// default-on per the extended-thinking support table), but we always send `type:"adaptive"`
-/// explicitly so that `output_config.effort` is honoured and thinking tokens are predictable.
+/// Both sub-buckets accept the same request shape. The distinction matters only when
+/// thinking effort is NOT configured: sub-bucket A models still produce thinking even
+/// without us sending the field; sub-bucket B models do not.
 ///
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
@@ -1834,6 +1837,56 @@ mod tests {
         assert_eq!(t["type"], "adaptive");
         let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
         assert_eq!(oc["effort"], "max");
+    }
+
+    // ---- anthropic_thinking_config: display:"summarized" in all enabled shapes ----
+
+    #[test]
+    fn anthropic_thinking_config_adaptive_emits_display_summarized() {
+        // Adaptive families (Opus 4.7, Sonnet 5, Fable 5, etc.) must include
+        // display:"summarized" so thinking text is returned, not omitted.
+        for model in &[
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-5-20250901",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            let (thinking, _) = anthropic_thinking_config(model, ThinkingEffort::High, 32_768);
+            let t = thinking
+                .unwrap_or_else(|| panic!("thinking must be present for adaptive model {model}"));
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for adaptive model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_budget_emits_display_summarized() {
+        // Manual-budget families (claude-3.x, opus-4-5) must also include
+        // display:"summarized" so thinking text is returned.
+        for model in &["claude-3-7-sonnet-20250219", "claude-opus-4-5"] {
+            let (thinking, _) = anthropic_thinking_config(model, ThinkingEffort::High, 65_536);
+            let t = thinking.unwrap_or_else(|| {
+                panic!("thinking must be present for manual-budget model {model}")
+            });
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for manual-budget model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_omitted_when_no_thinking_has_no_display_field() {
+        // Models that don't produce a thinking field at all should have no display key.
+        let (thinking, _) =
+            anthropic_thinking_config("claude-haiku-4-5", ThinkingEffort::High, 32_768);
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for unknown model"
+        );
     }
 
     // ---- clamp_adaptive_effort — per-model clamping tests ----
