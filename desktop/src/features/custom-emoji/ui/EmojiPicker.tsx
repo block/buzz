@@ -29,11 +29,36 @@ function warmEmojiIndex() {
 warmEmojiIndex();
 
 /**
+ * Defensive stylesheet injected into every picker's shadow root. emoji-mart
+ * renders the search bar's magnifying-glass ("loupe") and clear ("delete")
+ * controls as inline SVGs and sizes them with its own shadow-root stylesheet.
+ * If that stylesheet hasn't applied when the SVG paints — observed in the
+ * Tauri/WebKitGTK webview on Linux, where shadow-DOM style application can
+ * race first paint — the loupe falls back to its intrinsic size and balloons
+ * into a giant icon that covers the search field and the emoji grid.
+ *
+ * Hard-capping the icon size here is idempotent (`#buzz-emoji-search-icon-fix`
+ * guards re-injection) and harmless when emoji-mart's own CSS is present: the
+ * values match emoji-mart's intended ~1.3em glyph, so this only ever shrinks a
+ * runaway icon back to the correct size. `.icon` covers the current markup;
+ * `svg` directly under `.search` guards against markup shifts across versions.
+ */
+const SEARCH_ICON_SIZE_CSS = `
+  .search .icon,
+  .search .icon svg,
+  .search > svg {
+    height: 1.3em;
+    width: 1.3em;
+  }
+`;
+
+/**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
- * autocorrect, and autocapitalize on its search input. When `autoFocus` is
- * true, also focus the input so the cursor lands there immediately — this
- * makes focus deterministic and owned by us, preventing Radix's focus-scope
- * from racing emoji-mart's own async focus call and winning.
+ * autocorrect, and autocapitalize on its search input, and cap the search-icon
+ * size (see SEARCH_ICON_SIZE_CSS). When `autoFocus` is true, also focus the
+ * input so the cursor lands there immediately — this makes focus deterministic
+ * and owned by us, preventing Radix's focus-scope from racing emoji-mart's own
+ * async focus call and winning.
  *
  * emoji-mart mounts the custom element and its shadow content asynchronously,
  * so the input is not present on first render. A MutationObserver on the
@@ -53,7 +78,19 @@ function disableSearchInputCorrections(
   // closure doesn't re-widen to ShadowRoot | null.
   const root: ShadowRoot = shadowRoot;
 
+  function injectSearchIconSizeFix() {
+    if (root.querySelector("#buzz-emoji-search-icon-fix")) return;
+    const style = document.createElement("style");
+    style.id = "buzz-emoji-search-icon-fix";
+    style.textContent = SEARCH_ICON_SIZE_CSS;
+    root.appendChild(style);
+  }
+
   function applyAttributes() {
+    // Cap the search-icon size as soon as the shadow root exists — this does
+    // not depend on the input being present, and injecting early minimizes the
+    // window where a runaway loupe could flash.
+    injectSearchIconSizeFix();
     const input = root.querySelector<HTMLInputElement>('input[type="search"]');
     if (!input) return false;
     input.spellcheck = false;
