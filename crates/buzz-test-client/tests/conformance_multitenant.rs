@@ -1741,20 +1741,22 @@ mod workflows {
     }
 
     /// Define a workflow in `channel_id` on `http_base`'s community (kind:30620,
-    /// `h`=channel, content=YAML). Returns the **server-generated** workflow id,
-    /// parsed out of the OK message (`response:{"workflow_id":"…"}`). This id is
-    /// the tenant-scoped handle the trigger door confines: defined under A, it
-    /// only resolves under A.
+    /// `h`=channel, `d`=client-generated workflow id, content=YAML). Returns the
+    /// id (which the server now requires the client to supply; cf.
+    /// `handle_workflow_def` rejecting "missing d tag (workflow_id)"). That id
+    /// is the tenant-scoped handle the trigger door confines: defined under A,
+    /// it only resolves under A.
     async fn define_workflow(http_base: &str, keys: &Keys, channel_id: &str, name: &str) -> String {
-        // `h` binds the channel; `name` is required by `handle_workflow_def`
-        // (it rejects "missing workflow name" before parsing YAML). We use the
-        // `name` tag, not `d`: the server *generates* the workflow id, and that
-        // generated id — not any client-supplied `d` — is the handle this row
-        // confines. A `d` tag here would falsely imply the trigger resolves by
-        // client key.
+        // `h` binds the channel; `name` is required by `handle_workflow_def`.
+        // The current relay also requires the client to supply the workflow id
+        // via a `d` tag (previously it generated one server-side). We generate
+        // a fresh UUID per call and use it for both the definition and the
+        // subsequent trigger.
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), workflow_yaml(name))
             .tags(vec![
                 Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["d", workflow_id.as_str()]).unwrap(),
                 Tag::parse(["name", name]).unwrap(),
             ])
             .sign_with_keys(keys)
@@ -1764,18 +1766,9 @@ mod workflows {
             body["accepted"].as_bool().unwrap_or(false),
             "workflow def not accepted against {http_base}: {body}"
         );
-        // The command executor returns `message: "response:{json}"` where json
-        // carries `workflow_id`. Extract it.
-        let msg = body["message"].as_str().unwrap_or_default();
-        let json_part = msg.strip_prefix("response:").unwrap_or_else(|| {
-            panic!("workflow def OK message missing `response:` prefix: {msg:?}")
-        });
-        let resp: serde_json::Value = serde_json::from_str(json_part)
-            .unwrap_or_else(|e| panic!("parse workflow def response json: {e} ({json_part:?})"));
-        resp["workflow_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("workflow def response missing workflow_id: {resp}"))
-            .to_string()
+        // The relay's success envelope echoes back the workflow_id we supplied;
+        // we no longer need to parse the response to learn it.
+        workflow_id
     }
 
     /// Fire a workflow by id on `http_base`'s community (kind:46020, `d`=id).
