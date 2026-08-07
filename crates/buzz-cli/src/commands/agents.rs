@@ -93,7 +93,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth = resolve_auth(client, &target_pubkey, &signer_hex).await?;
+            let auth =
+                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
             let builder = build_archive_identity_request(
                 &target_pubkey,
                 &content,
@@ -124,7 +125,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         } => {
             validate_hex64(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
-            let auth = resolve_auth(client, &target_pubkey, &signer_hex).await?;
+            let auth =
+                resolve_auth(client, &target_pubkey, &signer_hex, &mut std::io::stderr()).await?;
             let builder = build_unarchive_identity_request(
                 &target_pubkey,
                 &content,
@@ -160,19 +162,175 @@ fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
     PublicKey::parse(&hex).map_err(|e| CliError::Auth(format!("invalid owner attestation: {e}")))
 }
 
+/// Typed reason why NIP-OA owner-auth could not be extracted from a kind:0.
+///
+/// Produced by [`classify_owner_auth_tag`] and formatted into a JSON warning
+/// by [`resolve_auth`]. One variant per distinguishable failure cause so the
+/// diagnostic is always accurate and never duplicates validation logic.
+#[derive(Debug, PartialEq)]
+enum AuthFailure {
+    /// kind:0 has no `tags` array or the array is empty of `auth`-labelled entries.
+    NoAuthTag,
+    /// kind:0 has more than one `auth`-labelled tag; count included.
+    AmbiguousAuthTag(usize),
+    /// Sole `auth` tag has wrong element count; actual count included.
+    WrongArity(usize),
+    /// Sole `auth` tag contains a non-string element.
+    NonStringElement,
+    /// Sole `auth` tag owner field is not a valid 64-hex pubkey; value included.
+    InvalidOwnerHex(String),
+    /// Sole `auth` tag sig field is not a valid 128-hex signature.
+    InvalidSigHex,
+    /// Tag is structurally valid but names a different owner; actual owner included.
+    OwnerMismatch(String),
+}
+
+impl AuthFailure {
+    /// Human-readable description suitable for the `"warning"` JSON field.
+    fn message(&self) -> String {
+        match self {
+            AuthFailure::NoAuthTag => "target kind:0 has no \"auth\" tag".to_owned(),
+            AuthFailure::AmbiguousAuthTag(n) => format!(
+                "target kind:0 has {n} \"auth\" tags (expected exactly 1) — ambiguous ownership"
+            ),
+            AuthFailure::WrongArity(n) => format!(
+                "sole \"auth\" tag has {n} element(s) (expected 4: label, owner, conditions, sig)"
+            ),
+            AuthFailure::NonStringElement => {
+                "sole \"auth\" tag contains a non-string element".to_owned()
+            }
+            AuthFailure::InvalidOwnerHex(v) => {
+                format!("sole \"auth\" tag owner field is not a valid 64-hex pubkey: {v}")
+            }
+            AuthFailure::InvalidSigHex => {
+                "sole \"auth\" tag sig field is not a valid 128-hex signature".to_owned()
+            }
+            AuthFailure::OwnerMismatch(actual) => {
+                format!("sole \"auth\" tag names owner {actual} which does not match your key")
+            }
+        }
+    }
+}
+
+/// Single classifier: either extract the auth tag or return the typed reason
+/// for failure. [`extract_owner_auth_tag`] is a thin `.ok()` wrapper kept for
+/// the existing tests that assert on `Option`.
+fn classify_owner_auth_tag(
+    tags: &[serde_json::Value],
+    signer_hex: &str,
+) -> Result<[String; 4], AuthFailure> {
+    let auth_tags: Vec<&serde_json::Value> = tags
+        .iter()
+        .filter(|tag| {
+            tag.as_array()
+                .and_then(|elems| elems.first())
+                .and_then(|v| v.as_str())
+                == Some("auth")
+        })
+        .collect();
+    match auth_tags.len() {
+        0 => return Err(AuthFailure::NoAuthTag),
+        n if n > 1 => return Err(AuthFailure::AmbiguousAuthTag(n)),
+        _ => {}
+    }
+
+    // Exactly one auth tag.
+    let elems = auth_tags[0]
+        .as_array()
+        .ok_or(AuthFailure::NonStringElement)?;
+    if elems.len() != 4 {
+        return Err(AuthFailure::WrongArity(elems.len()));
+    }
+    let label = elems[0].as_str().ok_or(AuthFailure::NonStringElement)?;
+    let owner = elems[1].as_str().ok_or(AuthFailure::NonStringElement)?;
+    let conditions = elems[2].as_str().ok_or(AuthFailure::NonStringElement)?;
+    let sig = elems[3].as_str().ok_or(AuthFailure::NonStringElement)?;
+    if owner.len() != 64 || !owner.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AuthFailure::InvalidOwnerHex(owner.to_owned()));
+    }
+    if sig.len() != 128 || !sig.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AuthFailure::InvalidSigHex);
+    }
+    if !owner.eq_ignore_ascii_case(signer_hex) {
+        return Err(AuthFailure::OwnerMismatch(owner.to_owned()));
+    }
+    Ok([
+        label.to_owned(),
+        owner.to_owned(),
+        conditions.to_owned(),
+        sig.to_owned(),
+    ])
+}
+
+/// Pure sync core of auth resolution: given a fetched kind:0 profile (or
+/// `None` when no event was found), either return the extracted auth tag or
+/// emit one `{"warning":"..."}` JSON line to `warn_sink` and return `None`.
+///
+/// Separated from [`resolve_auth`] so unit tests can call this directly with
+/// a `Vec<u8>` sink and assert on exactly what hits the wire — without needing
+/// a live `BuzzClient` or async runtime.
+///
+/// Three warning branches, one success path:
+/// 1. `profile == None` → no kind:0 found for target.
+/// 2. `profile.get("tags")` absent or non-array → no tags array.
+/// 3. [`classify_owner_auth_tag`] returns `Err` → typed failure reason.
+/// 4. `classify_owner_auth_tag` returns `Ok` → `Some(tag)`, no warning.
+fn resolve_auth_from_profile(
+    profile: Option<&serde_json::Value>,
+    target_hex: &str,
+    signer_hex: &str,
+    warn_sink: &mut dyn std::io::Write,
+) -> Option<[String; 4]> {
+    let event = match profile {
+        Some(e) => e,
+        None => {
+            let msg = format!(
+                "no kind:0 profile found for target {target_hex}; \
+                 proceeding without owner attestation — this succeeds only if your key is a relay admin"
+            );
+            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
+            return None;
+        }
+    };
+    let tags = match event.get("tags").and_then(|v| v.as_array()) {
+        Some(t) => t,
+        None => {
+            let msg = format!(
+                "target {target_hex} kind:0 has no tags array; \
+                 proceeding without owner attestation — this succeeds only if your key is a relay admin"
+            );
+            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
+            return None;
+        }
+    };
+    match classify_owner_auth_tag(tags, signer_hex) {
+        Ok(tag) => Some(tag),
+        Err(failure) => {
+            let msg = format!(
+                "{}; proceeding without owner attestation — \
+                 this succeeds only if your key is a relay admin",
+                failure.message()
+            );
+            let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": msg}));
+            None
+        }
+    }
+}
+
 /// Resolve the optional NIP-OA `auth` tag for archive/unarchive requests.
 ///
 /// Mirrors the desktop's `maybe_owner_auth_tag`:
-/// - `target == signer`: self path — no auth needed → `Ok(None)`.
-/// - Otherwise: fetch target's kind:0, look for an `auth` tag whose owner
-///   (index 1) matches the signer. Return it when present; `Ok(None)` when
-///   absent or structurally malformed. Query/network failures surface as
-///   `Err` — silent degradation to bare would make the relay reject the
-///   request with a misleading error.
+/// - `target == signer`: self path — no auth needed → `Ok(None)`, silent.
+/// - Otherwise: fetch target's kind:0, delegate to [`resolve_auth_from_profile`]
+///   which either returns the extracted tag or emits one `{"warning":"..."}` JSON
+///   line to `warn_sink` and returns `None` — the bare request is still sent so
+///   relay admins can succeed without owner attestation. Query/network failures
+///   surface as `Err`.
 async fn resolve_auth(
     client: &BuzzClient,
     target_hex: &str,
     signer_hex: &str,
+    warn_sink: &mut dyn std::io::Write,
 ) -> Result<Option<[String; 4]>, CliError> {
     if target_hex.eq_ignore_ascii_case(signer_hex) {
         return Ok(None);
@@ -184,15 +342,13 @@ async fn resolve_auth(
         .map_err(|e| CliError::Other(format!("failed to fetch target kind:0: {e}")))?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("invalid kind:0 query response: {e}")))?;
-    let event = match events.into_iter().next() {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-    let tags = match event.get("tags").and_then(|v| v.as_array()) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    Ok(extract_owner_auth_tag(tags, signer_hex))
+    let profile = events.into_iter().next();
+    Ok(resolve_auth_from_profile(
+        profile.as_ref(),
+        target_hex,
+        signer_hex,
+        warn_sink,
+    ))
 }
 
 /// Pure extraction helper: require exactly one kind:0 tag whose first
@@ -201,46 +357,11 @@ async fn resolve_auth(
 /// then structurally validate that sole tag as
 /// `["auth", owner, conditions, sig]` matching `signer_hex`.
 ///
-/// Malformed tags (wrong arity, non-string elements, non-hex fields) are
-/// silently skipped — the contract is "bare" (None), not error.
+/// Thin wrapper around [`classify_owner_auth_tag`] that collapses the typed
+/// failure reason to `None`. Malformed tags → `None`; valid tag → `Some`.
+#[cfg(test)]
 fn extract_owner_auth_tag(tags: &[serde_json::Value], signer_hex: &str) -> Option<[String; 4]> {
-    let auth_tags: Vec<&serde_json::Value> = tags
-        .iter()
-        .filter(|tag| {
-            tag.as_array()
-                .and_then(|elems| elems.first())
-                .and_then(|v| v.as_str())
-                == Some("auth")
-        })
-        .collect();
-    if auth_tags.len() != 1 {
-        return None;
-    }
-
-    let elems = auth_tags[0].as_array()?;
-    if elems.len() != 4 {
-        return None;
-    }
-    let label = elems[0].as_str()?;
-    let owner = elems[1].as_str()?;
-    if !owner.eq_ignore_ascii_case(signer_hex) {
-        return None;
-    }
-    let conditions = elems[2].as_str()?;
-    let sig = elems[3].as_str()?;
-    if owner.len() != 64
-        || !owner.chars().all(|c| c.is_ascii_hexdigit())
-        || sig.len() != 128
-        || !sig.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    Some([
-        label.to_owned(),
-        owner.to_owned(),
-        conditions.to_owned(),
-        sig.to_owned(),
-    ])
+    classify_owner_auth_tag(tags, signer_hex).ok()
 }
 
 /// Validate the NIP-11 relay-info `self` field is a 64-hex pubkey and
@@ -519,6 +640,242 @@ mod tests {
             json!(["auth", "not-hex", "conditions"]),
         ];
         assert!(extract_owner_auth_tag(&tags, &signer).is_none());
+    }
+
+    // --- (c) auth-failure classifier: classify_owner_auth_tag ---
+    //
+    // Tests the typed failure taxonomy. Each case asserts the exact
+    // AuthFailure variant so a wrong classification causes a compile-time or
+    // assertion failure — not just a message-substring miss.
+
+    #[test]
+    fn classify_no_auth_tag_returns_no_auth_tag() {
+        // Case 3 (zero auth tags): tags array has entries but none labelled "auth".
+        let signer = hex64('a');
+        let tags = vec![json!(["p", hex64('b')]), json!(["e", hex64('c')])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::NoAuthTag)
+        );
+    }
+
+    #[test]
+    fn classify_empty_tags_returns_no_auth_tag() {
+        assert_eq!(
+            classify_owner_auth_tag(&[], &hex64('a')),
+            Err(AuthFailure::NoAuthTag)
+        );
+    }
+
+    #[test]
+    fn classify_duplicate_auth_tags_returns_ambiguous() {
+        let signer = hex64('a');
+        let sig = hex128('b');
+        let tags = vec![
+            json!(["auth", signer, "conditions", sig]),
+            json!(["auth", signer, "conditions", sig]),
+        ];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::AmbiguousAuthTag(2))
+        );
+    }
+
+    #[test]
+    fn classify_wrong_arity_returns_wrong_arity() {
+        let signer = hex64('a');
+        let tags = vec![json!(["auth", signer, "conditions"])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::WrongArity(3))
+        );
+    }
+
+    #[test]
+    fn classify_non_string_element_returns_non_string() {
+        let signer = hex64('a');
+        let tags = vec![json!(["auth", signer, 42, hex128('b')])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::NonStringElement)
+        );
+    }
+
+    #[test]
+    fn classify_invalid_owner_hex_returns_invalid_owner_hex() {
+        let bad_owner = "z".repeat(64);
+        let tags = vec![json!(["auth", bad_owner, "", hex128('a')])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &bad_owner),
+            Err(AuthFailure::InvalidOwnerHex(bad_owner))
+        );
+    }
+
+    #[test]
+    fn classify_invalid_sig_hex_returns_invalid_sig_hex() {
+        let signer = hex64('a');
+        let bad_sig = "z".repeat(128);
+        let tags = vec![json!(["auth", signer, "", bad_sig])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::InvalidSigHex)
+        );
+    }
+
+    #[test]
+    fn classify_owner_mismatch_returns_owner_mismatch_with_actual_owner() {
+        // Case 4: structurally valid tag but owner ≠ signer. The failure must
+        // carry the actual owner so resolve_auth can print it in the warning.
+        let actual_owner = hex64('a');
+        let signer = hex64('b');
+        let sig = hex128('c');
+        let tags = vec![json!(["auth", actual_owner, "conditions", sig])];
+        assert_eq!(
+            classify_owner_auth_tag(&tags, &signer),
+            Err(AuthFailure::OwnerMismatch(actual_owner.clone()))
+        );
+        // Message must include the actual owner for actionability.
+        let msg = AuthFailure::OwnerMismatch(actual_owner.clone()).message();
+        assert!(
+            msg.contains(&actual_owner),
+            "OwnerMismatch message must include actual owner, got: {msg}"
+        );
+    }
+
+    // --- (c2) resolve_auth_from_profile emission boundary ---
+    //
+    // Observable-boundary tests: each test calls the production function
+    // `resolve_auth_from_profile` directly with a `Vec<u8>` sink and asserts
+    // on exactly what the production code writes.  Deleting any `writeln!`
+    // call in that function makes at least one of these tests fail.
+    //
+    // `resolve_auth` is async and requires a live `BuzzClient`; the sync
+    // decomposition lets us test the warning logic without a relay connection.
+
+    fn assert_one_json_warning(sink: &[u8], expected_fragment: &str) {
+        let text = std::str::from_utf8(sink).expect("sink is valid UTF-8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one warning line, got: {text:?}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("warning line must be parseable JSON");
+        let warning = parsed["warning"]
+            .as_str()
+            .expect("warning line must have a string 'warning' field");
+        assert!(
+            warning.contains(expected_fragment),
+            "warning must contain {expected_fragment:?}, got: {warning}"
+        );
+    }
+
+    fn assert_no_warning(sink: &[u8]) {
+        let text = std::str::from_utf8(sink).expect("sink is valid UTF-8");
+        assert!(text.is_empty(), "expected no warning output, got: {text:?}");
+    }
+
+    // Branch 1: profile == None → no kind:0 found.
+    #[test]
+    fn resolve_auth_from_profile_no_kind0_emits_json_warning() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(None, &target, &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, "no kind:0 profile found");
+    }
+
+    // Branch 2: profile present but no tags array.
+    #[test]
+    fn resolve_auth_from_profile_no_tags_array_emits_json_warning() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"kind": 0, "content": "{}"});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &target, &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, "no tags array");
+    }
+
+    // Branch 3a: tags present but no auth tag (NoAuthTag).
+    #[test]
+    fn resolve_auth_from_profile_no_auth_tag_emits_json_warning() {
+        let target = hex64('t');
+        let signer = hex64('s');
+        let profile = json!({"tags": [["p", hex64('b')]]});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &target, &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, "no \"auth\" tag");
+    }
+
+    // Branch 3b: duplicate auth tags (AmbiguousAuthTag).
+    #[test]
+    fn resolve_auth_from_profile_ambiguous_auth_tag_emits_json_warning() {
+        let signer = hex64('s');
+        let sig = hex128('b');
+        let profile = json!({"tags": [
+            ["auth", signer, "conditions", sig],
+            ["auth", signer, "conditions", sig],
+        ]});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, "ambiguous");
+    }
+
+    // Branch 3c: sole auth tag malformed (WrongArity).
+    #[test]
+    fn resolve_auth_from_profile_malformed_tag_emits_json_warning() {
+        let signer = hex64('s');
+        // arity 3 — missing sig field
+        let profile = json!({"tags": [["auth", signer, "conditions"]]});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, "element");
+    }
+
+    // Branch 3d: owner mismatch — warning must include the actual owner pubkey.
+    #[test]
+    fn resolve_auth_from_profile_owner_mismatch_emits_json_warning_with_actual_owner() {
+        let actual_owner = hex64('a');
+        let signer = hex64('b');
+        let sig = hex128('c');
+        let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
+        assert!(result.is_none(), "bare path: must return None");
+        assert_one_json_warning(&sink, &actual_owner);
+    }
+
+    // Success path: valid auth tag → Some returned, sink stays empty.
+    #[test]
+    fn resolve_auth_from_profile_valid_auth_tag_returns_some_emits_nothing() {
+        let signer = hex64('a');
+        let sig = hex128('b');
+        let profile = json!({"tags": [["auth", signer, "conditions", sig]]});
+        let mut sink: Vec<u8> = Vec::new();
+        let result = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
+        assert!(result.is_some(), "must return the extracted tag");
+        assert_no_warning(&sink);
+    }
+
+    // Warning output must be valid JSON (serde_json serializes safely).
+    #[test]
+    fn resolve_auth_from_profile_warning_is_valid_json() {
+        let actual_owner = hex64('a');
+        let signer = hex64('b');
+        let sig = hex128('c');
+        let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
+        let mut sink: Vec<u8> = Vec::new();
+        let _ = resolve_auth_from_profile(Some(&profile), &hex64('t'), &signer, &mut sink);
+        let text = std::str::from_utf8(&sink).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(text.trim()).expect("warning output must be valid JSON");
+        assert!(parsed["warning"].is_string());
     }
 
     // --- (d) NIP-11 self normalization: normalize_relay_self_hex ---
