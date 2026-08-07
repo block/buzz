@@ -46,7 +46,7 @@ else
   export PGUSER=buzz
   export PGPASSWORD=buzz_dev
   export PGDATABASE=buzz
-  export REDIS_URL="redis://localhost:6379"
+  export REDIS_URL="redis://localhost:6380"
 fi
 
 # ---- Track results ----------------------------------------------------------
