@@ -146,7 +146,8 @@ mod tests {
         // Small local models end multi-step turns with prose instead of a
         // `send_message` call, so shared compute opts into harness delivery.
         assert_eq!(
-            env.get("BUZZ_ACP_DELIVER_PLAIN_REPLIES").map(String::as_str),
+            env.get("BUZZ_ACP_DELIVER_PLAIN_REPLIES")
+                .map(String::as_str),
             // `true`, not `1`: clap bool flags reject `1` and the harness
             // exits at startup with "invalid value '1'".
             Some("true")
