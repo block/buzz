@@ -386,6 +386,7 @@ mod tests {
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
+            resume_on_restart: true,
             runtime_pid: None,
             backend: crate::managed_agents::types::BackendKind::Local,
             backend_agent_id: None,

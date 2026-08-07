@@ -266,8 +266,7 @@ fn resolve_avatar(
             return (Some(data_url), None);
         }
     }
-    // Fall back to URL reference (caller provided a URL avatar or bytes were
-    // too large).
+    // Fall back to URL reference (caller provided a URL avatar or bytes were too large).
     let url_ref = record
         .avatar_url
         .as_deref()

@@ -122,6 +122,7 @@ pub(crate) struct SpawnConfigSnapshot {
     pub respond_to_allowlist: Option<Vec<String>>,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
+    pub resume_on_restart: bool,
     pub parallelism: u32,
 }
 
@@ -167,6 +168,7 @@ impl SpawnConfigSnapshot {
             ),
             idle_timeout_seconds: record.idle_timeout_seconds,
             max_turn_duration_seconds: record.max_turn_duration_seconds,
+            resume_on_restart: record.resume_on_restart,
             // Hash the effective parallelism so over-cap edits that don't change
             // the running pool size (e.g. 10 → 8, both clamp to 5 on OpenClaw)
             // do not raise a spurious "restart required" badge. Cap crossings
