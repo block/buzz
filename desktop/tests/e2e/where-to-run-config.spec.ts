@@ -98,12 +98,17 @@ async function openCreateDialogOnProvider(page: Page) {
     name: "Advanced",
     exact: true,
   });
-  const runOn = dialog.locator("#agent-run-on");
   await expect(advanced).toHaveAttribute("aria-expanded", "false");
-  await expect(runOn).toBeVisible();
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "true");
-  await expect(dialog.getByTestId("agent-respond-to")).toBeVisible();
+  const respondTo = dialog.getByTestId("agent-respond-to");
+  const runOn = dialog.locator("#agent-run-on");
+  await expect(respondTo).toBeVisible();
+  await expect(runOn).toBeVisible();
+  expect(await respondTo.evaluate((element) => element.offsetTop)).toBeLessThan(
+    await runOn.evaluate((element) => element.offsetTop),
+  );
   await selectRunOnOption(page, dialog, PROVIDER.id);
   return dialog;
 }
@@ -137,7 +142,7 @@ test("typing into a defaultless provider field sticks and probes only once", asy
   });
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "false");
-  await expect(dialog.locator("#agent-run-on")).toBeVisible();
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "true");
   await expect(dialog.locator("#provider-cfg-context")).toHaveValue(
@@ -175,7 +180,7 @@ test("config fields render only after a slow probe resolves, with defaults", asy
   expect(await probeInvocations(page)).toBe(1);
 });
 
-test("collapsed Advanced keeps incomplete remote setup blocked", async ({
+test("collapsed Advanced marks incomplete remote setup as required", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -193,7 +198,10 @@ test("collapsed Advanced keeps incomplete remote setup blocked", async ({
   await expect(submit).toBeDisabled();
   await advanced.click();
   await expect(advanced).toHaveAttribute("aria-expanded", "false");
-  await expect(dialog.locator("#agent-run-on")).toBeVisible();
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("persona-advanced-required-badge"),
+  ).toHaveText("Required");
   await expect(submit).toBeDisabled();
 });
 
