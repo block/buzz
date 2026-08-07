@@ -24,7 +24,10 @@ import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import { useBakedBuildEnvQuery, useRelayAgentsQuery } from "@/features/agents/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
@@ -39,10 +42,40 @@ import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
+  const identityQuery = useIdentityQuery();
+  const relayAgentsQuery = useRelayAgentsQuery();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
+  const relayAgentPubkeys = React.useMemo(
+    () => (relayAgentsQuery.data ?? []).map((agent) => agent.pubkey),
+    [relayAgentsQuery.data],
+  );
+  const relayProfilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
+    enabled: relayAgentPubkeys.length > 0,
+  });
+  const externalAgents = React.useMemo(() => {
+    const ownerPubkey = identityQuery.data?.pubkey;
+    if (!ownerPubkey) return [];
+    const localPubkeys = new Set(
+      agents.managedAgents.map((agent) => normalizePubkey(agent.pubkey)),
+    );
+    return (relayAgentsQuery.data ?? []).filter((agent) => {
+      const pubkey = normalizePubkey(agent.pubkey);
+      const profile = relayProfilesQuery.data?.profiles[pubkey];
+      return (
+        !localPubkeys.has(pubkey) &&
+        profile?.ownerPubkey &&
+        normalizePubkey(profile.ownerPubkey) === normalizePubkey(ownerPubkey)
+      );
+    });
+  }, [
+    agents.managedAgents,
+    identityQuery.data?.pubkey,
+    relayAgentsQuery.data,
+    relayProfilesQuery.data,
+  ]);
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -273,6 +306,40 @@ export function AgentsView() {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
               }}
             />
+
+            {externalAgents.length > 0 ? (
+              <section className="space-y-3" data-testid="external-agents-section">
+                <div>
+                  <h2 className="text-sm font-semibold">External agents</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Running outside this Desktop. Their deployment owns their keys and lifecycle.
+                  </p>
+                </div>
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3 [@container(max-width:40rem)]:justify-center">
+                  {externalAgents.map((agent) => (
+                    <button
+                      className="rounded-2xl border bg-card p-4 text-left transition-colors hover:bg-accent"
+                      key={agent.pubkey}
+                      onClick={() => openProfilePanel?.(agent.pubkey)}
+                      type="button"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate font-medium">{agent.name}</span>
+                        <span className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground">
+                          External
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {agent.agentType || "Agent"} · {agent.status}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        View identity and runtime details
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
 
             <TeamsSection
               error={
