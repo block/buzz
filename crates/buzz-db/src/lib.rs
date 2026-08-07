@@ -3585,6 +3585,35 @@ impl Db {
         .await
     }
 
+    /// Insert or update a workflow inside an existing transaction.
+    ///
+    /// Used by relay event ingest so the signed kind-30620 source event and
+    /// the workflow registry projection share one commit boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_workflow_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id: Uuid,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<()> {
+        workflow::upsert_workflow_tx(
+            tx,
+            community_id,
+            id,
+            channel_id,
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     pub async fn get_workflow(
         &self,

@@ -91,12 +91,14 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
+/// NOTE: Most domain mutations (open_dm, hide_dm, approvals) execute on the
 /// connection pool, NOT inside this transaction. The pattern is idempotent but
 /// not strictly atomic: if a mutation succeeds but commit fails, the mutation
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// operations. Workflow definitions are the exception: their registry upsert
+/// uses this same transaction so the signed kind-30620 event and executable
+/// projection can never diverge.
 async fn persist_command_event(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -749,8 +751,9 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Internal(format!("error: json serialize: {e}")))?;
     let hash = compute_definition_hash(&definition_json_final);
 
-    // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    // Persist the command event — returns open transaction. The workflow
+    // registry projection is written through this same transaction below.
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -781,7 +784,8 @@ async fn handle_workflow_def(
 
     state
         .db
-        .upsert_workflow(
+        .upsert_workflow_tx(
+            &mut tx,
             community_id,
             workflow_id,
             Some(channel_id),
@@ -1367,4 +1371,157 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod integration_tests {
+    //! Postgres-gated regression for the workflow definition atomicity boundary.
+    //!
+    //! Run with:
+    //!   `cargo test -p buzz-relay --lib workflow_definition_event_and_registry_roll_back_together -- --ignored --exact`
+
+    use super::*;
+    use buzz_core::channel::{ChannelType, ChannelVisibility};
+    use buzz_db::CreateCommunityWithOwnerResult;
+    use nostr::Keys;
+    use sqlx::PgPool;
+
+    async fn test_state() -> (Arc<AppState>, PgPool) {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        (Arc::new(state), pool)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_definition_event_and_registry_roll_back_together() {
+        let (state, pool) = test_state().await;
+        let owner = Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let host = format!("wf-atomic-{}.example", Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(record) => record.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "workflow-atomicity",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let tenant = TenantContext::resolved(community, host);
+        let workflow_id = Uuid::new_v4();
+        let yaml = "name: atomic projection\ntrigger:\n  on: schedule\nsteps: []\n";
+        let event = buzz_sdk::builders::build_workflow_def(channel.id, workflow_id, yaml)
+            .expect("build workflow definition")
+            .sign_with_keys(&owner)
+            .expect("sign workflow definition");
+
+        let mut tx = match persist_command_event(&state, &tenant, &event, None)
+            .await
+            .expect("persist signed event")
+        {
+            PersistResult::Inserted(tx) => tx,
+            PersistResult::Duplicate => panic!("fresh event must be inserted"),
+        };
+        let definition = r#"{"name":"atomic projection","trigger":{"on":"schedule"},"steps":[]}"#;
+        let hash = compute_definition_hash(definition);
+        state
+            .db
+            .upsert_workflow_tx(
+                &mut tx,
+                community,
+                workflow_id,
+                Some(channel.id),
+                &owner.public_key().to_bytes(),
+                "atomic projection",
+                definition,
+                &hash,
+            )
+            .await
+            .expect("upsert registry projection");
+
+        let event_inside: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(tx.as_mut())
+                .await
+                .expect("read uncommitted event");
+        let workflow_inside: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflows WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(tx.as_mut())
+        .await
+        .expect("read uncommitted workflow");
+        assert_eq!((event_inside, workflow_inside), (1, 1));
+
+        tx.rollback().await.expect("force ingest rollback");
+
+        let event_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("read event after rollback");
+        let workflow_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflows WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read workflow after rollback");
+        assert_eq!(
+            (event_after, workflow_after),
+            (0, 0),
+            "rollback must remove both the signed event and registry projection"
+        );
+    }
 }

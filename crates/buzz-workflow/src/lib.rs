@@ -53,6 +53,13 @@ use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+/// The scheduler sleeps for 60 seconds between scans, but each scan also does
+/// database and workflow work. A lookback equal to the sleep duration leaves a
+/// gap whenever that work pushes the next scan even slightly past 60 seconds.
+/// Keep one extra tick of overlap; durable scheduled-fire claims deduplicate
+/// the overlap across ticks and pods.
+const CRON_LOOKBACK_SECS: i64 = 120;
+
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
 pub struct WorkflowConfig {
@@ -536,7 +543,7 @@ impl WorkflowEngine {
                     schema::TriggerDef::Schedule {
                         cron: Some(expr),
                         interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                    } => match cron_fire_instant(expr, now, CRON_LOOKBACK_SECS, workflow.id) {
                         Some(instant) => (instant, "cron"),
                         None => continue,
                     },
@@ -746,10 +753,11 @@ impl WorkflowEngine {
 /// Find the cron schedule instant that fired within the `window_secs`-wide
 /// window ending at `now`, if any.
 ///
-/// Uses window-based matching: finds the next scheduled time after
-/// `(now - window_secs)` and returns it when it falls at or before `now`.
-/// This tolerates tick drift gracefully — a 61s tick won't miss a
-/// minute-granularity cron expression. The returned instant is the cron's own
+/// Uses window-based matching: finds scheduled times after
+/// `(now - window_secs)` and returns the latest one at or before `now`.
+/// Returning the latest due instant matters when an overlapping lookback spans
+/// multiple minute-granularity fires: each tick should claim the freshest one,
+/// not remain one fire behind. The returned instant is the cron's own
 /// scheduled time (not `now`), so every pod evaluating the same expression in
 /// the same window computes the *same* value — making it a safe, deterministic
 /// claim anchor for cross-pod at-most-once firing.
@@ -766,7 +774,10 @@ fn cron_fire_instant(
     match normalized.parse::<cron::Schedule>() {
         Ok(sched) => {
             let window_start = now - chrono::Duration::seconds(window_secs);
-            sched.after(&window_start).next().filter(|t| *t <= now)
+            sched
+                .after(&window_start)
+                .take_while(|scheduled| *scheduled <= now)
+                .last()
         }
         Err(e) => {
             tracing::warn!(
@@ -1125,6 +1136,44 @@ mod tests {
                     .with_timezone(&Utc)
             ),
             "cron anchor must be the scheduled instant, stable across pod tick drift"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_survives_tick_work_overrun() {
+        // The loop sleeps 60s *after* doing work, so a scan can arrive just
+        // beyond a one-minute boundary. The production lookback overlaps one
+        // additional tick and must still recover the scheduled fire.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:01:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let scheduled = chrono::DateTime::parse_from_rfc3339("2026-06-15T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("0 9 * * *", now, CRON_LOOKBACK_SECS, wf_id),
+            Some(scheduled),
+            "scheduler work must not open a gap immediately after the 60s sleep"
+        );
+    }
+
+    #[test]
+    fn cron_fire_instant_returns_latest_due_fire_in_overlapping_window() {
+        // A two-minute lookback spans two fires for an every-minute workflow.
+        // Choose the current minute; choosing the oldest would keep each tick
+        // permanently one fire behind.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-06-15T12:02:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let latest = chrono::DateTime::parse_from_rfc3339("2026-06-15T12:02:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let wf_id = Uuid::new_v4();
+        assert_eq!(
+            cron_fire_instant("* * * * *", now, CRON_LOOKBACK_SECS, wf_id),
+            Some(latest),
+            "overlap must claim the latest due schedule instant"
         );
     }
 
