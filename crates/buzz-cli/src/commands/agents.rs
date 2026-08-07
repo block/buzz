@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, validate_hex64};
+use crate::validate::{normalize_pubkey, read_or_stdin};
 use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
@@ -91,7 +91,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             replaced_by,
             content,
         } => {
-            validate_hex64(&target_pubkey)?;
+            let target_pubkey = normalize_pubkey(&target_pubkey)?;
+            let replaced_by = replaced_by.as_deref().map(normalize_pubkey).transpose()?;
             let signer_hex = client.keys().public_key().to_hex();
             let auth = resolve_auth(client, &target_pubkey, &signer_hex).await?;
             let builder = build_archive_identity_request(
@@ -122,7 +123,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             reason,
             content,
         } => {
-            validate_hex64(&target_pubkey)?;
+            let target_pubkey = normalize_pubkey(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
             let auth = resolve_auth(client, &target_pubkey, &signer_hex).await?;
             let builder = build_unarchive_identity_request(

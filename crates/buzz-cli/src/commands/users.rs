@@ -3,7 +3,7 @@ use nostr::PublicKey;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::normalize_pubkey;
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
 
@@ -32,12 +32,13 @@ pub async fn cmd_get_users(
         return Err(CliError::Usage("--owner requires --name".into()));
     }
 
-    for pk in pubkeys {
-        validate_hex64(pk)?;
-    }
     if pubkeys.len() > 200 {
         return Err(CliError::Usage("--pubkey: maximum 200 pubkeys".into()));
     }
+    let pubkeys: Vec<String> = pubkeys
+        .iter()
+        .map(|pk| normalize_pubkey(pk))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let my_pk = client.keys().public_key().to_hex();
     let authors: Vec<&str> = if pubkeys.is_empty() {
@@ -454,14 +455,12 @@ async fn fetch_current_profile(
 
 /// Get presence status for users — query kind:40902 presence snapshot events.
 pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<(), CliError> {
-    let pubkeys: Vec<&str> = pubkeys_csv
+    let pubkeys: Vec<String> = pubkeys_csv
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .collect();
-    for pk in &pubkeys {
-        validate_hex64(pk)?;
-    }
+        .map(normalize_pubkey)
+        .collect::<Result<Vec<_>, _>>()?;
 
     let filter = serde_json::json!({
         "kinds": [40902],

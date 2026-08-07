@@ -35,6 +35,18 @@ pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Accept a 64-char hex pubkey or bech32 `npub1…`, return lowercase hex.
+///
+/// Use this for user-identity flags (`--pubkey` on channels, DMs, users,
+/// moderation, agents). Git-protocol fields that only ever carry hex from CLI
+/// output can keep [`validate_hex64`].
+pub fn normalize_pubkey(s: &str) -> Result<String, CliError> {
+    let s = s.trim();
+    nostr::PublicKey::parse(s)
+        .map(|pk| pk.to_hex())
+        .map_err(|_| CliError::Usage(format!("must be a 64-character hex pubkey or npub: {s}")))
+}
+
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
 pub fn validate_repo_id(s: &str) -> Result<(), CliError> {
     if s.is_empty() || s.len() > 64 {
@@ -253,6 +265,50 @@ mod tests {
         let mut hex = "a".repeat(63);
         hex.push('z'); // 'z' is not a hex digit
         let err = validate_hex64(&hex).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // --- normalize_pubkey ---
+    // Same test vectors as buzz-sdk mentions (valid secp256k1 keys).
+
+    const TEST_HEX: &str = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+    const TEST_NPUB: &str = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+
+    #[test]
+    fn normalize_pubkey_hex() {
+        assert_eq!(normalize_pubkey(TEST_HEX).unwrap(), TEST_HEX);
+    }
+
+    #[test]
+    fn normalize_pubkey_hex_uppercase() {
+        assert_eq!(
+            normalize_pubkey(&TEST_HEX.to_uppercase()).unwrap(),
+            TEST_HEX
+        );
+    }
+
+    #[test]
+    fn normalize_pubkey_npub() {
+        assert_eq!(normalize_pubkey(TEST_NPUB).unwrap(), TEST_HEX);
+    }
+
+    #[test]
+    fn normalize_pubkey_trims_whitespace() {
+        assert_eq!(
+            normalize_pubkey(&format!("  {TEST_NPUB}  ")).unwrap(),
+            TEST_HEX
+        );
+    }
+
+    #[test]
+    fn normalize_pubkey_rejects_garbage() {
+        let err = normalize_pubkey("not-a-key").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn normalize_pubkey_rejects_wrong_length_hex() {
+        let err = normalize_pubkey(&"ab".repeat(20)).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 

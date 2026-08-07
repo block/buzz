@@ -11,7 +11,7 @@ use crate::client::{
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{normalize_pubkey, parse_uuid, read_or_stdin, validate_uuid};
 
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -959,7 +959,7 @@ pub async fn cmd_add_channel_member(
     pubkey: &str,
     role: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let typed_role = match role {
@@ -975,7 +975,7 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
+    let builder = buzz_sdk::build_add_member(channel_uuid, &pubkey, typed_role)
         .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -989,10 +989,10 @@ pub async fn cmd_remove_channel_member(
     channel_id: &str,
     pubkey: &str,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_remove_member(channel_uuid, pubkey)
+    let builder = buzz_sdk::build_remove_member(channel_uuid, &pubkey)
         .map_err(|e| CliError::Other(format!("build_remove_member failed: {e}")))?;
 
     let event = client.sign_event(builder)?;

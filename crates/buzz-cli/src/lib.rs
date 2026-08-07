@@ -311,12 +311,12 @@ buzz agents archive <PUBKEY> --reason retired\n  \
 buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
     )]
     Archive {
-        /// Target identity pubkey (hex)
+        /// Target identity pubkey (hex or npub)
         target_pubkey: String,
         /// Machine-readable reason code, max 64 UTF-8 bytes
         #[arg(long)]
         reason: Option<String>,
-        /// Rotation pointer pubkey (hex); must differ from the target
+        /// Rotation pointer pubkey (hex or npub); must differ from the target
         #[arg(long)]
         replaced_by: Option<String>,
         /// Optional human-readable note (not parsed for authorization)
@@ -327,7 +327,7 @@ buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
     #[command(after_help = "Examples:\n  \
 buzz agents unarchive <PUBKEY> --reason returned")]
     Unarchive {
-        /// Target identity pubkey (hex)
+        /// Target identity pubkey (hex or npub)
         target_pubkey: String,
         /// Machine-readable reason code, max 64 UTF-8 bytes
         #[arg(long)]
@@ -656,7 +656,7 @@ pub enum ChannelsCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Member pubkey (64-char hex)
+        /// Member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
         /// Member role (owner, admin, member, guest, bot)
@@ -669,7 +669,7 @@ pub enum ChannelsCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Member pubkey (64-char hex)
+        /// Member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
     },
@@ -784,7 +784,7 @@ pub enum DmsCmd {
     },
     /// Open a new direct message with one or more users
     Open {
-        /// User pubkey(s) to DM (64-char hex, 1-8)
+        /// User pubkey(s) to DM (hex or npub, 1-8)
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
@@ -793,7 +793,7 @@ pub enum DmsCmd {
         /// DM conversation UUID
         #[arg(long)]
         channel: String,
-        /// User pubkey to add (64-char hex)
+        /// User pubkey to add (hex or npub)
         #[arg(long)]
         pubkey: String,
     },
@@ -809,7 +809,7 @@ pub enum DmsCmd {
 pub enum UsersCmd {
     /// Look up user profiles by pubkey or name
     Get {
-        /// User pubkey(s) to look up (64-char hex). Omit for your own profile
+        /// User pubkey(s) to look up (hex or npub). Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
         /// Search by display name (case-insensitive substring match)
@@ -837,7 +837,7 @@ pub enum UsersCmd {
     },
     /// Get presence status for users
     Presence {
-        /// Comma-separated pubkeys (64-char hex)
+        /// Comma-separated pubkeys (hex or npub)
         #[arg(long)]
         pubkeys: String,
     },
@@ -1832,10 +1832,10 @@ pub enum ModerationCmd {
     },
     /// Ban a member from the community (kind 9040)
     #[command(
-        after_help = "Examples:\n  buzz moderation ban --pubkey <HEX>\n  buzz moderation ban --pubkey <HEX> --expires-in 604800 --reason \"repeated spam\""
+        after_help = "Examples:\n  buzz moderation ban --pubkey <HEX_OR_NPUB>\n  buzz moderation ban --pubkey <HEX_OR_NPUB> --expires-in 604800 --reason \"repeated spam\""
     )]
     Ban {
-        /// Target member pubkey (hex)
+        /// Target member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
         /// Ban duration in seconds from now (omit for a permanent ban)
@@ -1850,16 +1850,16 @@ pub enum ModerationCmd {
     },
     /// Lift a member's ban (kind 9041)
     Unban {
-        /// Target member pubkey (hex)
+        /// Target member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
     },
     /// Time out a member — a write-block, not a disconnect (kind 9042)
     #[command(
-        after_help = "Examples:\n  buzz moderation timeout --pubkey <HEX> --expires-in 3600\n  buzz moderation timeout --pubkey <HEX> --expires-at 1783500000 --reason \"cool off\""
+        after_help = "Examples:\n  buzz moderation timeout --pubkey <HEX_OR_NPUB> --expires-in 3600\n  buzz moderation timeout --pubkey <HEX_OR_NPUB> --expires-at 1783500000 --reason \"cool off\""
     )]
     Timeout {
-        /// Target member pubkey (hex)
+        /// Target member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
         /// Timeout duration in seconds from now
@@ -1874,7 +1874,7 @@ pub enum ModerationCmd {
     },
     /// Clear a member's timeout early (kind 9043)
     Untimeout {
-        /// Target member pubkey (hex)
+        /// Target member pubkey (hex or npub)
         #[arg(long)]
         pubkey: String,
     },
