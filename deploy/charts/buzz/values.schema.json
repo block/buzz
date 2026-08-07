@@ -62,7 +62,6 @@
         "drainJitterMs": { "type": "integer", "minimum": 0 },
         "requireAuthToken": { "type": "boolean" },
         "requireRelayMembership": { "type": "boolean" },
-        "requireMediaGetAuth": { "type": "boolean" },
         "allowNipOaAuth": { "type": "boolean" },
         "huddleAudioAvailable": {
           "type": ["boolean", "null"],
