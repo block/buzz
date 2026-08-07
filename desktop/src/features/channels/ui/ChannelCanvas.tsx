@@ -2,10 +2,13 @@ import { Pencil, Save, X } from "lucide-react";
 import * as React from "react";
 
 import {
-  useCanvasQuery,
+  useCanvasHistoryQuery,
   useSetCanvasMutation,
 } from "@/features/channels/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import type { CanvasRevision } from "@/shared/api/canvasTypes";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Textarea } from "@/shared/ui/textarea";
@@ -20,12 +23,28 @@ type ChannelCanvasProps = {
   isArchived: boolean;
 };
 
+const revisionDateFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+function formatRevisionTimestamp(timestamp: number) {
+  return revisionDateFormatter.format(new Date(timestamp * 1_000));
+}
+
+function isCurrentRevision(
+  revision: CanvasRevision,
+  currentRevision: CanvasRevision | null,
+) {
+  return revision.eventId === currentRevision?.eventId;
+}
+
 export function ChannelCanvas({
   channelId,
   canEdit,
   isArchived,
 }: ChannelCanvasProps) {
-  const canvasQuery = useCanvasQuery(channelId, channelId !== null);
+  const canvasQuery = useCanvasHistoryQuery(channelId, channelId !== null);
   const setCanvasMutation = useSetCanvasMutation(channelId);
   const { channels } = useChannelNavigation();
   const channelNames = React.useMemo(
@@ -34,11 +53,45 @@ export function ChannelCanvas({
   );
   const [isEditing, setIsEditing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
+  const [selectedRevisionId, setSelectedRevisionId] = React.useState<
+    string | null
+  >(null);
 
-  const canvasContent = canvasQuery.data?.content ?? null;
+  const revisions = canvasQuery.data ?? [];
+  const currentRevision = revisions[0] ?? null;
+  const selectedRevision =
+    revisions.find((revision) => revision.eventId === selectedRevisionId) ??
+    currentRevision;
+  const viewingHistoricalRevision =
+    selectedRevision !== null &&
+    !isCurrentRevision(selectedRevision, currentRevision);
+  const revisionAuthors = React.useMemo(
+    () => [...new Set(revisions.map((revision) => revision.author))],
+    [revisions],
+  );
+  const profilesQuery = useUsersBatchQuery(revisionAuthors, {
+    enabled: revisionAuthors.length > 0,
+  });
+  const profiles = profilesQuery.data?.profiles;
+  const canvasContent = currentRevision?.content ?? null;
+  const displayedContent = selectedRevision?.content ?? null;
   // Defer the single large Markdown parse so opening the canvas commits the
   // surrounding chrome immediately and the heavy render reconciles after.
-  const deferredCanvasContent = React.useDeferredValue(canvasContent);
+  const deferredCanvasContent = React.useDeferredValue(displayedContent);
+
+  React.useEffect(() => {
+    if (!currentRevision) {
+      setSelectedRevisionId(null);
+      return;
+    }
+
+    if (
+      selectedRevisionId === null ||
+      !revisions.some((revision) => revision.eventId === selectedRevisionId)
+    ) {
+      setSelectedRevisionId(currentRevision.eventId);
+    }
+  }, [currentRevision, revisions, selectedRevisionId]);
 
   function handleStartEditing() {
     setDraft(canvasContent ?? "");
@@ -119,22 +172,106 @@ export function ChannelCanvas({
 
   return (
     <div className="space-y-3">
-      {canvasContent ? (
+      {selectedRevision ? (
         <div
           className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3"
           data-testid="channel-canvas-content"
         >
+          {viewingHistoricalRevision ? (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-background/50 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">
+                Viewing an earlier revision (read-only).
+              </span>
+              <Button
+                data-testid="channel-canvas-current-revision"
+                onClick={() =>
+                  setSelectedRevisionId(currentRevision?.eventId ?? null)
+                }
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                Return to current
+              </Button>
+            </div>
+          ) : null}
           <Markdown
             channelNames={channelNames}
             content={deferredCanvasContent ?? ""}
           />
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">
-          No canvas set for this channel.
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="channel-canvas-history-empty"
+        >
+          No revision history yet — save the canvas to start tracking changes.
         </p>
       )}
-      {canEdit && !isArchived ? (
+      {selectedRevision && currentRevision ? (
+        <div
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground"
+          data-testid="channel-canvas-current-metadata"
+        >
+          <span>Updated by</span>
+          <span className="font-medium text-foreground">
+            {resolveUserLabel({ pubkey: currentRevision.author, profiles })}
+          </span>
+          <span aria-hidden="true">·</span>
+          <time
+            dateTime={new Date(currentRevision.updatedAt * 1_000).toISOString()}
+          >
+            {formatRevisionTimestamp(currentRevision.updatedAt)}
+          </time>
+        </div>
+      ) : null}
+      {revisions.length > 1 ? (
+        <section
+          aria-label="Canvas revision history"
+          className="space-y-2 rounded-2xl border border-border/70 px-3 py-3"
+          data-testid="channel-canvas-history"
+        >
+          <h3 className="text-sm font-semibold">Revision history</h3>
+          <div className="space-y-1">
+            {revisions.map((revision) => {
+              const current = isCurrentRevision(revision, currentRevision);
+              const selected = revision.eventId === selectedRevision?.eventId;
+              return (
+                <button
+                  aria-current={selected ? "page" : undefined}
+                  className={`flex w-full items-start justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors ${selected ? "bg-muted" : "hover:bg-muted/60"}`}
+                  data-testid={
+                    current
+                      ? "channel-canvas-revision-current"
+                      : `channel-canvas-revision-${revision.eventId}`
+                  }
+                  key={revision.eventId}
+                  onClick={() => setSelectedRevisionId(revision.eventId)}
+                  type="button"
+                >
+                  <span className="min-w-0">
+                    <span className="block font-medium">
+                      {current ? "Current revision" : "Earlier revision"}
+                    </span>
+                    <span className="block truncate text-muted-foreground">
+                      {resolveUserLabel({ pubkey: revision.author, profiles })}
+                    </span>
+                  </span>
+                  <time
+                    className="shrink-0 text-xs text-muted-foreground"
+                    dateTime={new Date(
+                      revision.updatedAt * 1_000,
+                    ).toISOString()}
+                  >
+                    {formatRevisionTimestamp(revision.updatedAt)}
+                  </time>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+      {canEdit && !isArchived && !viewingHistoricalRevision ? (
         <Button
           data-testid="channel-canvas-edit"
           onClick={handleStartEditing}
