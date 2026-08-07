@@ -6,7 +6,8 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isMacPlatform, isWindowsPlatform } from "@/shared/lib/platform";
+import { WindowControls } from "@/shared/ui/WindowControls";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
@@ -81,6 +82,9 @@ export function AppTopChrome({
       : "pl-[80px]"
     : "pl-3";
   const navRowAlignmentClass = macChrome ? "translate-y-[3px]" : null;
+  // Windows runs undecorated (see `lib.rs`), so the app draws its own caption
+  // buttons. They must sit flush against the window edge, hence no right pad.
+  const showWindowControls = isWindowsPlatform() && !isFullscreen;
 
   React.useEffect(() => {
     const topChrome = topChromeRef.current;
@@ -99,7 +103,8 @@ export function AppTopChrome({
     <div
       ref={topChromeRef}
       className={cn(
-        "relative z-45 flex shrink-0 cursor-default select-none items-center bg-sidebar pr-3 text-sidebar-foreground",
+        "relative z-45 flex shrink-0 cursor-default select-none items-center bg-sidebar text-sidebar-foreground",
+        showWindowControls ? "pr-0" : "pr-3",
         topChromeBackdrop.height,
         navRowPaddingClass,
       )}
@@ -131,6 +136,7 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
+      {showWindowControls ? <WindowControls /> : null}
     </div>
   );
 }
