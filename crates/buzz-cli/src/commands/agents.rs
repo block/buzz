@@ -774,16 +774,6 @@ mod tests {
     // profiles. No relay, no async runtime. These guard all failure paths
     // that the async production resolver depends on.
 
-    fn make_valid_profile(signer: &str) -> serde_json::Value {
-        let sig = hex128('b');
-        json!({"tags": [["auth", signer, "conditions", sig]]})
-    }
-
-    fn make_no_auth_profile() -> serde_json::Value {
-        // Valid JSON but no auth tag — extraction always fails.
-        json!({"tags": [["p", hex64('x')]]})
-    }
-
     #[test]
     fn extract_auth_no_profile_returns_no_profile_failure() {
         let target = hex64('t');
