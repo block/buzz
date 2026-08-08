@@ -1280,11 +1280,38 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
+            // #4086: when no `BUZZ_ACP_KINDS` override is set, default to a curated
+            // list instead of a true wildcard. The previous wildcard behavior let
+            // two or more sibling agents storm indefinitely on each other's 👀/💬
+            // (kind 7) and their NIP-09 deletions (kind 5) — harness bookkeeping,
+            // not user intent. The curated list below keeps every kind agents
+            // actually need to wake on (chat, DMs, stream reminders, canvas,
+            // workflow events) and excludes the reaction/bookkeeping kinds.
+            //
+            // Users can still opt into the genuine wildcard by setting
+            // `BUZZ_ACP_KINDS=` explicitly (including `5` and `7`); the override
+            // remains authoritative.
+            let default_kinds = config.kinds_override.clone().unwrap_or_else(|| {
+                use buzz_core::kind::{
+                    KIND_CANVAS, KIND_GIFT_WRAP, KIND_STREAM_MESSAGE_EDIT,
+                    KIND_STREAM_MESSAGE_V2, KIND_WORKFLOW_TRIGGER,
+                };
+                vec![
+                    KIND_STREAM_MESSAGE,              // 9
+                    KIND_STREAM_MESSAGE_V2,           // 40002
+                    KIND_STREAM_MESSAGE_EDIT,         // 40003
+                    KIND_GIFT_WRAP,                   // 1059
+                    KIND_STREAM_REMINDER,             // 40007
+                    KIND_CANVAS,                      // 40100
+                    KIND_WORKFLOW_APPROVAL_REQUESTED, // 46010
+                    KIND_WORKFLOW_TRIGGER,            // 46020
+                ]
+            });
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: Some(default_kinds.clone()),
                         require_mention: false,
                     },
                 );
@@ -1375,10 +1402,33 @@ pub fn resolve_dynamic_channel_filter(
             })),
             require_mention: !config.no_mention_filter,
         }),
-        SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
-            require_mention: false,
-        }),
+        SubscribeMode::All => {
+            // #4086: mirror of `resolve_channel_filters()` — default to the same
+            // curated kind list when no `BUZZ_ACP_KINDS` override is set, instead
+            // of a true wildcard that let sibling agents storm on bookkeeping
+            // reactions (kind 7) and NIP-09 deletions (kind 5). Override still
+            // reaches through untouched.
+            let default_kinds = config.kinds_override.clone().unwrap_or_else(|| {
+                use buzz_core::kind::{
+                    KIND_CANVAS, KIND_GIFT_WRAP, KIND_STREAM_MESSAGE_EDIT,
+                    KIND_STREAM_MESSAGE_V2, KIND_WORKFLOW_TRIGGER,
+                };
+                vec![
+                    KIND_STREAM_MESSAGE,              // 9
+                    KIND_STREAM_MESSAGE_V2,           // 40002
+                    KIND_STREAM_MESSAGE_EDIT,         // 40003
+                    KIND_GIFT_WRAP,                   // 1059
+                    KIND_STREAM_REMINDER,             // 40007
+                    KIND_CANVAS,                      // 40100
+                    KIND_WORKFLOW_APPROVAL_REQUESTED, // 46010
+                    KIND_WORKFLOW_TRIGGER,            // 46020
+                ]
+            });
+            Some(ChannelFilter {
+                kinds: Some(default_kinds),
+                require_mention: false,
+            })
+        }
         SubscribeMode::Config => {
             // Same merge logic as resolve_channel_filters() Config branch:
             // evaluate ALL rules against this specific channel (including
@@ -1435,6 +1485,11 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
 mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
+    use buzz_core::kind::{
+        KIND_CANVAS, KIND_DELETION, KIND_GIFT_WRAP, KIND_REACTION, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER,
+        KIND_WORKFLOW_APPROVAL_REQUESTED, KIND_WORKFLOW_TRIGGER,
+    };
     use clap::{Parser, ValueEnum};
 
     /// Build a minimal Config for testing without CLI parsing.
@@ -1777,12 +1832,50 @@ mod tests {
         assert_eq!(result.len(), 3);
         for ch in &channels {
             let f = result.get(ch).unwrap();
+            // #4086: All mode with no kinds_override now defaults to a
+            // curated list (not a wildcard) to stop sibling agents storming
+            // on each other's bookkeeping kinds (5 = NIP-09 deletion,
+            // 7 = reaction).
+            let kinds = f
+                .kinds
+                .as_ref()
+                .expect("all mode with no override = curated default kinds");
+            assert_eq!(
+                kinds,
+                &[
+                    KIND_STREAM_MESSAGE,
+                    KIND_STREAM_MESSAGE_V2,
+                    KIND_STREAM_MESSAGE_EDIT,
+                    KIND_GIFT_WRAP,
+                    KIND_STREAM_REMINDER,
+                    KIND_CANVAS,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    KIND_WORKFLOW_TRIGGER,
+                ]
+            );
             assert!(
-                f.kinds.is_none(),
-                "all mode with no override = wildcard kinds"
+                !kinds.contains(&KIND_DELETION) && !kinds.contains(&KIND_REACTION),
+                "curated defaults must exclude bookkeeping kinds 5 and 7"
             );
             assert!(!f.require_mention);
         }
+    }
+
+    #[test]
+    fn test_all_mode_dynamic_channel_matches_static() {
+        // #4086 lockstep: resolve_dynamic_channel_filter must emit the same
+        // curated default kinds as resolve_channel_filters, otherwise
+        // instantly-joined channels behave differently from bootstrapped
+        // ones.
+        let config = test_config(SubscribeMode::All);
+        let ch = Uuid::new_v4();
+
+        let dynamic = resolve_dynamic_channel_filter(&config, ch, &[])
+            .expect("All mode should produce a dynamic filter");
+        let statics = resolve_channel_filters(&config, &[ch], &[]);
+        let statik = statics.get(&ch).expect("All mode should produce a filter");
+        assert_eq!(dynamic.kinds, statik.kinds);
+        assert_eq!(dynamic.require_mention, statik.require_mention);
     }
 
     #[test]
