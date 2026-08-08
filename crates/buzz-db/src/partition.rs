@@ -4,9 +4,46 @@
 
 use chrono::{Datelike, TimeZone, Utc};
 use sqlx::{PgPool, Row};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{DbError, Result};
+
+/// True when a `sqlx::Error` is a Postgres `42P17` ("would overlap partition")
+/// raised by a `CREATE PARTITION` whose range is already covered. Fresh schemas
+/// include a right-edge catch-all (`*_p_future`), so a fresh install collides
+/// on the "current month" boundary it tries to add. Split out of
+/// `ensure_partition` so the classification is unit-testable without Postgres.
+fn is_partition_overlap_error(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db) => {
+            db.code().as_deref() == Some("42P17")
+                && db.message().contains("would overlap partition")
+        }
+        _ => false,
+    }
+}
+
+/// Record #4033: a monthly partition attempt was absorbed by the `*_p_future`
+/// catch-all (monthly partition NOT created). Metric so operators can alert
+/// independent of log level.
+fn catch_all_coverage_metric(table: &'static str) {
+    metrics::counter!(
+        "buzz_db_partition_catchall_coverage",
+        "table" => table,
+    )
+    .increment(1);
+}
+
+/// Resolve a validated table name to its static allowlist entry so the metric
+/// label escapes the caller's stack. `ensure_partition` already validated the
+/// name against `PARTITIONED_TABLES`; `.expect` is unreachable for valid input.
+fn static_table_name(table: &str) -> &'static str {
+    PARTITIONED_TABLES
+        .iter()
+        .copied()
+        .find(|t| *t == table)
+        .expect("table name validated against PARTITIONED_TABLES")
+}
 
 /// Tables that may be partition-managed. Allowlist prevents DDL injection.
 const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
@@ -132,17 +169,20 @@ async fn ensure_partition(
             info!("added partition {partition_name}");
             Ok(())
         }
-        Err(sqlx::Error::Database(db_err))
-            if db_err.code().as_deref() == Some("42P17")
-                && db_err.message().contains("would overlap partition") =>
-        {
-            // Fresh schemas include a right-edge catch-all partition (`*_p_future`).
-            // If it already covers this month, the table is still safe for writes;
-            // treat the overlap as "ensured" rather than failing startup.
-            info!(
-                partition_name,
-                "partition range already covered by an existing partition"
+        Err(e) if is_partition_overlap_error(&e) => {
+            // #4033: the `*_p_future` catch-all already covers this month, so the
+            // monthly partition was NOT created and never will be — every row for
+            // this range keeps landing in the catch-all. Postgres only logs an
+            // unsuppressable server-side ERROR; the app must NOT surface this as a
+            // silent `info!` success. Escalate to `warn!` and emit a metric so the
+            // growing catch-all is alertable, but still return Ok: writes are safe
+            // and startup must not fail.
+            warn!(
+                partition = %partition_name,
+                table = %table_name,
+                "monthly partition was NOT created: range already covered by the `*_p_future` catch-all (Postgres 42P17); rows for this range keep accumulating in the catch-all. Re-base or split the catch-all to restore monthly pruning/archival."
             );
+            catch_all_coverage_metric(static_table_name(table_name));
             Ok(())
         }
         Err(e) => Err(e.into()),
@@ -152,6 +192,50 @@ async fn ensure_partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlap_predicate_classifies_42p17() {
+        // We cannot easily construct a real sqlx::Error::Database without a
+        // Postgres connection, so this documents the contract: the predicate
+        // only matches sqlx::Error::Database variants whose code is 42P17 and
+        // whose message contains "would overlap partition" (covered by the
+        // 42P17-catch-all arm in `ensure_partition`); every other sqlx::Error
+        // variant (PoolClosed here) must NOT match.
+        let non_db = sqlx::Error::PoolClosed;
+        assert!(!is_partition_overlap_error(&non_db));
+    }
+
+    #[test]
+    fn catchall_metric_emits_under_local_recorder() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let guard = metrics::set_default_local_recorder(&recorder);
+        catch_all_coverage_metric("events");
+        drop(guard);
+
+        let hit = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_partition_catchall_coverage")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let table = labels
+                    .iter()
+                    .find(|l| l.key() == "table")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                (table, n)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(hit, vec![("events".to_owned(), 1)]);
+    }
 
     #[test]
     fn suffix_validation() {
