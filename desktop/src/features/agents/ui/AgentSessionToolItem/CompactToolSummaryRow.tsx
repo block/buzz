@@ -38,7 +38,7 @@ export function CompactToolSummaryRow({
 }) {
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const mutedTone = compactSummaryTone();
   const resolvedThumbnail = React.useMemo(() => {
     if (!thumbnailSrc || thumbnailFailed) return null;

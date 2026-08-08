@@ -27,7 +27,7 @@ function MessageItem({
   profiles?: UserProfileLookup;
 }) {
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
   const messageLink = getTranscriptMessageLink(item);

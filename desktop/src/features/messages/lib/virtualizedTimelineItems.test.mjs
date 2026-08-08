@@ -37,10 +37,17 @@ const DAY_A = dayAt(2026, 6, 1);
 const DAY_B = dayAt(2026, 6, 2);
 const DAY_Z = dayAt(2026, 5, 31);
 
-function keysOf(dayGroups, { leading = undefined, exhausted = false } = {}) {
-  return buildVirtualizedItems(dayGroups, leading, exhausted).map(
-    virtualizedItemKey,
-  );
+function keysOf(
+  dayGroups,
+  { leading = undefined, trailing = undefined, exhausted = false } = {},
+) {
+  return buildVirtualizedItems(
+    dayGroups,
+    leading,
+    exhausted,
+    true,
+    trailing,
+  ).map(virtualizedItemKey);
 }
 
 /**
@@ -63,6 +70,14 @@ function assertShiftAdmittedAndCacheClean(previousKeys, keys) {
 test("oldest day carries no divider while more history exists", () => {
   const keys = keysOf([group("day-A", DAY_A, ["a3", "a4", "a5"])]);
   assert.deepEqual(keys, ["a3", "a4", "a5", "bottom-spacer"]);
+});
+
+test("live activity renders after messages and before the composer spacer", () => {
+  const keys = keysOf([group("day-A", DAY_A, ["a1"])], {
+    trailing: "activity",
+  });
+
+  assert.deepEqual(keys, ["a1", "trailing-content", "bottom-spacer"]);
 });
 
 test("oldest day divider renders once history is exhausted", () => {

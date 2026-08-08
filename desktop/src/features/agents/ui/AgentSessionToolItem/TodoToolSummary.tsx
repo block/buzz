@@ -30,7 +30,7 @@ export function TodoToolSummary({
 }) {
   const todos = buildTodoDisplayItems(item.args, item.result, fallbackPreview);
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const actionLabel = {
     verb: "Updated",
     object: fallbackPreview ?? "todos",
@@ -84,7 +84,7 @@ export function isTodoSummary(summary: CompactToolSummary) {
 
 function TodoCheckboxRow({ todo }: { todo: TodoDisplayItem }) {
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
 
   return (
     <div

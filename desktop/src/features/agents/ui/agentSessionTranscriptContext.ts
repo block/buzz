@@ -1,6 +1,9 @@
 import * as React from "react";
 
-export type AgentSessionTranscriptVariant = "default" | "compactPreview";
+export type AgentSessionTranscriptVariant =
+  | "default"
+  | "compactPreview"
+  | "inlineTimeline";
 
 const AgentSessionTranscriptVariantContext =
   React.createContext<AgentSessionTranscriptVariant>("default");
