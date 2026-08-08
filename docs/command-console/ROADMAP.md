@@ -29,15 +29,14 @@ each capability.
 
 | Capability | State | Repository control | Next gate |
 | --- | --- | --- | --- |
-| Command Adviser V1 and Buzz v0.5.2 integration | Installed and operational | [PR #14](https://github.com/NavigatorRAN/buzz/pull/14), `codex/upstream-v0.5.2-sync` at `641f5ac4` | Integrate Living Ship, then close the stacked integration line |
-| V4 Living Ship | Engineering and installed-app acceptance complete | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), `codex/living-ship-design` at `6038a17a1` | GitHub still shows the PR as open and draft; merge it into the v0.5.2 integration branch before the next sync |
+| Command Adviser V1 and Buzz v0.5.2 integration | Installed and operational | [PR #14](https://github.com/NavigatorRAN/buzz/pull/14), `codex/upstream-v0.5.2-sync` at `865569bb4` | Complete the merged-tree verification, then close the integration PR |
+| V4 Living Ship | Complete and merged | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), merged as `865569bb4` after installed-app acceptance | Included in the v0.5.2 integration line; retain its real-user journey in every release regression |
 | Upstream Buzz refresh | Next implementation phase | Latest verified stable tag is `desktop-v0.5.8` at `f3de86057`; re-check at kickoff | Pin one stable tag and complete the controlled merge and regression gate |
 | V2 Keeper | Approved product design; not implemented | Canonical design is currently in Memory MCP under `buzz-keeper` | Revalidate against the synchronized base, then start typed-memory MVP |
 | V3 native remote access | Design to be frozen; not implemented | Canonical design is currently in the Version 3 peer task and Memory MCP under `native-buzz-remote-access-pilot` | Revalidate after the upstream sync; implementation follows Keeper MVP |
 
-The installed application may contain Living Ship even while its stacked GitHub
-PR remains open. Installed acceptance and repository integration are separate
-gates; both must be complete before the next upstream merge begins.
+Living Ship installed acceptance and repository integration are complete. The
+remaining Step 0 gate is to verify and merge the combined PR #14 tree.
 
 ## Execution sequence
 
