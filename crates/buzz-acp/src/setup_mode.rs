@@ -446,6 +446,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            false,
         )
         .await
         .is_some();
