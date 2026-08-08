@@ -83,11 +83,12 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInAllowedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
   allowedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
+    candidate.isMember === true ||
     allowedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }

@@ -229,7 +229,7 @@ test("autocomplete helper extraction preserves safe filtering and labels", () =>
   );
 });
 
-test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed agent identities", () => {
+test("isAgentIdentityInAllowedList: keeps people, channel members, and explicitly allowed agents", () => {
   const allowedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(
@@ -252,6 +252,13 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
       allowedAgentPubkeys,
     ),
     false,
+  );
+  assert.equal(
+    isAgentIdentityInAllowedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      allowedAgentPubkeys,
+    ),
+    true,
   );
 });
 
