@@ -761,6 +761,45 @@ impl BuzzClient {
         self.handle_response(resp).await
     }
 
+    /// POST a JSON body to a public, unauthenticated relay endpoint, returning
+    /// the raw JSON body.
+    ///
+    /// No NIP-98 `Authorization` and no `x-auth-tag`: the only caller today is
+    /// `POST /api/invites/accept-policy`, which the relay serves without auth
+    /// because the receipt it returns is bound to the invite code and the
+    /// policy version, not to a pubkey — signing it would prove nothing the
+    /// subsequent `POST /api/invites/claim` does not already prove.
+    ///
+    /// The standard retry policy applies. That is safe here because the
+    /// receipt is a deterministic MAC over `(code, policy_version)`: a retry
+    /// returns the byte-identical receipt rather than issuing a second one.
+    pub async fn post_public(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("body serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                let resp = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
     /// Execute a one-shot query via the HTTP bridge.
     /// `filter` is a Nostr filter object (will be wrapped in an array).
     /// Returns the raw JSON response (array of events).
@@ -847,6 +886,126 @@ impl BuzzClient {
             }
         })
         .await
+    }
+
+    /// POST a JSON body to an authed relay endpoint (NIP-98), returning the
+    /// raw JSON body.
+    ///
+    /// `path` is a root-relative path, e.g. `/api/invites/claim`. The standard
+    /// retry policy applies (fresh NIP-98 auth event per attempt), so this is
+    /// only correct for **idempotent** endpoints — re-sending the same body
+    /// must not produce a second mutation. Non-idempotent endpoints must use
+    /// [`BuzzClient::post_authed_once`].
+    pub async fn post_authed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("body serialization failed: {e}")))?,
+        );
+        self.with_retry_body(|| {
+            let body = body.clone();
+            let url = url.clone();
+            async move {
+                // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
+                // event ID, keeping retries safe against the relay's replay guard.
+                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let resp = self
+                    .with_auth_tag(
+                        self.http
+                            .post(&url)
+                            .header("Authorization", auth)
+                            .header("Content-Type", "application/json")
+                            .body(body),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(resp).await
+            }
+        })
+        .await
+    }
+
+    /// POST a JSON body to an authed relay endpoint exactly once, never retrying.
+    ///
+    /// For non-idempotent endpoints, mirroring the moderation-command policy in
+    /// [`BuzzClient::submit_moderation_event`]: `POST /api/invites` mints a
+    /// fresh live credential on every call, so a blind retry can leave an
+    /// unexpired invite code in circulation that the caller never saw.
+    ///
+    /// Connect failures are definitively unreceived and stay
+    /// [`CliError::Network`] (retryable), as is a pre-ingest 429 carrying a
+    /// `rate-limited:` body — the relay provably did not execute. Every other
+    /// failure after the request left the process — timeout, mid-body loss,
+    /// proxy 429, proxy 502–504 — is ambiguous and surfaces as
+    /// [`CliError::DeliveryUnknown`] (never retryable).
+    pub async fn post_authed_once(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| CliError::Other(format!("body serialization failed: {e}")))?,
+        );
+        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+        let resp = self
+            .with_auth_tag(
+                self.http
+                    .post(&url)
+                    .header("Authorization", auth)
+                    .header("Content-Type", "application/json")
+                    .body(body),
+            )
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(resp) => resp,
+            Err(e) if e.is_connect() => return Err(CliError::Network(e)),
+            Err(e) => {
+                return Err(CliError::DeliveryUnknown(format!(
+                    "POST {path} outcome unknown: {e}"
+                )))
+            }
+        };
+        if resp.status().as_u16() == 429 {
+            // Same split as `submit_moderation_event`: only the relay's own
+            // pre-ingest rate limiter proves the request did not execute, and it
+            // says so with a `rate-limited:` body. A proxy 429 — or any body we
+            // do not recognise — leaves execution ambiguous, and `Relay { 429 }`
+            // is retryable (`error::is_retryable`), which for a mint would put a
+            // second live credential in circulation that the caller never saw.
+            let body_text = resp.text().await.unwrap_or_default();
+            let extracted = extract_relay_message_field(&body_text);
+            let msg = extracted.as_deref().unwrap_or(&body_text);
+            if msg.starts_with("rate-limited:") {
+                return Err(CliError::Relay {
+                    status: 429,
+                    body: body_text,
+                });
+            }
+            return Err(CliError::DeliveryUnknown(format!(
+                "POST {path} outcome unknown: HTTP 429"
+            )));
+        }
+        if matches!(resp.status().as_u16(), 502..=504) {
+            // Proxy-level error: the relay may have executed before the proxy failed.
+            return Err(CliError::DeliveryUnknown(format!(
+                "POST {path} outcome unknown: HTTP {}",
+                resp.status().as_u16()
+            )));
+        }
+        self.handle_response(resp).await.map_err(|e| match e {
+            // Body loss after the relay confirmed receipt is ambiguous.
+            CliError::Network(net) => CliError::DeliveryUnknown(format!(
+                "POST {path} outcome unknown: response body lost: {net}"
+            )),
+            other => other,
+        })
     }
 
     /// Submit a signed Nostr event via POST /events.
@@ -1878,6 +2037,198 @@ mod retry_policy_tests {
         let addr: SocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), counter)
+    }
+
+    /// Spin up a one-shot axum server that handles `POST` on any path.
+    /// Same contract as `test_server` — returns base URL and attempt counter.
+    async fn post_server<F>(f: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32) -> (StatusCode, String) + Send + Sync + 'static,
+    {
+        let counter = Arc::new(AtomicU32::new(0));
+        let handler: Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync> = Arc::new(f);
+        let state = (handler, counter.clone());
+
+        type S = (
+            Arc<dyn Fn(u32) -> (StatusCode, String) + Send + Sync>,
+            Arc<AtomicU32>,
+        );
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(
+                    |State((handler, ctr)): State<S>, _headers: HeaderMap, _body: Body| async move {
+                        let n = ctr.fetch_add(1, Ordering::SeqCst) + 1;
+                        let (status, body) = handler(n);
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), counter)
+    }
+
+    /// `post_authed` is the idempotent-endpoint POST path (`buzz invites claim`):
+    /// a transient 502 is retried and the next attempt succeeds.
+    #[tokio::test]
+    async fn post_authed_retries_transient_502() {
+        let (url, attempts) = post_server(|n| {
+            if n == 1 {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "transient gateway error".to_string(),
+                )
+            } else {
+                (StatusCode::OK, r#"{"status":"joined"}"#.to_string())
+            }
+        })
+        .await;
+        let client = test_client(&url);
+        let result = client
+            .post_authed("/api/invites/claim", &serde_json::json!({"code": "v2.abc"}))
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 502 retry on an idempotent POST, got {result:?}"
+        );
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "must have retried at least once"
+        );
+    }
+
+    /// `post_authed_once` is the non-idempotent POST path (`buzz invites mint`):
+    /// a 502 is ambiguous — the relay may already have minted a live code — so it
+    /// must NOT be retried, and must surface as `DeliveryUnknown` (retryable:false)
+    /// rather than a retryable relay error.
+    #[tokio::test]
+    async fn post_authed_once_never_retries_502() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "transient gateway error".to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "502 on a non-idempotent POST must be DeliveryUnknown, got {err:?}"
+        );
+        assert!(
+            !crate::error::is_retryable_error(&err),
+            "a minted-but-unseen invite code must never be re-minted blindly"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "non-idempotent POST must be sent exactly once"
+        );
+    }
+
+    /// A 429 with no `rate-limited:` body is a proxy-level throttle: the relay
+    /// may already have minted. `Relay { status: 429 }` is retryable, so it must
+    /// be reclassified as `DeliveryUnknown` or a caller obeying `retryable` will
+    /// mint a second live code nobody ever sees.
+    #[tokio::test]
+    async fn post_authed_once_treats_proxy_429_as_unknown() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "<html>429 Too Many Requests</html>".to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::DeliveryUnknown(_)),
+            "proxy 429 on a non-idempotent POST must be DeliveryUnknown, got {err:?}"
+        );
+        assert!(
+            !crate::error::is_retryable_error(&err),
+            "an ambiguous 429 must not advertise itself as retryable"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The relay's own pre-ingest limiter answers `rate-limited:` and proves it
+    /// did not execute, so the same command is safe to re-send: keep it as
+    /// `Relay { status: 429 }` (retryable) rather than the pessimistic
+    /// `DeliveryUnknown`.
+    #[tokio::test]
+    async fn post_authed_once_keeps_pre_ingest_429_retryable() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate-limited: retry in 2s".to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Relay { status: 429, .. }),
+            "pre-ingest 429 must stay a relay error, got {err:?}"
+        );
+        assert!(
+            crate::error::is_retryable_error(&err),
+            "the relay proved it did not execute — re-sending is safe"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "post_authed_once still never retries internally"
+        );
+    }
+
+    /// A definitive relay rejection (403 from the owner/admin authz check on
+    /// `POST /api/invites`) is passed through as `Relay { status: 403 }` — which
+    /// the exit-code mapping renders as auth error / exit 3 — and is not retried.
+    #[tokio::test]
+    async fn post_authed_once_passes_through_definitive_403() {
+        let (url, attempts) = post_server(|_n| {
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"only relay owners and admins can create invites"}"#.to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let err = client
+            .post_authed_once("/api/invites", &serde_json::json!({"ttl_secs": 3600}))
+            .await
+            .unwrap_err();
+        match err {
+            CliError::Relay { status: 403, body } => assert!(
+                body.contains("only relay owners and admins can create invites"),
+                "relay's error field must reach the user verbatim, got {body:?}"
+            ),
+            other => panic!("expected Relay(403), got {other:?}"),
+        }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "403 must not be retried"
+        );
     }
 
     /// `with_retry_body` retries transient HTTP 502 on a read path (`get_authed`)
