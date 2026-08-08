@@ -473,6 +473,15 @@ mod tests {
 
     #[test]
     fn trace_context_lookup_does_not_enable_callsites() {
+        // tracing's callsite `interest` cache is global and per-process —
+        // `with_default` installs a *thread-local* dispatcher, but a static
+        // callsite's cached interest can be poisoned by another test going
+        // through the same callsite with a different subscriber active,
+        // letting our `LevelFilter::OFF` be bypassed (reproduced 1/6 on clean
+        // `main` under `cargo test -p buzz-relay --lib` before this fix).
+        // Forcing the cache to be rebuilt while our subscriber is installed
+        // makes the per-test filter authoritative again.
+        // See https://github.com/block/buzz/issues/3929.
         let context_lookup = TraceContextLookup::default();
         let subscriber = tracing_subscriber::registry().with(
             context_lookup
@@ -481,6 +490,7 @@ mod tests {
         );
 
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             assert!(context_lookup
                 .dispatch
                 .get()
@@ -491,7 +501,11 @@ mod tests {
                 tracing::Level::ERROR
             ));
         });
+
+        // Restore interest cache so subsequent tests observe default values.
+        tracing::callsite::rebuild_interest_cache();
     }
+
 
     #[test]
     fn test_service_resource_default_when_env_unset() {
