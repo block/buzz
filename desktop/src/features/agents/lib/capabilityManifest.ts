@@ -655,7 +655,7 @@ function readinessChecks(
           id: "credential_persistence",
           label: "Credential persistence",
           status: "ready",
-          detail: "Keyring entry verified",
+          detail: "Keyring entry found",
         }
       : agent.credentialPersistence === "inline_fallback"
         ? {
@@ -860,8 +860,6 @@ export function buildAgentCapabilityManifest({
   runtimeStatus,
   presenceStatus,
   observer,
-  catalogObservedAt,
-  runtimeObservedAt,
 }: ManifestInputs): AgentCapabilityManifest {
   const capabilityEvidence =
     observer.capabilityEvidence ??
@@ -941,8 +939,6 @@ export function buildAgentCapabilityManifest({
       initialize?.event.timestamp,
       session?.event.timestamp,
       commands.event?.timestamp,
-      catalogObservedAt,
-      runtimeObservedAt,
     ]),
     runtime: identity,
     protocolVersion,
