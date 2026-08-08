@@ -29,14 +29,15 @@ each capability.
 
 | Capability | State | Repository control | Next gate |
 | --- | --- | --- | --- |
-| Command Adviser V1 and Buzz v0.5.2 integration | Installed and operational | [PR #14](https://github.com/NavigatorRAN/buzz/pull/14), `codex/upstream-v0.5.2-sync` at `865569bb4` | Complete the merged-tree verification, then close the integration PR |
+| Command Adviser V1 and Buzz v0.5.2 integration | Complete and merged | [PR #14](https://github.com/NavigatorRAN/buzz/pull/14), merged as `e9b121154` | Retain as the rollback baseline for the v0.5.8 phase |
 | V4 Living Ship | Complete and merged | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), merged as `865569bb4` after installed-app acceptance | Included in the v0.5.2 integration line; retain its real-user journey in every release regression |
-| Upstream Buzz refresh | Next implementation phase | Latest verified stable tag is `desktop-v0.5.8` at `f3de86057`; re-check at kickoff | Pin one stable tag and complete the controlled merge and regression gate |
+| Upstream Buzz refresh | Active implementation phase | `codex/phase-upstream-v0.5.8-sync`; pinned `desktop-v0.5.8` at `f3de86057` | Capture rollback state, merge deliberately, and complete the regression gate |
 | V2 Keeper | Approved product design; not implemented | Canonical design is currently in Memory MCP under `buzz-keeper` | Revalidate against the synchronized base, then start typed-memory MVP |
 | V3 native remote access | Design to be frozen; not implemented | Canonical design is currently in the Version 3 peer task and Memory MCP under `native-buzz-remote-access-pilot` | Revalidate after the upstream sync; implementation follows Keeper MVP |
 
-Living Ship installed acceptance and repository integration are complete. The
-remaining Step 0 gate is to verify and merge the combined PR #14 tree.
+Living Ship and the v0.5.2 integration line are complete. PR #14 merged as
+`e9b121154`, which is the fixed downstream rollback baseline. The active phase
+is the controlled sync to pinned upstream tag `desktop-v0.5.8`.
 
 ## Execution sequence
 
