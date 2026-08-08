@@ -666,14 +666,21 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr::Event> {
 /// Pairing route discovered from the main relay's NIP-11 document.
 #[derive(Debug, PartialEq, Eq)]
 enum PairingRelay {
+    /// Relay advertises a dedicated NIP-AB pairing relay via `pairing_relay_url`.
     Configured(String),
-    LegacyPath,
+    /// Relay enforces membership (advertises NIP-43) but advertises no
+    /// `pairing_relay_url`. An unpaired peer is rejected at NIP-42 AUTH on the
+    /// main relay (`buzz-relay` gates membership at auth time, with no
+    /// exemption for pairing events), so pairing is impossible until the
+    /// operator deploys a dedicated pairing relay.
+    MembershipWithoutPairingRelay,
+    /// Open relay: an unpaired peer can pair over the main relay itself.
     MainRelay,
 }
 
-/// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
-/// convention remains as a compatibility fallback for NIP-43 relays that do
-/// not advertise the extension yet.
+/// Prefer the relay-advertised dedicated pairing URL. Open relays pair over the
+/// main relay directly; membership-enforcing relays (NIP-43) require the
+/// operator to advertise a dedicated pairing relay via `pairing_relay_url`.
 async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
     let http_url = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{rest}")
@@ -712,13 +719,13 @@ fn resolve_pairing_relay_url(
 ) -> Result<String, String> {
     match pairing_relay {
         PairingRelay::Configured(url) => Ok(url),
-        PairingRelay::LegacyPath => {
-            let mut url =
-                url::Url::parse(main_relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
-            let path = url.path().trim_end_matches('/').to_string();
-            url.set_path(&format!("{path}/pair"));
-            Ok(url.to_string())
-        }
+        PairingRelay::MembershipWithoutPairingRelay => Err(
+            "This relay requires membership, so an unpaired device cannot \
+             connect to it, and no device-pairing relay is configured. Ask the \
+             relay operator to deploy a pairing relay (set BUZZ_PAIRING_RELAY_URL \
+             / Helm pairingRelay.url)."
+                .to_string(),
+        ),
         PairingRelay::MainRelay => Ok(main_relay_url.to_string()),
     }
 }
@@ -740,7 +747,7 @@ fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
         .and_then(|value| value.as_array())
         .is_some_and(|nips| nips.iter().any(|nip| nip.as_u64() == Some(43)))
     {
-        PairingRelay::LegacyPath
+        PairingRelay::MembershipWithoutPairingRelay
     } else {
         PairingRelay::MainRelay
     }

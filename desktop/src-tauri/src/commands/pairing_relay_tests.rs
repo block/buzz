@@ -38,7 +38,7 @@ async fn live_nip11_probe_discovers_configured_pairing_relay() {
 }
 
 #[test]
-fn configured_pairing_relay_takes_precedence_over_legacy_path() {
+fn configured_pairing_relay_takes_precedence_over_membership_gate() {
     let document = serde_json::json!({
         "pairing_relay_url": "wss://pairing.buzz.xyz",
         "supported_nips": [43]
@@ -51,7 +51,7 @@ fn configured_pairing_relay_takes_precedence_over_legacy_path() {
 }
 
 #[test]
-fn invalid_pairing_relay_url_falls_back_to_legacy_path() {
+fn membership_relay_without_pairing_url_is_not_pairable() {
     let document = serde_json::json!({
         "pairing_relay_url": "https://pairing.buzz.xyz",
         "supported_nips": [43]
@@ -59,7 +59,7 @@ fn invalid_pairing_relay_url_falls_back_to_legacy_path() {
 
     assert_eq!(
         pairing_relay_from_nip11(&document),
-        PairingRelay::LegacyPath
+        PairingRelay::MembershipWithoutPairingRelay
     );
 }
 
@@ -82,14 +82,24 @@ fn configured_pairing_relay_resolves_to_configured_url() {
 }
 
 #[test]
-fn legacy_pairing_relay_appends_pair_path() {
-    let resolved = resolve_pairing_relay_url(
+fn membership_without_pairing_relay_errors_instead_of_guessing_a_path() {
+    // Regression: a membership-enforcing relay with no advertised pairing
+    // relay must surface an actionable error, never fabricate a `/pair` URL
+    // that every current buzz-relay 404s on (the relay serves WS only at `/`).
+    let error = resolve_pairing_relay_url(
         "wss://flint.communities.buzz.xyz/community",
-        PairingRelay::LegacyPath,
+        PairingRelay::MembershipWithoutPairingRelay,
     )
-    .expect("resolve legacy pairing relay");
+    .expect_err("membership relay without a pairing relay is not pairable");
 
-    assert_eq!(resolved, "wss://flint.communities.buzz.xyz/community/pair");
+    assert!(
+        !error.contains("/pair"),
+        "must not fabricate a /pair URL: {error}"
+    );
+    assert!(
+        error.contains("pairing relay"),
+        "error should name the missing pairing relay: {error}"
+    );
 }
 
 #[test]
