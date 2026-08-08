@@ -1,3 +1,9 @@
+Mirror of block/buzz, pinned at upstream commit
+02f640bc4559c48ac0c2ec595ef34dd2c294b0db.
+License: Apache-2.0 (LICENSE carried; upstream has no NOTICE,
+so Apache §4(d) is N/A).
+
+
 <h1 align="center">Buzz 🐝</h1>
 
 <p align="center">
