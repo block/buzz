@@ -9,12 +9,12 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
-  CHANNEL_EVENT_KINDS,
-  KIND_CHANNEL_THREAD_SUMMARY,
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
+  createFencedSubscription,
   type ConnectionState,
+  type FenceHandle,
   type PendingEvent,
   type RelaySubscription,
   type RelaySubscriptionFilter,
@@ -23,8 +23,10 @@ import {
   buildChannelAuxDeletionFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
+  buildChannelLiveFilter,
   buildChannelMentionFilter,
   buildGlobalStreamFilter,
+  buildTypingIndicatorFilter,
 } from "@/shared/api/relayChannelFilters";
 import {
   clearClosedRetry,
@@ -149,7 +151,10 @@ export class RelayClient {
     }
 
     for (const [subId, sub] of this.subscriptions) {
-      if (sub.mode !== "live") {
+      if (sub.mode === "fenced") {
+        sub.lapsed = true;
+        sub.resolveEstablished();
+      } else if (sub.mode !== "live") {
         window.clearTimeout(sub.timeout);
         sub.reject(error);
       } else {
@@ -329,18 +334,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    // 39005 rides only this window-store subscription — CHANNEL_EVENT_KINDS'
-    // other consumers (unread tracking, cache merges) must never see
-    // summary overlays.
-    return this.subscribe(
-      {
-        kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
-        "#h": [channelId],
-        limit: 1000,
-        since: Math.floor(Date.now() / 1_000),
-      },
-      onEvent,
-    );
+    return this.subscribe(buildChannelLiveFilter(channelId), onEvent);
   }
 
   /**
@@ -366,15 +360,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(
-      {
-        kinds: [KIND_TYPING_INDICATOR],
-        "#h": [channelId],
-        limit: 10,
-        since: Math.floor(Date.now() / 1_000) - 10,
-      },
-      onEvent,
-    );
+    return this.subscribe(buildTypingIndicatorFilter(channelId), onEvent);
   }
 
   async subscribeToPresenceUpdates(onEvent: (event: RelayEvent) => void) {
@@ -414,6 +400,25 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
   ) {
     return this.subscribe(filter, onEvent);
+  }
+
+  /** @see `createFencedSubscription` in relayClientShared for contract. */
+  async subscribeFenced(
+    filter: RelaySubscriptionFilter,
+    onEvent: (event: RelayEvent) => void,
+  ): Promise<FenceHandle> {
+    await this.ensureConnected();
+    const deps = {
+      connectionGeneration: () => this.connectionGeneration,
+      subscriptions: this.subscriptions,
+      sendReq: (id: string, f: RelaySubscriptionFilter) =>
+        this.sendRawWithReconnectRetry(
+          ["REQ", id, f],
+          "Failed to establish fenced subscription.",
+        ),
+      closeSub: (id: string) => this.closeSubscription(id),
+    };
+    return createFencedSubscription(deps, filter, onEvent);
   }
 
   async subscribeToChannelMentionEvents(
@@ -469,7 +474,9 @@ export class RelayClient {
       this.reconnectListeners.delete(listener);
     };
   }
-
+  getConnectionGeneration(): number {
+    return this.connectionGeneration;
+  }
   /** Current connection state — synchronous read. */
   getConnectionState(): ConnectionState {
     return this.connectionStateEmitter.get();
@@ -648,23 +655,16 @@ export class RelayClient {
   }
 
   private async sendRaw(payload: unknown[]) {
-    if (this.wsId === null) {
-      throw new Error("Relay socket is not connected.");
-    }
-
+    if (this.wsId === null) throw new Error("Relay socket is not connected.");
     await invoke("plugin:websocket|send", {
       id: this.wsId,
-      message: {
-        type: "Text",
-        data: JSON.stringify(payload),
-      },
+      message: { type: "Text", data: JSON.stringify(payload) },
     });
   }
 
   private normalizeRelayError(error: unknown, fallbackMessage: string) {
     return error instanceof Error ? error : new Error(fallbackMessage);
   }
-
   private recoverFromSocketFailure(
     error: unknown,
     fallbackMessage: string,
@@ -698,11 +698,7 @@ export class RelayClient {
   }
 
   private async closeSubscription(subId: string) {
-    if (this.wsId === null) {
-      return;
-    }
-
-    await this.sendRaw(["CLOSE", subId]);
+    if (this.wsId !== null) await this.sendRaw(["CLOSE", subId]);
   }
 
   async publishEvent(
@@ -1007,12 +1003,7 @@ export class RelayClient {
     }
   }
 
-  private resetConnection(
-    error: Error,
-    options?: {
-      reconnect?: boolean;
-    },
-  ) {
+  private resetConnection(error: Error, options?: { reconnect?: boolean }) {
     this.onMessageChannel = null;
     this.stallWatchdog.stop();
     this.connectionGeneration++;
@@ -1062,6 +1053,12 @@ export class RelayClient {
     }
 
     for (const [subId, subscription] of this.subscriptions) {
+      if (subscription.mode === "fenced") {
+        subscription.lapsed = true;
+        subscription.resolveEstablished();
+        this.subscriptions.delete(subId);
+        continue;
+      }
       if (subscription.mode !== "live") {
         window.clearTimeout(subscription.timeout);
         subscription.reject(error);

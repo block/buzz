@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { ForcedUnreadSource } from "@/features/channels/forcedUnreadStore";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
+import type { ReadStateProjection } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
 import type { FeedItem } from "@/shared/api/types";
@@ -18,7 +19,10 @@ type AppShellContextValue = {
       topLevelOnly?: boolean;
     },
   ) => void;
-  markChannelUnread: (channelId: string, source?: ForcedUnreadSource) => void;
+  markChannelUnread: (
+    channelId: string,
+    source?: ForcedUnreadSource,
+  ) => boolean;
   clearChannelUnreadSource: (
     channelId: string,
     source: ForcedUnreadSource,
@@ -52,6 +56,10 @@ type AppShellContextValue = {
   // Inject the thread→channel parent resolver derived from the event graph
   // (NIP-RS hierarchical frontier). Set by the active channel surface.
   setContextParentResolver: (resolver: ContextParentResolver | null) => void;
+  // Snapshot of the ReadStateManager's projection (completeness + frontiers +
+  // overrides). Used by communityUnreadObserver for accurate per-community
+  // unread projections without a second manager instance.
+  getProjection: () => ReadStateProjection | null;
   followThread: (rootId: string) => void;
   unfollowThread: (rootId: string) => void;
   isFollowingThread: (rootId: string) => boolean;
@@ -85,7 +93,7 @@ type AppShellContextValue = {
 const AppShellContext = React.createContext<AppShellContextValue>({
   markAllChannelsRead: () => {},
   markChannelRead: () => {},
-  markChannelUnread: () => {},
+  markChannelUnread: () => false,
   clearChannelUnreadSource: () => {},
   openBrowseChannels: () => {},
   openCreateChannel: () => {},
@@ -98,6 +106,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   markMessageRead: () => {},
   readStateVersion: 0,
   setContextParentResolver: () => {},
+  getProjection: () => null,
   followThread: () => {},
   unfollowThread: () => {},
   isFollowingThread: () => false,

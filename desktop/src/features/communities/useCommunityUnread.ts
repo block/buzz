@@ -3,6 +3,7 @@ import * as React from "react";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { markCommunityRead } from "@/features/communities/communityMarkRead";
 import { pollCommunityUnread } from "@/features/communities/communityUnreadObserver";
+import { useAppShell } from "@/app/AppShellContext";
 
 import type { Community } from "./types";
 
@@ -54,6 +55,7 @@ export function useCommunityUnread(
   unreadByCommunity: Record<string, CommunityUnreadState>;
   markCommunityRead: (communityId: string) => Promise<void>;
 } {
+  const { getProjection } = useAppShell();
   const [unreadByCommunity, setUnreadByCommunity] = React.useState<
     Record<string, CommunityUnreadState>
   >(() => seedCommunityStates(communities, {}));
@@ -131,7 +133,11 @@ export function useCommunityUnread(
         if (cancelled) return;
         markLoading(community.id);
         try {
-          const result = await pollCommunityUnread(community, pubkey);
+          const result = await pollCommunityUnread(
+            community,
+            pubkey,
+            getProjection,
+          );
           if (cancelled) return;
           markReady(community.id, result);
         } catch (error) {
@@ -155,7 +161,7 @@ export function useCommunityUnread(
         window.clearTimeout(pollTimer);
       }
     };
-  }, [activeCommunityId, communities]);
+  }, [activeCommunityId, communities, getProjection]);
 
   const communitiesRef = React.useRef(communities);
   communitiesRef.current = communities;

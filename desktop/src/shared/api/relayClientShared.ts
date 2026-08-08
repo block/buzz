@@ -75,6 +75,173 @@ type LiveSubscription = {
   closedRetryTimeout?: number;
 };
 
+/**
+ * Fenced subscription for NIP-RS full-state loads.
+ *
+ * Unlike `live`, a fenced subscription:
+ * - Resolves `established` ONLY on this subscription's own EOSE — never via
+ *   a fallback timer or terminal CLOSED.
+ * - Delivers events synchronously (bypasses the EVENT_BATCH_MS buffer) so
+ *   the loader's synchronous drain barrier needs no timer.
+ * - On CLOSED or any connection lapse, sets `lapsed = true` and resolves
+ *   `established` (in case the loader is still awaiting it), then removes
+ *   itself without retrying.
+ */
+export type FencedSubscription = {
+  mode: "fenced";
+  filter: RelaySubscriptionFilter;
+  onEvent: (event: RelayEvent) => void;
+  /** Connection generation at subscribe time — mismatch = lapsed. */
+  generation: number;
+  /** Resolves on EOSE or lapse (check `lapsed` after awaiting). */
+  resolveEstablished: () => void;
+  /** True after CLOSED, reconnect, or generation change. */
+  lapsed: boolean;
+};
+
+/**
+ * Handle returned by `RelayClient.subscribeFenced()`.
+ *
+ * - `established` resolves ONLY on the subscription's own EOSE, or resolves
+ *   after setting `lapsed = true` if the connection lapses before EOSE.
+ * - `lapsed` is synchronously readable — check it after awaiting `established`
+ *   and at any point during enumeration.
+ * - `unsubscribe()` closes the relay subscription when the load is complete.
+ */
+export type FenceHandle = {
+  /** Resolves on EOSE (check `lapsed` after awaiting). */
+  established: Promise<void>;
+  /** True if the connection lapsed before or after EOSE. */
+  readonly lapsed: boolean;
+  /** Close the relay subscription. */
+  unsubscribe(): Promise<void>;
+};
+
+export function buildFenceHandle(
+  sub: FencedSubscription,
+  established: Promise<void>,
+  unsubscribe: () => Promise<void>,
+): FenceHandle {
+  return {
+    established,
+    get lapsed() {
+      return sub.lapsed;
+    },
+    unsubscribe,
+  };
+}
+
+/**
+ * Millis to wait for EOSE after the REQ is sent.  If the relay keeps the
+ * socket alive but never sends this subscription's EOSE, the fence lapses and
+ * the load concludes `complete: false`.  Reconnect / `retryLoad` owns recovery.
+ * Must NEVER count as establishment.
+ */
+export const FENCED_ESTABLISHMENT_TIMEOUT_MS = 30_000;
+
+/**
+ * Core of `RelayClient.subscribeFenced()` extracted for testability.
+ *
+ * Registers a fenced subscription, sends REQ, and returns a `FenceHandle`
+ * whose `established` resolves ONLY on EOSE — never on a fallback timer or
+ * CLOSED. Any lapse (generation mismatch, send failure, `resetConnection`,
+ * or establishment timeout) sets `lapsed = true` and resolves `established`
+ * so no caller suspends forever.
+ */
+export async function createFencedSubscription(
+  deps: {
+    connectionGeneration: () => number;
+    subscriptions: Map<string, RelaySubscription>;
+    sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
+    closeSub: (subId: string) => Promise<void>;
+    /** Override the establishment timeout (ms). Defaults to FENCED_ESTABLISHMENT_TIMEOUT_MS. */
+    establishmentTimeoutMs?: number;
+  },
+  filter: RelaySubscriptionFilter,
+  onEvent: (event: RelayEvent) => void,
+): Promise<FenceHandle> {
+  const generation = deps.connectionGeneration();
+  let resolveEstablished = () => {};
+  const established = new Promise<void>((r) => {
+    resolveEstablished = r;
+  });
+  const subId = `fenced-${crypto.randomUUID()}`;
+  const fencedSub: FencedSubscription = {
+    mode: "fenced",
+    filter,
+    onEvent,
+    generation,
+    resolveEstablished,
+    lapsed: false,
+  };
+  const lapseAndReturn = (): FenceHandle => {
+    fencedSub.lapsed = true;
+    resolveEstablished();
+    deps.subscriptions.delete(subId);
+    return buildFenceHandle(fencedSub, established, async () => {});
+  };
+  if (deps.connectionGeneration() !== generation) return lapseAndReturn();
+  deps.subscriptions.set(subId, fencedSub);
+
+  // ── Establishment timeout ───────────────────────────────────────────────
+  // Install the timeout and wrapped resolver BEFORE sending REQ so that EOSE
+  // delivered synchronously during sendReq() (e.g. from a fake or fast relay)
+  // cancels the timer correctly and never lapses an already-established fence.
+  //
+  // A relay that stays alive but never delivers this subscription's EOSE must
+  // not hang initialize() forever.  The timeout lapses the fence exactly like
+  // a CLOSED or reconnect — it NEVER counts as establishment.
+  const timeoutMs =
+    deps.establishmentTimeoutMs ?? FENCED_ESTABLISHMENT_TIMEOUT_MS;
+  let establishmentTimer: ReturnType<typeof setTimeout> | null = null;
+  let alreadyEstablished = false;
+
+  // Wrap resolveEstablished so the timer is cancelled on normal EOSE.
+  const originalResolve = fencedSub.resolveEstablished;
+  fencedSub.resolveEstablished = () => {
+    alreadyEstablished = true;
+    if (establishmentTimer !== null) {
+      clearTimeout(establishmentTimer);
+      establishmentTimer = null;
+    }
+    originalResolve();
+  };
+  // Also patch the closed reference so the promise resolves via the wrapper.
+  resolveEstablished = fencedSub.resolveEstablished;
+
+  establishmentTimer = setTimeout(() => {
+    establishmentTimer = null;
+    // Only lapse if EOSE has not already established the fence.
+    if (
+      !alreadyEstablished &&
+      !fencedSub.lapsed &&
+      deps.subscriptions.get(subId) === fencedSub
+    ) {
+      fencedSub.lapsed = true;
+      fencedSub.resolveEstablished();
+      deps.subscriptions.delete(subId);
+    }
+  }, timeoutMs);
+
+  try {
+    await deps.sendReq(subId, filter);
+  } catch {
+    return lapseAndReturn();
+  }
+  if (deps.connectionGeneration() !== generation || fencedSub.lapsed)
+    return lapseAndReturn();
+
+  return buildFenceHandle(fencedSub, established, async () => {
+    if (establishmentTimer !== null) {
+      clearTimeout(establishmentTimer);
+      establishmentTimer = null;
+    }
+    if (deps.subscriptions.get(subId) !== fencedSub) return;
+    deps.subscriptions.delete(subId);
+    await deps.closeSub(subId);
+  });
+}
+
 export type PendingEvent = {
   event: RelayEvent;
   resolve: (event: RelayEvent) => void;
@@ -85,7 +252,8 @@ export type PendingEvent = {
 export type RelaySubscription =
   | HistorySubscription
   | FirstEventSubscription
-  | LiveSubscription;
+  | LiveSubscription
+  | FencedSubscription;
 
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {

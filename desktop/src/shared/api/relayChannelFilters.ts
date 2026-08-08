@@ -3,12 +3,14 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_CHANNEL_THREAD_SUMMARY,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
+  KIND_TYPING_INDICATOR,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -173,5 +175,37 @@ export function buildChannelMentionFilter(
     "#p": [pubkey],
     limit,
     since: Math.floor(Date.now() / 1_000),
+  };
+}
+
+/**
+ * Live-subscription filter for an open channel starting now, with no history
+ * replay. Includes {@link CHANNEL_EVENT_KINDS} plus KIND_CHANNEL_THREAD_SUMMARY
+ * (39005), which rides only this window-store subscription — the summary
+ * overlays must never reach other consumers (unread tracking, cache merges).
+ */
+export function buildChannelLiveFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
+    "#h": [channelId],
+    limit: 1000,
+    since: Math.floor(Date.now() / 1_000),
+  };
+}
+
+/**
+ * Typing-indicator subscription filter: recent indicators only (last 10 s),
+ * bounded by a small limit so the subscription stays lightweight.
+ */
+export function buildTypingIndicatorFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    kinds: [KIND_TYPING_INDICATOR],
+    "#h": [channelId],
+    limit: 10,
+    since: Math.floor(Date.now() / 1_000) - 10,
   };
 }
