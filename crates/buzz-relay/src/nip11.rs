@@ -458,6 +458,19 @@ mod tests {
     }
 
     #[test]
+    fn advertised_max_filters_matches_the_enforced_cap() {
+        // The relay must never advertise a `max_filters` it does not enforce.
+        // Both doors that accept NIP-01 filter lists — the WebSocket REQ/COUNT
+        // handler and the HTTP bridge `/query`/`/count` — reject lists longer
+        // than `crate::protocol::MAX_FILTERS_PER_REQ`, so the advertised value
+        // must equal it. Guards against the three drifting apart.
+        assert_eq!(
+            relay_limitation(DEFAULT_MAX_FRAME_BYTES).max_filters,
+            Some(crate::protocol::MAX_FILTERS_PER_REQ as u32),
+        );
+    }
+
+    #[test]
     fn max_message_length_uses_configured_frame_limit() {
         let info = RelayInfo::build(None, None, false, 262_144, None);
         let limitation = info.limitation.expect("limitation");
