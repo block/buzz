@@ -14,6 +14,7 @@ __pycache__/
 .env
 .env.local
 .env.*.local
+.env.init.*
 
 # Editor / IDE
 .idea/

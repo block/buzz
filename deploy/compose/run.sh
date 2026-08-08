@@ -16,13 +16,114 @@ compose() {
   docker compose --env-file .env "${COMPOSE_FILES[@]}" "$@"
 }
 
+valid_domain() {
+  local domain="$1"
+  local label
+  local -a labels
+
+  if ((${#domain} > 253)) ||
+    [[ "$domain" != *.* ]] ||
+    [[ "$domain" == .* ]] ||
+    [[ "$domain" == *. ]] ||
+    [[ "$domain" == *..* ]]; then
+    return 1
+  fi
+
+  IFS=. read -r -a labels <<<"$domain"
+  for label in "${labels[@]}"; do
+    if [[ ! "$label" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+      return 1
+    fi
+  done
+}
+
+init_env() (
+  if (($# != 2)); then
+    printf 'Usage: ./run.sh init <domain> <owner-pubkey-hex>\n' >&2
+    exit 1
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'Environment initialization requires openssl\n' >&2
+    exit 1
+  fi
+
+  local domain="${1,,}"
+  local owner_pubkey="${2,,}"
+  if ! valid_domain "$domain"; then
+    printf 'Domain must be a valid DNS name such as buzz.example.com\n' >&2
+    exit 1
+  fi
+  if [[ ! "$owner_pubkey" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'Owner public key must be 64 hexadecimal characters\n' >&2
+    exit 1
+  fi
+  if [[ -e .env ]] || [[ -L .env ]]; then
+    printf 'Refusing to overwrite deploy/compose/.env\n' >&2
+    exit 1
+  fi
+
+  umask 077
+  local init_tmp
+  init_tmp="$(mktemp ./.env.init.XXXXXXXXXX)"
+  trap 'if [[ -n "${init_tmp:-}" ]] && [[ -f "$init_tmp" ]]; then rm -f -- "$init_tmp"; fi' EXIT
+
+  local relay_private_key
+  local hook_secret
+  local postgres_password
+  local redis_password
+  local s3_access_key
+  local s3_secret_key
+  relay_private_key="$(openssl rand -hex 32)"
+  hook_secret="$(openssl rand -hex 32)"
+  postgres_password="$(openssl rand -hex 32)"
+  redis_password="$(openssl rand -hex 32)"
+  s3_access_key="buzz$(openssl rand -hex 12)"
+  s3_secret_key="$(openssl rand -hex 32)"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      BUZZ_DOMAIN=*) printf 'BUZZ_DOMAIN=%s\n' "$domain" ;;
+      RELAY_URL=*) printf 'RELAY_URL=wss://%s\n' "$domain" ;;
+      BUZZ_MEDIA_BASE_URL=*) printf 'BUZZ_MEDIA_BASE_URL=https://%s/media\n' "$domain" ;;
+      BUZZ_MEDIA_SERVER_DOMAIN=*) printf 'BUZZ_MEDIA_SERVER_DOMAIN=%s\n' "$domain" ;;
+      BUZZ_CORS_ORIGINS=*) printf 'BUZZ_CORS_ORIGINS=https://%s\n' "$domain" ;;
+      RELAY_OWNER_PUBKEY=*) printf 'RELAY_OWNER_PUBKEY=%s\n' "$owner_pubkey" ;;
+      BUZZ_RELAY_PRIVATE_KEY=*) printf 'BUZZ_RELAY_PRIVATE_KEY=%s\n' "$relay_private_key" ;;
+      BUZZ_GIT_HOOK_HMAC_SECRET=*) printf 'BUZZ_GIT_HOOK_HMAC_SECRET=%s\n' "$hook_secret" ;;
+      POSTGRES_PASSWORD=*) printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password" ;;
+      REDIS_PASSWORD=*) printf 'REDIS_PASSWORD=%s\n' "$redis_password" ;;
+      BUZZ_S3_ACCESS_KEY=*) printf 'BUZZ_S3_ACCESS_KEY=%s\n' "$s3_access_key" ;;
+      BUZZ_S3_SECRET_KEY=*) printf 'BUZZ_S3_SECRET_KEY=%s\n' "$s3_secret_key" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <.env.example >"$init_tmp"
+  chmod 0600 "$init_tmp"
+
+  if ! ln -- "$init_tmp" .env; then
+    printf 'Refusing to overwrite deploy/compose/.env\n' >&2
+    exit 1
+  fi
+  rm -f -- "$init_tmp"
+  init_tmp=
+  unset \
+    relay_private_key \
+    hook_secret \
+    postgres_password \
+    redis_password \
+    s3_access_key \
+    s3_secret_key
+
+  printf 'Created deploy/compose/.env with mode 600; review and back it up before starting Buzz\n'
+)
+
 require_env() {
   if [[ ! -f .env ]]; then
     cat >&2 <<'MSG'
 Missing deploy/compose/.env.
 
-Copy .env.example to .env and replace every CHANGE_ME value, or run the bootstrap
-script once it lands. Do not start production with generated secrets missing.
+Run ./run.sh init <domain> <owner-pubkey-hex>, or install .env.example as a
+mode-600 .env and replace every CHANGE_ME value manually. Do not start
+production with generated secrets missing.
 MSG
     exit 1
   fi
@@ -51,6 +152,10 @@ MSG
 }
 
 case "${1:-help}" in
+  init)
+    shift
+    init_env "$@"
+    ;;
   start|up)
     require_env
     compose up -d --wait
@@ -100,6 +205,8 @@ case "${1:-help}" in
 Usage: ./run.sh <command>
 
 Commands:
+  init <domain> <owner-pubkey-hex>
+                Create a new mode-600 .env with stable generated secrets
   start         Start Buzz with docker compose up -d --wait
   stop          Stop containers without deleting volumes
   restart       Recreate the relay after env/image changes
