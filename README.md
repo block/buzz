@@ -177,7 +177,7 @@ For a split-terminal workflow (relay logs separate from Vite output), use `just 
 
 Want a single-node / VPS relay instead of the local-dev stack? Use the production Compose bundle in [`deploy/compose/`](deploy/compose/README.md) (`docker compose` + Postgres, Redis, MinIO, optional Caddy/TLS). The root [`docker-compose.yml`](docker-compose.yml) is for day-to-day development only.
 
-For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
+For standalone automation, [`buzz-cli`](crates/buzz-cli) accepts an operator-provided identity and returns structured JSON. Managed ACP agents use a harness-owned signer and the typed `buzz_send_message` tool instead; their model-controlled shell never receives `BUZZ_PRIVATE_KEY`.
 
 ---
 
