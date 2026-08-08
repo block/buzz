@@ -8,9 +8,11 @@ use super::*;
 use crate::commands::personas::snapshot::import::{
     decode_snapshot_for_import, parse_snapshot_payload_from_bytes,
 };
+use crate::managed_agents::agent_snapshot::{make_png_with_text, PNG_CHUNK_KEYWORD};
 use crate::managed_agents::agent_snapshot_envelope::{
     encode_locked_snapshot_png, encrypt_snapshot_envelope, ChunkPayload, LOCKED_CARD_REFUSAL,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// Build a keyed instance record holding real key material, so the
 /// agent-endpoint unlock path resolves exactly as production does.
@@ -126,4 +128,46 @@ fn plain_decoder_refuses_locked_cards() {
     let (_snapshot, png) = locked_png(&owner, &agent);
     let err = decode_snapshot_from_bytes(&png).unwrap_err();
     assert_eq!(err, LOCKED_CARD_REFUSAL);
+}
+
+#[test]
+fn locked_import_rejects_unknown_envelope_fields_from_json_and_png() {
+    let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+    let snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    let envelope = encrypt_snapshot_envelope(&snapshot, &owner, &agent.public_key()).unwrap();
+
+    for (field, nested) in [("keyDerivation", false), ("transport", true)] {
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        if nested {
+            value["encryption"][field] = serde_json::json!("future");
+        } else {
+            value[field] = serde_json::json!("future");
+        }
+        let json = serde_json::to_vec(&value).unwrap();
+        let png = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(&json)).unwrap();
+
+        for bytes in [json.as_slice(), png.as_slice()] {
+            let error = parse_snapshot_payload_from_bytes(bytes).unwrap_err();
+            assert!(error.contains("contains fields this version of Buzz does not support"));
+            assert!(error.contains(field));
+        }
+    }
+}
+
+#[test]
+fn newer_locked_envelope_version_precedes_unknown_fields_for_json_and_png() {
+    let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+    let snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    let envelope = encrypt_snapshot_envelope(&snapshot, &owner, &agent.public_key()).unwrap();
+    let mut value = serde_json::to_value(envelope).unwrap();
+    value["version"] = serde_json::json!(2);
+    value["keyDerivation"] = serde_json::json!("future");
+    let json = serde_json::to_vec(&value).unwrap();
+    let png = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(&json)).unwrap();
+
+    for bytes in [json.as_slice(), png.as_slice()] {
+        let error = parse_snapshot_payload_from_bytes(bytes).unwrap_err();
+        assert!(error.contains("Unsupported locked card envelope version 2"));
+        assert!(error.contains("Update Buzz"));
+    }
 }

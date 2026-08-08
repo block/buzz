@@ -597,3 +597,28 @@ fn unsupported_version_is_rejected() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unsupported snapshot version"));
 }
+
+#[test]
+fn newer_version_reports_version_before_unknown_fields() {
+    let snapshot = build_snapshot(&minimal_record(), MemoryLevel::None, vec![], None);
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["version"] = serde_json::json!(2);
+    value["definition"]["skills"] = serde_json::json!([{"name": "analysis"}]);
+
+    let error = decode_snapshot_json(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+    assert!(error.contains("Unsupported snapshot version 2"));
+    assert!(error.contains("Update Buzz"));
+}
+
+#[test]
+fn v1_rejects_unknown_portable_capabilities_instead_of_dropping_them() {
+    for field in ["skills", "toolRequirements"] {
+        let snapshot = build_snapshot(&minimal_record(), MemoryLevel::None, vec![], None);
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["definition"][field] = serde_json::json!([{"name": "analytics"}]);
+
+        let error = decode_snapshot_json(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.contains("contains fields this version of Buzz does not support"));
+        assert!(error.contains(field));
+    }
+}
