@@ -167,6 +167,10 @@ pub struct TurnUsage {
     /// a decrease here never flips `delta_reliable` or invalidates the
     /// input/output deltas.
     pub turn_cache_read_tokens: Option<u64>,
+    /// Per-turn cache-write token delta; `None` when unreported.
+    pub turn_cache_write_tokens: Option<u64>,
+    /// Whether cumulative token counters are available for this record.
+    pub cumulative_tokens_present: bool,
     /// Session-cumulative input tokens as reported by goose at end of turn.
     pub cumulative_input_tokens: u64,
     /// Session-cumulative output tokens as reported by goose at end of turn.
@@ -181,9 +185,116 @@ pub struct TurnUsage {
     /// any harness that omits `accumulatedCachedInputTokens`).
     /// `Some(0)` when the harness reported zero cache hits.
     pub cumulative_cache_read_tokens: Option<u64>,
+    /// Session-cumulative cache-write tokens as reported by buzz-agent.
+    pub cumulative_cache_write_tokens: Option<u64>,
     /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
     /// harness did not include the model in its usage notification.
     pub model: Option<String>,
+    /// Whether at least one cumulative counter is available for this record.
+    /// Standard ACP prompt usage is per-turn; only Claude's cumulative cost
+    /// notification makes its record cumulative.
+    pub has_cumulative_usage: bool,
+}
+
+/// Per-turn usage carried by the experimental ACP `session/prompt` response.
+/// Claude and Codex both scope these fields to the completed prompt and expose
+/// cache-exclusive `input_tokens` alongside cache reads/writes. Per NIP-AM
+/// "Numeric validity and token semantics" (docs/nips/NIP-AM.md:167-174),
+/// `StandardUsageTracker` folds those components into the NIP-AM-inclusive
+/// input total; the cache fields remain informational subsets.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptResponseUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_read_tokens: Option<u64>,
+    pub cached_write_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandardAdapterKind {
+    Claude,
+    Codex,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StandardUsageTracker {
+    sessions: HashMap<String, u64>,
+    in_flight_session: Option<String>,
+    pending_cost: Option<f64>,
+    pending_prompt: Option<(String, PromptResponseUsage, StandardAdapterKind)>,
+}
+
+impl StandardUsageTracker {
+    pub(crate) fn begin_turn(&mut self, session_id: &str) {
+        self.in_flight_session = Some(session_id.to_string());
+        self.pending_cost = None;
+        self.pending_prompt = None;
+    }
+
+    /// Claude's `usage_update.cost.amount` is a raw session-cumulative total.
+    /// It belongs in NIP-AM `cumulative`, not a client-computed turn delta.
+    pub(crate) fn record_cost(&mut self, session_id: &str, cost: f64) {
+        if cost.is_finite() && cost >= 0.0 && self.in_flight_session.as_deref() == Some(session_id)
+        {
+            self.pending_cost = Some(cost);
+        }
+    }
+
+    pub(crate) fn record_prompt_usage(
+        &mut self,
+        session_id: &str,
+        usage: PromptResponseUsage,
+        adapter: StandardAdapterKind,
+    ) {
+        if self.in_flight_session.as_deref() == Some(session_id) {
+            self.pending_prompt = Some((session_id.to_string(), usage, adapter));
+        }
+    }
+
+    pub(crate) fn take(&mut self) -> Option<TurnUsage> {
+        self.in_flight_session = None;
+        let cost = self.pending_cost.take();
+        let (session_id, usage, adapter) = self.pending_prompt.take()?;
+        let turn_seq = {
+            let seq = self.sessions.entry(session_id.clone()).or_default();
+            *seq += 1;
+            *seq
+        };
+        // Both standard adapters expose cache-exclusive input alongside separate
+        // cache components. NIP-AM requires the inclusive input-side total;
+        // cache fields remain informational subsets (NIP-AM.md:167-174).
+        let turn_input_tokens = usage
+            .input_tokens
+            .checked_add(usage.cached_read_tokens.unwrap_or_default())
+            .and_then(|input| input.checked_add(usage.cached_write_tokens.unwrap_or_default()));
+        Some(TurnUsage {
+            session_id,
+            turn_seq,
+            // PromptResponse.usage is already per-turn; no cumulative baseline
+            // is required for these token counts.
+            delta_reliable: true,
+            turn_input_tokens,
+            turn_output_tokens: Some(usage.output_tokens),
+            // Claude computes this value by adding categories, whereas Codex
+            // forwards provider-shaped tokenUsage.last.totalTokens.
+            turn_total_tokens: (adapter == StandardAdapterKind::Codex)
+                .then_some(usage.total_tokens),
+            turn_cost_usd: None,
+            turn_cache_read_tokens: usage.cached_read_tokens,
+            turn_cache_write_tokens: usage.cached_write_tokens,
+            cumulative_tokens_present: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: cost,
+            cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
+            model: None,
+            has_cumulative_usage: cost.is_some(),
+        })
+    }
 }
 
 /// Tracks per-session cumulative usage state across turns.
@@ -343,12 +454,16 @@ impl UsageTracker {
                 turn_total_tokens: turn_total,
                 turn_cost_usd: turn_cost,
                 turn_cache_read_tokens: turn_cache_read,
+                turn_cache_write_tokens: None,
+                cumulative_tokens_present: true,
                 cumulative_input_tokens: current_input,
                 cumulative_output_tokens: current_output,
                 cumulative_total_tokens: current_total,
                 cumulative_cost_usd: current_cost,
                 cumulative_cache_read_tokens: current_cached_input,
+                cumulative_cache_write_tokens: None,
                 model: payload.model.clone(),
+                has_cumulative_usage: true,
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -1449,12 +1564,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 700,
             cumulative_output_tokens: 200,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None, // harness did not report the field
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -1487,12 +1606,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: Some(300),
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 700,
             cumulative_output_tokens: 200,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: Some(600),
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);

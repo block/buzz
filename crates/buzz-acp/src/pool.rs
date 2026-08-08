@@ -3658,10 +3658,8 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
 ///
 /// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
 ///   per-turn i/o/total/cost deltas for this turn.
-/// - `cumulative` always carries the session-aggregate i/o/cost totals.
-///   `total_tokens` is `Some` only when the session accumulated a genuine
-///   provider-reported total on every turn — never derived from i/o sums
-///   (NIP-AM MUST NOT).
+/// - `cumulative` is omitted when this harness has no cumulative counters;
+///   otherwise it carries the session-aggregate values it reported.
 pub(crate) fn build_turn_metric_counts(
     usage: &crate::usage::TurnUsage,
 ) -> (
@@ -3682,9 +3680,7 @@ pub(crate) fn build_turn_metric_counts(
             // Field-local: present when the cumulative counter was monotonic
             // across this turn. Zero means no cache hits this turn (not absent).
             cache_read_tokens: usage.turn_cache_read_tokens,
-            // buzz-agent does not emit a cache-write count on the wire today;
-            // leave None rather than deriving it from other fields.
-            cache_write_tokens: None,
+            cache_write_tokens: usage.turn_cache_write_tokens,
         })
     } else {
         // Defense-in-depth: UsageTracker already sets all turn_* fields to None
@@ -3693,22 +3689,17 @@ pub(crate) fn build_turn_metric_counts(
         // accidentally publishing unreliable per-turn counts.
         None
     };
-    let cumulative_counts = Some(TokenCounts {
-        input_tokens: Some(usage.cumulative_input_tokens),
-        output_tokens: Some(usage.cumulative_output_tokens),
-        // Present when every turn in the session reported a genuine provider
-        // total. None when the session has never emitted one or any turn lacked
-        // one. Never derived from input+output (NIP-AM MUST NOT).
+    let cumulative_counts = usage.has_cumulative_usage.then_some(TokenCounts {
+        input_tokens: usage
+            .cumulative_tokens_present
+            .then_some(usage.cumulative_input_tokens),
+        output_tokens: usage
+            .cumulative_tokens_present
+            .then_some(usage.cumulative_output_tokens),
         total_tokens: usage.cumulative_total_tokens,
         cost_usd: usage.cumulative_cost_usd,
-        // Session-cumulative cache-read tokens; None when the harness never
-        // reported this field (e.g. goose or older buzz-agent sessions).
-        // Passes through directly — do not wrap in Some() as the field already
-        // carries provenance (None vs Some(0) are distinct meanings).
         cache_read_tokens: usage.cumulative_cache_read_tokens,
-        // buzz-agent does not emit a cache-write count on the wire today;
-        // leave None rather than deriving it from other fields.
-        cache_write_tokens: None,
+        cache_write_tokens: usage.cumulative_cache_write_tokens,
     });
     (turn_counts, cumulative_counts)
 }
@@ -6162,12 +6153,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -6198,12 +6193,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: Some(0.001),
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
             cumulative_total_tokens: None,
             cumulative_cost_usd: Some(0.001),
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
         // Will try to publish and fail (no real relay) but must not panic.
         publish_agent_turn_metric(
@@ -6235,12 +6234,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -6272,12 +6275,16 @@ mod tests {
             turn_total_tokens: None,
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
             cumulative_total_tokens: None,
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(
@@ -6306,12 +6313,16 @@ mod tests {
             turn_total_tokens: Some(130), // genuine per-turn total
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 500,
             cumulative_output_tokens: 120,
             cumulative_total_tokens: Some(620), // genuine cumulative total
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -6355,12 +6366,16 @@ mod tests {
             turn_total_tokens: None, // provider did not supply a total
             turn_cost_usd: None,
             turn_cache_read_tokens: None,
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: true,
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 60,
             cumulative_total_tokens: None, // session has no total
             cumulative_cost_usd: None,
             cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
             model: None,
+            has_cumulative_usage: true,
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -6396,6 +6411,87 @@ mod tests {
         assert_ne!(
             turn_json["totalTokens"], derived_sum,
             "total_tokens must never equal input+output when provider omitted it"
+        );
+    }
+
+    #[test]
+    fn test_build_turn_metric_counts_claude_tokens_and_cumulative_cost() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "claude-session".to_string(),
+            turn_seq: 3,
+            delta_reliable: true,
+            turn_input_tokens: Some(155),
+            turn_output_tokens: Some(20),
+            turn_total_tokens: None,
+            turn_cost_usd: None,
+            turn_cache_read_tokens: Some(30),
+            turn_cache_write_tokens: Some(25),
+            cumulative_tokens_present: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: Some(0.042),
+            cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
+            model: None,
+            has_cumulative_usage: true,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+        let turn_json = serde_json::to_value(turn.expect("Claude turn counts")).unwrap();
+        let cumulative_json =
+            serde_json::to_value(cumulative.expect("Claude cumulative cost")).unwrap();
+
+        // NIP-AM inputTokens is inclusive: Claude's 100 non-cached input plus
+        // the 30 cache-read and 25 cache-write subsets.
+        assert_eq!(turn_json["inputTokens"], serde_json::json!(155));
+        assert_eq!(turn_json["outputTokens"], serde_json::json!(20));
+        assert!(turn_json["totalTokens"].is_null());
+        assert!(turn_json["costUsd"].is_null());
+        assert_eq!(turn_json["cacheReadTokens"], serde_json::json!(30));
+        assert_eq!(turn_json["cacheWriteTokens"], serde_json::json!(25));
+        assert!(cumulative_json["inputTokens"].is_null());
+        assert!(cumulative_json["outputTokens"].is_null());
+        assert!(cumulative_json["totalTokens"].is_null());
+        assert_eq!(cumulative_json["costUsd"], serde_json::json!(0.042));
+    }
+
+    #[test]
+    fn test_build_turn_metric_counts_codex_tokens_without_cumulative() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "codex-session".to_string(),
+            turn_seq: 3,
+            delta_reliable: true,
+            turn_input_tokens: Some(130),
+            turn_output_tokens: Some(10),
+            turn_total_tokens: Some(140),
+            turn_cost_usd: None,
+            turn_cache_read_tokens: Some(40),
+            turn_cache_write_tokens: None,
+            cumulative_tokens_present: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: None,
+            cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
+            model: None,
+            has_cumulative_usage: false,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+        let turn_json = serde_json::to_value(turn.expect("Codex turn counts")).unwrap();
+
+        // NIP-AM.md:167-174 requires cache reads to be folded into inputTokens.
+        assert_eq!(turn_json["inputTokens"], serde_json::json!(130));
+        assert_eq!(turn_json["outputTokens"], serde_json::json!(10));
+        assert_eq!(turn_json["totalTokens"], serde_json::json!(140));
+        assert!(turn_json["costUsd"].is_null());
+        assert_eq!(turn_json["cacheReadTokens"], serde_json::json!(40));
+        assert!(turn_json.get("cacheWriteTokens").is_none());
+        assert!(
+            cumulative.is_none(),
+            "Codex does not report cumulative usage"
         );
     }
 
