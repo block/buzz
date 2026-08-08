@@ -83,8 +83,18 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
+    ///
+    /// **SECURITY**: Passing the key directly as an argument exposes it in
+    /// shell history and process listings. Prefer `BUZZ_PRIVATE_KEY` env var
+    /// or `--private-key-file`.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Path to a file containing the Nostr private key (hex or nsec).
+    /// The file is read at startup; the key never appears in shell history
+    /// or process listings. File should have mode 0600.
+    #[arg(long, value_name = "PATH", help_heading = "Security")]
+    private_key_file: Option<std::path::PathBuf>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -1955,11 +1965,61 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
+    //
+    // #4032: prefer --private-key-file over --private-key for security.
+    // When the key comes from a file, it never appears in shell history
+    // or process listings. When it comes from argv, warn the user.
+    let private_key_str = match (cli.private_key, cli.private_key_file) {
+        // --private-key-file provided: read key from file.
+        (None, Some(ref path)) => {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                CliError::Auth(format!("cannot read private key file {}: {e}", path.display()))
+            })?;
+            // Trim whitespace/newlines — the key may be the entire file content.
+            let trimmed = content.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(CliError::Auth(format!(
+                    "private key file {} is empty",
+                    path.display()
+                )));
+            }
+            trimmed
+        }
+        // --private-key or env var used directly: warn about exposure.
+        (Some(ref key), None) => {
+            // Distinguish argv from env var by checking if the value is in
+            // the environment. If it is, it's not in shell history (env vars
+            // don't appear in `ps` output for short-lived processes, and
+            // they're not persisted in shell history files).
+            if std::env::var("BUZZ_PRIVATE_KEY").is_err() {
+                // Key came from argv, not env var — warn.
+                eprintln!(
+                    "warning: --private-key exposes your key in shell history and \
+                     process listings; prefer --private-key-file or BUZZ_PRIVATE_KEY"
+                );
+            }
+            key.clone()
+        }
+        // Both provided: conflict.
+        (Some(_), Some(_)) => {
+            return Err(CliError::Auth(
+                "specify only one of --private-key (or BUZZ_PRIVATE_KEY) \
+                 and --private-key-file"
+                    .into(),
+            ));
+        }
+        // Neither provided.
+        (None, None) => {
+            return Err(CliError::Auth(
+                "BUZZ_PRIVATE_KEY is required (use --private-key-file, \
+                 --private-key, or set BUZZ_PRIVATE_KEY)"
+                    .into(),
+            ));
+        }
+    };
+
     let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+        .map_err(|e| CliError::Key(format!("invalid private key: {e}")))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
     //
