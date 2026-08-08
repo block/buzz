@@ -57,6 +57,7 @@ async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     url
 }
 
+#[derive(Clone)]
 struct CannedResponse {
     status: u16,
     body: Value,
@@ -77,6 +78,38 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
 async fn spawn_capturing_fake_llm_with_statuses(
     responses: Vec<CannedResponse>,
 ) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let (url, captures, mut pick_rx, release_tx) =
+        spawn_capturing_fake_llm_delayed(responses).await;
+    // Default behaviour for existing tests: release each picked response
+    // immediately (no artificial delay).
+    tokio::spawn(async move {
+        while let Some(r) = pick_rx.recv().await {
+            let _ = release_tx.send(r);
+        }
+    });
+    (url, captures)
+}
+
+/// Fake provider with test-controlled response timing: for each incoming
+/// request the server pops the next canned response and sends it to the test
+/// over the pick channel; the test returns it (often after a delay or after
+/// firing another client call) over the release channel, and only then is it
+/// written to the socket. This lets a test deterministically interleave e.g.
+/// a steer into a specific provider round. If no response is released within
+/// 10s the originally picked response is written anyway (safety net).
+///
+/// Returns (url, captures, pick_rx, release_tx).
+async fn spawn_capturing_fake_llm_delayed(
+    responses: Vec<CannedResponse>,
+) -> (
+    String,
+    Arc<Mutex<Vec<Value>>>,
+    tokio::sync::mpsc::UnboundedReceiver<CannedResponse>,
+    tokio::sync::mpsc::UnboundedSender<CannedResponse>,
+) {
+    let (pick_tx, pick_rx) = tokio::sync::mpsc::unbounded_channel::<CannedResponse>();
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel::<CannedResponse>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
@@ -90,6 +123,8 @@ async fn spawn_capturing_fake_llm_with_statuses(
             };
             let queue = queue.clone();
             let captures = captures_clone.clone();
+            let pick_tx = pick_tx.clone();
+            let release_rx = release_rx.clone();
             tokio::spawn(async move {
                 // Read headers.
                 let mut buf = Vec::new();
@@ -138,20 +173,29 @@ async fn spawn_capturing_fake_llm_with_statuses(
                     captures.lock().await.push(parsed);
                 }
 
-                // Send canned response.
-                let response = queue.lock().await.pop_front().unwrap_or(CannedResponse {
+                // Pick the canned response for this request and hand it to
+                // the test; write only what the test releases (10s fallback).
+                let picked = queue.lock().await.pop_front().unwrap_or(CannedResponse {
                     status: 500,
                     body: json!({ "error": "no canned response" }),
                 });
-                let body_s = serde_json::to_string(&response.body).unwrap();
-                let reason = if response.status == 200 {
+                let _ = pick_tx.send(picked.clone());
+                let released = {
+                    let mut rx = release_rx.lock().await;
+                    match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                        Ok(Some(r)) => r,
+                        _ => picked, // timeout or channel closed
+                    }
+                };
+                let body_s = serde_json::to_string(&released.body).unwrap();
+                let reason = if released.status == 200 {
                     "OK"
                 } else {
                     "Error"
                 };
                 let resp = format!(
                     "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response.status,
+                    released.status,
                     reason,
                     body_s.len(),
                     body_s,
@@ -161,7 +205,7 @@ async fn spawn_capturing_fake_llm_with_statuses(
             });
         }
     });
-    (url, captures)
+    (url, captures, pick_rx, release_tx)
 }
 
 struct Harness {
@@ -856,6 +900,156 @@ async fn steer_folds_into_active_turn_without_cancelling() {
     assert!(
         saw_steer,
         "steered text never reached the provider; captured requests: {reqs:#?}"
+    );
+    drop(reqs);
+    h.shutdown().await;
+}
+
+/// Regression test for issue #4942 ("buzz-agent can acknowledge a steer
+/// dropped during turn completion, losing the message"). A steer accepted
+/// while the run is still live but racing the run teardown must never be
+/// dropped silently: it is folded into session history and surfaces as a
+/// user message in the very NEXT provider round. The easier case — the steer
+/// lands before completion and folds into the same turn — also satisfies the
+/// invariant; we accept either, and only assert that SOME request across the
+/// two turns carries the steer text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_steer_is_never_lost_across_turn_boundary() {
+    let (url, captures, mut pick_rx, release_tx) = spawn_capturing_fake_llm_delayed(vec![
+        CannedResponse {
+            status: 200,
+            body: openai_tool_call("call_steer_race", "fake__noop", json!({})),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("turn one done"),
+        },
+        CannedResponse {
+            status: 200,
+            body: openai_text("turn two done"),
+        },
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"first task"}],
+            }),
+        )
+        .await;
+    let run_id = recv_active_run_id(&mut h).await;
+
+    // Round 1's response has been REQUESTED — the provider is paused waiting
+    // for us to release it, so the run is definitely in flight here. Fire the
+    // steer at this exact moment: it is acknowledged and queued BEFORE the
+    // round's drain, i.e. precisely the #4942 window (accepted late, racing
+    // the final drain before teardown).
+    let round1 = pick_rx.recv().await.expect("round 1 pick");
+    let steer_text = "LATE-STEER-CANARY: apply this next turn";
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": run_id,
+                "prompt": [{"type":"text","text": steer_text}],
+            }),
+        )
+        .await;
+
+    // Give the steer handler a beat to process, then release round 1. The
+    // remainder of the run (and turn 2) resolve un-gated: release every pick
+    // immediately from here on.
+    let _ = release_tx.send(round1);
+    let release_tx2 = release_tx.clone();
+    tokio::spawn(async move {
+        while let Some(r) = pick_rx.recv().await {
+            let _ = release_tx2.send(r);
+        }
+    });
+
+    let mut steer_ok = false;
+    let mut turn_done = false;
+    for _ in 0..30 {
+        if steer_ok && turn_done {
+            break;
+        }
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            assert!(
+                v["result"].is_object(),
+                "steer was rejected even though the run was live when sent: {v:#?}"
+            );
+            steer_ok = true;
+        } else if v["id"] == json!(p_id) {
+            assert_eq!(v["result"]["stopReason"], "end_turn");
+            turn_done = true;
+        }
+    }
+    assert!(steer_ok, "steer was not acknowledged");
+    assert!(turn_done, "turn 1 did not complete");
+
+    // If the steer already folded into turn 1, the invariant is met — the
+    // message reached the provider in round 1 and there's nothing left to
+    // prove. Skip turn 2 in that (benign) case.
+    let steer_reached_turn1 = captures.lock().await.iter().any(|req| {
+        req["messages"].as_array().is_some_and(|msgs| {
+            msgs.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(steer_text))
+            })
+        })
+    });
+
+    if !steer_reached_turn1 {
+        // The steer raced the completion teardown — it must have been folded
+        // into history at the end of turn 1 and surface in turn 2.
+        let p2 = h
+            .send(
+                "session/prompt",
+                json!({
+                    "sessionId": sid,
+                    "prompt": [{"type":"text","text":"second task"}],
+                }),
+            )
+            .await;
+        let mut turn2_done = false;
+        for _ in 0..30 {
+            if turn2_done {
+                break;
+            }
+            let v = h.recv().await;
+            if v["id"] == json!(p2) {
+                turn2_done = true;
+            }
+        }
+        assert!(turn2_done, "turn 2 did not complete");
+    }
+
+    // The invariant: the acknowledged steer was NOT lost — it appears in some
+    // provider request, either folded into turn 1 before completion or
+    // drained into history afterwards and surfaced in turn 2.
+    let reqs = captures.lock().await;
+    let saw_steer = reqs.iter().any(|req| {
+        req["messages"].as_array().is_some_and(|msgs| {
+            msgs.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(steer_text))
+            })
+        })
+    });
+    assert!(
+        saw_steer,
+        "acknowledged steer was silently dropped (#4942); captured requests: {reqs:#?}"
     );
     drop(reqs);
     h.shutdown().await;
