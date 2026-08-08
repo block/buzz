@@ -98,9 +98,22 @@ pub async fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolRe
     }
 
     // Apply the size cap to the full output (body + Supporting Files section)
-    // so the total tool result stays within MAX_SKILL_BODY_BYTES.
+    // so the total tool result stays within MAX_SKILL_BODY_BYTES. If we had
+    // to truncate, append an explicit in-band marker so the model knows the
+    // tail (often format/refusal/verification instructions) is missing, and
+    // emit a server-side warn so logs capture it too. See issue #4163.
     let output = if output.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
+        let original_len = output.len();
+        let mut truncated = truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned();
+        truncated.push_str(&format!(
+            "\n\n[truncated: {MAX_SKILL_BODY_BYTES} of {original_len} bytes shown]"
+        ));
+        tracing::warn!(
+            skill_body_bytes = original_len,
+            cap = MAX_SKILL_BODY_BYTES,
+            "load_skill truncated oversized skill output"
+        );
+        truncated
     } else {
         output
     };
@@ -204,7 +217,20 @@ async fn load_supporting_file(
                         skill_name, rel_path_owned, content
                     );
                     let output = if output.len() > MAX_SKILL_BODY_BYTES {
-                        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
+                        let original_len = output.len();
+                        let mut truncated =
+                            truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned();
+                        truncated.push_str(&format!(
+                            "\n\n[truncated: {MAX_SKILL_BODY_BYTES} of {original_len} bytes shown]"
+                        ));
+                        tracing::warn!(
+                            skill = %skill_name,
+                            rel_path = %rel_path_owned,
+                            file_bytes = original_len,
+                            cap = MAX_SKILL_BODY_BYTES,
+                            "load_skill truncated oversized supporting file"
+                        );
+                        truncated
                     } else {
                         output
                     };
@@ -528,11 +554,24 @@ mod tests {
         let result = call_load_skill(&serde_json::json!({"name": "big"}), &skills).await;
         assert!(!result.is_error);
         let text = text_content(&result);
+        // Truncated body is capped at MAX_SKILL_BODY_BYTES; an in-band
+        // truncation marker is appended so the model knows the tail is
+        // missing (issue #4163).
         assert!(
-            text.len() <= MAX_SKILL_BODY_BYTES,
-            "output length {} exceeds MAX_SKILL_BODY_BYTES {}",
-            text.len(),
-            MAX_SKILL_BODY_BYTES
+            text.contains("[truncated:"),
+            "missing truncation marker in output: {}",
+            &text[text.len().saturating_sub(200)..]
+        );
+        assert!(
+            text.len() > MAX_SKILL_BODY_BYTES,
+            "expected marker appended past cap, got {}",
+            text.len()
+        );
+        // Marker stays small — well under 200 bytes of overhead.
+        assert!(
+            text.len() < MAX_SKILL_BODY_BYTES + 200,
+            "output length {} unexpectedly large",
+            text.len()
         );
     }
 
@@ -561,15 +600,47 @@ mod tests {
         .await;
         assert!(!result.is_error);
         let text = text_content(&result);
+        // Truncated body is capped at MAX_SKILL_BODY_BYTES; an in-band
+        // truncation marker is appended so the model knows the tail is
+        // missing (issue #4163).
         assert!(
-            text.len() <= MAX_SKILL_BODY_BYTES,
-            "output length {} exceeds MAX_SKILL_BODY_BYTES {}",
-            text.len(),
-            MAX_SKILL_BODY_BYTES
+            text.contains("[truncated:"),
+            "missing truncation marker in supporting-file output"
+        );
+        assert!(
+            text.len() > MAX_SKILL_BODY_BYTES,
+            "expected marker appended past cap, got {}",
+            text.len()
         );
         assert!(
             text.starts_with("# Loaded: big/references/huge.md"),
             "missing supporting-file header: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_under_cap_has_no_truncation_marker() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: small\ndescription: desc\n---\nTiny body.\n",
+        )
+        .unwrap();
+
+        let skills = vec![make_skill_with_files("small", "desc", skill_md, vec![])];
+        let result = call_load_skill(&serde_json::json!({"name": "small"}), &skills).await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(
+            !text.contains("[truncated:"),
+            "unexpected truncation marker on under-cap output: {text}"
+        );
+        assert!(
+            text.len() <= MAX_SKILL_BODY_BYTES,
+            "under-cap body unexpectedly large: {}",
+            text.len()
         );
     }
 }
