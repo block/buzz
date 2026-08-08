@@ -855,18 +855,20 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// Only returns `Some` when the filter contains exactly one `#h` value and it
+/// is a parseable UUID. Multi-value `#h` filters use NIP-01 OR semantics and
+/// must be evaluated by the Rust-side `filters_match` post-filter, not pinned
+/// to a single arbitrary channel in SQL.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter.generic_tags.get(&h_tag).and_then(|vs| {
+        if vs.len() == 1 {
+            vs.iter().next()?.parse::<uuid::Uuid>().ok()
+        } else {
+            None
         }
-    }
-    None
+    })
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1584,6 +1586,68 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_single_h() {
+        let channel_id = uuid::Uuid::new_v4();
+        let filter = filter_with_channel(channel_id);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel_id));
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_multi_h_returns_none() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter = Filter::new().custom_tag(
+            SingleLetterTag::lowercase(Alphabet::H),
+            channel_a.to_string(),
+        );
+        let filter = filter.custom_tag(
+            SingleLetterTag::lowercase(Alphabet::H),
+            channel_b.to_string(),
+        );
+        assert_eq!(
+            extract_channel_id_from_filter(&filter),
+            None,
+            "multi-value #h must not be pinned to an arbitrary channel"
+        );
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_no_h_returns_none() {
+        assert_eq!(extract_channel_id_from_filter(&Filter::new()), None);
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_invalid_h_returns_none() {
+        let filter =
+            Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::H), "not-a-uuid");
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+    }
+
+    #[test]
+    fn build_event_query_from_filter_multi_h_leaves_channel_id_unset() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter = Filter::new()
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                channel_a.to_string(),
+            )
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::H),
+                channel_b.to_string(),
+            );
+
+        let query =
+            filter_to_query_params(&filter, extract_channel_id_from_filter(&filter), community);
+
+        assert_eq!(
+            query.channel_id, None,
+            "multi-value #h must not set channel_id"
+        );
     }
 
     #[test]
