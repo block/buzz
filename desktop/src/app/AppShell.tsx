@@ -42,6 +42,7 @@ import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManagedAgentRuntimeReconciliation";
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
+import { useAgentRecoverySupervisor } from "@/features/agents/lib/useAgentRecoverySupervisor";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
@@ -184,11 +185,10 @@ export function AppShell() {
     communitiesHook.activeCommunity?.relayUrl,
   );
   useAgentsDataRefresh();
-  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
   useAutoRestartPolicy();
-  // Owner-global observer ingestion: receives + decrypts agent observer
-  // frames and keeps derived active-turn liveness in sync app-wide, so no
-  // individual screen/panel has to mount its own bridge for ingestion.
+  useAgentRecoverySupervisor();
+  // Owner-global observer ingestion keeps active-turn liveness in sync app-wide,
+  // so individual screens do not need to mount their own ingestion bridge.
   // Intentionally mounted without a `startupReady`/identity guard: before
   // `currentPubkey` resolves the hook ingests managed agents only, and
   // relay-owned agents join automatically once identity arrives. Adding a

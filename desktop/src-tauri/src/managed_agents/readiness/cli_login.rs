@@ -61,6 +61,11 @@ pub(super) fn requirements(
                         diagnostic: stderr_excerpt,
                     }]
                 }
+                cli_probe::ProbeOutcome::TimedOut => vec![missing_requirement(
+                    probe_args,
+                    setup_copy,
+                    AcpAvailabilityStatus::Available,
+                )],
             }
         }
         other => vec![missing_requirement(probe_args, setup_copy, other)],

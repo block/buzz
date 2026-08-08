@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tauri::{AppHandle, Manager};
@@ -12,6 +13,12 @@ use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
+
+static MANAGED_AGENT_STORE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn managed_agent_store_generation() -> u64 {
+    MANAGED_AGENT_STORE_GENERATION.load(Ordering::Acquire)
+}
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
@@ -378,7 +385,9 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // keyring is unreachable, the key stays inline.
     persist_agent_keys(&mut sorted);
 
-    write_agent_store(app, definitions, sorted)
+    write_agent_store(app, definitions, sorted)?;
+    crate::managed_agents::readiness::cli_probe::clear_login_probe_cache();
+    Ok(())
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
@@ -391,7 +400,9 @@ pub(crate) fn save_agent_definitions(
     instances.retain(|record| !record.pubkey.is_empty());
     let mut definitions = definitions.to_vec();
     definitions.retain(|record| record.pubkey.is_empty());
-    write_agent_store(app, definitions, instances)
+    write_agent_store(app, definitions, instances)?;
+    crate::managed_agents::readiness::cli_probe::clear_login_probe_cache();
+    Ok(())
 }
 
 /// Serialize definitions + instances into the single unified store file.
@@ -414,7 +425,9 @@ fn write_agent_store(
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(&path, &payload)?;
+    MANAGED_AGENT_STORE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    Ok(())
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
