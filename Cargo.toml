@@ -29,6 +29,7 @@ members = [
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
     "examples/countdown-bot",
+    "examples/slack-connect-bridge",
 ]
 exclude = ["desktop/src-tauri"]
 resolver = "2"
