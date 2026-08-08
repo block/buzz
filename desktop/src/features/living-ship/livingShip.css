@@ -1,0 +1,400 @@
+.living-ship-screen {
+  --living-ship-text-3xs: 0.5rem;
+  --living-ship-text-2xs: 0.6875rem;
+  --living-ship-text-xs: 0.75rem;
+  --living-ship-text-sm: 0.875rem;
+  --living-ship-text-base: 1rem;
+  --living-ship-text-2xl: 1.5rem;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: auto;
+  background: #06152b;
+  color: #f6f1df;
+}
+
+.living-ship-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 1.25rem 1.5rem 1rem;
+  background: #081c36;
+  border-bottom: 1px solid rgb(92 154 176 / 28%);
+}
+
+.living-ship-header h1 {
+  margin-top: 0.2rem;
+  font-size: var(--living-ship-text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.living-ship-header p {
+  margin-top: 0.25rem;
+  color: #a9bfd0;
+  font-size: var(--living-ship-text-sm);
+}
+
+.living-ship-kicker {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #72d7dd;
+  font-size: var(--living-ship-text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.living-ship-legend {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem 1rem;
+  color: #c6d6df;
+  font-size: var(--living-ship-text-2xs);
+}
+
+.living-ship-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.living-ship-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  stroke-width: 0;
+}
+
+.living-ship-dot.is-working {
+  fill: #58dfdf;
+}
+.living-ship-dot.is-collaborating {
+  fill: #dca8ff;
+}
+.living-ship-dot.is-idle {
+  fill: #f3bc62;
+}
+.living-ship-dot.is-offline {
+  fill: #778796;
+}
+
+.living-ship-workspace {
+  position: relative;
+  width: 100%;
+  max-width: 120rem;
+  margin: auto;
+}
+
+.living-ship-canvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--ship-scene-width) / var(--ship-scene-height);
+  isolation: isolate;
+  overflow: hidden;
+  background: #071a35;
+}
+
+.living-ship-scene {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  image-rendering: pixelated;
+  user-select: none;
+}
+
+.living-ship-room {
+  position: absolute;
+  z-index: 2;
+  left: var(--room-x);
+  top: var(--room-y);
+  width: var(--room-width);
+  height: var(--room-height);
+  padding: 0.2rem;
+  border: 1px solid transparent;
+  border-radius: 0.2rem;
+  background: transparent;
+  color: #fff2cd;
+  cursor: pointer;
+  font-size: var(--living-ship-text-3xs);
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-shadow: 0 1px 2px #000;
+  text-transform: uppercase;
+}
+
+.living-ship-room:hover,
+.living-ship-room:focus-visible,
+.living-ship-room[data-selected="true"] {
+  border-color: #7ce7e8;
+  background: rgb(46 198 201 / 15%);
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px rgb(5 23 43 / 85%),
+    0 0 1rem rgb(82 225 226 / 36%);
+}
+
+.living-ship-room > span {
+  display: inline-block;
+  padding: 0.12rem 0.25rem;
+  border-radius: 0.15rem;
+  background: rgb(5 17 31 / 72%);
+}
+
+.living-ship-personnel-strip {
+  position: absolute;
+  z-index: 2;
+  top: 4%;
+  left: 2.4%;
+  min-width: 25%;
+  padding: 0.5rem 0.65rem 4.75rem;
+  border: 1px dashed rgb(169 191 208 / 42%);
+  border-radius: 0.35rem;
+  background: rgb(4 15 31 / 58%);
+  pointer-events: none;
+}
+
+.living-ship-personnel-title,
+.living-ship-personnel-subtitle {
+  display: block;
+}
+
+.living-ship-personnel-title {
+  color: #d6e2e8;
+  font-size: var(--living-ship-text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.living-ship-personnel-subtitle {
+  margin-top: 0.15rem;
+  color: #8fa6b6;
+  font-size: var(--living-ship-text-3xs);
+}
+
+.living-ship-agent {
+  position: absolute;
+  z-index: 4;
+  left: var(--agent-x);
+  top: var(--agent-y);
+  width: 2.8%;
+  aspect-ratio: 0.68;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    left 0.65s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.65s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.2s ease;
+}
+
+.living-ship-agent-sprite {
+  position: absolute;
+  inset: 0 8% 16%;
+  background-position: var(--sprite-position) 50%;
+  background-repeat: no-repeat;
+  background-size: 800% 100%;
+  filter: drop-shadow(0 0.1rem 0.12rem rgb(0 0 0 / 80%));
+}
+
+.living-ship-agent-label {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 0.1rem 0.15rem;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 0.18rem;
+  background: rgb(3 14 28 / 88%);
+  color: #f5f5ec;
+  font-size: var(--living-ship-text-3xs);
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px #000;
+  white-space: nowrap;
+}
+
+.living-ship-agent[data-state="working"] .living-ship-agent-label {
+  border-color: #58dfdf;
+  color: #95ffff;
+}
+.living-ship-agent[data-state="collaborating"] .living-ship-agent-label {
+  border-color: #dca8ff;
+  color: #efd6ff;
+}
+.living-ship-agent[data-state="idle"] .living-ship-agent-label {
+  border-color: #f3bc62;
+  color: #ffe0a8;
+}
+.living-ship-agent[data-state="offline"] {
+  filter: grayscale(1) saturate(0.2);
+  opacity: 0.72;
+}
+
+.living-ship-agent:hover,
+.living-ship-agent:focus-visible,
+.living-ship-agent[data-selected="true"] {
+  outline: none;
+  filter: brightness(1.22);
+}
+
+.living-ship-agent:focus-visible::after,
+.living-ship-agent[data-selected="true"]::after {
+  position: absolute;
+  inset: -5%;
+  border: 2px solid #7ce7e8;
+  border-radius: 0.35rem;
+  box-shadow: 0 0 1rem rgb(82 225 226 / 55%);
+  content: "";
+}
+
+.living-ship-details {
+  position: absolute;
+  z-index: 7;
+  top: 3.5%;
+  right: 2.2%;
+  width: min(19rem, 24%);
+  min-height: 7rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgb(121 207 213 / 42%);
+  border-radius: 0.45rem;
+  background: rgb(5 19 38 / 92%);
+  box-shadow: 0 0.5rem 2rem rgb(0 0 0 / 38%);
+  backdrop-filter: blur(0.45rem);
+}
+
+.living-ship-details h2 {
+  margin-top: 0.15rem;
+  color: #fff6df;
+  font-size: var(--living-ship-text-base);
+  font-weight: 700;
+}
+
+.living-ship-details p,
+.living-ship-details-hint {
+  color: #b9cad5;
+  font-size: var(--living-ship-text-xs);
+  line-height: 1.45;
+}
+
+.living-ship-details-eyebrow {
+  color: #72d7dd;
+  font-size: var(--living-ship-text-3xs);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.living-ship-details dl {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+}
+
+.living-ship-details dl > div {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.4rem;
+}
+
+.living-ship-details dt,
+.living-ship-details dd {
+  font-size: var(--living-ship-text-2xs);
+}
+
+.living-ship-details dt {
+  color: #7896aa;
+}
+.living-ship-details dd {
+  color: #d7e4e9;
+}
+
+.living-ship-collaborators {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.65rem;
+  color: #e4c7fa;
+  font-size: var(--living-ship-text-2xs);
+}
+
+.living-ship-activity-button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #55bdc5;
+  border-radius: 0.3rem;
+  background: #123c50;
+  color: #e7ffff;
+  font-size: var(--living-ship-text-2xs);
+  font-weight: 700;
+}
+
+.living-ship-activity-button:hover:not(:disabled) {
+  background: #17556b;
+}
+.living-ship-activity-button:focus-visible {
+  outline: 2px solid #8ff4f4;
+  outline-offset: 2px;
+}
+.living-ship-activity-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.living-ship-empty,
+.living-ship-error {
+  display: flex;
+  min-height: 16rem;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  color: #a9bfd0;
+  font-size: var(--living-ship-text-sm);
+}
+
+.living-ship-error {
+  min-height: auto;
+  background: rgb(116 35 50 / 35%);
+  color: #ffc9d1;
+}
+
+@media (max-width: 900px) {
+  .living-ship-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .living-ship-legend {
+    justify-content: flex-start;
+  }
+  .living-ship-details {
+    width: 32%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .living-ship-agent {
+    transition: none;
+  }
+}
+
+body:not(:focus-within) .living-ship-agent {
+  animation-play-state: paused;
+}

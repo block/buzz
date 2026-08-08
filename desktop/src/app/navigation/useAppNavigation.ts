@@ -79,6 +79,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goShip = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/ship",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goBattleRhythm = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation({ to: "/battle-rhythm" }, behavior),
@@ -344,6 +355,7 @@ export function useAppNavigation() {
     goProjects,
     goPulse,
     goSettings,
+    goShip,
     goWorkflow,
     goWorkflows,
     openSearchHit,

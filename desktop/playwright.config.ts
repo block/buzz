@@ -124,6 +124,7 @@ export default defineConfig({
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/command-console.spec.ts",
+        "**/living-ship.spec.ts",
         "**/battle-rhythm.spec.ts",
         "**/battle-rhythm-screenshots.spec.ts",
         "**/plans.spec.ts",
