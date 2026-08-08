@@ -227,6 +227,15 @@ Save these. Losing any of them is data loss. See NOTES.txt printed by `helm inst
 - **Cosign signing of the published chart** is a follow-up (the relay image is
   attested via `actions/attest-build-provenance`; the chart is not yet). The
   chart itself is published to GHCR — see [Releasing](#releasing).
+- **EKS Pod Identity / IRSA support rests on a temporary `aws-creds` fork pin.**
+  The relay resolves S3 credentials from the pod IAM role only because the
+  workspace pins `aws-creds` to a fork (Cargo.toml `[patch.crates-io]`) that
+  adopts the aws-creds portion of durch/rust-s3#449 — the crates.io release
+  cannot read EKS Pod Identity credentials
+  (`AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`).
+  The pin reverts to crates.io once #449 lands upstream; until then, Pod Identity
+  support depends on an unmerged fork, so operators relying on it should track
+  that upstream issue.
 
 ## Releasing
 
