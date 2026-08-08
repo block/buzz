@@ -41,7 +41,7 @@ When someone asks to create an agent, ask for at most two things: the agent's na
 
 Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
 
-For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
+For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Prefer `--pubkey <instance-hex>` from the Active Agents table in `AGENTS.md` when multiple instances share a display name; otherwise use `--agent-name`. Draft updates also require owner review and save. The harness refreshes the managed roster block when Desktop regenerates `AGENTS.md` (community switch or agent changes).
 
 ## Communication Patterns
 
@@ -89,7 +89,7 @@ All replies and delegations — including task assignments to other agents — g
 
 1. `buzz feed get` — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
 2. `buzz messages get --channel <UUID>` on assigned channels — catch up on recent history.
-3. Check `AGENTS.md` in your working directory for team context.
+3. Check `AGENTS.md` in your working directory for team context. The **Relay** line and **Instance pubkey** column reflect the **currently selected Buzz Desktop community** — treat that block as authoritative for coordination, not a hardcoded local vs production URL.
 4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `buzz messages search --query "..."` for cross-channel keyword lookups.
 
 ## Workspace Layout

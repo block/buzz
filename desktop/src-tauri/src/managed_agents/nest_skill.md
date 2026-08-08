@@ -39,6 +39,13 @@ buzz agents draft-update --channel <uuid> --agent-name "Current name" \
   --system-prompt "Updated instructions"
 ```
 
+When several managed instances share a persona name, prefer the **Instance pubkey** from the Active Agents table in `AGENTS.md`:
+
+```bash
+buzz agents draft-update --channel <uuid> --pubkey <64-hex-instance-pubkey> \
+  --system-prompt "Updated instructions"
+```
+
 Run `buzz agents draft-update --help` for optional runtime, provider, model, rename, and access changes. Prefer these CLI commands over any legacy MCP agent-management tools.
 
 ## Git Repositories

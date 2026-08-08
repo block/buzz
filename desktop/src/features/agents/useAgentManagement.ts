@@ -142,13 +142,25 @@ export function useAgentManagement() {
 
   const matchingPersonas = React.useMemo(() => {
     if (request?.action !== "update") return [];
+    const pubkey = request.request.agentPubkey?.trim().toLowerCase();
+    if (pubkey) {
+      const instance = (managedAgentsQuery.data ?? []).find(
+        (agent) => agent.pubkey.trim().toLowerCase() === pubkey,
+      );
+      if (!instance?.personaId) return [];
+      return (personasQuery.data ?? []).filter(
+        (persona) =>
+          persona.id === instance.personaId &&
+          requestTargetsEditablePersona(persona),
+      );
+    }
     const target = request.request.agentName.trim().toLocaleLowerCase();
     return (personasQuery.data ?? []).filter(
       (persona) =>
         persona.displayName.trim().toLocaleLowerCase() === target &&
         requestTargetsEditablePersona(persona),
     );
-  }, [personasQuery.data, request]);
+  }, [managedAgentsQuery.data, personasQuery.data, request]);
   const currentPersona =
     matchingPersonas.length === 1 ? matchingPersonas[0] : undefined;
 
@@ -287,7 +299,7 @@ export function useAgentManagement() {
       return "More than one personal agent has that name. Rename it in Agents, then ask the agent again.";
     }
     if (!currentPersona) {
-      return "Agents can only update a personal agent profile by its current name.";
+      return "Agents can only update a personal agent profile by its current name or instance pubkey.";
     }
     return null;
   }, [currentPersona, error, matchingPersonas.length, request]);

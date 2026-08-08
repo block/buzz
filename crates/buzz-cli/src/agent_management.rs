@@ -5,6 +5,7 @@ use nostr::{Event, Keys, PublicKey};
 use serde::Serialize;
 
 use crate::error::CliError;
+use crate::validate::validate_hex64;
 
 const REQUEST_KIND: &str = "agent_management_request";
 const MAX_NAME_CHARS: usize = 120;
@@ -23,6 +24,8 @@ pub struct CreateAgentDraft {
 pub struct UpdateAgentDraft {
     pub channel_id: String,
     pub agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_pubkey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,9 +161,32 @@ pub fn build_update(
             "respond-to must be owner-only or anyone".into(),
         ));
     }
+    let agent_pubkey = draft
+        .agent_pubkey
+        .map(|value| required(value, "agent pubkey", 64))
+        .transpose()?;
+    if agent_pubkey.is_some() {
+        if let Some(ref pk) = agent_pubkey {
+            validate_hex64(pk).map_err(|_| {
+                CliError::Usage("agent pubkey must be a 64-character hex string".into())
+            })?;
+        }
+    }
+    let agent_name_trimmed = draft.agent_name.trim();
+    if agent_pubkey.is_none() && agent_name_trimmed.is_empty() {
+        return Err(CliError::Usage(
+            "provide --agent-name or --pubkey for the target instance".into(),
+        ));
+    }
+    let agent_name = if agent_name_trimmed.is_empty() {
+        String::new()
+    } else {
+        required(draft.agent_name, "agent name", MAX_NAME_CHARS)?
+    };
     let request = UpdateAgentDraft {
         channel_id: channel_id.clone(),
-        agent_name: required(draft.agent_name, "agent name", MAX_NAME_CHARS)?,
+        agent_name,
+        agent_pubkey,
         display_name: optional(draft.display_name, "display name")?,
         system_prompt: draft
             .system_prompt
@@ -241,6 +267,33 @@ mod tests {
     }
 
     #[test]
+    fn update_accepts_pubkey_without_name() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let pubkey = agent.public_key().to_hex();
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: String::new(),
+                agent_pubkey: Some(pubkey.clone()),
+                display_name: None,
+                system_prompt: Some("New instructions.".into()),
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["request"]["agentPubkey"], pubkey);
+        assert_eq!(payload["payload"]["request"]["agentName"], "");
+    }
+
+    #[test]
     fn update_requires_a_change() {
         let error = build_update(
             &Keys::generate(),
@@ -248,6 +301,7 @@ mod tests {
             UpdateAgentDraft {
                 channel_id: CHANNEL.into(),
                 agent_name: "Scout".into(),
+                agent_pubkey: None,
                 display_name: None,
                 system_prompt: None,
                 runtime: None,

@@ -24,6 +24,8 @@ export type AgentManagementUpdateRequest = {
   request: {
     channelId: string;
     agentName: string;
+    /** When set, targets the managed instance by pubkey (preferred over name). */
+    agentPubkey?: string;
     displayName?: string;
     systemPrompt?: string;
     runtime?: string;
@@ -97,6 +99,7 @@ export function parseAgentManagementRequest(
     !hasOnlyKeys(request, [
       "channelId",
       "agentName",
+      "agentPubkey",
       "displayName",
       "systemPrompt",
       "runtime",
@@ -105,7 +108,7 @@ export function parseAgentManagementRequest(
       "respondTo",
     ]) ||
     !isText(request.channelId) ||
-    !isText(request.agentName)
+    (!isText(request.agentName) && !isText(request.agentPubkey))
   ) {
     return null;
   }
@@ -128,7 +131,10 @@ export function parseAgentManagementRequest(
     requestId: payload.requestId,
     request: {
       channelId: request.channelId,
-      agentName: request.agentName,
+      agentName: isText(request.agentName) ? request.agentName : "",
+      ...(isText(request.agentPubkey)
+        ? { agentPubkey: request.agentPubkey.trim() }
+        : {}),
       ...changes,
     },
   };

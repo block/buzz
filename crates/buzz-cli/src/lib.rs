@@ -279,9 +279,12 @@ pub enum AgentsCmd {
         /// Current channel UUID
         #[arg(long)]
         channel: String,
-        /// Current name of the personal agent to update
+        /// Current display name of the personal agent (omit when using --pubkey)
         #[arg(long)]
-        agent_name: String,
+        agent_name: Option<String>,
+        /// Managed instance pubkey (preferred when several instances share a persona name)
+        #[arg(long)]
+        pubkey: Option<String>,
         #[arg(long)]
         display_name: Option<String>,
         /// Replacement instructions; use '-' to read from stdin
