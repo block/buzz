@@ -187,6 +187,17 @@ async fn main() -> anyhow::Result<()> {
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
+
+    // Legacy-schema preflight on EVERY boot, migrating or not: a
+    // single-tenant `audit_log` (no community_id) makes every audit write
+    // fail per-event while the relay keeps serving traffic — the #4919
+    // silent-failure trap. Fail the boot loudly instead; the conversion is
+    // an operator script (scripts/cutover/), not startup migration state.
+    db.reject_legacy_audit_log_shape().await.map_err(|e| {
+        error!("Legacy database schema detected: {e}");
+        anyhow::anyhow!("Legacy audit_log shape check failed: {e}")
+    })?;
+
     if auto_migrate {
         db.migrate().await.map_err(|e| {
             error!("Failed to run database migrations: {e}");

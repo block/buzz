@@ -1013,6 +1013,16 @@ impl Db {
         migration::run_migrations(&self.pool).await
     }
 
+    /// Fail the boot loudly if the database carries the legacy single-tenant
+    /// `audit_log` shape (no `community_id` column), instead of letting every
+    /// audit write ERROR per-event while the relay keeps serving (#4919).
+    /// The legacy→multi-tenant cutover is an operator script
+    /// (`scripts/cutover/1321_backfill_default_community.sql`), deliberately
+    /// not startup migration state — see `migration.rs`.
+    pub async fn reject_legacy_audit_log_shape(&self) -> Result<()> {
+        migration::reject_legacy_audit_log_shape(&self.pool).await
+    }
+
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
