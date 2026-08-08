@@ -104,6 +104,7 @@ export function buildReplyTags(
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] = [],
+  replyTargetAuthorPubkey?: string,
 ) {
   const tags: string[][] = [
     ["p", authorPubkey],
@@ -113,7 +114,14 @@ export function buildReplyTags(
   // Add p-tags for mentioned users so mention-filtered subscriptions
   // (e.g. ACP agent harness) receive the reply event.
   // Best-effort normalization — relay performs authoritative validation.
-  for (const pubkey of normalizeMentionPubkeys(mentionPubkeys, authorPubkey)) {
+  // The replied-to event's author is folded in too: replying to a message is
+  // itself an implicit way of addressing its author (notably agent accounts,
+  // which wake on an explicit @mention / p-tag), so include it even when the
+  // composer text contains no literal "@mention".
+  const mentionSources = replyTargetAuthorPubkey
+    ? [...mentionPubkeys, replyTargetAuthorPubkey]
+    : mentionPubkeys;
+  for (const pubkey of normalizeMentionPubkeys(mentionSources, authorPubkey)) {
     tags.push(["p", pubkey]);
   }
 
@@ -159,4 +167,21 @@ export function resolveReplyRootId(
 
   const thread = getThreadReference(parent.tags);
   return thread.rootId ?? parent.id;
+}
+
+/**
+ * Resolve the author pubkey of the event being replied to, if it is present in
+ * the local message cache.
+ *
+ * Mirrors `resolveReplyRootId`'s lookup (same event array, same `id` match) so
+ * callers can fold the replied-to author into the reply's `p` tags — replying
+ * to a message implicitly addresses its author (e.g. an agent that wakes on an
+ * explicit mentioning `p` tag), even when the composer body has no literal
+ * `@mention`. Returns `null` when the parent event isn't in the cache yet.
+ */
+export function resolveReplyTargetAuthorPubkey(
+  parentEventId: string,
+  events: RelayEvent[],
+): string | null {
+  return events.find((event) => event.id === parentEventId)?.pubkey ?? null;
 }
