@@ -1001,6 +1001,22 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// Merge `channel_add_policy` into an existing kind:10100 content object.
+///
+/// Returns the existing content with the policy field set, preserving every
+/// other field. Absent or unparsable existing content degrades to an object
+/// holding only the policy (the previous behavior).
+fn merge_channel_add_policy(existing_content: Option<&str>, policy: &str) -> String {
+    let mut obj = existing_content
+        .and_then(|c| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(c).ok())
+        .unwrap_or_default();
+    obj.insert(
+        "channel_add_policy".to_string(),
+        serde_json::Value::String(policy.to_string()),
+    );
+    serde_json::Value::Object(obj).to_string()
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1032,7 +1048,26 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // kind:10100 is plain-replaceable: publishing replaces the whole event, so a
+    // bare {"channel_add_policy"} would clobber any richer agent profile the
+    // identity has published (respond_to, respond_to_allowlist, channel_ids, ...)
+    // — which also makes the agent invisible to mention-eligibility logic that
+    // reads those fields. Merge the policy into the existing content instead.
+    // Query errors propagate: failing the command is safer than silently
+    // replacing the profile with a minimal one.
+    let my_pk = client.keys().public_key().to_hex();
+    let filter = serde_json::json!({ "kinds": [10100], "authors": [my_pk], "limit": 1 });
+    let resp = client.query(&filter).await?;
+    let existing = serde_json::from_str::<serde_json::Value>(&resp)
+        .ok()
+        .and_then(|v| {
+            v.as_array()
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("content"))
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        });
+    let content = merge_channel_add_policy(existing.as_deref(), policy);
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
         Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
@@ -1348,6 +1383,42 @@ mod tests {
     // returns early with an error before any network call, so no relay is needed.
     // If the BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES check were removed from cmd_set_add_policy,
     // this test would fail (it would proceed to sign_event and return a different error).
+
+    #[test]
+    fn merge_add_policy_preserves_existing_profile_fields() {
+        // Regression: set-add-policy used to publish {"channel_add_policy"} as the
+        // ENTIRE content, clobbering richer agent profiles (kind:10100 is
+        // plain-replaceable). See #2987.
+        let existing = r#"{"name":"scout","agent_type":"agent","respond_to":"anyone","channel_ids":["11111111-1111-1111-1111-111111111111"]}"#;
+        let merged = super::merge_channel_add_policy(Some(existing), "owner_only");
+        let v: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(v["channel_add_policy"], "owner_only");
+        assert_eq!(v["name"], "scout");
+        assert_eq!(v["respond_to"], "anyone");
+        assert_eq!(v["channel_ids"][0], "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn merge_add_policy_overwrites_previous_policy() {
+        let existing = r#"{"channel_add_policy":"anyone","respond_to":"anyone"}"#;
+        let merged = super::merge_channel_add_policy(Some(existing), "nobody");
+        let v: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(v["channel_add_policy"], "nobody");
+        assert_eq!(v["respond_to"], "anyone");
+    }
+
+    #[test]
+    fn merge_add_policy_without_existing_content_matches_previous_behavior() {
+        let merged = super::merge_channel_add_policy(None, "owner_only");
+        assert_eq!(merged, r#"{"channel_add_policy":"owner_only"}"#);
+    }
+
+    #[test]
+    fn merge_add_policy_tolerates_unparsable_existing_content() {
+        let merged = super::merge_channel_add_policy(Some("not-json"), "anyone");
+        let v: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(v["channel_add_policy"], "anyone");
+    }
 
     fn make_test_client() -> BuzzClient {
         // Scalar = 1 is the smallest valid secp256k1 private key.
