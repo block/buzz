@@ -24,6 +24,17 @@ const ERROR_REFLECTION_SUFFIX: &str =
 
 const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
 
+/// Model-visible feedback after the provider truncates an assistant response at
+/// its output-token limit. This is a user message rather than a synthetic tool
+/// result because truncation can happen without a tool call (and an unpaired
+/// tool result is invalid on every provider wire format).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
+
+/// A provider can repeatedly spend its entire output allowance without making
+/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
+/// finite so a persistently truncating model eventually surfaces `max_tokens`.
+const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
+
 /// Remove image blocks that the provider has explicitly rejected while keeping
 /// their surrounding tool result (and therefore the tool-call/result pairing)
 /// intact. Returns the number of images removed; zero means the provider error
@@ -262,6 +273,10 @@ impl RunCtx<'_> {
         // per-session: a fresh prompt deserves a fresh chance to recover, and
         // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
         let mut context_recoveries = 0u32;
+        // Per-run output-truncation recovery budget. Unlike context recovery,
+        // these successful provider requests consume a real round and are not
+        // refunded; this counter only bounds the default-unlimited case.
+        let mut max_tokens_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -513,6 +528,37 @@ impl RunCtx<'_> {
                     ),
                 )
                 .await;
+            }
+
+            // `max_tokens` describes a truncated assistant response, not turn
+            // completion. Never execute tool calls from it: although one may
+            // parse as valid, a later call (or surrounding instructions) may
+            // have been cut off. Replay only the text, with no tool calls, so
+            // the history remains valid without fabricated tool results; then
+            // add actionable user-role feedback and ask the model to continue.
+            if response.stop == ProviderStop::MaxTokens {
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                    tracing::warn!(
+                        recoveries = max_tokens_recoveries,
+                        "provider repeatedly hit output token limit; recovery budget exhausted"
+                    );
+                    return Ok(StopReason::MaxTokens);
+                }
+                max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
+                tracing::warn!(
+                    recovery = max_tokens_recoveries,
+                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
+                    discarded_tool_calls = response.tool_calls.len(),
+                    "provider hit output token limit; asking model to continue in smaller steps"
+                );
+                self.history
+                    .push(HistoryItem::User(MAX_TOKENS_RECOVERY_MESSAGE.to_string()));
+                continue;
             }
 
             if response.tool_calls.is_empty() {

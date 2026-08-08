@@ -1229,6 +1229,11 @@ fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
 }
 
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
+    let max_tokens = v.get("status").and_then(Value::as_str) == Some("incomplete")
+        && v.get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            == Some("max_output_tokens");
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -1259,7 +1264,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     }
                 }
             }
-            Some("function_call") => {
+            Some("function_call") if !max_tokens => {
                 saw_function_call = true;
                 let raw = item
                     .get("arguments")
@@ -1279,6 +1284,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     Default::default(),
                 )?);
             }
+            // Incomplete Responses output can carry a partial function call.
+            // It is intentionally discarded by the in-turn recovery path.
+            Some("function_call") => {}
             Some("reasoning") => {
                 // Reasoning summary items from the Responses API. Each item has a
                 // `summary` array of `{"type": "summary_text", "text": "..."}` objects.
@@ -1554,13 +1562,19 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
                         reasoning.push_str(t);
                     }
                 }
-                // Anthropic's replay shape is fully modelled, so nothing to keep.
-                Some("tool_use") => tool_calls.push(make_tool_call(
-                    str_field(b, "id"),
-                    str_field(b, "name"),
-                    b.get("input").cloned().unwrap_or(Value::Null),
-                    Default::default(),
-                )?),
+                // A max-token response may end in the middle of a tool input.
+                // The agent discards all calls from truncated responses, so do
+                // not reject the whole response trying to parse an input that
+                // can never be executed.
+                Some("tool_use") if stop != ProviderStop::MaxTokens => {
+                    tool_calls.push(make_tool_call(
+                        str_field(b, "id"),
+                        str_field(b, "name"),
+                        b.get("input").cloned().unwrap_or(Value::Null),
+                        Default::default(),
+                    )?)
+                }
+                Some("tool_use") => {}
                 _ => {}
             }
         }
@@ -1648,30 +1662,33 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         }
     };
     let mut tool_calls = Vec::new();
-    if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
-        for tc in arr {
-            let f = tc
-                .get("function")
-                .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
-            let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-            let args: Value = serde_json::from_str(raw)
-                .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
-            // Everything on the wire object we do not model, kept for replay.
-            let extra = tc
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            tool_calls.push(make_tool_call(
-                str_field(tc, "id"),
-                str_field(f, "name"),
-                args,
-                extra,
-            )?);
+    if stop != ProviderStop::MaxTokens {
+        if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
+            for tc in arr {
+                let f = tc
+                    .get("function")
+                    .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
+                let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let args: Value = serde_json::from_str(raw).map_err(|e| {
+                    AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}"))
+                })?;
+                // Everything on the wire object we do not model, kept for replay.
+                let extra = tc
+                    .as_object()
+                    .map(|o| {
+                        o.iter()
+                            .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tool_calls.push(make_tool_call(
+                    str_field(tc, "id"),
+                    str_field(f, "name"),
+                    args,
+                    extra,
+                )?);
+            }
         }
     }
     dedupe_provider_ids(&mut tool_calls);
@@ -2226,22 +2243,56 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
     }
 }
 
+/// Completion-token cap that [`Llm::summarize`] actually requests from
+/// `provider`, given the caller's visible-text budget. OpenRouter grants
+/// reasoning a separate, equal budget on top of the text budget (see
+/// [`openrouter_summary_body`]), so its top-level cap is double the caller's
+/// budget; every other provider requests the caller's budget unchanged.
+/// Callers that reserve output headroom in an input budget
+/// (`handoff_prompt_budget_bytes`) must reserve THIS value, not the text
+/// budget — otherwise input plus the actual completion allowance can exceed
+/// the configured context window.
+pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
+    match provider {
+        Provider::OpenRouter => max_output_tokens.saturating_mul(2),
+        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
+            max_output_tokens
+        }
+    }
+}
+
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
 /// Extracted so tests can assert on the actual wire shape instead of a
-/// hand-rolled literal — summaries never carry `reasoning` (see
-/// `apply_openrouter_mutations`, which the summary path never calls).
-/// It spells the token limit `max_tokens` directly for the same reason: the
-/// mutation that renames it is never applied here.
+/// hand-rolled literal — summaries never carry config-driven reasoning
+/// *effort* (see `apply_openrouter_mutations`, which the summary path never
+/// calls). It spells the token limit `max_tokens` directly for the same
+/// reason: the mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
     user_prompt: &str,
     max_output_tokens: u32,
 ) -> Value {
+    // Reasoning models spend output tokens thinking before emitting any
+    // visible text, and that spend counts against `max_tokens`. Left
+    // unseparated, a model can burn the entire cap mid-reasoning and return an
+    // empty `content` — observed with deepseek-v4-flash, where 13 consecutive
+    // handoff attempts length-stopped inside the reasoning channel and every
+    // one degraded to lossy history truncation. Give reasoning its own
+    // equal-sized budget on top of the text budget so `max_output_tokens`
+    // remains what the caller means: visible summary text. `exclude` keeps the
+    // reasoning out of the response body; `summarize()` only reads `content`.
+    // Non-reasoning endpoints ignore the `reasoning` object (see
+    // `apply_openrouter_mutations` on why it is never paired with
+    // `provider.require_parameters`).
     json!({
         "model": effective_model,
         "stream": false,
-        "max_tokens": max_output_tokens,
+        "max_tokens": summary_completion_cap(Provider::OpenRouter, max_output_tokens),
+        "reasoning": {
+            "max_tokens": max_output_tokens,
+            "exclude": true,
+        },
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt },
@@ -3533,10 +3584,51 @@ mod tests {
         let v = serde_json::json!({
             "status": "incomplete",
             "incomplete_details": {"reason": "max_output_tokens"},
-            "output": [],
+            "output": [{
+                "type": "function_call",
+                "call_id": "partial",
+                "name": "dev__shell",
+                "arguments": "{\"command\":\"unterminated",
+            }],
         });
         let r = parse_responses(v).unwrap();
         assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn truncated_openai_tool_arguments_are_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "partial text",
+                    "tool_calls": [{
+                        "id": "partial",
+                        "type": "function",
+                        "function": {
+                            "name": "dev__shell",
+                            "arguments": "{\"command\":\"unterminated",
+                        },
+                    }],
+                },
+            }],
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn truncated_anthropic_tool_use_is_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "tool_use", "id": "", "name": "", "input": null}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
     }
 
     #[test]
@@ -6211,8 +6303,14 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
     }
 
+    /// The summary body reserves `max_output_tokens` for visible text by
+    /// granting reasoning a separate, equal budget on top and excluding it
+    /// from the response. Without the separation, a reasoning model can spend
+    /// the entire cap thinking and length-stop with empty `content`, which
+    /// `summarize()` reports as an empty summary and the handoff degrades to
+    /// lossy truncation.
     #[test]
-    fn openrouter_summary_carries_neither_reasoning_nor_provider() {
+    fn openrouter_summary_budgets_reasoning_separately_and_carries_no_provider() {
         let body = openrouter_summary_body(
             "anthropic/claude-opus-4-7",
             "summarize",
@@ -6222,14 +6320,25 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-opus-4-7");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "text to summarize");
-        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(
+            body["max_tokens"], 2048,
+            "total cap must cover the text budget plus the reasoning budget"
+        );
+        assert_eq!(
+            body["reasoning"]["max_tokens"], 1024,
+            "reasoning gets its own budget so it cannot starve the summary text"
+        );
+        assert_eq!(
+            body["reasoning"]["exclude"], true,
+            "reasoning must not be included in the response; summarize() reads only content"
+        );
+        assert!(
+            body["reasoning"].get("effort").is_none(),
+            "budget-based cap only; effort stays unset for the summary call"
+        );
         assert!(
             body.get("max_completion_tokens").is_none(),
             "summary body must use OpenRouter's token-limit spelling"
-        );
-        assert!(
-            body.get("reasoning").is_none(),
-            "summary body must not carry reasoning"
         );
         assert!(
             body.get("provider").is_none(),
