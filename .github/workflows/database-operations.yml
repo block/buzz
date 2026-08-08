@@ -1,0 +1,100 @@
+name: Buzz Database Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operação da base de dados"
+        required: true
+        type: choice
+        options:
+          - healthcheck
+          - ensure
+          - migrate
+        default: healthcheck
+      migration_file:
+        description: "Ficheiro SQL em migrations/; obrigatório para migrate"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  dispatch:
+    runs-on: arc-buzz-database
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::904727092208:role/github-actions-buzz-dispatch
+          aws-region: eu-central-1
+
+      - name: Dispatch private GHAR workflow
+        env:
+          AWS_REGION: eu-central-1
+          OPERATION: ${{ inputs.operation }}
+          MIGRATION_FILE: ${{ inputs.migration_file }}
+          GHAR_REPOSITORY: lolmeida/github-actions
+          GHAR_WORKFLOW: database.yml
+          GHAR_REF: main
+        run: |
+          set -euo pipefail
+          github_token="$(aws ssm get-parameter \
+            --name /shared/github/READ_TOKEN \
+            --with-decryption \
+            --region "$AWS_REGION" \
+            --query 'Parameter.Value' \
+            --output text)"
+          [[ -n "$github_token" && "$github_token" != None ]] || { echo "::error::dispatch token unavailable"; exit 1; }
+          github_curl_config="$RUNNER_TEMP/ghar-curl.conf"
+          umask 077
+          printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n' \
+            "$github_token" > "$github_curl_config"
+          github_token=""
+          trap 'rm -f "$github_curl_config"' EXIT
+
+          dispatch_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          dispatch_body="$(jq -cn \
+            --arg operation "$OPERATION" \
+            --arg migration_file "$MIGRATION_FILE" \
+            '{ref:"main",inputs:{operation:$operation,migration_file:$migration_file,migration_ref:"main"}}')"
+          dispatch_status="$(curl -sS -o "$RUNNER_TEMP/ghar-dispatch-response" -w '%{http_code}' \
+            --config "$github_curl_config" \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            "https://api.github.com/repos/$GHAR_REPOSITORY/actions/workflows/$GHAR_WORKFLOW/dispatches" \
+            --data "$dispatch_body")"
+          [[ "$dispatch_status" == 204 ]] || { echo "::error::GHAR dispatch failed with HTTP $dispatch_status"; cat "$RUNNER_TEMP/ghar-dispatch-response"; exit 1; }
+
+          run_id=""
+          for _ in $(seq 1 30); do
+            runs_json="$(curl -fsS \
+              --config "$github_curl_config" \
+              "https://api.github.com/repos/$GHAR_REPOSITORY/actions/workflows/$GHAR_WORKFLOW/runs?event=workflow_dispatch&branch=$GHAR_REF&per_page=20")"
+            run_id="$(jq -r --arg since "$dispatch_started" '.workflow_runs | map(select(.created_at >= $since)) | sort_by(.created_at) | last.id // empty' <<< "$runs_json")"
+            [[ "$run_id" =~ ^[0-9]+$ ]] && break
+            sleep 2
+          done
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "::error::GHAR run was not created after dispatch"; exit 1; }
+
+          for _ in $(seq 1 90); do
+            run_json="$(curl -fsS \
+              --config "$github_curl_config" \
+              "https://api.github.com/repos/$GHAR_REPOSITORY/actions/runs/$run_id")"
+            status="$(jq -r '.status' <<< "$run_json")"
+            if [[ "$status" == completed ]]; then
+              conclusion="$(jq -r '.conclusion' <<< "$run_json")"
+              run_url="$(jq -r '.html_url' <<< "$run_json")"
+              [[ "$conclusion" == success ]] || { echo "::error::GHAR run failed: $run_url"; exit 1; }
+              echo "GHAR database operation completed: $run_url"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::GHAR run timed out: https://github.com/$GHAR_REPOSITORY/actions/runs/$run_id"
+          exit 1

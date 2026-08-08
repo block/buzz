@@ -150,7 +150,15 @@ spec:
             {{- end }}
 
             # ── Owner ────────────────────────────────────────────────
+            {{- if .Values.ownerPubkey }}
             - { name: RELAY_OWNER_PUBKEY, value: {{ .Values.ownerPubkey | quote }} }
+            {{- else }}
+            - name: RELAY_OWNER_PUBKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: {{ .Values.ownerPubkeySecretKey | quote }}
+            {{- end }}
 
             # ── Migrations ───────────────────────────────────────────
             - { name: BUZZ_AUTO_MIGRATE, value: {{ .Values.migrate.autoMigrate | quote }} }

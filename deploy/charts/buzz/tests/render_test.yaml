@@ -8,6 +8,44 @@ templates:
   - templates/service.yaml
   - templates/pvc-git.yaml
 tests:
+  - it: reads the relay owner pubkey from the existing secret
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkeySecretKey: RELAY_OWNER_PUBKEY
+      secrets.existingSecret: buzz-secrets
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name == "RELAY_OWNER_PUBKEY")].valueFrom.secretKeyRef.name
+          value: buzz-secrets
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].env[?(@.name == "RELAY_OWNER_PUBKEY")].valueFrom.secretKeyRef.key
+          value: RELAY_OWNER_PUBKEY
+        template: templates/deployment.yaml
+
+  - it: renders an immutable image digest when configured
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      image.repository: ghcr.io/lolmeida/buzz
+      image.tag: relay-test
+      image.digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/lolmeida/buzz@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        template: templates/deployment.yaml
+
   - it: renders cleanly in production profile (external pg/redis)
     set:
       relayUrl: wss://buzz.example.com
