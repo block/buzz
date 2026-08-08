@@ -281,6 +281,7 @@ local_workspace_run_bounded \
     --volume "${credentials_file}:/run/minio-credentials:ro" \
     --volume "${backup_dir}/minio:/backup:ro" \
     minio-init -eu -c '
+      export MC_CONFIG_DIR=/tmp/mc-config
       { IFS= read -r user; IFS= read -r password; } < /run/minio-credentials
       mc alias set destination http://minio:9000 "$user" "$password" >/dev/null
       mc mb --ignore-existing destination/buzz-media >/dev/null

@@ -362,6 +362,10 @@ assert_contains "$backup_script" '{ IFS= read -r user; IFS= read -r password; }'
   "backup reads MinIO credentials with POSIX shell builtins"
 assert_contains "$restore_script" '{ IFS= read -r user; IFS= read -r password; }' \
   "restore reads MinIO credentials with POSIX shell builtins"
+assert_contains "$backup_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
+  "backup uses a writable transient MinIO client config"
+assert_contains "$restore_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
+  "restore uses a writable transient MinIO client config"
 if grep -Fq 'sed -n "1p" /run/minio-credentials' \
   "$backup_script" "$restore_script"; then
   fail "MinIO helpers must not depend on sed in the minimal mc image"

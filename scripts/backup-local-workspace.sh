@@ -82,6 +82,7 @@ trap cleanup_backup EXIT
       --volume "${credentials_file}:/run/minio-credentials:ro" \
       --volume "${backup_dir}/minio:/backup" \
       minio-init -eu -c '
+        export MC_CONFIG_DIR=/tmp/mc-config
         { IFS= read -r user; IFS= read -r password; } < /run/minio-credentials
         mc alias set source http://minio:9000 "$user" "$password" >/dev/null
         mc mirror --overwrite source/buzz-media /backup >/dev/null
