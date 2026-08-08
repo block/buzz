@@ -27,35 +27,10 @@ import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
-import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-
-function updateInputFromRequest(
-  request: Extract<AgentManagementRequest, { action: "update" }>,
-  current: UpdatePersonaInput,
-): UpdatePersonaInput {
-  const changes = request.request;
-  return {
-    ...current,
-    displayName: changes.displayName ?? current.displayName,
-    systemPrompt: changes.systemPrompt ?? current.systemPrompt,
-    runtime: changes.runtime ?? current.runtime,
-    provider: changes.provider ?? current.provider,
-    model: changes.model ?? current.model,
-    ...(changes.respondTo
-      ? {
-          behavior: {
-            respondTo: changes.respondTo,
-            respondToAllowlist: [],
-            parallelism: current.behavior?.parallelism,
-          },
-        }
-      : {}),
-  };
-}
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
@@ -271,15 +246,6 @@ export function useAgentManagement() {
     [request],
   );
 
-  const editInitialValues = React.useMemo(() => {
-    if (request?.action !== "update" || !currentPersona) return null;
-    return updateInputFromRequest(
-      request,
-      editPersonaDialogState(currentPersona)
-        .initialValues as UpdatePersonaInput,
-    );
-  }, [currentPersona, request]);
-
   const editError = React.useMemo(() => {
     if (request?.action !== "update") return error;
     if (error) return error;
@@ -294,8 +260,8 @@ export function useAgentManagement() {
 
   return {
     request,
+    currentPersona,
     createInitialValues,
-    editInitialValues,
     editError,
     error,
     ...createdAgentAttachment,
@@ -309,5 +275,38 @@ export function useAgentManagement() {
     submitCreate,
     submitUpdate,
     dismiss,
+    /** Returns an error string if the requesting agent lacks origin permission, null if OK. */
+    verifyOriginPermission(): string | null {
+      if (request?.action !== "update") return null;
+      try {
+        assertAgentCanActFromOrigin(request.request.channelId);
+        return null;
+      } catch (cause) {
+        return cause instanceof Error
+          ? cause.message
+          : "Origin permission check failed.";
+      }
+    },
+    /** Returns agent-requested field changes for R6 review mode pre-fill (overrides for the merged dialog). */
+    get reviewOverrides() {
+      if (request?.action !== "update" || !currentPersona) return undefined;
+      const changes = request.request;
+      const overrides: Partial<{
+        displayName: string;
+        systemPrompt: string;
+        runtime: string | undefined;
+        provider: string | undefined;
+        model: string | undefined;
+      }> = {};
+      if (changes.displayName != null)
+        overrides.displayName = changes.displayName;
+      if (changes.systemPrompt != null)
+        overrides.systemPrompt = changes.systemPrompt;
+      if (changes.runtime != null) overrides.runtime = changes.runtime;
+      if (changes.provider != null)
+        overrides.provider = changes.provider ?? undefined;
+      if (changes.model != null) overrides.model = changes.model ?? undefined;
+      return Object.keys(overrides).length > 0 ? overrides : undefined;
+    },
   };
 }

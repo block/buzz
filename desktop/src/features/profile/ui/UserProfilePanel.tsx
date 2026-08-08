@@ -33,7 +33,10 @@ import {
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
-import { AgentDialog } from "@/features/agents/ui/AgentDialog";
+import {
+  AgentEditDialog,
+  type AgentEditContext,
+} from "@/features/agents/ui/AgentEditDialog";
 import { useAgentLifecycleActions } from "@/features/profile/ui/useAgentLifecycleActions";
 import {
   consumePendingOpenEditAgent,
@@ -42,7 +45,6 @@ import {
 } from "@/features/agents/openEditAgentEvent";
 import {
   duplicatePersonaDialogState,
-  editPersonaDialogState,
   type PersonaDialogState,
 } from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
@@ -402,12 +404,8 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona) {
-      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
-      return;
-    }
     setEditAgentOpen(true);
-  }, [resolvedPersona]);
+  }, []);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
@@ -549,7 +547,7 @@ export function UserProfilePanel({
 
   const handleEditPersona = React.useCallback(() => {
     if (!resolvedPersona) return;
-    setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+    setEditAgentOpen(true);
   }, [resolvedPersona]);
 
   const handleDuplicatePersona = React.useCallback(() => {
@@ -905,21 +903,23 @@ export function UserProfilePanel({
       ) : null}
     </AuxiliaryPanelBody>
   );
-  const editAgentDialog =
-    canEditAgent && managedAgent ? (
-      <AgentDialog
-        agent={managedAgent}
-        mode="instance-edit"
-        initialFocus={editAgentFocus}
-        onEditLinkedPersona={
-          resolvedPersona && !resolvedPersona.isBuiltIn
-            ? () => {
-                setEditAgentOpen(false);
-                setEditAgentFocus(undefined);
-                setPersonaDialogState(editPersonaDialogState(resolvedPersona));
-              }
-            : undefined
+  const editCtx: AgentEditContext | null =
+    managedAgent && resolvedPersona
+      ? {
+          kind: "instance-with-definition",
+          definition: resolvedPersona,
+          instance: managedAgent,
         }
+      : managedAgent
+        ? { kind: "instance-only", instance: managedAgent }
+        : resolvedPersona
+          ? { kind: "definition-only", definition: resolvedPersona }
+          : null;
+  const editAgentDialog =
+    canEditAgent && editCtx ? (
+      <AgentEditDialog
+        ctx={editCtx}
+        initialFocus={editAgentFocus}
         onOpenChange={(next) => {
           setEditAgentOpen(next);
           if (!next) setEditAgentFocus(undefined);

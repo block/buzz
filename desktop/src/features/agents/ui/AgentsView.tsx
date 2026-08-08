@@ -8,6 +8,7 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
+import { AgentEditDialog } from "./AgentEditDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -311,6 +312,16 @@ export function AgentsView() {
             }
           }}
           open={agents.agentToAddToChannel !== null}
+        />
+      ) : null}
+      {/* R5: edit route collapses to merged surface (definition-only context) */}
+      {personas.personaToEdit ? (
+        <AgentEditDialog
+          ctx={{ kind: "definition-only", definition: personas.personaToEdit }}
+          open={personas.personaToEdit !== null}
+          onOpenChange={(open) => {
+            if (!open) personas.setPersonaToEdit(null);
+          }}
         />
       ) : null}
       {personas.personaDialogState ? (

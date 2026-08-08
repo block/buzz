@@ -102,6 +102,8 @@ type AgentDefinitionDialogProps = {
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimeCatalogStatus?: "loading" | "ready" | "error";
+  /** When true, D-fields render disabled + "Managed by team" notice; submit blocked. */
+  definitionReadOnly?: boolean;
   onDirtyChange?: (dirty: boolean) => void;
   onOpenChange: (open: boolean) => void;
   onSubmit: (
@@ -130,6 +132,7 @@ export function AgentDefinitionDialog({
   isPending,
   runtimes,
   runtimeCatalogStatus = "ready" as const,
+  definitionReadOnly = false,
   onDirtyChange,
   onOpenChange,
   onSubmit,
@@ -159,15 +162,9 @@ export function AgentDefinitionDialog({
   // The seed the draft is diffed against at submit: an untouched quad
   // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
-  // Tracks when the runtime was auto-seeded by the default-runtime effect in
-  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
-  // the seeded runtime from the submit payload for builtin definitions whose
-  // canonical runtime is null — the sync would revert it anyway.
+  // Tracks when the runtime was auto-seeded (not an explicit user choice).
   const isRuntimeAutoSeededRef = React.useRef(false);
   // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -484,12 +481,8 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
+  // Gate provider requirement on visible field (Codex/Claude hide picker),
+  // but a runtime-less legacy definition must still require provider.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -501,6 +494,7 @@ export function AgentDefinitionDialog({
   // Gate model/provider validity through missingNormalizedFields — single
   // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
+    !definitionReadOnly &&
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
@@ -752,7 +746,7 @@ export function AgentDefinitionDialog({
     >
       <AgentCreationPreview
         avatarUrl={previewAvatarUrl}
-        disabled={isPending || isAvatarUploadPending}
+        disabled={isPending || isAvatarUploadPending || definitionReadOnly}
         label={previewLabel}
         onClearAvatar={() => {
           setHasUserChanges(true);
@@ -766,6 +760,12 @@ export function AgentDefinitionDialog({
       />
 
       <div className="space-y-5">
+        {definitionReadOnly ? (
+          <p className="text-sm text-muted-foreground">
+            This agent is managed by a team. Its configuration cannot be edited
+            here.
+          </p>
+        ) : null}
         <div className="space-y-1.5">
           <label
             className="text-sm font-medium text-foreground"
@@ -785,7 +785,7 @@ export function AgentDefinitionDialog({
                 "h-8 px-0 py-0 leading-6",
                 PERSONA_FIELD_CONTROL_CLASS,
               )}
-              disabled={isPending}
+              disabled={isPending || definitionReadOnly}
               id="persona-display-name"
               onChange={(event) => setDisplayName(event.target.value)}
               placeholder="Fizz"
@@ -807,7 +807,7 @@ export function AgentDefinitionDialog({
                 "min-h-40 resize-y px-3 py-3 leading-5",
                 PERSONA_FIELD_CONTROL_CLASS,
               )}
-              disabled={isPending}
+              disabled={isPending || definitionReadOnly}
               id="persona-system-prompt"
               onChange={(event) => setSystemPrompt(event.target.value)}
               placeholder="Describe what this agent should do."
@@ -830,7 +830,7 @@ export function AgentDefinitionDialog({
         >
           {aiConfigurationMode === "custom" ? (
             <AgentHarnessField
-              disabled={isPending || runtimesLoading}
+              disabled={isPending || runtimesLoading || definitionReadOnly}
               onValueChange={handleRuntimeDropdownChange}
               options={runtimeDropdownOptions}
               placeholder={blankRuntimeOptionLabel}
@@ -851,7 +851,7 @@ export function AgentDefinitionDialog({
                 ) : null}
               </RequiredFieldLabel>
               <PersonaDropdownField
-                disabled={isPending}
+                disabled={isPending || definitionReadOnly}
                 id="persona-llm-provider"
                 onValueChange={handleProviderDropdownChange}
                 options={providerDropdownOptions}
@@ -872,7 +872,7 @@ export function AgentDefinitionDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={isPending}
+                    disabled={isPending || definitionReadOnly}
                     id="persona-custom-provider"
                     onChange={(event) => setProvider(event.target.value)}
                     placeholder="Custom provider ID"
@@ -887,7 +887,7 @@ export function AgentDefinitionDialog({
           aiConfigurationMode === "custom" &&
           topLevelSecretEnvVar ? (
             <PersonaProviderApiKeyField
-              disabled={isPending}
+              disabled={isPending || definitionReadOnly}
               envVarName={topLevelSecretEnvVar}
               isInherited={apiKeyIsInherited}
               inheritedLabel={apiKeyInheritedLabel}
@@ -906,7 +906,7 @@ export function AgentDefinitionDialog({
           <AnimatePresence initial={false}>
             {modelFieldVisible && aiConfigurationMode === "custom" ? (
               <PersonaModelField
-                disabled={isPending}
+                disabled={isPending || definitionReadOnly}
                 isExplicitModelRequired={isExplicitModelRequired}
                 model={model}
                 modelDiscoveryStatus={modelDiscoveryStatus}
@@ -989,7 +989,7 @@ export function AgentDefinitionDialog({
                 <PersonaAdvancedFields
                   afterRespondTo={isCreateMode ? createRunSection : undefined}
                   behaviorDraft={behaviorDraft}
-                  disabled={isPending}
+                  disabled={isPending || definitionReadOnly}
                   envVars={envVars}
                   fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                   hiddenEnvKeys={

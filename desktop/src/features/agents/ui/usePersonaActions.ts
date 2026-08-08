@@ -51,7 +51,6 @@ import type {
 } from "@/shared/api/types";
 import {
   duplicatePersonaDialogState,
-  editPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
 import {
@@ -94,6 +93,10 @@ export function usePersonaActions() {
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
+  // R5 route collapse: tracks the persona being edited via the merged surface.
+  const [personaToEdit, setPersonaToEdit] = React.useState<AgentPersona | null>(
+    null,
+  );
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] = React.useState<{
@@ -430,7 +433,8 @@ export function usePersonaActions() {
   function openEdit(persona: AgentPersona) {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
-    setPersonaDialogState(editPersonaDialogState(persona));
+    // R5: route to the merged AgentEditDialog surface (definition-only context).
+    setPersonaToEdit(persona);
   }
 
   function openDuplicate(persona: AgentPersona) {
@@ -581,6 +585,8 @@ export function usePersonaActions() {
     isPending,
     personaDialogState,
     setPersonaDialogState,
+    personaToEdit,
+    setPersonaToEdit,
     personaToDelete,
     setPersonaToDelete,
     personaToShare,
