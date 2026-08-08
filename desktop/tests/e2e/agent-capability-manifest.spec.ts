@@ -180,7 +180,7 @@ test("renders owner-only readiness from catalog, lifecycle, and observer evidenc
   const manifest = await openRuntimeManifest(page);
   await expect(
     manifest.getByTestId("agent-capability-overall-status"),
-  ).toHaveText("Ready locally");
+  ).toHaveText("Runtime ready");
   await expect(manifest).toContainText(
     "Local evidence for this owner and machine",
   );

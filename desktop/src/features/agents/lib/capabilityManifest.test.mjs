@@ -53,6 +53,7 @@ function agent(overrides = {}) {
     backendAgentId: null,
     respondTo: "owner-only",
     respondToAllowlist: [],
+    credentialPersistence: "keyring_verified",
     ...overrides,
   };
 }
@@ -253,6 +254,10 @@ test("builds a ready manifest from separately sourced live evidence", () => {
     requested: "bypassPermissions",
     effective: "perToolAutoDecision",
     source: "buzzHarness",
+  });
+  assert.deepEqual(result.sessionEvidence, {
+    sessionId: null,
+    channelId: null,
   });
   assert.equal(
     result.limitations.includes(
@@ -714,4 +719,55 @@ test("observer reset clears live manifest evidence for a community switch", () =
     afterReset.features.find((feature) => feature.id === "image-input")?.state,
     "unknown",
   );
+});
+
+test("credential persistence readiness check reflects keyring_verified as ready", () => {
+  const result = manifest({
+    agent: agent({ credentialPersistence: "keyring_verified" }),
+  });
+  const check = result.readiness.find((c) => c.id === "credential_persistence");
+  assert.equal(check?.status, "ready");
+  assert.equal(check?.detail, "Keyring entry verified");
+});
+
+test("credential persistence readiness check reflects inline_fallback as ready with detail", () => {
+  const result = manifest({
+    agent: agent({ credentialPersistence: "inline_fallback" }),
+  });
+  const check = result.readiness.find((c) => c.id === "credential_persistence");
+  assert.equal(check?.status, "ready");
+  assert.equal(check?.detail, "Key stored inline (keyring unreachable at last save)");
+});
+
+test("credential persistence readiness check reflects missing as attention", () => {
+  const result = manifest({
+    agent: agent({ credentialPersistence: "missing" }),
+  });
+  const check = result.readiness.find((c) => c.id === "credential_persistence");
+  assert.equal(check?.status, "attention");
+  assert.equal(check?.detail, "No key found in keyring or inline storage");
+});
+
+test("credential persistence readiness check reflects unavailable as unknown", () => {
+  const result = manifest({
+    agent: agent({ credentialPersistence: "unavailable" }),
+  });
+  const check = result.readiness.find((c) => c.id === "credential_persistence");
+  assert.equal(check?.status, "unknown");
+  assert.equal(check?.detail, "Keyring unavailable — cannot determine persistence");
+});
+
+test("credential persistence readiness check defaults to unknown when backend does not report it", () => {
+  const result = manifest({
+    agent: agent({ credentialPersistence: null }),
+  });
+  const check = result.readiness.find((c) => c.id === "credential_persistence");
+  assert.equal(check?.status, "unknown");
+});
+
+test("credential persistence check is positioned after authentication in the readiness array", () => {
+  const result = manifest();
+  const authIdx = result.readiness.findIndex((c) => c.id === "authentication");
+  const credIdx = result.readiness.findIndex((c) => c.id === "credential_persistence");
+  assert.equal(credIdx, authIdx + 1);
 });

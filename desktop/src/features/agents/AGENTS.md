@@ -182,7 +182,7 @@ with a TypeScript lookup table or an id comparison in a component.
     claims. A shareable claim requires a separate authenticated event contract,
     scoped receipts, and expiry semantics. Runtime catalog and lifecycle
     queries must settle before the manifest renders readiness. Label the
-    positive aggregate state as "Ready locally" and show the permission evidence
+    positive aggregate state as "Runtime ready" and show the permission evidence
     source so owners can distinguish runtime behavior from Buzz harness policy.
 
 ## The tests that enforce this
