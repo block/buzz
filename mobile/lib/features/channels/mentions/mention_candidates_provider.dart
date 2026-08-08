@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_archive/archived_identities_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../profile/user_cache_provider.dart';
@@ -80,6 +81,13 @@ final mentionCandidatesProvider = Provider.family
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      final archivedSnapshot = ref.watch(archivedIdentityPubkeysProvider);
+      // Do not briefly expose archived identities while the relay-scoped
+      // snapshot is loading or refreshing for a new relay. The archive
+      // provider itself fails open to an empty set when the relay cannot
+      // supply a valid snapshot.
+      if (archivedSnapshot.isLoading) return const [];
+      final archivedPubkeys = archivedSnapshot.asData?.value ?? const {};
       final channels =
           ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
@@ -99,6 +107,7 @@ final mentionCandidatesProvider = Provider.family
         sharedChannelIds: sharedChannelIds,
         userCache: userCache,
         ownerByAgentPubkey: owners,
+        archivedPubkeys: archivedPubkeys,
         searchResults: searchResults,
         currentPubkey: currentPubkey,
       );
