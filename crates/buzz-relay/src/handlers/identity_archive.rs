@@ -98,6 +98,9 @@ pub async fn handle_identity_archive_event(
     );
 
     if !changed {
+        if let Err(e) = publish_nipia_archival_list(tenant, state).await {
+            warn!(error = %e, "failed to publish NIP-IA archival list");
+        }
         return Ok(());
     }
 
