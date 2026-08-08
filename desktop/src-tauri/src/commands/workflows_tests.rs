@@ -101,6 +101,29 @@ fn malformed_yaml_yields_empty_object_not_error() {
 }
 
 #[test]
+fn channels_workflows_filters_emits_one_single_h_filter_per_channel() {
+    // Regression: must not pack all channels into one multi-value #h filter.
+    let a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string();
+    let b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string();
+    let filters = channels_workflows_filters(&[a.clone(), b.clone()]);
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        filters[0],
+        serde_json::json!({"kinds": [30620], "#h": [a]})
+    );
+    assert_eq!(
+        filters[1],
+        serde_json::json!({"kinds": [30620], "#h": [b]})
+    );
+}
+
+#[test]
+fn channels_workflows_filters_empty_input_is_empty() {
+    assert!(channels_workflows_filters(&[]).is_empty());
+}
+}
+
+#[test]
 fn scalar_yaml_document_yields_empty_object() {
     // A bare scalar parses as valid YAML but isn't an object; treat as empty.
     let ev = wf_event(WF, CHAN, "just a string");

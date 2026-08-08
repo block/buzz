@@ -855,18 +855,26 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// Returns `Some` only when the filter has **exactly one** `#h` value that
+/// parses as a UUID. Multi-value `#h` is NIP-01 OR ("match any of these
+/// channels") and must **not** be collapsed into a single SQL `channel_id`
+/// predicate — that would silently drop events in every other listed channel
+/// (Desktop Workflows overview used one multi-`#h` filter for all member
+/// channels and only received the first channel's workflows).
+///
+/// When this returns `None` for multi-`#h`, callers leave `channel_id` unset,
+/// apply the accessible-channel scope, and rely on NIP-01 post-filter matching
+/// (same shape as the WS REQ path's `per_filter_channel` for `vs.len() != 1`).
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
+    let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter.generic_tags.get(&h).and_then(|vs| {
+        if vs.len() == 1 {
+            vs.iter().next()?.parse::<uuid::Uuid>().ok()
+        } else {
+            None
         }
-    }
-    None
+    })
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1584,6 +1592,44 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_single_h_pushes_channel() {
+        let channel_id = uuid::Uuid::new_v4();
+        let filter = filter_with_channel(channel_id);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel_id));
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_multi_h_does_not_collapse() {
+        // Regression: multi-value #h must not pick the first iterated UUID as
+        // SQL channel_id. That dropped every other channel's workflows from the
+        // Desktop overview's batched query.
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let filter = Filter::new().custom_tags(
+            h,
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+        assert_eq!(
+            extract_channel_id_from_filter(&filter),
+            None,
+            "multi-#h is NIP-01 OR and must leave channel_id unset"
+        );
+
+        // Downstream: no single-channel predicate → access scope can push the
+        // full accessible set; NIP-01 post-filter keeps the matching channels.
+        let community =
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let params = filter_to_query_params(&filter, None, community);
+        assert!(params.channel_id.is_none());
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_empty_h_returns_none() {
+        assert_eq!(extract_channel_id_from_filter(&Filter::new()), None);
     }
 
     #[test]
