@@ -110,6 +110,73 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   );
 });
 
+test("relayAgentIsSharedWithUser: an owner-only agent is invocable by its owner", () => {
+  const agent = {
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+  const sharedChannelIds = new Set(["general"]);
+
+  assert.equal(
+    relayAgentIsSharedWithUser(agent, sharedChannelIds, CURRENT_PUBKEY, true),
+    true,
+  );
+  // Someone else's owner-only agent stays out of reach.
+  assert.equal(
+    relayAgentIsSharedWithUser(agent, sharedChannelIds, CURRENT_PUBKEY, false),
+    false,
+  );
+  // Ownership is matched, never assumed: no viewer identity, no admission.
+  assert.equal(
+    relayAgentIsSharedWithUser(agent, sharedChannelIds, null, true),
+    false,
+  );
+});
+
+test("getMentionableAgentPubkeys: admits an owner-only relay agent for its owner", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_A,
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      channelIds: ["general"],
+    },
+    {
+      pubkey: PUB_B,
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      channelIds: ["general"],
+    },
+  ];
+  const call = (overrides) =>
+    getMentionableAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      eligibilityScope: { type: "channel", channelId: "general" },
+      managedAgentPubkeys: [],
+      relayAgents,
+      ...overrides,
+    });
+  const profiles = {
+    [PUB_A]: { ownerPubkey: CURRENT_PUBKEY.toUpperCase() },
+    [PUB_B]: { ownerPubkey: OTHER_OWNER_PUBKEY },
+  };
+
+  assert.deepEqual([...call({ profiles })], [PUB_A]);
+  // The owner still only reaches the agent in channels it actually joined.
+  assert.deepEqual(
+    [
+      ...call({
+        eligibilityScope: { type: "channel", channelId: "other" },
+        profiles,
+      }),
+    ],
+    [],
+  );
+  // No owner metadata, no admission -- unchanged from before.
+  assert.deepEqual([...call({})], []);
+});
+
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
   const agent = {
     respondTo: "allowlist",
