@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   clearCommunityStorage,
+  deriveCommunityName,
   initFirstCommunity,
   loadCommunities,
   loadCommunityDiscoveryAfterLeave,
@@ -131,4 +132,27 @@ test("clearCommunityStorage preserves completed final-leave discovery", () => {
 
   assert.equal(storage.length, 1);
   assert.equal(loadCommunityDiscoveryAfterLeave(storage), true);
+});
+
+test("deriveCommunityName skips service labels ahead of the org label", () => {
+  assert.equal(deriveCommunityName("wss://buzz.nilor.cool"), "nilor");
+  assert.equal(deriveCommunityName("wss://relay.example.com"), "example");
+  assert.equal(deriveCommunityName("wss://buzz.relay.example.com"), "example");
+});
+
+test("deriveCommunityName keeps the registrable domain label", () => {
+  // The service label IS the org when nothing follows it but the TLD.
+  assert.equal(deriveCommunityName("wss://buzz.com"), "buzz");
+  assert.equal(deriveCommunityName("wss://nilor.cool"), "nilor");
+  // Non-service subdomains still win over the domain.
+  assert.equal(deriveCommunityName("wss://acme.example.com"), "acme");
+});
+
+test("deriveCommunityName preserves local and staging special cases", () => {
+  assert.equal(deriveCommunityName("ws://localhost:3000"), "Local Dev");
+  assert.equal(
+    deriveCommunityName("wss://buzz-oss.stage.blox.sqprod.co"),
+    "Buzz (staging)",
+  );
+  assert.equal(deriveCommunityName("not a url"), "Community");
 });
