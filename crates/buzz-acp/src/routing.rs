@@ -286,10 +286,18 @@ impl Policy {
     }
 
     /// Which harness class should own this turn. `None` => no opinion
-    /// (fail-open). Deterministic and IO-free, mirroring [`decide_static`], so
-    /// every process reaches the same answer and exactly one handles the turn.
+    /// (fail-open). Deterministic and IO-free, mirroring [`decide_static`].
+    ///
+    /// UNWIRED. The ingress decline-gate that consumed this was reverted after
+    /// adversarial review (2026-08-08): a per-class *decline* fails closed
+    /// system-wide when no sibling of the target class is subscribed, and it
+    /// duplicates the existing per-pubkey `require_mention` selector in the
+    /// targeted case. Kept as a staged primitive for a real dispatcher (one
+    /// authority that *assigns* a turn and guarantees delivery/fallback) — which
+    /// must NOT reuse these decline semantics. Do not rewire as-is.
     ///
     /// [`decide_static`]: Policy::decide_static
+    #[allow(dead_code)]
     pub fn decide_harness(&self, prompt: &str) -> Option<HarnessDecision> {
         if !self.enabled {
             return None;
@@ -322,6 +330,9 @@ impl Policy {
     /// block, no rule matched with no `default_class`, or the target equals this
     /// process's class. The harness block's `self_class` overrides the passed
     /// `self_class`, so one shared block is portable across a group.
+    ///
+    /// UNWIRED — see [`Policy::decide_harness`]; the ingress caller was reverted.
+    #[allow(dead_code)]
     pub fn harness_decline(&self, prompt: &str, self_class: &str) -> Option<HarnessDecision> {
         let self_class = self
             .harness
