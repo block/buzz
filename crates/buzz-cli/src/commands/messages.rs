@@ -1,8 +1,10 @@
+use std::io::Write;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::client::{normalize_event, normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -350,6 +352,24 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// The event kinds a channel read returns when the caller does not name any:
+/// chat plus the channel-scoped system events a reader expects to see.
+const CHANNEL_READ_KINDS: [u64; 5] = [9, 40002, 40008, 45001, 45003];
+
+/// Parse `--kinds 9,1984` into a filter list, falling back to the default read
+/// set. Shared by the HTTP read and the WebSocket stream so `messages subscribe`
+/// delivers exactly what `messages get` would have returned.
+fn channel_read_kinds(kinds: Option<&str>) -> Vec<u64> {
+    let parsed: Vec<u64> = kinds
+        .map(|k| k.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    if parsed.is_empty() {
+        CHANNEL_READ_KINDS.to_vec()
+    } else {
+        parsed
+    }
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -363,18 +383,10 @@ pub async fn cmd_get_messages(
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
+        "kinds": channel_read_kinds(kinds),
         "#h": [channel_id],
         "limit": limit
     });
-
-    // If specific kinds requested, override
-    if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
-    }
 
     if let Some(b) = before {
         filter["until"] = serde_json::json!(b);
@@ -389,6 +401,91 @@ pub async fn cmd_get_messages(
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
+}
+
+/// Relay heartbeat period (`buzz_relay::connection::heartbeat_loop`). The idle
+/// deadline has to clear several of these or a healthy quiet channel looks dead.
+const RELAY_HEARTBEAT_SECS: u64 = 30;
+
+/// Stream a channel over a held-open authenticated WebSocket, one normalized
+/// event per line on stdout, until the connection stops delivering.
+///
+/// Deliberately not `--format`-aware. The output is a transport for a program
+/// that reads one line at a time and acts on it, not a rendering for a person,
+/// and a pretty table cannot be consumed a line at a time.
+pub async fn cmd_subscribe_messages(
+    client: &BuzzClient,
+    channel_id: &str,
+    kinds: Option<&str>,
+    since: Option<i64>,
+    idle_timeout: u64,
+    reconnect_after: u64,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    if idle_timeout <= RELAY_HEARTBEAT_SECS {
+        return Err(CliError::Usage(format!(
+            "--idle-timeout {idle_timeout} is not above the relay's {RELAY_HEARTBEAT_SECS}s \
+             heartbeat, so a healthy connection would be torn down as dead; use 90 or more"
+        )));
+    }
+
+    // Default to "from now". History is what `messages get` is for, and a
+    // subscriber that replays the backlog on every reconnect turns a flapping
+    // network into a flood.
+    let since = since.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    });
+
+    let filter = serde_json::json!({
+        "kinds": channel_read_kinds(kinds),
+        "#h": [channel_id],
+        "since": since,
+    });
+
+    let mut out = std::io::stdout().lock();
+    let mut reader_gone = false;
+
+    let stream = client.subscribe_events(filter, idle_timeout, |event| {
+        let raw = serde_json::to_value(event)
+            .map_err(|e| CliError::Other(format!("cannot serialize event: {e}")))?;
+        let line = normalize_event(&raw).to_string();
+        // Flush every line. The consumer is a reader blocked on this pipe, so
+        // a line sitting in a buffer is an undelivered message — the exact
+        // failure this command exists to remove.
+        if let Err(e) = writeln!(out, "{line}").and_then(|()| out.flush()) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                reader_gone = true;
+            }
+            return Err(CliError::Other(format!("stdout: {e}")));
+        }
+        Ok(())
+    });
+
+    // A healthy subscription is indistinguishable from a subscription the relay
+    // has quietly stopped matching against: both are silent, and both heartbeat.
+    // Ending a good connection on a schedule is what gives the supervisor its
+    // chance to re-read over HTTP and find out which one this was.
+    let stopped = if reconnect_after == 0 {
+        stream.await
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(reconnect_after), stream).await {
+            Ok(reason) => reason,
+            Err(_) => Err(CliError::Other(format!(
+                "scheduled re-subscribe after {reconnect_after}s"
+            ))),
+        }
+    };
+
+    match stopped {
+        Ok(never) => match never {},
+        // The reader closed the pipe. That is the reader's decision, not a
+        // failure of the stream, and must not be reported as one.
+        Err(_) if reader_gone => Ok(()),
+        Err(reason) => Err(reason),
+    }
 }
 
 pub async fn cmd_get_thread(
@@ -959,6 +1056,23 @@ pub async fn dispatch(
                 since,
                 kinds.as_deref(),
                 format,
+            )
+            .await
+        }
+        MessagesCmd::Subscribe {
+            channel,
+            kinds,
+            since,
+            idle_timeout,
+            reconnect_after,
+        } => {
+            cmd_subscribe_messages(
+                client,
+                &channel,
+                kinds.as_deref(),
+                since,
+                idle_timeout,
+                reconnect_after,
             )
             .await
         }

@@ -107,6 +107,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `edit` | Edit a message you sent |
 | | `delete` | Delete a message |
 | | `get` | List messages in a channel |
+| | `subscribe` | Stream new messages live over WebSocket, one JSON object per line |
 | | `thread` | Get a message thread |
 | | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
