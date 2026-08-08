@@ -136,6 +136,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: None,
     },
     PresetHarness {
+        id: "poolside",
+        label: "Poolside",
+        command: "pool",
+        args: &["acp"],
+        install_instructions_url: "https://docs.poolside.ai/cli/install",
+        install_hint: "Buzz talks to Poolside through the pool CLI's ACP mode (pool acp).",
+        underlying_cli: None,
+    },
+    PresetHarness {
         id: "kimi",
         label: "Kimi Code",
         command: "kimi",
