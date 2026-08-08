@@ -53,6 +53,7 @@ import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
+import '../huddles/huddle_controls.dart';
 import 'small_avatar.dart';
 import 'thread_detail_page.dart';
 import 'timeline_message.dart';
@@ -338,6 +339,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ],
               ),
         actions: [
+          HuddleButton(channelId: resolvedChannel.id),
           _MembersButton(
             channelId: resolvedChannel.id,
             channel: resolvedChannel,

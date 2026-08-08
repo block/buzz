@@ -42,6 +42,14 @@ dependencies:
   open_filex: ^4.7.0
   path_provider: ^2.1.6
   share_plus: ^13.3.0
+  audio_session: 0.2.4
+  flutter_pcm_sound: 3.3.3
+  opus_codec: 3.0.5
+  opus_codec_dart: 3.0.5
+  record: 6.2.1
+  permission_handler: ^13.0.0
+  speech_to_text: ^7.4.0
+  flutter_tts: ^4.2.5
 
 dev_dependencies:
   flutter_test:

@@ -97,6 +97,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.13.1"
+  audio_session:
+    dependency: "direct main"
+    description:
+      name: audio_session
+      sha256: f9e7711a0e24ca8b40f5d7ac374c3c6e55016f3157912badd18199cdbbca5c4d
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.4"
   bech32:
     dependency: transitive
     description:
@@ -470,6 +478,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.4"
+  flutter_pcm_sound:
+    dependency: "direct main"
+    description:
+      name: flutter_pcm_sound
+      sha256: "15c6894da8195122001375084d51449bd77849579c93fca2800c00b615699dc0"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.3.3"
   flutter_plugin_android_lifecycle:
     dependency: transitive
     description:
@@ -547,6 +563,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_tts:
+    dependency: "direct main"
+    description:
+      name: flutter_tts
+      sha256: ce5eb209b40e95f2f4a1397116c87ab2fcdff32257d04ed7a764e75894c03775
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.2.5"
   flutter_web_plugins:
     dependency: transitive
     description: flutter
@@ -904,6 +928,78 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.7.0"
+  opus_codec:
+    dependency: "direct main"
+    description:
+      name: opus_codec
+      sha256: d8ad96b7242e78025122bc2b3821788310ddfb4700f03da7c67da83339099287
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_android:
+    dependency: transitive
+    description:
+      name: opus_codec_android
+      sha256: "347f61ac7fe53cb684ec4777b49688a8336077e025a3e04e3f61294da5d89c68"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_dart:
+    dependency: "direct main"
+    description:
+      name: opus_codec_dart
+      sha256: a5570ca76ff4d973415991e09507cc05f11d640c2d635aee101152457fecf88f
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_ios:
+    dependency: transitive
+    description:
+      name: opus_codec_ios
+      sha256: fdca5606410eaf14b9d1f1179f0b00b7994b6dbc64f0399e2955618b16ef9353
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_linux:
+    dependency: transitive
+    description:
+      name: opus_codec_linux
+      sha256: "69762fa3c8e87e38e6279124544deeebad48b5c3d8b8950de2ce7ef9c63f80f6"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_macos:
+    dependency: transitive
+    description:
+      name: opus_codec_macos
+      sha256: ff8012e5eb692a81151404bc5b43385794be0e7b779e60f7f9d7405bba69d693
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_platform_interface:
+    dependency: transitive
+    description:
+      name: opus_codec_platform_interface
+      sha256: "76c6b64097fd1eed334e7be6fc161567058ba26e61f792be9416552fcf48e83b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_web:
+    dependency: transitive
+    description:
+      name: opus_codec_web
+      sha256: c23af0111c986d62ab14c92a25a5e73939034f5d8cd3ef2aca76d904a5994f29
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
+  opus_codec_windows:
+    dependency: transitive
+    description:
+      name: opus_codec_windows
+      sha256: "85fff458e90d1cca8ae0ea2527fa408db3c7dd4d48d98e407e2eac4f4c3a3426"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.0.5"
   package_config:
     dependency: transitive
     description:
@@ -992,6 +1088,54 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.3.0"
+  permission_handler:
+    dependency: "direct main"
+    description:
+      name: permission_handler
+      sha256: "06149cba29bc46206f8b54b56065fe74b07602d2454a281287685ae66b5ab7b5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "13.0.0"
+  permission_handler_android:
+    dependency: transitive
+    description:
+      name: permission_handler_android
+      sha256: d7676c6fcf2f0b92537ec41476a6ead45a00b0d8bbb852395a6f9f33f49d6242
+      url: "https://pub.dev"
+    source: hosted
+    version: "14.0.0"
+  permission_handler_apple:
+    dependency: transitive
+    description:
+      name: permission_handler_apple
+      sha256: "11b7e94a9d2fbee23c27f0cae0105c6266c03fd83b9a2eda6cf09141fc82624b"
+      url: "https://pub.dev"
+    source: hosted
+    version: "9.5.0"
+  permission_handler_html:
+    dependency: transitive
+    description:
+      name: permission_handler_html
+      sha256: "6ea98b3f17f60d3b527f2647ed2ab4dc0f6bfe25b22cb1c363f5d8f62252f6ac"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.4+1"
+  permission_handler_platform_interface:
+    dependency: transitive
+    description:
+      name: permission_handler_platform_interface
+      sha256: a5c8a97ecf5616112a5b16d4b8e9ec0e5ae90ef63ac69c0d7b8ae240be760b23
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.4.0"
+  permission_handler_windows:
+    dependency: transitive
+    description:
+      name: permission_handler_windows
+      sha256: caeae01858a0a7d2df67a445ac98e1ad95e55a0e77c73044f4e9b1c8c2289cbd
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.2"
   petitparser:
     dependency: transitive
     description:
@@ -1064,6 +1208,70 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.5.0"
+  record:
+    dependency: "direct main"
+    description:
+      name: record
+      sha256: "10911465138fafacef459a780564e883e01bd48eabf87ab20543684884492870"
+      url: "https://pub.dev"
+    source: hosted
+    version: "6.2.1"
+  record_android:
+    dependency: transitive
+    description:
+      name: record_android
+      sha256: eb1732e42d0d2a1895b8db86e4fc917287e6d8491b6ed59918aea8bed6c69de4
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.2"
+  record_ios:
+    dependency: transitive
+    description:
+      name: record_ios
+      sha256: c051fb48edd7a0e265daafb9108730dc827c27b551728a3fdfb3ef69efd89c73
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.1"
+  record_linux:
+    dependency: transitive
+    description:
+      name: record_linux
+      sha256: "31181787bf7eccb0e298835836b69b3cd0a903863b75d70e937de3dec71cd8f3"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.1"
+  record_macos:
+    dependency: transitive
+    description:
+      name: record_macos
+      sha256: cfe1b61435e27db418bf513dc36820d10c9f7eb1843786c2c9a52e07e2f4f627
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.2"
+  record_platform_interface:
+    dependency: transitive
+    description:
+      name: record_platform_interface
+      sha256: "8e56cbe06c6984137fb86132ff03459f29938d927496d9b2d0962e2d6345d488"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.6.0"
+  record_web:
+    dependency: transitive
+    description:
+      name: record_web
+      sha256: "7e9846981c1f2d111d86f0ae3309071f5bba8b624d1c977316706f08fc31d16d"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.3.0"
+  record_windows:
+    dependency: transitive
+    description:
+      name: record_windows
+      sha256: "223258060a1d25c62bae18282c16783f28581ec19401d17e56b5205b9f039d78"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.7"
   riverpod:
     dependency: transitive
     description:
@@ -1245,6 +1453,30 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.10.2"
+  speech_to_text:
+    dependency: "direct main"
+    description:
+      name: speech_to_text
+      sha256: "75587f7400f485fdf166beacd471549d98fe5d58e634f708916bb65dec05d6a4"
+      url: "https://pub.dev"
+    source: hosted
+    version: "7.4.0"
+  speech_to_text_platform_interface:
+    dependency: transitive
+    description:
+      name: speech_to_text_platform_interface
+      sha256: a7e16e02853853ed7534ac2bde9a1c4f39c8879970a7974ac6ff832d4bdaa4b0
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.4.0"
+  speech_to_text_windows:
+    dependency: transitive
+    description:
+      name: speech_to_text_windows
+      sha256: "2d1d10565b23262386b453b33656299608dc7a66784453735d6c1318f13f44d7"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.1"
   stack_trace:
     dependency: transitive
     description:
@@ -1485,6 +1717,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "15.0.2"
+  wasm_ffi:
+    dependency: transitive
+    description:
+      name: wasm_ffi
+      sha256: "950238f09e2d18b85c5c4356833a06319b049c1d19f936db32c3f0d8194e30b5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.3.0"
   watcher:
     dependency: transitive
     description:

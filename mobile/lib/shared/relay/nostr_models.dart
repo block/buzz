@@ -39,6 +39,7 @@ abstract final class EventKind {
   static const huddleParticipantJoined = 48101;
   static const huddleParticipantLeft = 48102;
   static const huddleEnded = 48103;
+  static const huddleGuidelines = 48106;
 
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
@@ -86,6 +87,7 @@ abstract final class EventKind {
     jobCancel,
     jobError,
     huddleStarted,
+    huddleEnded,
   ];
 }
 
