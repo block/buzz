@@ -38,18 +38,81 @@ export type MeshNodeStatus = {
   deviceName?: string | null;
 };
 
+let meshDiagnosticLoggingEnabled = false;
+
+export function meshDebugLog(message: string): void {
+  if (!meshDiagnosticLoggingEnabled) return;
+  void invokeTauri<void>("mesh_debug_log", { message }).catch(() => {
+    // Diagnostic logging must never affect the UI path.
+  });
+}
+
+export async function meshDebugLoggingEnabled(): Promise<boolean> {
+  const enabled = await invokeTauri<boolean>("mesh_debug_logging_enabled");
+  meshDiagnosticLoggingEnabled = enabled;
+  return enabled;
+}
+
+export async function setMeshDebugLoggingEnabled(
+  enabled: boolean,
+): Promise<boolean> {
+  const saved = await invokeTauri<boolean>("set_mesh_debug_logging_enabled", {
+    enabled,
+  });
+  meshDiagnosticLoggingEnabled = saved;
+  return saved;
+}
+
 export async function meshStartNode(
   request: StartMeshNodeRequest,
 ): Promise<MeshNodeStatus> {
-  return await invokeTauri<MeshNodeStatus>("mesh_start_node", { request });
+  meshDebugLog(`api mesh_start_node invoke ${JSON.stringify(request)}`);
+  try {
+    const status = await invokeTauri<MeshNodeStatus>("mesh_start_node", {
+      request,
+    });
+    meshDebugLog(
+      `api mesh_start_node ok state=${status.state} mode=${status.mode} model=${status.modelId}`,
+    );
+    return status;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_start_node error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 export async function meshStopNode(): Promise<MeshNodeStatus> {
-  return await invokeTauri<MeshNodeStatus>("mesh_stop_node");
+  meshDebugLog("api mesh_stop_node invoke");
+  try {
+    const status = await invokeTauri<MeshNodeStatus>("mesh_stop_node");
+    meshDebugLog(
+      `api mesh_stop_node ok state=${status.state} mode=${status.mode} model=${status.modelId}`,
+    );
+    return status;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_stop_node error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 export async function meshNodeStatus(): Promise<MeshNodeStatus> {
-  return await invokeTauri<MeshNodeStatus>("mesh_node_status");
+  meshDebugLog("api mesh_node_status invoke");
+  try {
+    const status = await invokeTauri<MeshNodeStatus>("mesh_node_status");
+    meshDebugLog(
+      `api mesh_node_status ok state=${status.state} mode=${status.mode} model=${status.modelId}`,
+    );
+    return status;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_node_status error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 /**
@@ -70,11 +133,35 @@ export type MeshServingUsage = {
 };
 
 export async function meshServingUsage(): Promise<MeshServingUsage> {
-  return await invokeTauri<MeshServingUsage>("mesh_serving_usage");
+  meshDebugLog("api mesh_serving_usage invoke");
+  try {
+    const usage = await invokeTauri<MeshServingUsage>("mesh_serving_usage");
+    meshDebugLog(
+      `api mesh_serving_usage ok inflight=${usage.inflight} requests=${usage.requestsServed} remote=${usage.remoteAttempts}`,
+    );
+    return usage;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_serving_usage error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 export async function meshInstalledModels(): Promise<MeshModelOption[]> {
-  return await invokeTauri<MeshModelOption[]>("mesh_installed_models");
+  meshDebugLog("api mesh_installed_models invoke");
+  try {
+    const models = await invokeTauri<MeshModelOption[]>(
+      "mesh_installed_models",
+    );
+    meshDebugLog(`api mesh_installed_models ok count=${models.length}`);
+    return models;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_installed_models error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
 
 export type MeshModelFit = "comfortable" | "tight" | "tradeoff" | "too_large";
@@ -110,5 +197,17 @@ export type MeshModelCatalog = {
  * Works without a running mesh node (hardware survey + HF cache scan).
  */
 export async function meshModelCatalog(): Promise<MeshModelCatalog> {
-  return await invokeTauri<MeshModelCatalog>("mesh_model_catalog");
+  meshDebugLog("api mesh_model_catalog invoke");
+  try {
+    const catalog = await invokeTauri<MeshModelCatalog>("mesh_model_catalog");
+    meshDebugLog(
+      `api mesh_model_catalog ok entries=${catalog.entries.length} recommended=${catalog.recommended} vram=${catalog.vramGb}`,
+    );
+    return catalog;
+  } catch (err) {
+    meshDebugLog(
+      `api mesh_model_catalog error ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
 }
