@@ -207,6 +207,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     .locator("div")
     .boundingBox();
   const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const guidanceLayerBox = await guidanceLayer.boundingBox();
   const guidanceBackdrop = page.getByTestId(
     "welcome-composer-guidance-backdrop",
   );
@@ -217,6 +218,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     !personaMentionBox ||
     !composerBox ||
     !dockBackdropBox ||
+    !guidanceLayerBox ||
     !guidanceBackdropBox
   ) {
     throw new Error("Could not measure welcome composer banner layout");
@@ -226,23 +228,20 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     await composer.getByTestId("welcome-composer-guide-banner").count(),
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
-  expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
-  expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
+  // Banner is in normal flow above the composer, no overlap.
+  expect(bannerBox.y + bannerBox.height).toBeLessThanOrEqual(composerBox.y);
+  // The dock backdrop is absolute inset-y-0 inside composer-dock, which now
+  // contains the guidance layer + composer in flow, so its top aligns with the
+  // guidance layer top (not the composer top).
+  expect(Math.abs(dockBackdropBox.y - guidanceLayerBox.y)).toBeLessThanOrEqual(
+    1,
+  );
   expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
-  expect(
-    Math.abs(
-      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
-    ),
-  ).toBeLessThanOrEqual(1);
-  const [guidanceZIndex, backdropZIndex] = await Promise.all([
-    guidanceLayer.evaluate((element) =>
-      Number(window.getComputedStyle(element).zIndex),
-    ),
-    page
-      .getByTestId("composer-dock-backdrop")
-      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
-  ]);
-  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  // The guidance backdrop extends bottom-3 (12px) short of the banner's bottom,
+  // visually connecting up to the composer.
+  expect(guidanceBackdropBox.y + guidanceBackdropBox.height).toBeLessThan(
+    composerBox.y,
+  );
   expect(
     await page
       .getByTestId("channel-composer-overlay")
@@ -3168,6 +3167,59 @@ test("finishing onboarding creates starter channels and focuses welcome-everyone
   await expectStarterChannels(page);
   await expectWelcomeGuideIntro(page);
   await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
+});
+
+test("welcome-everywhere banner: X dismiss removes the guidance surface", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+  const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const dismissButton = page.getByTestId("welcome-composer-dismiss-button");
+
+  // Banner and guidance layer are visible in the prompt state.
+  await expect(banner).toBeVisible();
+  await expect(guidanceLayer).toBeVisible();
+  await expect(dismissButton).toBeVisible();
+
+  await dismissButton.click();
+
+  // After dismiss the entire guidance surface must be gone.
+  await expect(banner).toHaveCount(0, { timeout: 2_000 });
+  await expect(guidanceLayer).toHaveCount(0);
+});
+
+test("welcome-everywhere banner: dismiss persists after channel re-entry", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await completeProfileOnboarding(page);
+
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+
+  await expect(banner).toBeVisible();
+  await page.getByTestId("welcome-composer-dismiss-button").click();
+  await expect(banner).toHaveCount(0, { timeout: 2_000 });
+
+  // Leave the Welcome channel.
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toContainText("general");
+  await expect(banner).toHaveCount(0);
+
+  // Return — banner must stay hidden.
+  await page.getByTestId("channel-welcome-everyone").click();
+  await expect(page.getByTestId("chat-title")).toContainText("Welcome");
+  await expect(banner).toHaveCount(0);
 });
 
 test("initial profile read failures still hold incomplete users in onboarding", async ({
