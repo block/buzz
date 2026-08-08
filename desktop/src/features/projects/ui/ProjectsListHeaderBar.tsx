@@ -8,6 +8,13 @@ import type {
 import { ProjectsListScopeDropdown } from "@/features/projects/ui/ProjectsListScopeDropdown";
 import { ProjectsViewModeToggle } from "@/features/projects/ui/ProjectsToolbar";
 import { cn } from "@/shared/lib/cn";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 
 const PROJECT_SCOPE_OPTIONS: Array<{
   label: string;
@@ -125,20 +132,28 @@ export function ProjectsListHeaderBar({
     >
       {scopeDropdown}
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <label
+          className="text-xs text-muted-foreground"
+          htmlFor="projects-sort-select"
+        >
           <span className="sr-only">Sort projects</span>
-          <select
-            className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
-            onChange={(event) =>
-              onSortChange(event.target.value as ProjectsSort)
-            }
-            value={sort}
-          >
-            <option value="updated">Recent activity</option>
-            <option value="created">Created date</option>
-            <option value="name">Name</option>
-          </select>
         </label>
+        <Select
+          onValueChange={(value) => onSortChange(value as ProjectsSort)}
+          value={sort}
+        >
+          <SelectTrigger
+            className="h-8 rounded-md border-transparent bg-transparent px-2 py-0 text-xs shadow-none hover:bg-muted/50"
+            id="projects-sort-select"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="updated">Recent activity</SelectItem>
+            <SelectItem value="created">Created date</SelectItem>
+            <SelectItem value="name">Name</SelectItem>
+          </SelectContent>
+        </Select>
         <ProjectsViewModeToggle
           onViewModeChange={onViewModeChange}
           viewMode={viewMode}

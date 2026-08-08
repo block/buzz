@@ -13,6 +13,13 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { downloadDisabled, MIN_PASSPHRASE_LEN } from "../lib/encryptedBackup";
 
 /** Word-count bounds mirroring `key_backup.rs` (Rust clamps regardless). */
@@ -210,19 +217,22 @@ function PassphraseGeneratorPopover({
           >
             Separator
           </label>
-          <select
-            className="h-8 rounded-lg border border-border bg-background px-2 text-sm text-foreground outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            id="backup-passphrase-separator"
-            data-testid="backup-passphrase-separator"
-            onChange={(event) => setSeparator(event.target.value)}
-            value={separator}
-          >
-            {SEPARATOR_OPTIONS.map((option) => (
-              <option key={option.label} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+          <Select onValueChange={setSeparator} value={separator}>
+            <SelectTrigger
+              className="h-8 rounded-lg border-border px-2 py-0"
+              data-testid="backup-passphrase-separator"
+              id="backup-passphrase-separator"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SEPARATOR_OPTIONS.map((option) => (
+                <SelectItem key={option.label} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {error ? (
