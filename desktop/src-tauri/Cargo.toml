@@ -91,6 +91,9 @@ opus = "0.3"
 neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Names the failing field path in directory-parse skip warns (already in the
+# tree as a transitive dep).
+serde_path_to_error = "0.1"
 serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44", "nip49"] }
