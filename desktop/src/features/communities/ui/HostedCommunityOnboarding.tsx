@@ -517,15 +517,26 @@ export function HostedCommunityOnboarding({
               </DialogTitle>
               <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
                 Your Builderlab account
-                {auth.email ? ` (${auth.email})` : ""} is ready. Connect this
-                device’s Buzz identity to finish setup. Your private key stays
-                on this device.
+                {auth.email ? ` (${auth.email})` : ""} is ready. Connect the
+                Buzz identity already on this device to finish setup. Your
+                private key stays on this device — Builderlab never receives
+                it.
               </DialogDescription>
+              <p
+                className="mt-4 w-full text-left text-xs leading-5 text-foreground/55"
+                data-testid="hosted-connect-identity-hint"
+              >
+                Need a different Buzz private key for this email? Close this
+                dialog, open Settings → Account, sign out of the current
+                identity (back up the nsec first), then import or create a new
+                key and return here to connect.
+              </p>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
               <Button
                 className={`mt-6 ${MODAL_PRIMARY_ACTION_CLASS}`}
                 disabled={busy}
                 onClick={() => void connectIdentity()}
+                data-testid="hosted-connect-identity"
               >
                 {busy ? (
                   <LoaderCircle className="h-4 w-4 animate-spin" />
@@ -539,8 +550,10 @@ export function HostedCommunityOnboarding({
                 This account uses a different Buzz identity
               </DialogTitle>
               <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
-                This account is connected to another Buzz identity. Reconnect
-                this device, or sign out to use a different email.
+                This Builderlab account is already linked to a different Buzz
+                identity. Use this device&apos;s key (rebinds the account), sign
+                in with a different email, or switch the local Buzz identity
+                under Settings → Account before reconnecting.
               </DialogDescription>
               <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
                 Account: {identity.npub ?? boundPubkey}
