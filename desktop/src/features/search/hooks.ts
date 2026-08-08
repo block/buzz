@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { searchMessages } from "@/shared/api/tauri";
 
+export const MIN_SEARCH_QUERY_LENGTH = 1;
+
 export function useSearchMessagesQuery(
   query: string,
   options?: {
@@ -45,7 +47,7 @@ export function useSearchMessagesQuery(
       }),
     // Call sites own the "when to search" floor (FTS length / unresolved
     // operators). Keep a single threshold here so it cannot drift.
-    enabled: enabled && trimmedQuery.length >= 2,
+    enabled: enabled && trimmedQuery.length >= MIN_SEARCH_QUERY_LENGTH,
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });
