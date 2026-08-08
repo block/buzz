@@ -211,6 +211,14 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Natural-language output streamed by the agent during the current turn.
+    /// The harness consumes this after a successful prompt and publishes it to
+    /// Buzz, avoiding a second model/tool round-trip for chat delivery.
+    turn_message: String,
+    /// ACP message identifier associated with `turn_message`. When a runtime
+    /// emits commentary followed by a distinct final message, only the newest
+    /// message is retained for publication.
+    turn_message_id: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,7 +558,14 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_message: String::new(),
+            turn_message_id: None,
         })
+    }
+
+    /// Take the natural-language response streamed during the current turn.
+    pub(crate) fn take_turn_message(&mut self) -> String {
+        std::mem::take(&mut self.turn_message)
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -768,6 +783,10 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // A prompt owns exactly one response buffer. Clearing here prevents a
+        // prior turn's output from being published after a later empty turn.
+        self.turn_message.clear();
+        self.turn_message_id = None;
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1731,6 +1750,27 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    if let Some(message_id) = update.get("messageId").and_then(|v| v.as_str()) {
+                        if self.turn_message_id.as_deref() != Some(message_id) {
+                            self.turn_message.clear();
+                            self.turn_message_id = Some(message_id.to_string());
+                        }
+                    }
+                    const MAX_AUTO_REPLY_BYTES: usize = 64 * 1024;
+                    let remaining = MAX_AUTO_REPLY_BYTES.saturating_sub(self.turn_message.len());
+                    if text.len() <= remaining {
+                        self.turn_message.push_str(text);
+                    } else if remaining > 0 {
+                        let safe_end = text
+                            .char_indices()
+                            .map(|(index, _)| index)
+                            .take_while(|index| *index <= remaining)
+                            .last()
+                            .unwrap_or(0);
+                        if safe_end > 0 {
+                            self.turn_message.push_str(&text[..safe_end]);
+                        }
+                    }
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3552,6 +3592,63 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_are_collected_once_per_turn() {
+        let mut client = spawn_inert_client().await;
+        for text in ["Hello, ", "Alex."] {
+            let update = serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": text}
+                    }
+                }
+            });
+            client.handle_session_update(&update);
+        }
+
+        assert_eq!(client.take_turn_message(), "Hello, Alex.");
+        assert!(client.take_turn_message().is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_agent_message_replaces_prior_commentary() {
+        let mut client = spawn_inert_client().await;
+        for (message_id, text) in [("commentary", "Checking."), ("final", "Done.")] {
+            let update = serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": {"text": text}
+                    }
+                }
+            });
+            client.handle_session_update(&update);
+        }
+
+        assert_eq!(client.take_turn_message(), "Done.");
+    }
+
+    #[tokio::test]
+    async fn collected_agent_message_is_capped_on_utf8_boundary() {
+        let mut client = spawn_inert_client().await;
+        let text = format!("{}é", "a".repeat(64 * 1024 - 1));
+        let update = serde_json::json!({
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": text}
+                }
+            }
+        });
+        client.handle_session_update(&update);
+
+        let collected = client.take_turn_message();
+        assert_eq!(collected.len(), 64 * 1024 - 1);
+        assert!(collected.is_char_boundary(collected.len()));
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

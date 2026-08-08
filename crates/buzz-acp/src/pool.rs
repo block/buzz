@@ -2139,6 +2139,18 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
+            // Chat delivery belongs to the harness rather than a second
+            // model/tool pass. A compatibility guard in the publisher avoids
+            // duplicates while older personas still post their own replies.
+            if let Some(ref completed_batch) = batch {
+                let response = agent.acp.take_turn_message();
+                if !response.trim().is_empty() {
+                    publish_natural_agent_reply(&ctx, completed_batch, response.trim()).await;
+                }
+            } else {
+                let _ = agent.acp.take_turn_message();
+            }
+
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
@@ -3907,6 +3919,300 @@ pub(crate) async fn post_failure_notice(
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
+}
+
+/// Publish the natural ACP response for a completed channel turn.
+///
+/// A compatibility query first checks whether the agent already posted in the
+/// channel after the triggering event. This keeps migration from legacy
+/// model-driven posting idempotent.
+async fn publish_natural_agent_reply(ctx: &PromptContext, batch: &FlushBatch, content: &str) {
+    let Some(trigger) = batch.events.last() else {
+        return;
+    };
+
+    let author_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(9))
+        .author(ctx.rest_client.keys.public_key())
+        .since(trigger.event.created_at)
+        .limit(20);
+    if let Ok(Ok(value)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        ctx.rest_client.query(&[author_filter]),
+    )
+    .await
+    {
+        let channel = batch.channel_id.to_string();
+        let already_posted = value.as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event
+                    .get("tags")
+                    .and_then(|tags| tags.as_array())
+                    .is_some_and(|tags| {
+                        tags.iter().any(|tag| {
+                            tag.as_array().is_some_and(|parts| {
+                                parts.first().and_then(|value| value.as_str()) == Some("h")
+                                    && parts.get(1).and_then(|value| value.as_str())
+                                        == Some(channel.as_str())
+                            })
+                        })
+                    })
+            })
+        });
+        if already_posted {
+            tracing::info!(
+                target: "pool::delivery",
+                channel = %batch.channel_id,
+                "natural reply not published because the agent already posted this turn"
+            );
+            return;
+        }
+    }
+
+    let channel_info = ctx.channel_info.resolve(batch.channel_id).await;
+    let is_dm = channel_info
+        .as_ref()
+        .is_some_and(|info| info.channel_type.eq_ignore_ascii_case("dm"));
+    let thread_ref = if is_dm {
+        None
+    } else {
+        let parsed = crate::queue::parse_thread_tags(&trigger.event);
+        let root_event_id = parsed
+            .root_event_id
+            .as_deref()
+            .and_then(|id| nostr::EventId::from_hex(id).ok())
+            .unwrap_or(trigger.event.id);
+        Some(buzz_sdk::ThreadRef {
+            root_event_id,
+            parent_event_id: trigger.event.id,
+        })
+    };
+
+    let mention_pubkeys = resolve_delegated_reply_mentions(ctx, batch, content).await;
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+    let builder = match buzz_sdk::build_message(
+        batch.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &mention_refs,
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::error!(target: "pool::delivery", "auto-reply build failed: {error}");
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(&ctx.rest_client.keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(target: "pool::delivery", "auto-reply signing failed: {error}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event)).await {
+        Ok(Ok(_)) => tracing::info!(
+            target: "pool::delivery",
+            channel = %batch.channel_id,
+            event = %event.id,
+            "natural ACP reply published"
+        ),
+        Ok(Err(error)) => tracing::error!(
+            target: "pool::delivery",
+            channel = %batch.channel_id,
+            "auto-reply publish failed: {error}"
+        ),
+        Err(_) => tracing::error!(
+            target: "pool::delivery",
+            channel = %batch.channel_id,
+            "auto-reply publish timed out"
+        ),
+    }
+}
+
+const MAX_DELEGATED_AGENT_REPLIES: usize = 6;
+
+fn event_p_tags(event: &nostr::Event) -> Vec<String> {
+    let mut seen = HashSet::new();
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("p"))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn resolve_delegated_names_from_profiles(
+    content: &str,
+    participant_pubkeys: &[String],
+    profile_events: &[serde_json::Value],
+    sender_pubkey: &str,
+) -> Vec<String> {
+    let participant_set: HashSet<String> = participant_pubkeys
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    let mut names_to_pubkeys: HashMap<String, Vec<String>> = HashMap::new();
+    let mut display_names = Vec::new();
+    for event in profile_events {
+        let Some(pubkey) = event.get("pubkey").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let pubkey = pubkey.to_ascii_lowercase();
+        if !participant_set.contains(&pubkey) {
+            continue;
+        }
+        let Some(profile_json) = event.get("content").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Ok(profile) = serde_json::from_str::<serde_json::Value>(profile_json) else {
+            continue;
+        };
+        let Some(name) = profile
+            .get("display_name")
+            .or_else(|| profile.get("name"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        names_to_pubkeys
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(pubkey);
+        display_names.push(name.to_string());
+    }
+
+    let known_names: Vec<&str> = display_names.iter().map(String::as_str).collect();
+    let stripped = buzz_sdk::mentions::strip_code_regions(content);
+    let requested = buzz_sdk::mentions::extract_at_mentions_with_known(&stripped, &known_names);
+    let sender = sender_pubkey.to_ascii_lowercase();
+    let mut resolved = Vec::new();
+    for name in requested {
+        let Some(candidates) = names_to_pubkeys.get(&name) else {
+            continue;
+        };
+        // Ambiguous display names are presentation-only. Never guess which
+        // identity should receive an executable mention.
+        if candidates.len() == 1 && candidates[0] != sender && !resolved.contains(&candidates[0]) {
+            resolved.push(candidates[0].clone());
+        }
+    }
+    resolved.truncate(buzz_sdk::mentions::MENTION_CAP);
+    resolved
+}
+
+/// Resolve visible `@Agent` text only inside an owner-delegated thread.
+///
+/// The owner must have authored the root and explicitly p-tagged the current
+/// agent plus at least one collaborator. Targets are restricted to that root
+/// participant set, and propagation stops after a bounded number of agent
+/// replies to prevent autonomous loops.
+async fn resolve_delegated_reply_mentions(
+    ctx: &PromptContext,
+    batch: &FlushBatch,
+    content: &str,
+) -> Vec<String> {
+    if !content.contains('@') {
+        return vec![];
+    }
+    let Some(owner) = ctx.agent_owner_pubkey else {
+        return vec![];
+    };
+    let Some(trigger) = batch.events.last() else {
+        return vec![];
+    };
+    let parsed = crate::queue::parse_thread_tags(&trigger.event);
+    let root_id = parsed
+        .root_event_id
+        .as_deref()
+        .and_then(|value| nostr::EventId::from_hex(value).ok())
+        .unwrap_or(trigger.event.id);
+
+    let root_event = if root_id == trigger.event.id {
+        trigger.event.clone()
+    } else {
+        let filter = nostr::Filter::new().id(root_id).limit(1);
+        let Ok(Ok(value)) =
+            tokio::time::timeout(Duration::from_secs(2), ctx.rest_client.query(&[filter])).await
+        else {
+            tracing::warn!(target: "pool::delivery", "delegated mention root lookup failed");
+            return vec![];
+        };
+        let Some(event_value) = value.as_array().and_then(|events| events.first()).cloned() else {
+            return vec![];
+        };
+        let Ok(event) = serde_json::from_value::<nostr::Event>(event_value) else {
+            return vec![];
+        };
+        event
+    };
+
+    if root_event.pubkey != owner {
+        return vec![];
+    }
+    let participants = event_p_tags(&root_event);
+    let sender = ctx.rest_client.keys.public_key().to_hex();
+    if participants.len() < 2 || !participants.iter().any(|value| value == &sender) {
+        return vec![];
+    }
+
+    let e_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
+    let thread_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(9))
+        .custom_tags(e_tag, [root_id.to_hex()])
+        .limit(MAX_DELEGATED_AGENT_REPLIES + 1);
+    if let Ok(Ok(value)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        ctx.rest_client.query(&[thread_filter]),
+    )
+    .await
+    {
+        let agent_reply_count = value.as_array().map_or(0, |events| {
+            events
+                .iter()
+                .filter(|event| {
+                    event.get("pubkey").and_then(|value| value.as_str())
+                        != Some(owner.to_hex().as_str())
+                })
+                .count()
+        });
+        if agent_reply_count >= MAX_DELEGATED_AGENT_REPLIES {
+            tracing::warn!(
+                target: "pool::delivery",
+                root = %root_id,
+                agent_reply_count,
+                "delegated mention propagation stopped at anti-loop bound"
+            );
+            return vec![];
+        }
+    }
+
+    let authors: Vec<nostr::PublicKey> = participants
+        .iter()
+        .filter_map(|value| nostr::PublicKey::from_hex(value).ok())
+        .collect();
+    let profile_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .authors(authors)
+        .limit(participants.len());
+    let Ok(Ok(value)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        ctx.rest_client.query(&[profile_filter]),
+    )
+    .await
+    else {
+        return vec![];
+    };
+    let profiles = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    resolve_delegated_names_from_profiles(content, &participants, profiles, &sender)
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
@@ -6994,5 +7300,56 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    #[test]
+    fn delegated_mentions_resolve_only_unique_root_participants() {
+        let participants = vec!["a".repeat(64), "b".repeat(64)];
+        let profiles = vec![
+            serde_json::json!({
+                "pubkey": participants[0],
+                "content": "{\"display_name\":\"Agent Alpha\"}"
+            }),
+            serde_json::json!({
+                "pubkey": participants[1],
+                "content": "{\"display_name\":\"Agent Beta\"}"
+            }),
+            serde_json::json!({
+                "pubkey": "c".repeat(64),
+                "content": "{\"display_name\":\"Agent Outside\"}"
+            }),
+        ];
+        assert_eq!(
+            resolve_delegated_names_from_profiles(
+                "@Agent Alpha align with @Agent Beta and ignore @Agent Outside",
+                &participants,
+                &profiles,
+                &participants[1],
+            ),
+            vec![participants[0].clone()],
+            "the sender is never self-mentioned and outsiders are never admitted"
+        );
+    }
+
+    #[test]
+    fn delegated_mentions_fail_closed_on_ambiguous_names_and_code() {
+        let participants = vec!["a".repeat(64), "b".repeat(64)];
+        let profiles = vec![
+            serde_json::json!({
+                "pubkey": participants[0],
+                "content": "{\"display_name\":\"Agent Alpha\"}"
+            }),
+            serde_json::json!({
+                "pubkey": participants[1],
+                "content": "{\"display_name\":\"Agent Alpha\"}"
+            }),
+        ];
+        assert!(resolve_delegated_names_from_profiles(
+            "@Agent Alpha is ambiguous; `@Agent Alpha` in code is inert",
+            &participants,
+            &profiles,
+            &"c".repeat(64),
+        )
+        .is_empty());
     }
 }
