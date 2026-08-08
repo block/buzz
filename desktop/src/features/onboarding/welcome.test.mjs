@@ -278,6 +278,30 @@ test("Welcome ensured marker is scoped to the current identity and community", (
   }
 });
 
+test("Welcome ensured marker canonicalizes relay URL differences", () => {
+  const { restore } = installWindowSessionStorage();
+  try {
+    markWelcomeChannelEnsured("pubkey-a", "wss://community-a.example/");
+
+    // Trailing slash, uppercase scheme, and mixed case must all map
+    // to the same key so a relay URL edit does not orphan the marker.
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "WSS://Community-A.Example/"),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example//"),
+      true,
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("ensureStarterChannels reuses existing open starter channels", async () => {
   const general = makeChannel({
     id: "general-channel",
