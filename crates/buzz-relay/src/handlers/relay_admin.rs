@@ -94,7 +94,91 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A relay-admin command failure, carrying the *category* of the failure so
+/// the ingest seam can map it to the right NIP-01 prefix and HTTP status.
+///
+/// The category is part of the security contract, not cosmetics: a ban must
+/// surface as `blocked:` / HTTP 403 (like every other durable-restriction
+/// refusal), and a restriction-lookup outage must surface as a 500 rather than
+/// a client-side 400 that reads as "your request was malformed". Mirrors
+/// [`super::push_lease::AcceptError`] and its `map_push_accept_error` seam.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RelayAdminError {
+    /// Sender is under a durable community ban — `blocked:` / HTTP 403.
+    Banned,
+    /// Legacy command rejection — `invalid:` / HTTP 400. This is whatever
+    /// [`execute_relay_admin_command`] returned as a `String`, which is mostly
+    /// validation and authorization but also still includes that function's own
+    /// DB failures. Categorizing those is deliberately out of scope for the ban
+    /// fix, so this arm claims no stronger invariant than "the command body said
+    /// no".
+    Rejected(String),
+    /// Admission could not be decided because the restriction lookup failed —
+    /// `error:` / HTTP 500.
+    Internal(String),
+}
+
+/// Decide whether a durable restriction state admits a relay-admin command.
+///
+/// Ban only, deliberately: a timeout is a write-block on *content*, and
+/// `ingest_event` exempts relay-admin kinds from its durable write-path gate
+/// precisely so restricted-but-not-banned admins retain their administrative
+/// capability. Mirrors `moderation_commands::ensure_actor_not_banned`.
+///
+/// Split out as a pure function so the admission rule itself is unit-testable
+/// without a live relay: the end-to-end HTTP test proves the transport, this
+/// proves the decision.
+fn admits_relay_admin_command(
+    restriction: &buzz_db::moderation::RestrictionState,
+) -> Result<(), RelayAdminError> {
+    if restriction.banned {
+        return Err(RelayAdminError::Banned);
+    }
+    Ok(())
+}
+
 /// Validate and execute a relay admin command (kinds 9030–9033).
+///
+/// Admission: rejects a sender under a durable community ban before any
+/// command runs. The command itself is executed by
+/// [`execute_relay_admin_command`].
+///
+/// Returns `Ok(())` on success, or a categorized [`RelayAdminError`].
+pub(super) async fn handle_relay_admin_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), RelayAdminError> {
+    // A ban is an admission boundary, not only a WebSocket-auth check. HTTP
+    // NIP-98 requests and already-authenticated sockets reach this handler
+    // without passing through a fresh NIP-42 challenge, and `ingest_event`
+    // exempts relay-admin kinds from its durable write-path gate so a *timed
+    // out* admin can still administer the roster. That exemption is ban-blind,
+    // so the ban must be enforced here or not at all: a banned admin otherwise
+    // keeps mutating `relay_members` — the very table `moderation_authz`
+    // derives moderator capability from — until someone manually deletes the
+    // row. Mirrors `moderation_commands.rs`, which defends the same boundary
+    // for 9040–9044, and holds that file's stated invariant that a direct
+    // command handler rejects a banned actor on every transport.
+    //
+    // This gate wraps execution rather than opening it so no future early
+    // return inside the command body can precede it.
+    let restriction = state
+        .db
+        .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
+        .await
+        // Fail closed: a DB blip must never admit a banned admin.
+        .map_err(|e| {
+            RelayAdminError::Internal(format!("internal error checking restriction state: {e}"))
+        })?;
+    admits_relay_admin_command(&restriction)?;
+
+    execute_relay_admin_command(tenant, state, event)
+        .await
+        .map_err(RelayAdminError::Rejected)
+}
+
+/// Execute an already-admitted relay admin command.
 ///
 /// The handler:
 /// 1. Extracts the target pubkey from the `["p", ...]` tag.
@@ -103,9 +187,11 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
 /// 4. Enforces the permission matrix.
 /// 5. Applies the change via the DB.
 ///
-/// Returns `Ok(())` on success.  Returns `Err(msg)` — where `msg` is a
-/// human-readable rejection reason — on any validation failure.
-pub async fn handle_relay_admin_event(
+/// Returns `Ok(())` on success.  Returns `Err(msg)` — where `msg` is the
+/// legacy rejection reason — on any failure. This body does not distinguish
+/// validation failures from execution DB failures; both surface as `Err(msg)`
+/// and are categorised by the caller as [`RelayAdminError::Rejected`].
+async fn execute_relay_admin_command(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
@@ -348,6 +434,46 @@ pub async fn handle_relay_admin_event(
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// The vulnerability this file's ban gate closes: `ingest_event` exempts
+    /// relay-admin kinds 9030–9033 from its durable write-path restriction
+    /// gate, so a **banned** admin could add/remove relay members and change
+    /// the workspace icon over signed NIP-98 `POST /events`. Deleting the
+    /// admission check must fail here, in the default (non-ignored) suite.
+    #[test]
+    fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
+        let banned = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+        assert_eq!(
+            admits_relay_admin_command(&banned),
+            Err(RelayAdminError::Banned),
+            "a durably banned admin must never reach a relay-admin command"
+        );
+    }
+
+    /// The counter-invariant, and the reason the ingest exemption exists at
+    /// all: a timeout restricts *content* writes, not administrative
+    /// capability. Widening this gate to timeouts would silently change policy.
+    #[test]
+    fn timed_out_actor_is_still_admitted() {
+        let timed_out = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        };
+        assert!(
+            admits_relay_admin_command(&timed_out).is_ok(),
+            "a timed-out admin must still administer the roster"
+        );
+    }
+
+    #[test]
+    fn unrestricted_actor_is_admitted() {
+        assert!(
+            admits_relay_admin_command(&buzz_db::moderation::RestrictionState::default()).is_ok()
+        );
+    }
 
     /// Build a minimal signed Event with the given kind and tags.
     /// The pubkey will be randomly generated — sufficient for tag extraction tests.

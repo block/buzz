@@ -97,6 +97,9 @@ class MainActivity : FlutterActivity() {
                     TRANSCODE_VIDEO_TO_MP4_METHOD -> {
                         handleTranscodeVideoToMp4(call.arguments, result)
                     }
+                    REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD -> {
+                        result.success(Build.VERSION.SDK_INT <= Build.VERSION_CODES.P)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -284,5 +287,7 @@ class MainActivity : FlutterActivity() {
         private const val SANITIZE_IMAGE_FOR_UPLOAD_METHOD = "sanitizeImageForUpload"
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
+        private const val REQUIRES_LEGACY_MEDIA_STORAGE_PERMISSION_METHOD =
+            "requiresLegacyMediaStoragePermission"
     }
 }

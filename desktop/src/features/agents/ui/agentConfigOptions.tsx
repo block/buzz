@@ -426,6 +426,60 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
   return `${runtime.label}${suffix}`;
 }
 
+export function buildPersonaRuntimeDropdownOptions({
+  defaultRuntimeId,
+  isCreateMode,
+  runtime,
+  runtimes,
+  runtimesLoading,
+}: {
+  defaultRuntimeId?: string;
+  isCreateMode: boolean;
+  runtime: string;
+  runtimes: AcpRuntimeCatalogEntry[];
+  runtimesLoading: boolean;
+}): {
+  blankRuntimeOptionLabel: string;
+  runtimeDropdownOptions: PersonaDropdownOption[];
+} {
+  const blankRuntimeOptionLabel = runtimesLoading
+    ? "Loading harnesses..."
+    : isCreateMode
+      ? "Choose a harness"
+      : "No preference (use app default)";
+  const runtimeDropdownOptions: PersonaDropdownOption[] = [
+    ...(!isCreateMode
+      ? [
+          {
+            label: blankRuntimeOptionLabel,
+            value: NO_RUNTIME_DROPDOWN_VALUE,
+          },
+        ]
+      : []),
+    ...sortPersonaRuntimes(runtimes).map((candidate) => ({
+      disabled:
+        isCreateMode &&
+        defaultRuntimeId !== undefined &&
+        candidate.availability !== "available",
+      label: `${formatRuntimeOptionLabel(candidate)}${
+        isCreateMode && candidate.id === defaultRuntimeId ? " (default)" : ""
+      }`,
+      value: candidate.id,
+    })),
+  ];
+  const currentRuntime = runtime.trim();
+  if (
+    currentRuntime.length > 0 &&
+    !runtimeDropdownOptions.some((option) => option.value === currentRuntime)
+  ) {
+    runtimeDropdownOptions.push({
+      label: `${currentRuntime} (current)`,
+      value: currentRuntime,
+    });
+  }
+  return { blankRuntimeOptionLabel, runtimeDropdownOptions };
+}
+
 function runtimeAvailabilitySortRank(
   availability: AcpRuntimeCatalogEntry["availability"],
 ) {

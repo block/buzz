@@ -9,6 +9,7 @@ class _MessageList extends HookConsumerWidget {
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
+  final double appBarTitleContentHeight;
 
   const _MessageList({
     required this.entries,
@@ -19,15 +20,22 @@ class _MessageList extends HookConsumerWidget {
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
+    required this.appBarTitleContentHeight,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final isLoadingOlder = useState(false);
     final isAtLatest = useState(true);
     final hasUserScrolled = useState(false);
+    final followsLatest = useRef(
+      initialMessageId == null && initialThreadRootId == null,
+    );
+    final isAutoScrolling = useRef(false);
+    final autoScrollScheduled = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
     final didOpenInitialThread = useRef(false);
@@ -35,40 +43,73 @@ class _MessageList extends HookConsumerWidget {
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
-      final chronologicalIndex = entries.indexWhere(
-        (entry) => entry.message.id == messageId,
+      final chronologicalIndex = displayEntries.indexWhere(
+        (group) => group.any((entry) => entry.message.id == messageId),
       );
       return chronologicalIndex < 0
           ? null
-          : entries.length - 1 - chronologicalIndex;
+          : displayEntries.length - 1 - chronologicalIndex;
     }
 
     Future<void> scrollToLatest() async {
-      if (!itemScrollController.isAttached) return;
-      await itemScrollController.scrollTo(
-        index: 0,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
+      if (!itemScrollController.isAttached || isAutoScrolling.value) return;
+      followsLatest.value = true;
+      hasUserScrolled.value = false;
+      isAutoScrolling.value = true;
+      try {
+        await itemScrollController.scrollTo(
+          index: 0,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+        if (context.mounted && !hasUserScrolled.value) {
+          isAtLatest.value = true;
+        }
+      } finally {
+        isAutoScrolling.value = false;
+      }
+    }
+
+    void scheduleAutoScrollToLatest() {
+      if (autoScrollScheduled.value || isAutoScrolling.value) return;
+      autoScrollScheduled.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        autoScrollScheduled.value = false;
+        if (!context.mounted || !followsLatest.value || hasUserScrolled.value) {
+          return;
+        }
+        scrollToLatest();
+      });
+    }
+
+    bool latestIsAtBoundary() {
+      // In this reversed list, item 0's leading edge is the bottom boundary.
+      return itemPositionsListener.itemPositions.value.any(
+        (position) => position.index == 0 && position.itemLeadingEdge >= 0,
       );
-      if (context.mounted) isAtLatest.value = true;
     }
 
     useEffect(() {
       void onPositionsChanged() {
         final positions = itemPositionsListener.itemPositions.value;
         if (positions.isEmpty) return;
-        final nextIsAtLatest = positions.any(
-          (position) => position.index == 0 && position.itemLeadingEdge < 1,
-        );
-        if (isAtLatest.value != nextIsAtLatest) {
-          isAtLatest.value = nextIsAtLatest;
+        final nextIsAtLatest = latestIsAtBoundary();
+        if (nextIsAtLatest) {
+          if (!isAtLatest.value) isAtLatest.value = true;
+        } else if (followsLatest.value && !hasUserScrolled.value) {
+          // The viewport can shrink when the composer or keyboard opens.
+          // Preserve auto-follow until the user scrolls the timeline.
+          if (!isAtLatest.value) isAtLatest.value = true;
+          scheduleAutoScrollToLatest();
+        } else if (isAtLatest.value) {
+          isAtLatest.value = false;
         }
 
         final oldestVisible = positions
             .map((position) => position.index)
             .reduce((a, b) => a > b ? a : b);
         if (!hasUserScrolled.value ||
-            oldestVisible < entries.length - 3 ||
+            oldestVisible < displayEntries.length - 3 ||
             isLoadingOlder.value) {
           return;
         }
@@ -121,8 +162,11 @@ class _MessageList extends HookConsumerWidget {
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
         didJumpToInitialMessage.value = true;
+        followsLatest.value = false;
+        hasUserScrolled.value = false;
+        isAtLatest.value = false;
+        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
       });
       return null;
     }, [initialMessageId, initialThreadRootId, entries.length]);
@@ -184,9 +228,18 @@ class _MessageList extends HookConsumerWidget {
       children: [
         NotificationListener<ScrollNotification>(
           onNotification: (notification) {
-            if (notification is ScrollStartNotification &&
-                notification.dragDetails != null) {
+            if (notification is UserScrollNotification &&
+                notification.direction != ScrollDirection.idle) {
               hasUserScrolled.value = true;
+              followsLatest.value = false;
+            } else if (notification is ScrollEndNotification &&
+                hasUserScrolled.value) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!context.mounted || !latestIsAtBoundary()) return;
+                hasUserScrolled.value = false;
+                followsLatest.value = true;
+                if (!isAtLatest.value) isAtLatest.value = true;
+              });
             }
             return false;
           },
@@ -198,32 +251,37 @@ class _MessageList extends HookConsumerWidget {
             padding: EdgeInsets.only(
               left: Grid.gutter,
               right: Grid.gutter,
-              top: frostedAppBarHeight(context),
-              bottom: Grid.xxs,
+              top: frostedAppBarHeight(
+                context,
+                titleContentHeight: appBarTitleContentHeight,
+              ),
+              bottom: 0,
             ),
-            itemCount: entries.length + (isLoadingOlder.value ? 1 : 0),
+            itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
             itemBuilder: (context, index) {
               // Loading indicator at the top (last index in reversed list).
-              if (index >= entries.length) {
+              if (index >= displayEntries.length) {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: Grid.xs),
                   child: Center(
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                    child: BuzzLoadingIndicator(
+                      size: 24,
+                      semanticLabel: 'Loading older messages',
                     ),
                   ),
                 );
               }
 
               // Reversed list: index 0 = newest (bottom of screen).
-              final chronIdx = entries.length - 1 - index;
-              final entry = entries[chronIdx];
+              final chronIdx = displayEntries.length - 1 - index;
+              final entryGroup = displayEntries[chronIdx];
+              final entry = entryGroup.first;
               final message = entry.message;
 
               // Day boundary check — applies to all messages including system.
-              final prevEntry = chronIdx > 0 ? entries[chronIdx - 1] : null;
+              final prevEntry = chronIdx > 0
+                  ? displayEntries[chronIdx - 1].last
+                  : null;
               final prevMessage = prevEntry?.message;
               final showDayDivider =
                   prevMessage == null ||
@@ -231,50 +289,58 @@ class _MessageList extends HookConsumerWidget {
 
               final showAuthor =
                   !message.isSystem &&
-                  (prevMessage == null ||
+                  (message.hasAttachments ||
+                      prevMessage == null ||
                       prevMessage.isSystem ||
                       showDayDivider ||
                       prevMessage.pubkey.toLowerCase() !=
                           message.pubkey.toLowerCase() ||
                       (message.createdAt - prevMessage.createdAt) > 300);
 
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (showDayDivider)
-                    DayDivider(label: formatDayHeading(message.createdAt)),
-                  if (message.isSystem)
-                    _SystemMessageRow(
-                      message: message,
-                      channelId: channelId,
-                      currentPubkey: currentPubkey,
-                      allMessages: null,
-                      isMember: isMember,
-                      isArchived: isArchived,
-                    )
-                  else ...[
-                    _MessageBubble(
-                      message: message,
-                      showAuthor: showAuthor,
-                      channelNames: channelNamesMap,
-                      currentChannelId: channelId,
-                      currentPubkey: currentPubkey,
-                      allMessages: allMessages,
-                      isMember: isMember,
-                      isArchived: isArchived,
-                    ),
-                    if (entry.summary != null)
-                      _ThreadSummaryRow(
-                        summary: entry.summary!,
+              return Padding(
+                key: ValueKey('channel-message-group-${message.id}'),
+                padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showDayDivider)
+                      DayDivider(label: formatDayHeading(message.createdAt)),
+                    if (message.isSystem)
+                      _SystemMessageRow(
                         message: message,
-                        allMessages: allMessages,
+                        groupedMessages: entryGroup.length > 1
+                            ? entryGroup.map((entry) => entry.message).toList()
+                            : null,
                         channelId: channelId,
                         currentPubkey: currentPubkey,
+                        allMessages: null,
+                        isMember: isMember,
+                        isArchived: isArchived,
+                      )
+                    else ...[
+                      _MessageBubble(
+                        message: message,
+                        showAuthor: showAuthor,
+                        channelNames: channelNamesMap,
+                        currentChannelId: channelId,
+                        currentPubkey: currentPubkey,
+                        allMessages: allMessages,
                         isMember: isMember,
                         isArchived: isArchived,
                       ),
+                      if (entry.summary != null)
+                        _ThreadSummaryRow(
+                          summary: entry.summary!,
+                          message: message,
+                          allMessages: allMessages,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        ),
+                    ],
                   ],
-                ],
+                ),
               );
             },
           ),

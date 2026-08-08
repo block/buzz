@@ -289,14 +289,9 @@ pub async fn start_huddle(
             // Audio relay failure is fatal — no point in a huddle without audio.
             if let Err(e) = post_connect_setup(&state, &ephemeral_channel_id).await {
                 // Rollback: audio relay failed after state was committed.
-                // Archive the ephemeral channel and reset state.
-                if let Ok(archive_builder) = events::build_archive(ephemeral_uuid) {
-                    if let Err(ae) = submit_event(archive_builder, &state).await {
-                        eprintln!(
-                            "buzz-desktop: rollback archive of {ephemeral_channel_id} failed: {ae}"
-                        );
-                    }
-                }
+                // Publish the terminal lifecycle event before archiving so
+                // other clients do not reconstruct a phantom active huddle.
+                emit_end_and_archive(&parent_channel_id, &ephemeral_channel_id, &state).await;
                 if let Ok(mut hs) = state.huddle_state.lock() {
                     hs.reset_preserving_generation();
                 }

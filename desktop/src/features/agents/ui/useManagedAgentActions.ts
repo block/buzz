@@ -29,6 +29,7 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
+import { clearActiveTurnsForAgentOnStop } from "../managedAgentRuntimeHooks";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
@@ -248,6 +249,9 @@ export function useManagedAgentActions() {
         relayAgents: relayAgentsQuery.data ?? [],
         stopManagedAgent: stopMutation.mutateAsync,
       });
+      if (agent.backend.type === "local") {
+        clearActiveTurnsForAgentOnStop(pubkey);
+      }
       if (result.noticeMessage) {
         setActionNoticeMessage(result.noticeMessage);
       }
@@ -368,13 +372,17 @@ export function useManagedAgentActions() {
       managedAgents.filter((a) => isManagedAgentActive(a)),
       "Stop",
       "stop",
-      (a) =>
-        stopManagedAgentWithRules({
+      async (a) => {
+        await stopManagedAgentWithRules({
           agent: a,
           channels: channelsQuery.data ?? [],
           relayAgents: relayAgentsQuery.data ?? [],
           stopManagedAgent: stopMutation.mutateAsync,
-        }),
+        });
+        if (a.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(a.pubkey);
+        }
+      },
     );
   }
 

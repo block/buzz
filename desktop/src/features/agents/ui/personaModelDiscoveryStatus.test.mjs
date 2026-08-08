@@ -67,3 +67,46 @@ test("model discovery status stays quiet for missing Databricks defaults", () =>
 
   assert.equal(status, null);
 });
+
+test("auth-required errors name the agent and ask for sign-in", () => {
+  // Real shape from run_agent_models_command wrapping buzz-acp stderr when
+  // cursor-agent is signed out (spec ErrorCode::AuthRequired text).
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "buzz-acp models failed (exit 1): agent communication failed: Agent reported error (code -32000): Authentication required",
+    ),
+    "",
+    "Cursor",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Cursor requires sign-in/);
+  assert.match(status?.message ?? "", /Sign in with the Cursor CLI/);
+});
+
+test("auth-required copy degrades gracefully without an agent label", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Agent reported error (code -32000): Authentication required"),
+    "",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /This agent requires sign-in/);
+});
+
+test("non-auth -32000 errors do NOT get the sign-in copy", () => {
+  // -32000 is the catch-all fallback code for unclassified agent errors
+  // (agent_error_from_json unwrap_or(-32000)); only the spec-reserved
+  // "Authentication required" text may route to the sign-in message.
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "buzz-acp models failed (exit 1): Agent reported error (code -32000): model catalog fetch timed out",
+    ),
+    "anthropic",
+    "Cursor",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.doesNotMatch(status?.message ?? "", /sign-in/i);
+  assert.match(status?.message ?? "", /Using built-in model options/);
+});

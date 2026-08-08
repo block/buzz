@@ -7,8 +7,10 @@ pub(crate) use agent_env::{
 };
 mod backend;
 pub(crate) mod config_bridge;
+pub(crate) mod custom_harnesses;
 mod discovery;
 mod effective_command;
+pub(crate) mod effective_config;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
@@ -28,6 +30,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
 pub(crate) mod team_events;
@@ -61,7 +64,8 @@ pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
 pub(crate) use readiness::{
-    agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
+    agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
+    AgentReadiness, Requirement,
 };
 pub use relay_mesh::*;
 pub use repos::{

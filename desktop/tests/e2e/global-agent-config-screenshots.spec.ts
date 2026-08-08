@@ -32,7 +32,7 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 
@@ -701,7 +701,7 @@ test.describe("global agent config screenshots", () => {
         .locator("p")
         .filter({ hasText: "Buzz Agent is not installed." }),
     ).toContainText(
-      "Buzz Agent is not installed. Visit Settings > Agents to set it up.",
+      "Buzz Agent is not installed. Ships with the Buzz desktop app. Visit Settings > Agents to set it up.",
     );
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
   });
@@ -712,7 +712,7 @@ test.describe("global agent config screenshots", () => {
     await page.goto("/");
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
-    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+    await page.getByRole("menuitem", { name: "Create agent" }).click();
 
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,

@@ -68,6 +68,7 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -95,6 +96,7 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
@@ -104,7 +106,6 @@ export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
-
   const communitiesHook = useCommunities();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
@@ -132,6 +133,7 @@ export function AppShell() {
     goProjects,
     goPulse,
     goSettings,
+    goShip,
     goWorkflows,
     closeSettings,
     openSearchHit,
@@ -161,7 +163,6 @@ export function AppShell() {
     ? locationSearchSection
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
-
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
@@ -169,7 +170,10 @@ export function AppShell() {
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
   );
-  usePersonaSync(identityQuery.data?.pubkey);
+  usePersonaSync(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+  );
   useAgentsDataRefresh();
   // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
   useAutoRestartPolicy();
@@ -230,6 +234,7 @@ export function AppShell() {
   const relayConnectionCard = useSidebarRelayConnectionCard(
     channelsErrorMessage,
     communitiesHook.activeCommunity?.relayUrl,
+    `${communitiesHook.activeCommunity?.id ?? "none"}-${communitiesHook.reinitKey}`,
   );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
@@ -251,18 +256,15 @@ export function AppShell() {
       return;
     }
     hasRestoredCommunityDestinationRef.current = true;
-
     // Restoration belongs to an explicit community transition. Cold boot and
     // reconnect remounts must preserve the route the user explicitly opened.
     if (!consumePendingCommunityRestore(activeCommunityId)) {
       return;
     }
-
     const destination = loadCommunityDestination(activeCommunityId);
     if (!destination || destination.kind === "home") {
       return;
     }
-
     const channelIsAvailable = sidebarChannels.some(
       (channel) => channel.id === destination.channelId,
     );
@@ -271,7 +273,6 @@ export function AppShell() {
       void goHome({ replace: true });
       return;
     }
-
     // The normal switch path writes the remembered channel into the hash before
     // the target community mounts, so no intermediate Inbox frame is painted.
     // Older transition callers may still arrive at neutral Home; repair those.
@@ -313,14 +314,12 @@ export function AppShell() {
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
   });
-
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
     followThread,
     unfollowThread,
   } = useThreadFollows(identityQuery.data?.pubkey);
-
   const {
     markAllChannelsRead,
     markChannelRead,
@@ -847,6 +846,7 @@ export function AppShell() {
                             addCommunityDialog.onOpenChange
                           }
                           onNewMessage={handleOpenNewDm}
+                          onBackgroundClick={requestFocusedThreadClose}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
@@ -882,6 +882,7 @@ export function AppShell() {
                           searchChannels={channels}
                           searchFocusRequest={searchFocusRequest}
                           onSelectHome={() => void goHome()}
+                          onSelectShip={() => void goShip()}
                           onSelectPlans={() => void goPlans()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}

@@ -177,7 +177,7 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  ["src-tauri/src/managed_agents/readiness.rs", 1947],
   // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
   // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
@@ -296,7 +296,7 @@ const overrides = new Map([
   // Buzz-managed Node path helpers and resolution tests moved to
   // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
   // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
-  ["src-tauri/src/managed_agents/discovery.rs", 1393],
+  ["src-tauri/src/managed_agents/discovery.rs", 1898],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -437,7 +437,9 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +1: rustfmt wraps the merged LM Studio-native discovery await after the
+  // v0.5.2 model-catalog integration; no additional behavior is introduced.
+  ["src-tauri/src/commands/agent_models.rs", 1193],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
@@ -469,7 +471,7 @@ const overrides = new Map([
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
   // +8: install_shell_from pure seam extracted for deterministic testing.
-  ["src-tauri/src/commands/agent_discovery.rs", 1523],
+  ["src-tauri/src/commands/agent_discovery.rs", 1842],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

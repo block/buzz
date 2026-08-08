@@ -13,7 +13,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
  * Every place that shows a status emoji renders this, so the shortcode→image
  * resolution can't drift across the (five) display sites — the same reason the
  * picker is unified. The relay URL is rewritten through the localhost media
- * proxy, matching reactions' `EmojiGlyph` (WKWebView bypasses WARP, so a direct
+ * proxy, matching reactions' `EmojiGlyph` (WKWebView bypasses the VPN tunnel, so a direct
  * relay URL 403s and renders broken).
  */
 type StatusEmojiProps = {

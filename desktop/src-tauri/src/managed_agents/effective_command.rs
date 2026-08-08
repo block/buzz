@@ -28,6 +28,12 @@ pub fn record_agent_command_with_preferred_runtime(
     {
         return command.to_string();
     }
+    if let Some(command) = record.runtime.as_deref().and_then(|runtime| {
+        super::custom_harnesses::lookup_loaded_harness_by_id(runtime)
+            .map(|definition| definition.command.clone())
+    }) {
+        return command;
+    }
     if let Some(command) = record
         .persona_id
         .as_deref()
@@ -37,6 +43,28 @@ pub fn record_agent_command_with_preferred_runtime(
         .and_then(|runtime| runtime.commands.first().copied())
     {
         return command.to_string();
+    }
+    if let Some(command) = record
+        .persona_id
+        .as_deref()
+        .and_then(|id| personas.iter().find(|persona| persona.id == id))
+        .and_then(|persona| persona.runtime.as_deref())
+        .and_then(|runtime| {
+            super::custom_harnesses::lookup_loaded_harness_by_id(runtime)
+                .map(|definition| definition.command.clone())
+        })
+    {
+        return command;
+    }
+    if let Some(command) = preferred_runtime
+        .map(str::trim)
+        .filter(|runtime| !runtime.is_empty())
+        .and_then(|runtime| {
+            super::custom_harnesses::lookup_loaded_harness_by_id(runtime)
+                .map(|definition| definition.command.clone())
+        })
+    {
+        return command;
     }
     preferred_runtime
         .map(str::trim)

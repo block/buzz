@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
@@ -113,10 +114,13 @@ class InviteJoinSheet extends ConsumerWidget {
                               .read(inviteJoinProvider.notifier)
                               .confirmJoin(),
                     icon: isClaiming
-                        ? const SizedBox(
+                        ? SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                            child: BuzzLoadingIndicator(
+                              size: 16,
+                              semanticLabel: 'Joining community',
+                            ),
                           )
                         : const Icon(LucideIcons.check),
                     label: Text(isClaiming ? 'Joining…' : 'Join'),

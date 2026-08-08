@@ -5,7 +5,7 @@ import 'package:buzz/shared/theme/theme.dart';
 void main() {
   group('default accent', () {
     test('uses black on the default light scheme', () {
-      final resolved = resolveSchemes(null);
+      final resolved = resolveSchemes(null, ThemeMode.light);
 
       final accented = applyAccent(resolved.light, defaultAccentIndex);
 
@@ -13,7 +13,7 @@ void main() {
     });
 
     test('uses the theme foreground on forced dark schemes', () {
-      final resolved = resolveSchemes('github-dark');
+      final resolved = resolveSchemes('github-dark', ThemeMode.dark);
       final base = resolved.dark;
 
       final accented = applyAccent(base, defaultAccentIndex);

@@ -18,7 +18,7 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 

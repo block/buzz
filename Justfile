@@ -119,7 +119,7 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check check-desktop-release-sidecars
 
 # Format all Rust code
 fmt:
@@ -174,6 +174,10 @@ fmt-all: fmt desktop-tauri-fmt mobile-fmt
 
 # Fix all formatting and lint issues
 fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
+
+# Reject release recipes and staged bundles that can ship placeholder sidecars.
+check-desktop-release-sidecars:
+    scripts/tests/verify-desktop-sidecars-test.sh
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
 # Sidecar binary list must stay in sync with desktop-release-build below.
@@ -269,26 +273,23 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
       cargo test compiled_flag_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
-# Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+# Build the full desktop Tauri app locally (unsigned, for testing).
+# Release builds must bundle real sidecars; compile-only checks use stubs above.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
 desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET={{target}}
-    mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-lmstudio-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
-    if [[ "$TARGET" == *-apple-darwin ]]; then
-        DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-          ./scripts/build-apple-inputs.sh "$TARGET"
-    fi
+    cargo build --release --target "$TARGET" \
+      -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh "$TARGET"
+    ./scripts/verify-desktop-sidecars.sh desktop/src-tauri/binaries "$TARGET"
     pnpm install
-    cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+    (cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}})
+    if [[ "$TARGET" == *-apple-darwin ]]; then
+        APP_MACOS="desktop/src-tauri/target/$TARGET/release/bundle/macos/Command Adviser.app/Contents/MacOS"
+        ./scripts/verify-desktop-sidecars.sh "$APP_MACOS"
+    fi
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
@@ -668,11 +669,12 @@ mobile-check:
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
 
-# Compile an unsigned Android debug APK
+# Compile an unsigned Android debug APK (worktree-aware debug identity)
 mobile-build-android:
+    ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
-# Run the mobile app on iOS simulator
+# Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -680,9 +682,14 @@ mobile-dev:
         open -a Simulator
         sleep 3
     fi
+    ./scripts/mobile-worktree-overrides.sh
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
     flutter run
+
+# Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
+mobile-clean:
+    ./scripts/mobile-worktree-clean.sh
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 

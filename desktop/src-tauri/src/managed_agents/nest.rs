@@ -50,7 +50,7 @@ const NEST_AGENTS_VERSION: u32 = 4;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 4;
+const NEST_SKILL_VERSION: u32 = 5;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";

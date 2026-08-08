@@ -40,13 +40,17 @@ class MediaGetAuthService {
        _nsec = nsec,
        _now = now ?? DateTime.now;
 
+  bool isRelayMediaUrl(String url) {
+    final uri = Uri.tryParse(url);
+    final relayUri = Uri.tryParse(_baseUrl);
+    if (uri == null || relayUri == null) return false;
+    return _isRelayMediaUrl(uri, relayUri);
+  }
+
   Map<String, String> headersFor(String url) {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return const {};
-    final uri = Uri.tryParse(url);
-    final relayUri = Uri.tryParse(_baseUrl);
-    if (uri == null || relayUri == null) return const {};
-    if (!_isRelayMediaUrl(uri, relayUri)) return const {};
+    if (!isRelayMediaUrl(url)) return const {};
 
     final cached = _cachedHeaders;
     final refreshAt = _refreshAt;

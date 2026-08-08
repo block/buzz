@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'pending_local_messages_provider.dart';
 
 class ThreadRepliesArgs {
   final String channelId;
@@ -63,4 +66,78 @@ NostrFilter _threadRepliesFilter(
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },
   );
+}
+
+class ThreadLocalRepliesNotifier extends Notifier<List<NostrEvent>> {
+  final ThreadRepliesArgs args;
+
+  ThreadLocalRepliesNotifier(this.args);
+
+  @override
+  List<NostrEvent> build() => const [];
+
+  void add(NostrEvent event) {
+    state = _mergeReplies(state, [event]);
+  }
+
+  void remove(String eventId) {
+    state = state.where((event) => event.id != eventId).toList();
+  }
+
+  void confirm(Set<String> eventIds) {
+    if (!state.any((event) => eventIds.contains(event.id))) return;
+    state = state.where((event) => !eventIds.contains(event.id)).toList();
+  }
+}
+
+final threadLocalRepliesProvider =
+    NotifierProvider.family<
+      ThreadLocalRepliesNotifier,
+      List<NostrEvent>,
+      ThreadRepliesArgs
+    >(ThreadLocalRepliesNotifier.new);
+
+/// Relay-backed replies merged with signed local replies that are still
+/// waiting for acknowledgement.
+final threadRepliesWithLocalProvider =
+    Provider.family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((
+      ref,
+      args,
+    ) {
+      final relayReplies = ref.watch(threadRepliesProvider(args));
+      final localReplies = ref.watch(threadLocalRepliesProvider(args));
+      final authoritative = relayReplies.value;
+      if (authoritative != null && localReplies.isNotEmpty) {
+        final authoritativeIds = authoritative.map((event) => event.id).toSet();
+        if (localReplies.any((event) => authoritativeIds.contains(event.id))) {
+          Future.microtask(() {
+            ref
+                .read(threadLocalRepliesProvider(args).notifier)
+                .confirm(authoritativeIds);
+            ref
+                .read(pendingLocalMessagesProvider(args.channelId).notifier)
+                .confirm(authoritativeIds);
+          });
+        }
+      }
+      if (localReplies.isEmpty) return relayReplies;
+      return relayReplies.when(
+        data: (events) => AsyncData(_mergeReplies(events, localReplies)),
+        loading: () => AsyncData(localReplies),
+        error: (error, stackTrace) => AsyncData(localReplies),
+      );
+    });
+
+List<NostrEvent> _mergeReplies(
+  Iterable<NostrEvent> first,
+  Iterable<NostrEvent> second,
+) {
+  final byId = <String, NostrEvent>{};
+  for (final event in [...first, ...second]) {
+    byId[event.id] = event;
+  }
+  return byId.values.toList()..sort((a, b) {
+    final createdAt = a.createdAt.compareTo(b.createdAt);
+    return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
+  });
 }

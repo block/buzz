@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../profile/user_status.dart';
@@ -150,7 +151,12 @@ class MembersSheet extends HookConsumerWidget {
                       ),
                   ],
                 ),
-                loading: () => const Center(child: CircularProgressIndicator()),
+                loading: () => const Center(
+                  child: BuzzLoadingIndicator(
+                    size: 44,
+                    semanticLabel: 'Loading members',
+                  ),
+                ),
                 error: (error, _) => Center(
                   child: Text(
                     error.toString(),
@@ -240,13 +246,10 @@ class _MemberTile extends ConsumerWidget {
           ? Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                SizedBox(
-                  width: 10,
-                  height: 10,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.5,
-                    color: context.appColors.success,
-                  ),
+                BuzzLoadingIndicator(
+                  size: 14,
+                  color: context.appColors.success,
+                  semanticLabel: 'Agent working',
                 ),
                 const SizedBox(width: Grid.half),
                 Text(

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { OctagonX } from "lucide-react";
+import { OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -16,12 +16,14 @@ import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
 import { TeamShareDialog } from "./TeamShareDialog";
-import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
-import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import {
+  AGENT_CARD_GRID_COLUMNS_CLASS,
+  UnifiedAgentsSection,
+} from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -73,11 +75,14 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
-  // Show the resolved effective model, not just the structured `model` field:
-  // most providers persist the model as a provider env var (e.g. DATABRICKS_MODEL)
-  // or inherit a baked build default, leaving `globalConfig.model` null.
-  const configuredGlobalModel = inheritedDefaults.model.value;
-
+  const hasSavedAgentDefaults = Boolean(
+    globalConfig.preferred_runtime?.trim() ||
+      globalConfig.provider?.trim() ||
+      globalConfig.model?.trim() ||
+      Object.values(globalConfig.env_vars).some(
+        (value) => value.trim().length > 0,
+      ),
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile and teamActions.handleImportTeamSnapshotFile are stable
   React.useEffect(() => {
     // Consume a snapshot import that was enqueued before navigation (e.g. from
@@ -109,18 +114,23 @@ export function AgentsView() {
   return (
     <>
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
+        <div
+          className={`mx-auto grid w-full max-w-6xl ${AGENT_CARD_GRID_COLUMNS_CLASS} justify-start gap-x-3 gap-y-8`}
+        >
           <PageHeader
+            className="col-[1/-1]"
             action={
               <div className="flex flex-wrap justify-end gap-2">
                 <Button
-                  onClick={() => setIsAiDefaultsOpen(true)}
+                  data-testid="agent-defaults-button"
                   ref={aiDefaultsTriggerRef}
+                  onClick={() => setIsAiDefaultsOpen(true)}
                   size="sm"
                   variant="outline"
                 >
-                  {configuredGlobalModel
-                    ? `Default model: ${configuredGlobalModel}`
+                  <Settings2 />
+                  {hasSavedAgentDefaults
+                    ? "Agent defaults"
                     : "Set agent defaults"}
                 </Button>
                 {runningAgentCount > 0 ? (
@@ -138,11 +148,10 @@ export function AgentsView() {
                 ) : null}
               </div>
             }
-            className="mx-auto w-full max-w-[996px]"
             description="Set up and manage your agents."
             title="Agents"
           />
-          <div className="flex flex-col gap-8">
+          <div className="col-[1/-1] flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
@@ -175,7 +184,6 @@ export function AgentsView() {
                 void conversation.open(personaId);
               }}
               // Persona props
-              canChooseCatalog={personas.catalogPersonas.length > 0}
               personas={personas.libraryPersonas}
               personasError={
                 personas.personasQuery.error instanceof Error
@@ -194,10 +202,8 @@ export function AgentsView() {
               }
               isPersonasLoading={personas.personasQuery.isLoading}
               isPersonasPending={personas.isPending}
-              onCreatePersona={() => {
-                openUnifiedCreate();
-              }}
-              onChooseCatalog={personas.openCatalog}
+              onCreatePersona={openUnifiedCreate}
+              onDiscoverPersonas={personas.openCatalog}
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
@@ -233,17 +239,6 @@ export function AgentsView() {
               }}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
-            />
-
-            <RelayDirectorySection
-              error={
-                agents.relayAgentsQuery.error instanceof Error
-                  ? agents.relayAgentsQuery.error
-                  : null
-              }
-              isLoading={agents.relayAgentsQuery.isLoading}
-              managedPubkeys={agents.managedPubkeys}
-              relayAgents={agents.relayAgentsQuery.data ?? []}
             />
           </div>
         </div>
@@ -308,9 +303,11 @@ export function AgentsView() {
           error={
             personas.updatePersonaMutation.error instanceof Error
               ? personas.updatePersonaMutation.error
-              : personas.createPersonaMutation.error instanceof Error
-                ? personas.createPersonaMutation.error
-                : null
+              : personas.updatePersonaAndPublishMutation.error instanceof Error
+                ? personas.updatePersonaAndPublishMutation.error
+                : personas.createPersonaMutation.error instanceof Error
+                  ? personas.createPersonaMutation.error
+                  : null
           }
           initialValues={personas.personaDialogState.initialValues}
           isPending={personas.isPending}
@@ -322,8 +319,22 @@ export function AgentsView() {
               personas.setPersonaDialogState(null);
             }
           }}
-          onSubmit={personas.handleSubmit}
+          onSubmit={(input, options) =>
+            personas.handleSubmit(
+              input,
+              undefined,
+              undefined,
+              undefined,
+              options,
+            )
+          }
           open={personas.personaDialogState !== null}
+          publishCatalogUpdatesOnSave={
+            "id" in personas.personaDialogState.initialValues &&
+            personas.sharedCatalogPersonaIdSet.has(
+              personas.personaDialogState.initialValues.id,
+            )
+          }
           submitLabel={personas.personaDialogState.submitLabel}
           title={personas.personaDialogState.title}
         />
@@ -349,8 +360,20 @@ export function AgentsView() {
       ) : null}
       {personas.personaToShare ? (
         <PersonaShareDialog
+          catalogShareLevel={personas.getPersonaCatalogShareLevel(
+            personas.personaToShare.persona,
+          )}
           isPending={personas.isPending}
           linkedAgentPubkey={personas.personaToShare.linkedAgentPubkey}
+          effectiveAvatarUrl={personas.personaToShare.effectiveAvatarUrl}
+          onCatalogShareLevelChange={(shareLevel) => {
+            const shareTarget = personas.personaToShare;
+            if (!shareTarget) return;
+            void personas.setPersonaCatalogShareLevel(
+              shareTarget.persona,
+              shareLevel,
+            );
+          }}
           onExport={() => {
             const shareTarget = personas.personaToShare;
             if (!shareTarget) return;
@@ -377,6 +400,7 @@ export function AgentsView() {
               personas.handleExportSnapshot(
                 personas.personaToExportSnapshot.persona,
                 personas.personaToExportSnapshot.linkedAgentPubkey,
+                personas.personaToExportSnapshot.effectiveAvatarUrl,
                 memoryLevel,
                 format,
               );
@@ -409,8 +433,8 @@ export function AgentsView() {
       {personas.isCatalogDialogOpen ? (
         <PersonaCatalogDialog
           error={
-            personas.personasQuery.error instanceof Error
-              ? personas.personasQuery.error
+            personas.catalogQuery.error instanceof Error
+              ? personas.catalogQuery.error
               : null
           }
           feedbackErrorMessage={
@@ -423,8 +447,8 @@ export function AgentsView() {
               ? personas.personaNoticeMessage
               : null
           }
-          isLoading={personas.personasQuery.isLoading}
-          isPending={personas.setPersonaActiveMutation.isPending}
+          isLoading={personas.catalogQuery.isLoading}
+          isPending={personas.isPending}
           onClearFeedback={() => {
             personas.clearFeedback("catalog");
           }}

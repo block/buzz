@@ -48,6 +48,35 @@ test("goCommandConsole navigates to the console route", async () => {
   assert.equal(router.state.location.pathname, "/console");
 });
 
+test("goShip navigates to the living ship route", async () => {
+  let appNavigation = null;
+
+  function NavigationProbe() {
+    appNavigation = useAppNavigation();
+    return null;
+  }
+
+  const rootRoute = createRootRoute({ component: NavigationProbe });
+  const indexRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
+  });
+  const shipRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/ship",
+  });
+  const router = createRouter({
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([indexRoute, shipRoute]),
+  });
+
+  await router.load();
+  renderToStaticMarkup(React.createElement(RouterProvider, { router }));
+  assert.ok(appNavigation);
+  await appNavigation.goShip();
+  assert.equal(router.state.location.pathname, "/ship");
+});
+
 test("goBattleRhythm navigates to the battle rhythm route", async () => {
   let appNavigation = null;
   function NavigationProbe() {

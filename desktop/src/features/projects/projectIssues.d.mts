@@ -11,6 +11,7 @@ export type ProjectIssueStatus =
 export type ProjectIssueComment = {
   id: string;
   content: string;
+  tags: string[][];
   author: string;
   createdAt: number;
 };
@@ -19,6 +20,7 @@ export type ProjectIssue = {
   id: string;
   title: string;
   content: string;
+  tags: string[][];
   author: string;
   createdAt: number;
   repoAddress: string | null;
@@ -41,6 +43,7 @@ export const PROJECT_ISSUE_STATUS: {
 
 export function getTag(event: RelayEvent, name: string): string | undefined;
 export function getAllTags(event: RelayEvent, name: string): string[];
+export function getImetaTags(event: RelayEvent): string[][];
 export function eventToProjectIssue(
   issue: RelayEvent,
   statusEvents?: RelayEvent[],

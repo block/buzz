@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ struct PairingErrorPayload {
 /// Managed Tauri state for an active pairing session.
 pub struct PairingHandle {
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    generation: Arc<AtomicU64>,
     cancel: std::sync::Mutex<Option<CancellationToken>>,
     /// Send JSON-serialized events to the background WS task for relay publication.
     outbound_tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
@@ -47,6 +49,7 @@ impl PairingHandle {
     pub fn new() -> Self {
         Self {
             session: Arc::new(tokio::sync::Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
             payload: std::sync::Mutex::new(None),
@@ -71,10 +74,18 @@ pub async fn start_pairing(
     state: State<'_, AppState>,
     pairing: State<'_, PairingHandle>,
 ) -> Result<String, String> {
+    let task_generation = pairing
+        .generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
     if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
         token.cancel();
     }
     pairing.clear();
+    {
+        let mut session = pairing.session.lock().await;
+        *session = None;
+    }
 
     let keys = state.signing_keys()?;
     let nsec = keys
@@ -117,9 +128,12 @@ pub async fn start_pairing(
     *pairing.cancel.lock().map_err(|e| e.to_string())? = Some(cancel.clone());
 
     let session_arc = Arc::clone(&pairing.session);
+    let generation = Arc::clone(&pairing.generation);
     tauri::async_runtime::spawn(pairing_ws_task(
         pairing_relay_url,
         session_arc,
+        generation,
+        task_generation,
         cancel,
         outbound_rx,
         app,
@@ -199,6 +213,8 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
         }
     }
 
+    pairing.generation.fetch_add(1, Ordering::SeqCst);
+
     if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
         token.cancel();
     }
@@ -215,22 +231,35 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
 async fn pairing_ws_task(
     relay_url: String,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    generation: Arc<AtomicU64>,
+    task_generation: u64,
     cancel: CancellationToken,
     mut outbound_rx: mpsc::Receiver<String>,
     app: AppHandle,
 ) {
-    if let Err(e) =
-        pairing_ws_task_inner(&relay_url, &session, &cancel, &mut outbound_rx, &app).await
+    if let Err(e) = pairing_ws_task_inner(
+        &relay_url,
+        &session,
+        &generation,
+        task_generation,
+        &cancel,
+        &mut outbound_rx,
+        &app,
+    )
+    .await
     {
-        let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
+        if pairing_task_is_current(&generation, task_generation) {
+            let _ = app.emit("pairing-error", PairingErrorPayload { message: e });
+        }
     }
-    let mut s = session.lock().await;
-    *s = None;
+    clear_pairing_session_if_current(&session, &generation, task_generation).await;
 }
 
 async fn pairing_ws_task_inner(
     relay_url: &str,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    generation: &AtomicU64,
+    task_generation: u64,
     cancel: &CancellationToken,
     outbound_rx: &mut mpsc::Receiver<String>,
     app: &AppHandle,
@@ -261,12 +290,18 @@ async fn pairing_ws_task_inner(
     tokio::pin!(hard_timeout);
 
     loop {
+        if !pairing_task_is_current(generation, task_generation) {
+            break;
+        }
+
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = &mut hard_timeout => {
-                let _ = app.emit("pairing-error", PairingErrorPayload {
-                    message: "Session timed out".into(),
-                });
+                if pairing_task_is_current(generation, task_generation) {
+                    let _ = app.emit("pairing-error", PairingErrorPayload {
+                        message: "Session timed out".into(),
+                    });
+                }
                 break;
             }
             Some(json_msg) = outbound_rx.recv() => {
@@ -282,30 +317,42 @@ async fn pairing_ws_task_inner(
                 let Message::Text(text) = msg else { continue };
 
                 if let Some(event) = parse_relay_event(text.as_str(), "pair") {
+                    if !pairing_task_is_current(generation, task_generation) {
+                        break;
+                    }
+
                     let mut guard = session.lock().await;
                     let Some(s) = guard.as_mut() else { break };
 
                     if let Ok(reason) = s.handle_abort(&event) {
-                        let _ = app.emit("pairing-aborted", PairingAbortedPayload {
-                            reason: format!("{reason:?}"),
-                        });
+                        if pairing_task_is_current(generation, task_generation) {
+                            let _ = app.emit("pairing-aborted", PairingAbortedPayload {
+                                reason: format!("{reason:?}"),
+                            });
+                        }
                         break;
                     }
 
                     if let Ok(sas) = s.handle_offer(&event) {
-                        let _ = app.emit("pairing-sas-received", PairingSasPayload { sas });
+                        if pairing_task_is_current(generation, task_generation) {
+                            let _ = app.emit("pairing-sas-received", PairingSasPayload { sas });
+                        }
                         continue;
                     }
 
                     match s.handle_complete(&event) {
                         Ok(()) => {
-                            let _ = app.emit("pairing-complete", serde_json::json!({}));
+                            if pairing_task_is_current(generation, task_generation) {
+                                let _ = app.emit("pairing-complete", serde_json::json!({}));
+                            }
                             break;
                         }
                         Err(ref e) if format!("{e}").contains("success=false") => {
-                            let _ = app.emit("pairing-error", PairingErrorPayload {
-                                message: "Mobile device reported failure importing credentials".into(),
-                            });
+                            if pairing_task_is_current(generation, task_generation) {
+                                let _ = app.emit("pairing-error", PairingErrorPayload {
+                                    message: "Mobile device reported failure importing credentials".into(),
+                                });
+                            }
                             break;
                         }
                         Err(_) => {}
@@ -316,6 +363,21 @@ async fn pairing_ws_task_inner(
     }
 
     Ok(())
+}
+
+fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {
+    generation.load(Ordering::SeqCst) == task_generation
+}
+
+async fn clear_pairing_session_if_current(
+    session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    generation: &AtomicU64,
+    task_generation: u64,
+) {
+    let mut session = session.lock().await;
+    if pairing_task_is_current(generation, task_generation) {
+        *session = None;
+    }
 }
 
 async fn handle_nip42_auth<R, W>(
@@ -525,6 +587,40 @@ where
     })
     .await
     .map_err(|_| "timeout waiting for EOSE".to_string())?
+}
+
+#[cfg(test)]
+mod pairing_generation_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use super::{clear_pairing_session_if_current, PairingSession};
+
+    #[tokio::test]
+    async fn stale_task_does_not_clear_replacement_session() {
+        let (initial, _) = PairingSession::new_source("ws://initial.example".to_string());
+        let session = Arc::new(tokio::sync::Mutex::new(Some(initial)));
+        let generation = AtomicU64::new(1);
+
+        generation.store(2, Ordering::SeqCst);
+        let (replacement, _) = PairingSession::new_source("ws://replacement.example".to_string());
+        *session.lock().await = Some(replacement);
+
+        clear_pairing_session_if_current(&session, &generation, 1).await;
+
+        assert!(session.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn current_task_clears_its_session() {
+        let (active, _) = PairingSession::new_source("ws://active.example".to_string());
+        let session = Arc::new(tokio::sync::Mutex::new(Some(active)));
+        let generation = AtomicU64::new(3);
+
+        clear_pairing_session_if_current(&session, &generation, 3).await;
+
+        assert!(session.lock().await.is_none());
+    }
 }
 
 #[cfg(test)]

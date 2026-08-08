@@ -459,6 +459,7 @@ pub(crate) fn bundled_helper_identity() -> Result<String, &'static str> {
 }
 
 /// Return the validated sibling helper path for native long-lived modes.
+#[cfg(target_os = "macos")]
 pub(crate) fn verified_bundled_helper_path() -> Result<PathBuf, &'static str> {
     bundled_helper_path().map_err(|_| "apple_helper_unavailable")
 }

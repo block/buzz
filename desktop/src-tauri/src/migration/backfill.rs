@@ -65,12 +65,13 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     }
 
     // Pre-migration backup, taken ONCE: a re-run after a partial failure must
-    // not overwrite the pristine backup with a half-migrated snapshot.
-    let bak_path = base_dir.join("managed-agents.json.pre-backfill.bak");
-    if !bak_path.exists() {
-        std::fs::write(&bak_path, &content)
-            .map_err(|e| format!("failed to write pre-backfill backup: {e}"))?;
-    }
+    // not overwrite the pristine backup with a half-migrated snapshot. Owner-only
+    // from the initial open, and sited next to the resolved store — see
+    // `create_restricted_backup_once` and `resolved_backup_path`.
+    let bak_path =
+        crate::util::resolved_backup_path(&agents_path, "managed-agents.json.pre-backfill.bak");
+    crate::util::create_restricted_backup_once(&bak_path, content.as_bytes())
+        .map_err(|e| format!("failed to write pre-backfill backup: {e}"))?;
 
     let existing_slugs: std::collections::HashSet<String> =
         all.iter().filter_map(|r| r.slug.clone()).collect();

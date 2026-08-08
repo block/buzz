@@ -210,21 +210,21 @@ test("home inbox selection survives reload and back restores it", async ({
   expect(page.url()).not.toContain("item=");
   const defaultUrl = page.url();
 
-  const secondItem = items.nth(1);
-  const secondTestId = await secondItem.getAttribute("data-testid");
-  const secondItemId = secondTestId?.replace("home-inbox-item-", "");
-  expect(secondItemId).toBeTruthy();
-  await secondItem.click();
+  const selectedItem = items.first();
+  const selectedTestId = await selectedItem.getAttribute("data-testid");
+  const selectedItemId = selectedTestId?.replace("home-inbox-item-", "");
+  expect(selectedItemId).toBeTruthy();
+  await selectedItem.click();
   await expect
     .poll(() => page.url())
-    .toContain(`item=${encodeURIComponent(secondItemId ?? "")}`);
+    .toContain(`item=${encodeURIComponent(selectedItemId ?? "")}`);
 
   await page.reload();
 
   await expect(inboxList).toBeVisible();
   await expect(page.getByTestId("home-inbox-detail")).toBeVisible();
   expect(page.url()).toContain(
-    `item=${encodeURIComponent(secondItemId ?? "")}`,
+    `item=${encodeURIComponent(selectedItemId ?? "")}`,
   );
 
   await page.getByTestId("global-back").click();

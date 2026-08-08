@@ -187,6 +187,16 @@ test("commit detail opens from the commits feed with a diff", async ({
   await expect(
     page.getByRole("button", { name: "Copy commit hash" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "project guide" }),
+  ).toHaveAttribute("href", "https://example.com/project-guide");
+  await expect(
+    page.getByRole("button", { name: "Architecture" }),
+  ).toBeVisible();
+  await expect(page.locator("video")).toHaveAttribute(
+    "src",
+    "https://example.com/project-demo.mp4",
+  );
 
   // Diff from the mocked get_project_repo_diff renders changed files.
   await expect(page.getByText("2 changed files")).toBeVisible({

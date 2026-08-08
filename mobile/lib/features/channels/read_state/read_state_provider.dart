@@ -13,14 +13,19 @@ class ReadStateState {
   final String? pubkey;
   final Map<String, int> contexts;
   final int version;
-  final Set<String> locallyForcedChannelIds;
+
+  /// Session-local forced-unread flags, keyed by the forced context id
+  /// (a channel id from the channel tile, or a `msg:` key from the message
+  /// actions sheet), each mapped to the channel it belongs to so channel
+  /// tiles and badges can surface message-level forces.
+  final Map<String, String> forcedUnreadContexts;
 
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
     required this.contexts,
     required this.version,
-    this.locallyForcedChannelIds = const {},
+    this.forcedUnreadContexts = const {},
   });
 
   const ReadStateState.inert()
@@ -28,7 +33,16 @@ class ReadStateState {
       pubkey = null,
       contexts = const {},
       version = 0,
-      locallyForcedChannelIds = const {};
+      forcedUnreadContexts = const {};
+
+  /// Channels that should surface as unread because of a forced-unread flag —
+  /// either forced directly, or containing a forced message.
+  Set<String> get locallyForcedChannelIds =>
+      forcedUnreadContexts.values.toSet();
+
+  /// Whether this exact context (channel id or `msg:` key) is forced unread.
+  bool isForcedUnread(String contextId) =>
+      forcedUnreadContexts.containsKey(contextId);
 
   int? effectiveTimestamp(String contextId) => contexts[contextId];
 
@@ -43,7 +57,7 @@ class ReadStateState {
       pubkey: pubkey,
       contexts: Map.unmodifiable({...contexts, contextId: timestamp}),
       version: version + 1,
-      locallyForcedChannelIds: locallyForcedChannelIds,
+      forcedUnreadContexts: forcedUnreadContexts,
     );
   }
 }
@@ -51,14 +65,14 @@ class ReadStateState {
 class ReadStateNotifier extends Notifier<ReadStateState> {
   ReadStateManager? _manager;
   bool _isInitialized = false;
-  final Set<String> _locallyForcedChannelIds = {};
+  final Map<String, String> _forcedUnreadContexts = {};
 
   @override
   ReadStateState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
     _isInitialized = false;
-    _locallyForcedChannelIds.clear();
+    _forcedUnreadContexts.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
@@ -130,15 +144,45 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     return _stateFromManager(manager, isReady: false);
   }
 
-  void markContextRead(String contextId, int unixTimestamp) {
-    _locallyForcedChannelIds.remove(contextId);
+  /// Advance a context's read marker. Clears the forced-unread flag for
+  /// exactly this context, if any. An explicit channel-level "Mark read"
+  /// (channel tile/menu) should pass [clearForcedMessages] so message-level
+  /// forces inside the channel are released too; the automatic read on
+  /// channel open must not, so a message deliberately marked unread stays
+  /// unread until acted on.
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+  }) {
+    var removed = _forcedUnreadContexts.remove(contextId) != null;
+    if (clearForcedMessages) {
+      final before = _forcedUnreadContexts.length;
+      _forcedUnreadContexts.removeWhere(
+        (_, channelId) => channelId == contextId,
+      );
+      removed = removed || _forcedUnreadContexts.length != before;
+    }
     _manager?.markContextRead(contextId, unixTimestamp);
+    if (removed) {
+      _refreshForcedState();
+    }
   }
 
-  void markContextUnread(String contextId) {
+  /// Force a context unread for the rest of the session. [contextId] is a
+  /// channel id (channel-tile action) or a `msg:` key (message actions
+  /// sheet); [channelId] is the channel the context belongs to, so tiles and
+  /// badges can surface message-level forces. Read markers are monotonic,
+  /// so this is the only way to move a context back to unread.
+  void markContextUnread(String contextId, {required String channelId}) {
+    if (_manager == null) return;
+    _forcedUnreadContexts[contextId] = channelId;
+    _refreshForcedState();
+  }
+
+  void _refreshForcedState() {
     final manager = _manager;
     if (manager == null) return;
-    _locallyForcedChannelIds.add(contextId);
     state = _stateFromManager(
       manager,
       isReady: _isInitialized,
@@ -153,7 +197,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   void _emitManagerState(ReadStateManager manager) {
     if (_manager != manager) return;
     final advances = manager.drainSyncedAdvances();
-    _locallyForcedChannelIds.removeAll(advances);
+    for (final contextId in advances) {
+      _forcedUnreadContexts.remove(contextId);
+    }
     state = _stateFromManager(
       manager,
       isReady: _isInitialized,
@@ -171,8 +217,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       pubkey: manager.pubkey,
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
-      locallyForcedChannelIds: Set.unmodifiable(
-        Set<String>.from(_locallyForcedChannelIds),
+      forcedUnreadContexts: Map.unmodifiable(
+        Map<String, String>.from(_forcedUnreadContexts),
       ),
     );
   }

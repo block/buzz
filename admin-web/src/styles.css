@@ -496,6 +496,38 @@ dd {
   margin: 0;
 }
 
+.reported-message {
+  display: grid;
+  justify-items: start;
+  gap: 1rem;
+  border-left: 3px solid #d7d72e;
+  border-radius: 0 0.8rem 0.8rem 0;
+  background: #f6f6f1;
+  padding: 1rem;
+}
+
+.reported-message p,
+.message-unavailable {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.reported-message-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.4rem 0.75rem;
+  width: 100%;
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.78rem;
+}
+
+.message-unavailable {
+  color: rgb(35 30 30 / 60%);
+  font-style: italic;
+}
+
 .sensitive {
   border-left: 3px solid #d7d72e;
   border-radius: 0 0.8rem 0.8rem 0;

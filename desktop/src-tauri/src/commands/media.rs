@@ -411,7 +411,7 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
 }
 
 async fn send_upload_attempt(
-    state: &State<'_, AppState>,
+    state: &AppState,
     url: String,
     auth_header: &str,
     mime: &str,
@@ -455,10 +455,22 @@ async fn send_upload_attempt(
     response.map_err(|error| classify_request_error(&error))
 }
 
+pub(crate) async fn upload_image_bytes(
+    body: Vec<u8>,
+    state: &AppState,
+) -> Result<BlobDescriptor, String> {
+    let mime = detect_and_validate_mime(&body)?;
+    if !mime.starts_with("image/") {
+        return Err("profile avatar must be an image".to_string());
+    }
+    let body = sanitize_image_for_upload(body, &mime)?;
+    do_upload(body, &mime, state, None).await
+}
+
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
-    state: &State<'_, AppState>,
+    state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
@@ -559,7 +571,7 @@ pub async fn upload_media(
 /// files from ever leaving the client on image-only surfaces.
 async fn process_picked_path(
     path: std::path::PathBuf,
-    state: &State<'_, AppState>,
+    state: &AppState,
     images_only: bool,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a

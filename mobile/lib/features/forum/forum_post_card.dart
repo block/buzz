@@ -77,17 +77,22 @@ class ForumPostCard extends ConsumerWidget {
                     onTap: () => showUserProfileSheet(context, post.pubkey),
                     child: Text(
                       displayName,
-                      style: context.textTheme.labelMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      maxLines: 1,
+                      style: messageUsernameTextStyle,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ),
-                Text(
-                  formatRelativeTime(post.createdAt),
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
+                const SizedBox(width: Grid.xxs),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: Grid.xxl),
+                  child: Text(
+                    formatRelativeTime(post.createdAt),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: messageTimestampTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 const SizedBox(width: Grid.half),
@@ -124,6 +129,9 @@ class ForumPostCard extends ConsumerWidget {
                     content: preview,
                     mentionNames: mentionNames,
                     tags: post.tags,
+                    baseStyle: messageBodyTextStyle.copyWith(
+                      color: context.colors.onSurface,
+                    ),
                   ),
                 ),
               ),

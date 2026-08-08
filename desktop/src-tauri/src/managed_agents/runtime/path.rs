@@ -30,30 +30,25 @@ pub(crate) fn should_skip_claude_executable(path: &std::path::Path, is_windows: 
 /// Decide whether the inherited process PATH should be appended to the
 /// composed PATH.
 ///
-/// On Windows, `login_shell_path()` always returns `None` because Git Bash
-/// returns POSIX colon-delimited paths that poison native children.
-/// `Command::env("PATH", …)` replaces rather than extends, so without the
-/// inherited PATH every child loses node/npm/git.
-///
-/// This pure function takes an explicit `is_windows` flag so it can be
-/// unit-tested cross-host (macOS CI can pass `true` to exercise the Windows
-/// policy without needing the `cfg!(windows)` target).
+/// `Command::env("PATH", …)` replaces rather than extends, so a child whose
+/// composed PATH carries no native entries loses every system binary. On
+/// Windows that is the steady state — `login_shell_path()` always returns
+/// `None` because Git Bash returns POSIX colon-delimited paths that poison
+/// native children. On Unix it is the failure mode: a login shell that exits
+/// non-zero or prints nothing also yields `None`, and the child is then left
+/// with only Buzz's managed Node dirs — no `curl`, `sh`, or `tar`, which
+/// silently breaks every `curl … | bash` install. The inherited PATH is the
+/// floor under both cases, appended last so managed dirs keep precedence.
 ///
 /// Rules:
-/// - Only append when `is_windows` — on Unix the login-shell PATH always covers
-///   the needed runtimes.
 /// - Suppress when `had_shell_path` is `true` — if a login-shell PATH was
 ///   supplied it already carries the user's native entries; appending the
 ///   process PATH would double them.
 /// - Suppress when `has_local_context` is `false` — callers that pass no home
 ///   or exe-parent context must not receive a PATH manufactured from ambient
 ///   process state alone.
-pub(crate) fn should_use_inherited(
-    had_shell_path: bool,
-    has_local_context: bool,
-    is_windows: bool,
-) -> bool {
-    is_windows && !had_shell_path && has_local_context
+pub(crate) fn should_use_inherited(had_shell_path: bool, has_local_context: bool) -> bool {
+    !had_shell_path && has_local_context
 }
 
 /// Pure PATH composition kernel shared by the install shell and the runtime/probe paths.
@@ -91,10 +86,14 @@ pub(crate) fn compose_path_entries(
 ///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
 ///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
-///   7. Windows only: the current process `PATH` (appended when no login-shell
-///      PATH exists, because callers use `Command::env("PATH", …)` which
-///      *replaces* the child's PATH — without this, the child loses node/npm/git
-///      and every npm `.cmd` shim fails with `'node' is not recognized`)
+///   7. the current process `PATH` — appended on every platform when no
+///      login-shell PATH exists, because callers use `Command::env("PATH", …)`
+///      which *replaces* the child's PATH. This is the steady state on Windows,
+///      where `login_shell_path()` always returns `None` and without it the
+///      child loses node/npm/git and every npm `.cmd` shim fails with
+///      `'node' is not recognized`; on Unix it is the login-shell-probe failure
+///      fallback, which keeps `curl`/`sh`/`tar` reachable. See
+///      [`should_use_inherited`] for the suppression rules.
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -145,7 +144,7 @@ pub(in crate::managed_agents) fn build_augmented_path(
     let inherited: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let use_inherited = should_use_inherited(had_shell_path, has_local_context, cfg!(windows));
+    let use_inherited = should_use_inherited(had_shell_path, has_local_context);
 
     let parts = compose_path_entries(managed, login, inherited, use_inherited);
     if parts.is_empty() {
@@ -223,29 +222,86 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn nvm_bin_none_does_not_add_segment() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        // With no shell_path the inherited process PATH is appended last, so
+        // pin it to a sentinel to keep the assertion deterministic.
+        std::env::set_var("PATH", "/sentinel/inherited");
+
         let result = build_augmented_path(
             Some(PathBuf::from("/home/user")),
             Some(PathBuf::from("/usr/local/bin")),
             None,
             None,
         );
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
         let result = result.expect("path");
         assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
-        assert!(result.ends_with(":/usr/local/bin"), "{result}");
+        assert!(!result.contains(".nvm"), "no nvm segment: {result}");
+        assert!(
+            result.contains(":/usr/local/bin:"),
+            "exe parent must precede the inherited PATH: {result}"
+        );
+        assert!(
+            result.ends_with(":/sentinel/inherited"),
+            "inherited PATH must be appended last when no shell_path: {result}"
+        );
     }
 
-    /// On Unix, supplying a `shell_path` must NOT trigger the Windows process-PATH
-    /// fallback — the output must be byte-identical to what it was before this
-    /// fix.
+    /// On Unix with no login-shell PATH, `build_augmented_path` must fall back to
+    /// the inherited process PATH — otherwise the child gets only Buzz-managed
+    /// dirs and loses every system binary (`curl`, `sh`, `tar`).
     #[cfg(unix)]
     #[test]
-    fn unix_shell_path_output_unchanged_by_windows_fallback_logic() {
+    fn unix_appends_process_path_when_no_shell_path() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        std::env::set_var("PATH", "/usr/bin:/bin");
+
+        let result = build_augmented_path(Some(PathBuf::from("/home/user")), None, None, None);
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let result = result.expect("path must not be None with a home dir");
+        assert!(
+            result.starts_with("/home/user/.local/bin:"),
+            "home/.local/bin must be first: {result}"
+        );
+        assert!(
+            result.ends_with(":/usr/bin:/bin"),
+            "process PATH must be last: {result}"
+        );
+    }
+
+    /// On Unix, supplying a `shell_path` must NOT also append the inherited
+    /// process PATH — the login-shell PATH already carries the native entries.
+    #[cfg(unix)]
+    #[test]
+    fn unix_shell_path_suppresses_inherited_fallback() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        std::env::set_var("PATH", "/should/not/appear");
+
         let result = build_augmented_path(
             Some(PathBuf::from("/home/user")),
             None,
             Some("/usr/local/bin:/usr/bin:/bin".to_string()),
             None,
         );
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
         let result = result.expect("path");
         assert!(
             result.ends_with(":/usr/local/bin:/usr/bin:/bin"),
@@ -334,8 +390,8 @@ mod tests {
 // ── Pure policy and composition tests — run on every host ────────────────────
 //
 // These test `should_use_inherited` and `compose_path_entries` with explicit
-// inputs, so they run on macOS/Linux CI and validate the Windows policy
-// behavior without touching process state or requiring a Windows target.
+// inputs, so they run on macOS/Linux CI and validate the cross-platform
+// fallback policy without touching process state or requiring a Windows target.
 #[cfg(test)]
 mod compose_tests {
     use super::{compose_path_entries, is_batch_shim, should_use_inherited};
@@ -347,43 +403,37 @@ mod compose_tests {
 
     // ── should_use_inherited policy matrix ────────────────────────────────────
 
-    /// Windows + no shell path + has local context → must use inherited.
+    /// No shell path + has local context → must use inherited, on every OS.
+    /// This is the steady state on Windows (login_shell_path() is always None)
+    /// and the failure mode on Unix (login shell exited non-zero or printed
+    /// nothing); in both the child would otherwise get no native PATH entries.
     #[test]
-    fn policy_windows_no_shell_with_context_uses_inherited() {
+    fn policy_no_shell_with_context_uses_inherited() {
         assert!(
-            should_use_inherited(false, true, true),
-            "Windows, no shell path, has context → must append inherited"
+            should_use_inherited(false, true),
+            "no shell path, has context → must append inherited"
         );
     }
 
-    /// Windows + shell path present → must NOT use inherited (login path covers it).
+    /// Shell path present → must NOT use inherited (login path covers it).
     #[test]
-    fn policy_windows_shell_path_present_suppresses_inherited() {
+    fn policy_shell_path_present_suppresses_inherited() {
         assert!(
-            !should_use_inherited(true, true, true),
-            "Windows, shell path present → must not append inherited"
+            !should_use_inherited(true, true),
+            "shell path present → must not append inherited"
         );
     }
 
-    /// Windows + no local context → must NOT use inherited (no ambient state).
+    /// No local context → must NOT use inherited (no ambient state).
     #[test]
-    fn policy_windows_no_local_context_suppresses_inherited() {
+    fn policy_no_local_context_suppresses_inherited() {
         assert!(
-            !should_use_inherited(false, false, true),
-            "Windows, no local context → must not append inherited"
-        );
-    }
-
-    /// Non-Windows → never use inherited, regardless of other flags.
-    #[test]
-    fn policy_non_windows_never_uses_inherited() {
-        assert!(
-            !should_use_inherited(false, true, false),
-            "non-Windows must never append inherited PATH"
+            !should_use_inherited(false, false),
+            "no local context → must not append inherited"
         );
         assert!(
-            !should_use_inherited(false, false, false),
-            "non-Windows + no context must never append inherited PATH"
+            !should_use_inherited(true, false),
+            "no local context → must not append inherited even with a shell path"
         );
     }
 
@@ -498,23 +548,25 @@ mod compose_tests {
     // compute the same `should_use_inherited` decision for equivalent inputs.
     // Tests the policy function directly to confirm the wrappers can't drift.
 
-    /// Exhaustive truth-table for `should_use_inherited` — all four input
-    /// combinations that affect real callers. Confirms the policy is correct
-    /// before either wrapper binds to it.
+    /// Exhaustive truth-table for `should_use_inherited` — every input
+    /// combination. Confirms the policy is correct before either wrapper binds
+    /// to it. The rule is OS-independent: the inherited PATH is the floor
+    /// whenever no login-shell PATH was obtained, because the alternative is a
+    /// child with no native binaries at all.
     #[test]
     fn should_use_inherited_policy_truth_table() {
-        // (had_shell, has_context, is_windows) → expected
+        // (had_shell, has_context) → expected
         let cases = [
-            (false, true, true, true),   // Windows, no shell, context → USE
-            (true, true, true, false),   // Windows, shell present → NO
-            (false, false, true, false), // Windows, no context → NO
-            (false, true, false, false), // non-Windows → NO
+            (false, true, true),   // no shell PATH, context → USE (the floor)
+            (true, true, false),   // shell PATH present → NO (already covered)
+            (false, false, false), // no context → NO (no ambient-only PATH)
+            (true, false, false),  // no context → NO, shell PATH irrelevant
         ];
-        for (had_shell, has_ctx, is_win, expected) in cases {
-            let result = should_use_inherited(had_shell, has_ctx, is_win);
+        for (had_shell, has_ctx, expected) in cases {
+            let result = should_use_inherited(had_shell, has_ctx);
             assert_eq!(
                 result, expected,
-                "policy mismatch: had_shell={had_shell} has_ctx={has_ctx} is_win={is_win}"
+                "policy mismatch: had_shell={had_shell} has_ctx={has_ctx}"
             );
         }
     }

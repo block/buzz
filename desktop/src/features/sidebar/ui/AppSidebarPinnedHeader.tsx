@@ -6,6 +6,7 @@ import {
   FolderGit2,
   Inbox,
   ShieldCheck,
+  ShipWheel,
   Zap,
 } from "lucide-react";
 
@@ -21,12 +22,13 @@ import {
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 
-type SidebarSelectedView =
+export type SidebarSelectedView =
   | "home"
   | "channel"
   | "messages"
   | "agents"
   | "console"
+  | "ship"
   | "workflows"
   | "pulse"
   | "plans"
@@ -53,6 +55,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectBattleRhythm: () => void;
   onSelectCommandConsole: () => void;
   onSelectHome: () => void;
+  onSelectShip: () => void;
   onSelectPlans: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -101,6 +104,7 @@ export function AppSidebarPrimaryMenu({
   onSelectBattleRhythm,
   onSelectCommandConsole,
   onSelectHome,
+  onSelectShip,
   onSelectPlans,
   onSelectProjects,
   onSelectPulse,
@@ -109,7 +113,7 @@ export function AppSidebarPrimaryMenu({
 }: AppSidebarPrimaryMenuProps) {
   return (
     <SidebarHeader
-      className="cursor-default select-none px-2 pb-0 pt-0"
+      className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
       data-tauri-drag-region
       data-testid="sidebar-primary-menu"
     >
@@ -207,6 +211,18 @@ export function AppSidebarPrimaryMenu({
           >
             <ShieldCheck className="h-4 w-4" />
             <SidebarMenuLabel>Command Console</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-living-ship-view"
+            isActive={selectedView === "ship"}
+            onClick={onSelectShip}
+            tooltip="Living Ship"
+            type="button"
+          >
+            <ShipWheel className="h-4 w-4" />
+            <SidebarMenuLabel>Living Ship</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

@@ -4,7 +4,11 @@ import { init, SearchIndex } from "emoji-mart";
 import data from "@emoji-mart/data";
 
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
-import { fuzzyStandardEmoji, rankByShortcode } from "@/shared/lib/emojiSearch";
+import {
+  fuzzyStandardEmoji,
+  rankByShortcode,
+  rankShortcodeMatchesFirst,
+} from "@/shared/lib/emojiSearch";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
@@ -18,7 +22,7 @@ export type EmojiSuggestion = {
 
 const EMOJI_DEBOUNCE_MS = 120;
 const MIN_QUERY_LENGTH = 2;
-const MAX_RESULTS = 8;
+const UNLIMITED_RESULTS = Number.POSITIVE_INFINITY;
 
 init({ data });
 
@@ -81,7 +85,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
       emojiQuery,
       customEmojiRef.current,
       (e) => e.shortcode,
-      MAX_RESULTS,
+      UNLIMITED_RESULTS,
     ).map((e) => ({
       id: e.shortcode,
       name: e.shortcode,
@@ -89,7 +93,10 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
       url: rewriteRelayUrl(e.url),
     }));
 
-    SearchIndex.search(emojiQuery)
+    SearchIndex.search(emojiQuery, {
+      caller: "useEmojiAutocomplete",
+      maxResults: UNLIMITED_RESULTS,
+    })
       .then(
         (
           results: Array<{
@@ -106,23 +113,28 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
               native: emoji.skins[0]?.native ?? "",
             }))
             .filter((e) => e.native !== "");
-          // Top up remaining slots with fuzzy shortcode matches emoji-mart
-          // missed — its token-prefix search can't cross `_` (so `pointup`
-          // finds nothing). Skip ids already shown to avoid duplicates.
+          // Add fuzzy shortcode matches emoji-mart missed — its token-prefix
+          // search can't cross `_` (so `pointup` finds nothing). Skip ids
+          // already shown to avoid duplicates.
           const shown = new Set<string>(
             [...customMatches, ...standard].map((e) => e.id),
           );
           const fuzzy: EmojiSuggestion[] = fuzzyStandardEmoji(
             emojiQuery,
-            MAX_RESULTS - customMatches.length - standard.length,
+            UNLIMITED_RESULTS,
             shown,
           ).map((e) => ({ id: e.id, name: e.name, native: e.native }));
-          // Custom emoji first (community-specific), then standard, then fuzzy.
-          const merged = [...customMatches, ...standard, ...fuzzy].slice(
-            0,
-            MAX_RESULTS,
+          // Rank exact/prefix shortcode matches across custom and standard emoji
+          // before semantic and weaker matches (for example, `joy` before
+          // `bufo_joy`). Keep emoji-mart's name/keyword results ahead of loose
+          // substring and subsequence matches.
+          setSuggestions(
+            rankShortcodeMatchesFirst(
+              emojiQuery,
+              [...standard, ...customMatches, ...fuzzy],
+              (emoji) => emoji.id,
+            ),
           );
-          setSuggestions(merged);
           setEmojiSelectedIndex(0);
         },
       )

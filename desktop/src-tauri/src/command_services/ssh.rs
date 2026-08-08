@@ -1,13 +1,21 @@
 use base64::Engine;
+#[cfg(unix)]
 use rustix::fs::{fstat, openat, FileType, Mode, OFlags, Stat};
+#[cfg(unix)]
 use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::fs::File;
-use std::io::{self, Read, Seek};
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Seek};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,13 +80,18 @@ pub(super) fn validate_host_target(alias: &str, user: &str) -> Result<(), SshErr
 
 #[derive(Debug)]
 pub(super) struct ProtectedFile {
+    #[cfg(unix)]
     file: File,
+    #[cfg(unix)]
     stat: Stat,
+    #[cfg(unix)]
     maximum: u64,
+    #[cfg(unix)]
     _ancestors: Vec<(File, Stat)>,
 }
 
 impl ProtectedFile {
+    #[cfg(unix)]
     pub(super) fn open(path: &Path, maximum: u64) -> Result<Self, SshError> {
         if !path.is_absolute() || maximum == 0 {
             return Err(SshError::UnprotectedFile);
@@ -149,6 +162,12 @@ impl ProtectedFile {
         })
     }
 
+    #[cfg(not(unix))]
+    pub(super) fn open(_path: &Path, _maximum: u64) -> Result<Self, SshError> {
+        Err(SshError::UnprotectedFile)
+    }
+
+    #[cfg(unix)]
     pub(super) fn read_all(&self) -> Result<Vec<u8>, SshError> {
         let before = fstat(&self.file).map_err(|_| SshError::UnprotectedFile)?;
         if !same_inode(&self.stat, &before) {
@@ -178,6 +197,12 @@ impl ProtectedFile {
         Ok(bytes)
     }
 
+    #[cfg(not(unix))]
+    pub(super) fn read_all(&self) -> Result<Vec<u8>, SshError> {
+        Err(SshError::UnprotectedFile)
+    }
+
+    #[cfg(unix)]
     pub(super) fn descriptor_path(&self) -> PathBuf {
         #[cfg(target_os = "linux")]
         let prefix = "/proc/self/fd";
@@ -185,8 +210,14 @@ impl ProtectedFile {
         let prefix = "/dev/fd";
         PathBuf::from(prefix).join(self.file.as_raw_fd().to_string())
     }
+
+    #[cfg(not(unix))]
+    pub(super) fn descriptor_path(&self) -> PathBuf {
+        PathBuf::new()
+    }
 }
 
+#[cfg(unix)]
 fn validate_directory(directory: &File) -> Result<(), SshError> {
     let stat = fstat(directory).map_err(|_| SshError::UnprotectedFile)?;
     let uid = geteuid().as_raw();
@@ -199,6 +230,7 @@ fn validate_directory(directory: &File) -> Result<(), SshError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn same_inode(expected: &Stat, observed: &Stat) -> bool {
     expected.st_dev == observed.st_dev
         && expected.st_ino == observed.st_ino

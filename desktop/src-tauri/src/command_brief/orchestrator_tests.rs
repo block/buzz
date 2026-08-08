@@ -37,6 +37,10 @@ use super::types::{
 const SNAPSHOT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SNAPSHOT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OBSERVED: &str = "2026-07-25T06:00:00+10:00";
+#[cfg(not(windows))]
+const TEST_APPLE_FILE_PATH: &str = "/Users/command/brief.txt";
+#[cfg(windows)]
+const TEST_APPLE_FILE_PATH: &str = r"C:\Users\command\brief.txt";
 
 #[test]
 fn routing_preference_defines_one_exact_provider_order() {

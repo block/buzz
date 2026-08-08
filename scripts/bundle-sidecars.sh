@@ -37,8 +37,16 @@ mkdir -p "$BINARIES_DIR"
 for bin in "${SIDECARS[@]}"; do
     destination="$BINARIES_DIR/${bin}-${TARGET}${EXE}"
     cp "$SRC_DIR/${bin}${EXE}" "$destination"
-    chmod 0755 "$destination"
+
+    # cp preserves an existing destination mode on macOS. Generated Unix
+    # placeholders may not be executable, while Windows sidecars do not need
+    # a chmod pass.
+    if [[ -z "$EXE" ]]; then
+        chmod 755 "$destination"
+    fi
 done
+
+"$PWD/scripts/verify-desktop-sidecars.sh" "$BINARIES_DIR" "$TARGET"
 
 if [[ "$TARGET" == *-apple-darwin ]]; then
     DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \

@@ -10,6 +10,7 @@ import type {
   ProjectRepoContributor,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoCommit } from "@/shared/api/types";
 import {
   resolveUserLabel,
@@ -25,32 +26,6 @@ import {
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
-
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "min", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -130,7 +105,7 @@ export function ContributorsPanel({
               {row.lastCommitAt ? (
                 <>
                   <span>·</span>
-                  <span>updated {compactDate(row.lastCommitAt)}</span>
+                  <span>updated {relativeTime(row.lastCommitAt)}</span>
                 </>
               ) : null}
             </div>
@@ -257,7 +232,7 @@ export function ActivityPanel({
                     className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
                     title={new Date(commit.timestamp * 1_000).toLocaleString()}
                   >
-                    {relativeCommitTime(commit.timestamp)}
+                    {relativeTime(commit.timestamp)}
                   </span>
                   <ProjectFeedRowCluster>
                     <ProjectFeedRowMonoCell

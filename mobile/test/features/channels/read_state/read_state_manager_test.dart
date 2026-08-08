@@ -181,6 +181,7 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
+    void Function(NostrEvent event)? onSigned,
   }) async {
     submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
     return _stubAckEvent();
@@ -199,6 +200,7 @@ class _UnsupportedKindSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
+    void Function(NostrEvent event)? onSigned,
   }) async {
     submitCount++;
     throw Exception('restricted: unknown event kind');
@@ -217,6 +219,7 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
+    void Function(NostrEvent event)? onSigned,
   }) async {
     submitCount++;
     throw Exception('missing users:write');

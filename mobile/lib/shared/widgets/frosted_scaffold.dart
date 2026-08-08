@@ -21,17 +21,23 @@ class FrostedScaffold extends StatelessWidget {
   /// Whether the body should resize when the on-screen keyboard appears.
   final bool? resizeToAvoidBottomInset;
 
+  /// Optional scaffold background, useful when a parent supplies a shared
+  /// surface behind this page.
+  final Color? backgroundColor;
+
   const FrostedScaffold({
     super.key,
     required this.appBar,
     required this.body,
     this.floatingActionButton,
     this.resizeToAvoidBottomInset,
+    this.backgroundColor,
   });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: backgroundColor,
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
       floatingActionButton: floatingActionButton,
       body: Stack(children: [body, appBar]),

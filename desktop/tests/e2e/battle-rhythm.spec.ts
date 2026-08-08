@@ -2,6 +2,10 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-07-29T12:00:00+10:00"));
+});
+
 function planningDocument(
   filename: string,
   hashCharacter: string,

@@ -41,6 +41,33 @@ final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
   return owners;
 });
 
+/// Pubkeys currently known to represent agents for rendered mention chips.
+///
+/// Uses the same three identity sources as mention autocomplete: channel bot
+/// roles, relay agent-directory entries, and verified NIP-OA ownership.
+final mentionAgentPubkeysProvider = Provider.family<Set<String>, String>((
+  ref,
+  channelId,
+) {
+  final members =
+      ref.watch(channelMembersProvider(channelId)).asData?.value ??
+      const <ChannelMember>[];
+  final relayAgents =
+      ref.watch(agentDirectoryProvider).asData?.value ??
+      const <AgentDirectoryEntry>[];
+  final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+  final userCache = ref.watch(userCacheProvider);
+
+  return {
+    for (final member in members)
+      if (member.isBot) member.pubkey.toLowerCase(),
+    for (final agent in relayAgents) agent.pubkey.toLowerCase(),
+    ...owners.keys.map((pubkey) => pubkey.toLowerCase()),
+    for (final profile in userCache.values)
+      if (profile.ownerPubkey != null) profile.pubkey.toLowerCase(),
+  };
+});
+
 /// Debounce before a mention query hits the relay search endpoint.
 const _mentionSearchDebounce = Duration(milliseconds: 250);
 

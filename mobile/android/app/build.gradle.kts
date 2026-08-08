@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -18,6 +20,31 @@ val uploadSigningValues =
     )
 val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrBlank() }.keys
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
+
+// Worktree-aware debug identity (gitignored, written by
+// scripts/mobile-worktree-overrides.sh): debug builds from a git worktree get a
+// branch-labelled app name and a unique applicationId suffix so builds from
+// multiple worktrees install side by side. Release builds never read this.
+val worktreePropsFile = rootProject.file("worktree.properties")
+val worktreeProps =
+    Properties().apply {
+        if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
+    }
+val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
+if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+"""))) {
+    throw GradleException(
+        "worktree.properties label must match [A-Za-z0-9._-]+ (safe for string " +
+            "resources), got: " + worktreeLabel,
+    )
+}
+val worktreeIdSuffix =
+    worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
+if (worktreeIdSuffix != null && !worktreeIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
+    throw GradleException(
+        "worktree.properties applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
+            worktreeIdSuffix,
+    )
+}
 
 // Release signing modes:
 //   - "upload-keystore" (default): sign with the CI-vended upload keystore;
@@ -64,6 +91,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        resValue("string", "app_name", "Buzz")
     }
 
     signingConfigs {
@@ -78,6 +106,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Only debug builds take the worktree identity; release/profile
+            // keep the production applicationId and label.
+            if (worktreeIdSuffix != null) {
+                applicationIdSuffix = worktreeIdSuffix
+            }
+            if (worktreeLabel != null) {
+                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+            }
+        }
         release {
             if (hasUploadSigning) {
                 signingConfig = signingConfigs.getByName("upload")

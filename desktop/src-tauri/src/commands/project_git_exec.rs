@@ -173,10 +173,21 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             return apply_git_config(command, &entries);
         };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
-        entries.push(("credential.helper", cred_helper.display().to_string()));
+        entries.push((
+            "credential.helper",
+            credential_helper_config_value(cred_helper),
+        ));
         entries.push(("credential.useHttpPath", "true".to_string()));
     }
     apply_git_config(command, &entries);
+}
+
+/// Format a path for git `credential.helper`.
+///
+/// Git for Windows invokes helpers via MinGW bash, which treats `\` as
+/// escapes. Forward slashes work on every platform git supports.
+fn credential_helper_config_value(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
@@ -316,9 +327,19 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, git_needs_credentials, git_subcommand, validate_clone_url,
-        validate_clone_url_against_relay,
+        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
+        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
     };
+
+    #[test]
+    fn credential_helper_config_value_uses_forward_slashes() {
+        let path =
+            std::path::PathBuf::from(r"C:\Users\x\AppData\Local\Buzz\git-credential-nostr.exe");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
+        );
+    }
 
     #[test]
     fn git_subcommand_skips_global_config_options() {

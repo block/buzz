@@ -191,20 +191,29 @@ export function formatCreatedDate(createdAt: number) {
   });
 }
 
-export function relativeTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
+export function relativeTime(
+  createdAt: number,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+) {
+  const elapsedSeconds = Math.max(1, Math.floor(nowSeconds - createdAt));
   const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "week", seconds: 7 * 24 * 60 * 60 },
     { label: "day", seconds: 24 * 60 * 60 },
     { label: "hour", seconds: 60 * 60 },
     { label: "minute", seconds: 60 },
     { label: "second", seconds: 1 },
   ];
+
+  if (elapsedSeconds >= 7 * 24 * 60 * 60) {
+    const createdDate = new Date(createdAt * 1_000);
+    const nowDate = new Date(nowSeconds * 1_000);
+    return createdDate.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      ...(createdDate.getFullYear() === nowDate.getFullYear()
+        ? {}
+        : { year: "numeric" }),
+    });
+  }
 
   for (const unit of units) {
     const value = Math.floor(elapsedSeconds / unit.seconds);

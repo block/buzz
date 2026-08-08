@@ -1,11 +1,25 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/tappable_flapping_bee.dart';
 import 'pairing_provider.dart';
+import 'pairing_qr_scanner.dart';
+
+part 'pairing_page/onboarding_background.dart';
+part 'pairing_page/pairing_welcome_view.dart';
+
+const _onboardingChartreuse = Color(0xFFD7D72E);
+const _onboardingShellBottom = Color(0xFFD7E7F6);
+const _onboardingCtaLabel = Color(0xFFD7E6F0);
+const _onboardingInk = Color(0xFF111111);
+const _onboardingMutedInk = Color(0xB3111111);
 
 class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
@@ -18,6 +32,8 @@ class PairingPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
     final codeController = useTextEditingController();
+    final fallbackScannerVisible = useState(false);
+    final pairingCodeExpanded = useState(false);
     final isBusy =
         pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
@@ -33,183 +49,131 @@ class PairingPage extends HookConsumerWidget {
       });
     }
 
-    return PopScope(
-      onPopInvokedWithResult: (didPop, _) {
-        if (didPop) {
-          ref.read(pairingProvider.notifier).reset();
-        }
-      },
-      child: Scaffold(
-        appBar: addingCommunity
-            ? AppBar(
-                leading: IconButton(
-                  icon: const Icon(LucideIcons.arrowLeft),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-                title: const Text('Add Community'),
-              )
-            : null,
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
-            child: pairingState.status == PairingStatus.confirmingSas
-                ? _SasVerificationView(
+    Future<void> handleScannerResult(String? code) async {
+      if (code != null && context.mounted) {
+        await ref.read(pairingProvider.notifier).pair(code);
+      }
+    }
+
+    Future<void> openScanner() async {
+      final usesDynamicIslandPortal = await usesDynamicIslandQrScannerPortal();
+      if (!context.mounted) {
+        return;
+      }
+
+      if (!usesDynamicIslandPortal) {
+        fallbackScannerVisible.value = true;
+        return;
+      }
+
+      final code = await showDynamicIslandPairingQrScanner(context);
+      await handleScannerResult(code);
+    }
+
+    final isVerifyingSas = pairingState.status == PairingStatus.confirmingSas;
+    final themedSystemOverlayStyle =
+        (context.theme.brightness == Brightness.dark
+                ? SystemUiOverlayStyle.light
+                : SystemUiOverlayStyle.dark)
+            .copyWith(statusBarColor: Colors.transparent);
+    final pairingAppBar = addingCommunity
+        ? AppBar(
+            foregroundColor: isVerifyingSas
+                ? context.colors.onSurface
+                : _onboardingInk,
+            systemOverlayStyle: isVerifyingSas
+                ? themedSystemOverlayStyle
+                : SystemUiOverlayStyle.dark.copyWith(
+                    statusBarColor: Colors.transparent,
+                  ),
+            leading: IconButton(
+              icon: const Icon(LucideIcons.arrowLeft),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+            title: Text(
+              'Add Community',
+              style: isVerifyingSas
+                  ? null
+                  : context.textTheme.titleMedium?.copyWith(
+                      color: _onboardingInk,
+                    ),
+            ),
+          )
+        : null;
+
+    final pairingScaffold = isVerifyingSas
+        ? AnnotatedRegion<SystemUiOverlayStyle>(
+            key: const Key('pairing-sas-system-overlay'),
+            value: themedSystemOverlayStyle,
+            child: Scaffold(
+              backgroundColor: context.colors.surface,
+              appBar: pairingAppBar,
+              body: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
+                  child: _SasVerificationView(
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
-                  )
-                : Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Spacer(flex: 2),
-
-                      Image.asset('assets/images/buzz-icon.png', height: 64),
-                      const SizedBox(height: Grid.xs),
-                      Text(
-                        'Welcome to Buzz',
-                        style: context.textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: Grid.xxs),
-                      Text(
-                        'Scan the QR code from your desktop app\nor paste a pairing code to connect.',
-                        textAlign: TextAlign.center,
-                        style: context.textTheme.bodyMedium?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-
-                      const SizedBox(height: Grid.lg),
-
-                      // Scan QR button
-                      FilledButton.icon(
-                        onPressed: isBusy
-                            ? null
-                            : () => _openScanner(context, ref),
-                        icon: const Icon(LucideIcons.scanLine),
-                        label: const Text('Scan QR Code'),
-                      ),
-
-                      const SizedBox(height: Grid.sm),
-
-                      Row(
-                        children: [
-                          const Expanded(child: Divider()),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.twelve,
-                            ),
-                            child: Text(
-                              'or paste pairing code',
-                              style: context.textTheme.bodySmall?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
-                            ),
-                          ),
-                          const Expanded(child: Divider()),
-                        ],
-                      ),
-
-                      const SizedBox(height: Grid.sm),
-
-                      // Paste field
-                      TextField(
-                        controller: codeController,
-                        decoration: const InputDecoration(
-                          hintText: 'nostrpair://... or buzz://...',
-                          prefixIcon: Icon(LucideIcons.link),
-                          isDense: true,
-                        ),
-                        autocorrect: false,
-                        enableSuggestions: false,
-                        enabled: !isBusy,
-                        contextMenuBuilder: (context, editableTextState) {
-                          return AdaptiveTextSelectionToolbar.editableText(
-                            editableTextState: editableTextState,
-                          );
-                        },
-                      ),
-
-                      const SizedBox(height: Grid.twelve),
-
-                      // Connect button
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
-                          onPressed: isBusy
-                              ? null
-                              : () {
-                                  final code = codeController.text.trim();
-                                  if (code.isNotEmpty) {
-                                    ref
-                                        .read(pairingProvider.notifier)
-                                        .pair(code);
-                                  }
-                                },
-                          child: isBusy
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Text('Connect'),
-                        ),
-                      ),
-
-                      // Error message
-                      if (pairingState.status == PairingStatus.error &&
-                          pairingState.errorMessage != null) ...[
-                        const SizedBox(height: Grid.twelve),
-                        Container(
-                          padding: const EdgeInsets.all(Grid.twelve),
-                          decoration: BoxDecoration(
-                            color: context.colors.errorContainer,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                LucideIcons.triangleAlert,
-                                size: 16,
-                                color: context.colors.onErrorContainer,
-                              ),
-                              const SizedBox(width: Grid.xxs),
-                              Expanded(
-                                child: Text(
-                                  pairingState.errorMessage!,
-                                  style: context.textTheme.bodySmall?.copyWith(
-                                    color: context.colors.onErrorContainer,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-
-                      const Spacer(flex: 3),
-                    ],
                   ),
-          ),
-        ),
-      ),
-    );
-  }
+                ),
+              ),
+            ),
+          )
+        : AnnotatedRegion<SystemUiOverlayStyle>(
+            key: const Key('pairing-onboarding-system-overlay'),
+            value: SystemUiOverlayStyle.dark.copyWith(
+              statusBarColor: Colors.transparent,
+            ),
+            child: _OnboardingBackground(
+              child: Scaffold(
+                backgroundColor: Colors.transparent,
+                appBar: pairingAppBar,
+                body: SafeArea(
+                  child: _PairingWelcomeView(
+                    codeController: codeController,
+                    isBusy: isBusy,
+                    pairingCodeExpanded: pairingCodeExpanded.value,
+                    errorMessage: pairingState.status == PairingStatus.error
+                        ? pairingState.errorMessage
+                        : null,
+                    onScan: openScanner,
+                    onTogglePairingCode: () {
+                      pairingCodeExpanded.value = !pairingCodeExpanded.value;
+                    },
+                    onConnect: () {
+                      final code = codeController.text.trim();
+                      if (code.isNotEmpty) {
+                        ref.read(pairingProvider.notifier).pair(code);
+                      }
+                    },
+                  ),
+                ),
+              ),
+            ),
+          );
 
-  void _openScanner(BuildContext context, WidgetRef ref) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _ScannerPage(
-          onScanned: (code) {
-            Navigator.of(context).pop();
-            ref.read(pairingProvider.notifier).pair(code);
-          },
-        ),
-      ),
+    final appSurface = PopScope(
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) {
+          ref.read(pairingProvider.notifier).reset();
+        }
+      },
+      child: pairingScaffold,
+    );
+
+    if (!fallbackScannerVisible.value) {
+      return appSurface;
+    }
+
+    return FallbackPairingQrScanner(
+      appSurface: appSurface,
+      onClosed: (code) {
+        fallbackScannerVisible.value = false;
+        unawaited(handleScannerResult(code));
+      },
     );
   }
 }
@@ -292,13 +256,10 @@ class _SasVerificationView extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: context.colors.primary,
-                ),
+              BuzzLoadingIndicator(
+                size: 24,
+                color: context.colors.primary,
+                semanticLabel: 'Connecting',
               ),
               const SizedBox(width: Grid.twelve),
               Text(
@@ -333,75 +294,6 @@ class _SasVerificationView extends StatelessWidget {
 
         const Spacer(flex: 3),
       ],
-    );
-  }
-}
-
-class _ScannerPage extends HookWidget {
-  final void Function(String code) onScanned;
-
-  const _ScannerPage({required this.onScanned});
-
-  @override
-  Widget build(BuildContext context) {
-    final handled = useState(false);
-    final controller = useMemoized(() => MobileScannerController());
-
-    useEffect(() => controller.dispose, const []);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Scan QR Code'),
-        leading: IconButton(
-          icon: const Icon(LucideIcons.arrowLeft),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ),
-      body: MobileScanner(
-        controller: controller,
-        errorBuilder: (context, error) {
-          final message = switch (error.errorCode) {
-            MobileScannerErrorCode.permissionDenied =>
-              'Camera permission is required to scan QR codes.\n\nPlease grant camera access in your device settings.',
-            _ =>
-              'Could not start camera: ${error.errorDetails?.message ?? 'unknown error'}',
-          };
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(Grid.sm),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    LucideIcons.cameraOff,
-                    size: 48,
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                  const SizedBox(height: Grid.xs),
-                  Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-        onDetect: (capture) {
-          if (handled.value) return;
-          final barcodes = capture.barcodes;
-          if (barcodes.isNotEmpty) {
-            final value = barcodes.first.rawValue;
-            if (value != null && value.isNotEmpty) {
-              handled.value = true;
-              onScanned(value);
-            }
-          }
-        },
-      ),
     );
   }
 }

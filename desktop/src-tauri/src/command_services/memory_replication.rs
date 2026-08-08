@@ -373,7 +373,18 @@ fn replicate_with_exchange(
     timeout: Duration,
     exchange: &mut impl JsonExchange,
 ) -> Result<ReplicationResult, MemoryError> {
-    if timeout.is_zero() || timeout > Duration::from_secs(300) {
+    replicate_with_exchange_limit(operation, local, remote, timeout, MAXIMUM_PAGES, exchange)
+}
+
+fn replicate_with_exchange_limit(
+    operation: &str,
+    local: &Node<'_>,
+    remote: &Node<'_>,
+    timeout: Duration,
+    maximum_pages: u64,
+    exchange: &mut impl JsonExchange,
+) -> Result<ReplicationResult, MemoryError> {
+    if timeout.is_zero() || timeout > Duration::from_secs(300) || maximum_pages == 0 {
         return Err(MemoryError::InvalidConfig);
     }
     let deadline = Instant::now() + timeout;
@@ -411,7 +422,7 @@ fn replicate_with_exchange(
     let mut totals = Totals::default();
     let mut complete = false;
 
-    for _ in 0..MAXIMUM_PAGES {
+    for _ in 0..maximum_pages {
         check_active(deadline)?;
         let export = serde_json::json!({"cursor": cursor, "limit": PAGE_SIZE});
         let envelope_value = exchange.request(

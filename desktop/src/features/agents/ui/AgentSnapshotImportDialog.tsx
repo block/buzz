@@ -15,6 +15,8 @@ import {
 } from "@/shared/ui/dialog";
 import { Separator } from "@/shared/ui/separator";
 
+import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ImportPhase = "preview" | "confirming" | "result";
@@ -163,6 +165,12 @@ function PreviewBody({
           </p>
         ) : null}
       </div>
+
+      <AgentDefinitionMetadata
+        isBuiltIn={preview.isBuiltIn}
+        model={preview.model}
+        runtime={preview.runtime}
+      />
 
       <p className="text-sm text-muted-foreground">
         A new agent will be created with a fresh keypair. The imported agent is

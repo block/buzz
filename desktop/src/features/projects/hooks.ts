@@ -48,7 +48,9 @@ import type {
   ProjectPullRequestCommentAnchor,
 } from "./projectPullRequests.mjs";
 import {
+  nextProjectPullRequestReviewCreatedAt,
   normalizeProjectPullRequestCommentAnchor,
+  PR_CHANGES_REQUESTED_LABEL,
   PR_INLINE_COMMENT_LABEL,
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
@@ -59,6 +61,8 @@ export type {
   ProjectPullRequest,
   ProjectPullRequestCommentAnchor,
 };
+
+export type ProjectPullRequestCommentDecision = "request-changes";
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -439,6 +443,7 @@ async function fetchProjectPullRequests(
 async function createProjectPullRequestComment({
   anchor,
   content,
+  decision,
   mediaTags,
   mentionPubkeys = [],
   project,
@@ -446,6 +451,7 @@ async function createProjectPullRequestComment({
 }: {
   anchor?: ProjectPullRequestCommentAnchor;
   content: string;
+  decision?: ProjectPullRequestCommentDecision;
   mediaTags?: string[][];
   mentionPubkeys?: string[];
   project: Project;
@@ -461,8 +467,8 @@ async function createProjectPullRequestComment({
   if (anchor && !normalizedAnchor) {
     throw new Error("Comment location is invalid.");
   }
-  if (normalizedAnchor && !pullRequest.commit) {
-    throw new Error("Pull request commit is required for inline comments.");
+  if ((normalizedAnchor || decision) && !pullRequest.commit) {
+    throw new Error("Pull request commit is required for review comments.");
   }
 
   const recipients = new Set([
@@ -484,12 +490,26 @@ async function createProjectPullRequestComment({
           ["line", String(normalizedAnchor.line)],
         ]
       : []),
+    ...(decision
+      ? [
+          ["t", PR_CHANGES_REQUESTED_LABEL],
+          ...(!normalizedAnchor ? [["c", pullRequest.commit as string]] : []),
+        ]
+      : []),
     ...(mediaTags ?? []),
   ];
 
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
     content: body,
+    ...(decision
+      ? {
+          createdAt: nextProjectPullRequestReviewCreatedAt(
+            pullRequest,
+            Math.floor(Date.now() / 1_000),
+          ),
+        }
+      : {}),
     tags,
   });
 
@@ -907,12 +927,14 @@ export function useCreateProjectPullRequestCommentMutation(
     mutationFn: ({
       anchor,
       content,
+      decision,
       mediaTags,
       mentionPubkeys,
       pullRequest,
     }: {
       anchor?: ProjectPullRequestCommentAnchor;
       content: string;
+      decision?: ProjectPullRequestCommentDecision;
       mediaTags?: string[][];
       mentionPubkeys?: string[];
       pullRequest: ProjectPullRequest;
@@ -921,6 +943,7 @@ export function useCreateProjectPullRequestCommentMutation(
       return createProjectPullRequestComment({
         anchor,
         content,
+        decision,
         mediaTags,
         mentionPubkeys,
         project,

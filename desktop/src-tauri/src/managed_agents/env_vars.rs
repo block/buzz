@@ -97,6 +97,12 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
     "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
     "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+    // Desktop ownership markers: these brand every spawned harness with the
+    // launching Desktop instance. A user-supplied override would let a
+    // definition masquerade as a different instance or fake the nonce used
+    // for same-session sweep decisions.
+    "BUZZ_MANAGED_AGENT",
+    "BUZZ_MANAGED_AGENT_START_NONCE",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {
@@ -301,8 +307,12 @@ pub(crate) fn merged_user_env(
 
 /// Look up the live env map of `persona_id` within an already-loaded persona
 /// slice. Returns an empty map for standalone agents (`None`) and for links
-/// to personas that no longer exist (an orphaned agent spawns from its own
-/// overrides alone — same fallback the prompt/model resolution uses).
+/// to personas that no longer exist. The latter is an orphaned instance,
+/// which `spawn_agent_child` refuses before this is ever read at spawn time
+/// (see `effective_config::resolve_effective_config`'s `OrphanedInstance`
+/// arm via `require_resolved`) — an empty map here only matters for
+/// non-spawn callers like readiness/hash that must still resolve
+/// a slice for a record whose orphan status hasn't been checked yet.
 pub(crate) fn live_persona_env(
     personas: &[super::types::AgentDefinition],
     persona_id: Option<&str>,

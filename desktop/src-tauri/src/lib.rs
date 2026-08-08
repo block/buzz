@@ -33,6 +33,8 @@ mod shutdown;
 mod startup;
 mod templates;
 mod util;
+#[cfg(target_os = "linux")]
+pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
@@ -369,16 +371,6 @@ pub fn run() {
                 .load(std::sync::atomic::Ordering::Acquire);
             let recovery_mode = identity_lost || keyring_locked;
 
-            // Snapshot owner keys after identity resolution; the best-effort
-            // event reconcile itself runs off the synchronous setup path below.
-            let owner_keys = match state.keys.lock() {
-                Ok(k) => k.clone(),
-                Err(e) => {
-                    eprintln!("buzz-desktop: fatal: owner keys lock poisoned: {e}");
-                    std::process::exit(1);
-                }
-            };
-
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
             // set but no source_version). Must run before
@@ -398,6 +390,21 @@ pub fn run() {
                 Err(e) => {
                     eprintln!("buzz-desktop: Command Team parallelism migration failed: {e}");
                 }
+            }
+
+            // Warm the loaded-harness registry BEFORE restore so cold-launch
+            // agent spawns can resolve custom/preset runtime ids without
+            // waiting for the frontend's discover_acp_providers call.  This is
+            // a pure directory scan — no PATH probing, no async work.
+            {
+                let custom_dir = app_handle
+                    .path()
+                    .app_data_dir()
+                    .ok()
+                    .map(|d| d.join("custom_harnesses"));
+                managed_agents::custom_harnesses::warm_harness_registry_from_dir(
+                    custom_dir.as_deref(),
+                );
             }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
@@ -423,7 +430,7 @@ pub fn run() {
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
-            // client so WARP tunnelling applies. The port is stored in AppState
+            // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
             let proxy_client = state.http_client.clone();
             let proxy_handle = app_handle.clone();
@@ -493,15 +500,6 @@ pub fn run() {
             }
 
             try_regenerate_nest(&app_handle);
-
-            // Sync team-dir edits and reconcile persona/team/agent events after
-            // setup can continue. It is best-effort retention backfill, unlike
-            // identity resolution above, so JSON/SQLite/signing work must not
-            // hold the boot path hostage. Skipped in recovery mode — the owner
-            // key is ephemeral.
-            if !recovery_mode {
-                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
-            }
 
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
@@ -585,17 +583,13 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     use std::time::Duration;
                     use tauri::Manager;
-                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                        .map(|d| d.join("retention.db"))
-                    else {
-                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                        return;
-                    };
                     loop {
                         let state = flush_handle.state::<AppState>();
-                        if let Err(e) =
-                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
-                                .await
+                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
+                            &flush_handle,
+                            &state,
+                        )
+                        .await
                         {
                             eprintln!("buzz-desktop: event-flush: {e}");
                         }
@@ -657,6 +651,7 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            sign_project_pull_request_status,
             sign_project_pull_request_review_request,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
@@ -677,6 +672,8 @@ pub fn run() {
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
+            save_custom_harness,
+            delete_custom_harness,
             connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
@@ -774,6 +771,7 @@ pub fn run() {
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,
+            mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
@@ -782,8 +780,10 @@ pub fn run() {
             list_personas,
             create_persona,
             update_persona,
+            update_persona_and_publish,
             delete_persona,
             set_persona_active,
+            set_persona_shared,
             reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,
@@ -851,6 +851,7 @@ pub fn run() {
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,
+            fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,

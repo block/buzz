@@ -9,7 +9,7 @@ import { AUTO_MODEL_DROPDOWN_VALUE } from "./agentConfigOptions.tsx";
 
 const fallback = [{ id: "", label: "Default model" }];
 const live = [
-  { id: "", label: "Default (auto)" },
+  { id: "", label: "Auto (collective when available)" },
   { id: "mesh/model", label: "mesh/model" },
 ];
 
@@ -35,7 +35,9 @@ test("Buzz shared compute fallback is Default auto while normal providers remain
     model: "",
     provider: "relay-mesh",
   });
-  assert.deepEqual(mesh.options, [{ id: "", label: "Default (auto)" }]);
+  assert.deepEqual(mesh.options, [
+    { id: "", label: "Auto (collective when available)" },
+  ]);
 
   const openai = relayMeshModelPickerState({
     discoveredOptions: null,
@@ -57,7 +59,9 @@ test("Buzz shared compute keeps Default auto when discovery is empty", () => {
     provider: "relay-mesh",
   });
 
-  assert.deepEqual(state.options, [{ id: "", label: "Default (auto)" }]);
+  assert.deepEqual(state.options, [
+    { id: "", label: "Auto (collective when available)" },
+  ]);
   assert.equal(state.selectValue, AUTO_MODEL_DROPDOWN_VALUE);
   assert.equal(state.showCustomInput, false);
 });
@@ -71,6 +75,6 @@ test("Buzz shared compute dropdown contains Default plus live models and no cust
   });
   assert.deepEqual(
     options.map((option) => option.label),
-    ["Default (auto)", "mesh/model"],
+    ["Auto (collective when available)", "mesh/model"],
   );
 });

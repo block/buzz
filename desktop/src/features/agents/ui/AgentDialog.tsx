@@ -11,7 +11,10 @@ import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { createPersonaDialogState } from "./personaDialogState";
-import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
+import {
+  AgentDefinitionDialog,
+  type AgentDefinitionSubmitOptions,
+} from "./AgentDefinitionDialog";
 import { WhereToRunSection } from "./WhereToRunSection";
 import {
   canSubmitWhereToRun,
@@ -64,7 +67,9 @@ type AgentDialogDefinitionEditProps = {
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
+    options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
+  publishCatalogUpdatesOnSave?: boolean;
 };
 
 type AgentDialogProps =

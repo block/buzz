@@ -5,7 +5,6 @@ import {
   Rocket,
   Share2,
   Trash2,
-  Upload,
 } from "lucide-react";
 
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
@@ -201,11 +200,7 @@ function NewTeamCard({
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard
-          ariaLabel="New team"
-          dataTestId="new-team-card"
-          label="New team"
-        />
+        <CreateIdentityCard ariaLabel="New team" dataTestId="new-team-card" />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
@@ -215,8 +210,7 @@ function NewTeamCard({
           Create team
         </DropdownMenuItem>
         <DropdownMenuItem disabled={isPending} onClick={onImport}>
-          <Upload className="h-4 w-4" />
-          Import team snapshot
+          Import
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

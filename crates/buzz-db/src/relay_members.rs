@@ -373,10 +373,36 @@ pub enum TransferResult {
     LimitReached,
 }
 
-/// Maximum number of communities a single pubkey can own. Enforced at the
-/// relay layer — the authoritative layer — so that concurrent transfers or
+/// Default maximum number of communities a single pubkey can own. Enforced at
+/// the relay layer — the authoritative layer — so that concurrent transfers or
 /// transfer-vs-create races cannot both pass a preflight count.
 pub const MAX_COMMUNITIES_PER_OWNER: i64 = 3;
+
+/// Effective per-owner community limit for this deployment.
+///
+/// Reads `BUZZ_MAX_COMMUNITIES_PER_OWNER` once (cached for the process
+/// lifetime); a missing, unparsable, or non-positive value falls back to
+/// [`MAX_COMMUNITIES_PER_OWNER`]. Lets multi-tenant operators raise the cap
+/// without a source change while keeping the stock default for everyone else.
+pub fn max_communities_per_owner() -> i64 {
+    static LIMIT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        effective_owner_limit(
+            std::env::var("BUZZ_MAX_COMMUNITIES_PER_OWNER")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Pure resolution of the owner limit from a raw env value — extracted from
+/// [`max_communities_per_owner`] so the parse/fallback rules are testable
+/// without process-global env state.
+fn effective_owner_limit(raw: Option<&str>) -> i64 {
+    raw.and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(MAX_COMMUNITIES_PER_OWNER)
+}
 
 /// Stable advisory-lock key for serializing ownership-granting operations
 /// (transfer + create) per recipient pubkey. Uses FNV-1a over the hex pubkey
@@ -472,7 +498,7 @@ pub async fn transfer_ownership(
     .fetch_one(&mut *tx)
     .await?;
 
-    if owned_count >= MAX_COMMUNITIES_PER_OWNER {
+    if owned_count >= max_communities_per_owner() {
         tx.rollback().await?;
         return Ok(TransferResult::LimitReached);
     }
@@ -555,6 +581,32 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owner_limit_defaults_when_unset_or_invalid() {
+        assert_eq!(
+            super::effective_owner_limit(None),
+            super::MAX_COMMUNITIES_PER_OWNER
+        );
+        assert_eq!(
+            super::effective_owner_limit(Some("not-a-number")),
+            super::MAX_COMMUNITIES_PER_OWNER
+        );
+        assert_eq!(
+            super::effective_owner_limit(Some("0")),
+            super::MAX_COMMUNITIES_PER_OWNER
+        );
+        assert_eq!(
+            super::effective_owner_limit(Some("-5")),
+            super::MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    #[test]
+    fn owner_limit_honors_positive_override() {
+        assert_eq!(super::effective_owner_limit(Some("100")), 100);
+        assert_eq!(super::effective_owner_limit(Some(" 12 ")), 12);
+    }
+
     use super::*;
     use uuid::Uuid;
 

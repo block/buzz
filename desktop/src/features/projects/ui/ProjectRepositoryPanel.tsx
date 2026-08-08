@@ -26,6 +26,7 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
@@ -39,31 +40,6 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "week", seconds: 7 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-    { label: "second", seconds: 1 },
-  ];
-
-  for (const unit of units) {
-    const value = Math.floor(elapsedSeconds / unit.seconds);
-    if (value >= 1) {
-      return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-    }
-  }
-
-  return "just now";
-}
 
 function pluralize(count: number, singular: string) {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
@@ -852,7 +828,7 @@ export function RepositoryFilesPanel({
                         latestCommit.timestamp * 1_000,
                       ).toISOString()}
                     >
-                      {relativeCommitTime(latestCommit.timestamp)}
+                      {relativeTime(latestCommit.timestamp)}
                     </time>
                   </div>
                 ) : (
@@ -905,7 +881,7 @@ export function RepositoryFilesPanel({
                           latestCommit.timestamp * 1_000,
                         ).toISOString()}
                       >
-                        {relativeCommitTime(latestCommit.timestamp)}
+                        {relativeTime(latestCommit.timestamp)}
                       </time>
                     ) : (
                       "—"

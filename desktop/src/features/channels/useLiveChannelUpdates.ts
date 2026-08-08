@@ -88,6 +88,13 @@ export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
     : UNREAD_TRIGGER_KINDS.has(kind);
 }
 
+export function isHomeActivityEvent(
+  isDmChannel: boolean,
+  isThreadedReply: boolean,
+) {
+  return isThreadedReply || isDmChannel;
+}
+
 export function withChannelTagFallback(
   event: RelayEvent,
   channelId: string,
@@ -278,7 +285,7 @@ export function useLiveChannelUpdates(
         }
       } else {
         options.onChannelMessage?.(channelId, event);
-        if (isThreadedReply) {
+        if (isHomeActivityEvent(isDmChannel, isThreadedReply)) {
           options.onThreadReplyNotification?.(channelId, event);
         }
       }

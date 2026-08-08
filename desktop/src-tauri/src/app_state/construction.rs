@@ -63,6 +63,7 @@ pub fn build_app_state() -> AppState {
             crate::startup::CommandBriefRuntimeSet::default(),
         ),
         command_brief_runtime_generation: AtomicU64::new(0),
+        #[cfg(target_os = "macos")]
         command_brief_wake_subscription: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -97,6 +98,8 @@ pub fn build_app_state() -> AppState {
         reset_failed: AtomicBool::new(false),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
+        #[cfg(feature = "mesh-llm")]
+        mesh_recovery: crate::mesh_llm::MeshRecoveryState::default(),
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),

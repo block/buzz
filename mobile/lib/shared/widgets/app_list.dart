@@ -1,10 +1,19 @@
 import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
+import 'app_list_inset.dart';
+
+/// Widest an inline [AppListRow.value] may grow before it ellipsises, leaving
+/// room for a reasonable title beside it.
+const double _maxValueWidth = 180.0;
+
+/// Row height comes entirely from this padding — rows carry a single line of
+/// text most of the time, so it sets how airy a card reads.
+const double _rowVerticalPadding = Grid.xs;
 
 /// A flush, borderless settings/list row: leading icon, title, optional
-/// subtitle and trailing widget. No card, no background — groups are
-/// separated by [AppListSection] dividers instead.
+/// subtitle and trailing widget. Its own background comes from whatever
+/// contains it — a grouped card, or the page itself.
 class AppListRow extends StatelessWidget {
   const AppListRow({
     super.key,
@@ -13,6 +22,7 @@ class AppListRow extends StatelessWidget {
     this.subtitle,
     this.subtitleStyle,
     this.subtitleMaxLines,
+    this.value,
     this.trailing,
     this.titleColor,
     this.onTap,
@@ -23,6 +33,11 @@ class AppListRow extends StatelessWidget {
   final String? subtitle;
   final TextStyle? subtitleStyle;
   final int? subtitleMaxLines;
+
+  /// The row's current setting, shown muted on the trailing side next to
+  /// [trailing] — for rows whose value is short enough to sit inline.
+  final String? value;
+
   final Widget? trailing;
   final Color? titleColor;
   final VoidCallback? onTap;
@@ -30,21 +45,20 @@ class AppListRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final row = Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.twelve,
+      padding: EdgeInsets.symmetric(
+        horizontal: AppListInset.of(context),
+        vertical: _rowVerticalPadding,
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        // Centred rather than baseline-aligned to the title: on a two-line row
+        // the icon and trailing control read as belonging to the row, not to
+        // its first line.
         children: [
           if (icon != null) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 1),
-              child: Icon(
-                icon,
-                size: 22,
-                color: titleColor ?? context.colors.onSurfaceVariant,
-              ),
+            Icon(
+              icon,
+              size: 22,
+              color: titleColor ?? context.colors.onSurfaceVariant,
             ),
             const SizedBox(width: Grid.xs),
           ],
@@ -77,6 +91,24 @@ class AppListRow extends StatelessWidget {
               ],
             ),
           ),
+          if (value != null) ...[
+            const SizedBox(width: Grid.xxs),
+            // Inflexible, so the title's Expanded absorbs the slack and the
+            // value stays flush against the trailing edge; capped instead of
+            // flexed so a long value ellipsises rather than overflowing.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: _maxValueWidth),
+              child: Text(
+                value!,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+              ),
+            ),
+          ],
           if (trailing != null) ...[const SizedBox(width: Grid.xxs), trailing!],
         ],
       ),
@@ -108,9 +140,9 @@ class AppListRowRaw extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final row = Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.twelve,
+      padding: EdgeInsets.symmetric(
+        horizontal: AppListInset.of(context),
+        vertical: _rowVerticalPadding,
       ),
       child: Row(
         children: [
@@ -136,53 +168,5 @@ class AppListRowRaw extends StatelessWidget {
 
     if (onTap == null) return row;
     return InkWell(onTap: onTap, child: row);
-  }
-}
-
-/// A group of list rows separated from the previous group by a hairline
-/// divider with breathing room, Slack-style. An optional [label] renders a
-/// small muted header above the rows.
-class AppListSection extends StatelessWidget {
-  const AppListSection({
-    super.key,
-    this.label,
-    required this.children,
-    this.showDivider = true,
-  });
-
-  final String? label;
-  final List<Widget> children;
-  final bool showDivider;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (showDivider)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-            child: Divider(height: 1, color: context.colors.outlineVariant),
-          ),
-        if (label != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              Grid.xxs,
-              Grid.gutter,
-              Grid.quarter,
-            ),
-            child: Text(
-              label!.toUpperCase(),
-              style: context.textTheme.labelMedium?.copyWith(
-                color: context.colors.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.6,
-              ),
-            ),
-          ),
-        ...children,
-      ],
-    );
   }
 }

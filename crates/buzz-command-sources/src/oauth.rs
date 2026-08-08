@@ -306,11 +306,12 @@ fn write_credentials(
     file.commit().map_err(|_| WorldMonitorOAuthError::State)
 }
 
-fn restrict_file(file: &File) -> Result<(), WorldMonitorOAuthError> {
+fn restrict_file(_file: &File) -> Result<(), WorldMonitorOAuthError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        _file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|_| WorldMonitorOAuthError::State)?;
     }
     Ok(())

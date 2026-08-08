@@ -62,7 +62,7 @@ content retains attachment disposition. Successful reads produce a structured
 trace containing feedback ID, community ID, and attachment hash, but no feedback
 body or attachment URL.
 
-The human trust boundary remains the private admin ingress. WARP/source-IP
+The human trust boundary remains the private admin ingress. VPN/source-IP
 admission is not per-operator identity. Anyone admitted to the dashboard can
 read attachments for feedback records they can access. Per-person attribution
 or revocation requires authenticated operator identity at ingress/application

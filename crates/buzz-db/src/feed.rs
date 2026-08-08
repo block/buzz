@@ -34,9 +34,10 @@ use sqlx::{PgPool, QueryBuilder};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
+    KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -103,7 +104,9 @@ fn build_mentions_query(
     qb.push(" AND e.deleted_at IS NULL");
     qb.push(format!(
         " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, \
-         {KIND_FORUM_POST}, {KIND_FORUM_COMMENT})"
+         {KIND_TEXT_NOTE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT}, {KIND_GIT_PULL_REQUEST}, \
+         {KIND_GIT_PR_UPDATE}, {KIND_GIT_ISSUE}, {KIND_GIT_STATUS_OPEN}, \
+         {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT})"
     ));
     push_visible_channel_filter(&mut qb, "e.channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -252,7 +255,7 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -776,6 +779,12 @@ mod tests {
         assert!(
             sql.contains("AND m.community_id = "),
             "mentions feed must also bind event_mentions.community_id: {sql}"
+        );
+        assert!(
+            sql.contains(&KIND_GIT_PULL_REQUEST.to_string())
+                && sql.contains(&KIND_GIT_ISSUE.to_string())
+                && sql.contains(&KIND_TEXT_NOTE.to_string()),
+            "mentions feed must include Buzz Git roots and comments: {sql}"
         );
     }
 

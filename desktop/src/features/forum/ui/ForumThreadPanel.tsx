@@ -11,9 +11,9 @@ import type { ForumThreadResponse, ThreadReply } from "@/shared/api/types";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
-import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
 

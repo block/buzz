@@ -859,5 +859,5 @@ pub(crate) async fn get_rag_source_binding(
     .map_err(|_| RagError::ServiceUnavailable)?
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

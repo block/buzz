@@ -64,7 +64,8 @@
 {{- end }}
 {{- if not .Values.relay.requireMediaGetAuth }}
   ⚠ relay.requireMediaGetAuth=false — media GET/HEAD reads are not auth-gated.
-    Keep this false only during staged client rollout.
+    Anyone who learns a media URL/hash can fetch private attachments. Only
+    use for local development or fully public communities.
 {{- end }}
 {{- if not .Values.migrate.autoMigrate }}
   ⚠ migrate.autoMigrate=false — relay startup will NOT run sqlx migrations.

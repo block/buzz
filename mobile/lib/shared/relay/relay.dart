@@ -1,4 +1,5 @@
 export 'app_lifecycle_provider.dart';
+export 'identity_scoped_prefs.dart';
 export 'media_auth.dart';
 export 'media_image.dart';
 export 'media_upload.dart';

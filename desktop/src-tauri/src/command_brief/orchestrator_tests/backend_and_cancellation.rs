@@ -62,7 +62,7 @@ async fn pre_cancelled_collection_stops_before_any_source_backend_call() {
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
         "note_folder_ids": ["Notes"],
-        "file_paths": ["/Users/command/brief.txt"],
+        "file_paths": [TEST_APPLE_FILE_PATH],
         "maximum_records_per_source": 25
     }))
     .expect("valid selection");
@@ -219,7 +219,7 @@ fn reloading_sources(loader: SequencedBackendLoader) -> Arc<dyn BriefSourceProvi
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
         "note_folder_ids": ["Notes"],
-        "file_paths": ["/Users/command/brief.txt"],
+        "file_paths": [TEST_APPLE_FILE_PATH],
         "maximum_records_per_source": 25
     }))
     .expect("valid selection");
@@ -347,7 +347,7 @@ async fn active_source_cancellation_stops_later_reads_and_never_reaches_persiste
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
         "note_folder_ids": ["Notes"],
-        "file_paths": ["/Users/command/brief.txt"],
+        "file_paths": [TEST_APPLE_FILE_PATH],
         "maximum_records_per_source": 25
     }))
     .expect("valid selection");

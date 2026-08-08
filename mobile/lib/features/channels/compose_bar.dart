@@ -1,7 +1,12 @@
+import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 
+import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -12,10 +17,13 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
-import '../custom_emoji/custom_emoji.dart';
-import '../custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../activity/compose_drafts_provider.dart';
+import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -23,23 +31,25 @@ import 'emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
+import 'photo_library.dart';
 
 part 'compose_bar/helpers.dart';
+part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/photo_gallery_picker.dart';
+part 'compose_bar/ios_photo_picker.dart';
+part 'compose_bar/ios_attachment_popover.dart';
+part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
+part 'compose_bar/layout.dart';
 
-const _pastedImageMimeTypes = <String>[
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-];
+const _maxConcurrentImageUploads = 3;
 
-/// Rich compose bar with @mention autocomplete, emoji picker, and a markdown
-/// formatting toolbar. Used in both channel and thread views — the caller
-/// provides an [onSend] callback that handles actual message submission.
+/// Rich compose bar with @mention autocomplete and a markdown formatting
+/// toolbar. Used in both channel and thread views — the caller provides an
+/// [onSend] callback that handles actual message submission.
 typedef ComposeBarOnSend =
     Future<void> Function(
       String content,
@@ -69,8 +79,59 @@ class ComposeBar extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController();
+    final controller = useMemoized(_MarkdownEditingController.new);
+    useEffect(() => controller.dispose, [controller]);
+
+    // Restore and persist unsent text as a local draft so the Activity
+    // inbox Drafts filter reflects real composer state.
+    //
+    // The effect is additionally keyed on the active relay + pubkey identity:
+    // provider-level namespacing alone cannot protect a composer that stays
+    // mounted through an in-place community/account switch — the controller
+    // would retain the old identity's text and the next edit would persist it
+    // into the new identity's store. On identity change we replace the
+    // controller content with the new identity's own saved draft (or clear).
+    final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
+    final draftIdentity =
+        '${ref.watch(relayConfigProvider).baseUrl}'
+        ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+    final lastDraftIdentity = useRef<String?>(null);
+    useEffect(() {
+      final identityChanged =
+          lastDraftIdentity.value != null &&
+          lastDraftIdentity.value != draftIdentity;
+      lastDraftIdentity.value = draftIdentity;
+      final saved = ref.read(composeDraftsProvider.notifier).textFor(draftKey);
+      if (identityChanged) {
+        controller.text = saved ?? '';
+      } else if (saved != null && controller.text.isEmpty) {
+        controller.text = saved;
+      }
+      void persistDraft() {
+        ref
+            .read(composeDraftsProvider.notifier)
+            .save(
+              key: draftKey,
+              channelId: channelId,
+              threadHeadId: threadHeadId,
+              text: controller.text,
+            );
+      }
+
+      controller.addListener(persistDraft);
+      return () => controller.removeListener(persistDraft);
+    }, [controller, draftKey, draftIdentity]);
     final focusNode = useFocusNode();
+    final isComposerExpanded = useState(false);
+    final attachmentSurface = useState(_AttachmentSurface.closed);
+    final iosAttachmentPopover = useMemoized(
+      _IOSAttachmentPopoverController.new,
+    );
+    useEffect(
+      () =>
+          () => unawaited(iosAttachmentPopover.dispose()),
+      [iosAttachmentPopover],
+    );
     final isSending = useState(false);
     final showFormatting = useState(false);
     final attachments = useState<List<BlobDescriptor>>([]);
@@ -80,10 +141,40 @@ class ComposeBar extends HookConsumerWidget {
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
     final customEmoji = ref.watch(customEmojiListProvider);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final composerExpansionController = useAnimationController(
+      initialValue: 0,
+      upperBound: 1.05,
+    );
+    final composerExpansionValue = useAnimation(composerExpansionController);
+    final composerExpansionProgress = composerExpansionValue
+        .clamp(0.0, 1.0)
+        .toDouble();
 
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
+
+    useEffect(() {
+      final target = isComposerExpanded.value ? 1.0 : 0.0;
+      if (reducedMotion) {
+        composerExpansionController.value = target;
+      } else if ((composerExpansionController.value - target).abs() > 0.001) {
+        composerExpansionController.animateWith(
+          SpringSimulation(
+            SpringDescription.withDurationAndBounce(
+              duration: const Duration(milliseconds: 280),
+              bounce: 0.16,
+            ),
+            composerExpansionController.value,
+            target,
+            0,
+            snapToEnd: true,
+          ),
+        );
+      }
+      return null;
+    }, [isComposerExpanded.value, reducedMotion]);
 
     useEffect(() {
       if (defaultTargetPlatform != TargetPlatform.iOS) return null;
@@ -288,12 +379,27 @@ class ComposeBar extends HookConsumerWidget {
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
+    // Insert a selected emoji at the cursor without replacing the draft.
+    void insertEmoji(String emoji) {
+      final text = controller.text;
+      final selection = controller.selection;
+      final cursor = selection.isValid
+          ? selection.baseOffset.clamp(0, text.length)
+          : text.length;
+      controller.value = TextEditingValue(
+        text: text.replaceRange(cursor, cursor, emoji),
+        selection: TextSelection.collapsed(offset: cursor + emoji.length),
+      );
+      focusNode.requestFocus();
+    }
+
     void clearComposer() {
       controller.clear();
       attachments.value = [];
       mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
+      attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
       uploadError.value = null;
       focusNode.requestFocus();
@@ -436,6 +542,80 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
+    Future<void> pickThenUpload({
+      required Future<XFile?> Function() pick,
+      required Future<BlobDescriptor> Function(XFile file) upload,
+    }) async {
+      uploadError.value = null;
+      try {
+        final picked = await pick();
+        if (picked == null || !context.mounted) return;
+        await pickAndUpload(() => upload(picked));
+      } catch (error) {
+        if (context.mounted) {
+          uploadError.value = _formatUploadError(error);
+        }
+      }
+    }
+
+    Future<void> uploadImages(List<XFile> images) async {
+      if (images.isEmpty) return;
+      uploadError.value = null;
+      uploadingCount.value += images.length;
+      try {
+        Future<({BlobDescriptor? uploaded, Object? error})> uploadImage(
+          XFile image,
+        ) async {
+          try {
+            final uploaded = await ref
+                .read(mediaUploadServiceProvider)
+                .uploadImage(image);
+            return (uploaded: uploaded, error: null);
+          } catch (error) {
+            return (uploaded: null, error: error);
+          }
+        }
+
+        final results = <({BlobDescriptor? uploaded, Object? error})>[];
+        for (
+          var start = 0;
+          start < images.length;
+          start += _maxConcurrentImageUploads
+        ) {
+          final end = math.min(
+            start + _maxConcurrentImageUploads,
+            images.length,
+          );
+          results.addAll(
+            await Future.wait([
+              for (final image in images.sublist(start, end))
+                uploadImage(image),
+            ]),
+          );
+        }
+        if (!context.mounted) return;
+
+        final uploaded = [for (final result in results) ?result.uploaded];
+        if (uploaded.isNotEmpty) {
+          attachments.value = [...attachments.value, ...uploaded];
+        }
+        final firstError = results
+            .map((result) => result.error)
+            .whereType<Object>()
+            .firstOrNull;
+        if (firstError != null) {
+          uploadError.value = _formatUploadError(firstError);
+        }
+      } finally {
+        if (context.mounted) {
+          uploadingCount.value = math.max(
+            0,
+            uploadingCount.value - images.length,
+          );
+        }
+      }
+    }
+
     Widget buildContextMenu(
       BuildContext context,
       EditableTextState editableTextState,
@@ -490,21 +670,6 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Insert an emoji at the cursor.
-    void insertEmoji(String emoji) {
-      final text = controller.text;
-      final cursor = controller.selection.isValid
-          ? controller.selection.baseOffset
-          : text.length;
-      final before = text.substring(0, cursor);
-      final after = text.substring(cursor);
-      controller.text = '$before$emoji$after';
-      controller.selection = TextSelection.collapsed(
-        offset: cursor + emoji.length,
-      );
-      focusNode.requestFocus();
-    }
-
     // Wrap (or insert) markdown formatting around the current selection.
     void applyFormat(String prefix, [String? suffix]) {
       suffix ??= prefix;
@@ -539,187 +704,275 @@ class ComposeBar extends HookConsumerWidget {
 
     // ----- Widget tree ----------------------------------------------------
 
-    final hasSuggestions =
-        suggestions.isNotEmpty || channelSuggestions.isNotEmpty;
+    void chooseAttachment(
+      Future<void> Function() choose, {
+      String? errorMessage,
+    }) {
+      attachmentSurface.value = _AttachmentSurface.closed;
+      unawaited(() async {
+        try {
+          await choose();
+        } catch (error) {
+          if (context.mounted) {
+            uploadError.value = errorMessage ?? _formatUploadError(error);
+          }
+        }
+      }());
+    }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Channel suggestions (above the compose chrome).
-        if (channelSuggestions.isNotEmpty)
-          _ChannelSuggestions(
-            suggestions: channelSuggestions,
-            onSelect: insertChannel,
-          ),
+    void toggleAttachments() {
+      attachmentSurface.value = switch (attachmentSurface.value) {
+        _AttachmentSurface.closed => _AttachmentSurface.menu,
+        _AttachmentSurface.menu => _AttachmentSurface.closed,
+        _AttachmentSurface.camera ||
+        _AttachmentSurface.photos => _AttachmentSurface.menu,
+      };
+    }
 
-        // Mention suggestions (above the compose chrome).
-        if (suggestions.isNotEmpty)
-          _MentionSuggestions(
-            suggestions: suggestions,
-            userCache: userCache,
-            currentPubkey: currentPubkey,
-            isDmChannel: isDmChannel,
-            onSelect: insertMention,
-          ),
+    void handleAttachmentTap(BuildContext triggerContext) {
+      if (defaultTargetPlatform != TargetPlatform.iOS ||
+          attachmentSurface.value != _AttachmentSurface.closed) {
+        toggleAttachments();
+        return;
+      }
 
-        // Compose chrome — bottom-sheet style container.
-        Container(
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: !hasSuggestions
-                ? const BorderRadius.vertical(
-                    top: Radius.circular(Radii.dialog),
-                  )
-                : BorderRadius.zero,
-            boxShadow: !hasSuggestions
-                ? [
-                    BoxShadow(
-                      color: context.colors.shadow.withValues(alpha: 0.08),
-                      blurRadius: 8,
-                      offset: const Offset(0, -2),
-                    ),
-                  ]
-                : null,
-          ),
-          padding: EdgeInsets.only(
-            left: Grid.gutter,
-            right: Grid.gutter,
-            top: Grid.xs,
-            bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.twelve,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Formatting toolbar (toggled via Aa button).
-              if (showFormatting.value)
-                _FormattingToolbar(onFormat: applyFormat),
-
-              if (hasAttachments || hasPendingUploads) ...[
-                _AttachmentStrip(
-                  attachments: attachments.value,
-                  uploadingCount: uploadingCount.value,
-                  onRemove: removeAttachment,
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              if (uploadError.value case final error?) ...[
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    error,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.error,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: Grid.xxs),
-              ],
-
-              // Row 1 — text input (full width, grows).
-              TextField(
-                controller: controller,
-                focusNode: focusNode,
-                textInputAction: TextInputAction.send,
-                contextMenuBuilder: buildContextMenu,
-                contentInsertionConfiguration: ContentInsertionConfiguration(
-                  allowedMimeTypes: _pastedImageMimeTypes,
-                  onContentInserted: uploadPastedImage,
-                ),
-                onSubmitted: (_) => send(),
-                minLines: 1,
-                maxLines: 5,
-                style: context.textTheme.bodyMedium,
-                decoration: InputDecoration(
-                  hintText: resolvedHint,
-                  hintStyle: context.textTheme.bodyMedium?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: Grid.half,
-                    vertical: Grid.half,
-                  ),
-                  isDense: true,
-                ),
+      unawaited(
+        iosAttachmentPopover
+            .present(
+              sourceContext: triggerContext,
+              onCapture: (image) => pickAndUpload(
+                () => ref.read(mediaUploadServiceProvider).uploadImage(image),
               ),
+              onChoosePhotos: uploadImages,
+              onAllPhotos: () => chooseAttachment(() async {
+                final photos = await ref
+                    .read(mediaUploadServiceProvider)
+                    .pickGalleryImages();
+                await uploadImages(photos);
+              }, errorMessage: 'Unable to open your photo library.'),
+              onVideo: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickGalleryVideo,
+                  upload: service.uploadVideo,
+                );
+              }),
+              onFiles: () => chooseAttachment(() {
+                final service = ref.read(mediaUploadServiceProvider);
+                return pickThenUpload(
+                  pick: service.pickAttachmentFile,
+                  upload: service.uploadFile,
+                );
+              }),
+            )
+            .then((didPresent) {
+              if (!didPresent && context.mounted) {
+                focusNode.unfocus();
+                toggleAttachments();
+              }
+            }),
+      );
+    }
 
-              const SizedBox(height: Grid.xxs),
+    void openCamera() {
+      focusNode.unfocus();
+      attachmentSurface.value = _AttachmentSurface.camera;
+    }
 
-              // Row 2 — action buttons [paperclip, emoji, @, Aa] ... [send].
-              Row(
-                children: [
-                  _ComposeAction(
-                    icon: LucideIcons.paperclip,
-                    onTap: () {
-                      showModalBottomSheet<void>(
-                        context: context,
-                        showDragHandle: true,
-                        builder: (sheetContext) => SafeArea(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              ListTile(
-                                leading: const Icon(LucideIcons.image),
-                                title: const Text('Photo'),
-                                onTap: () {
-                                  Navigator.of(sheetContext).pop();
-                                  pickAndUpload(
-                                    ref
-                                        .read(mediaUploadServiceProvider)
-                                        .pickAndUploadImage,
-                                  );
-                                },
-                              ),
-                              ListTile(
-                                leading: const Icon(LucideIcons.video),
-                                title: const Text('Video'),
-                                onTap: () {
-                                  Navigator.of(sheetContext).pop();
-                                  pickAndUpload(
-                                    ref
-                                        .read(mediaUploadServiceProvider)
-                                        .pickAndUploadVideo,
-                                  );
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                  _ComposeAction(
-                    icon: LucideIcons.smilePlus,
-                    onTap: () => showEmojiPicker(
-                      context: context,
-                      onSelect: insertEmoji,
-                    ),
-                  ),
-                  _ComposeAction(
-                    icon: LucideIcons.atSign,
-                    onTap: triggerMention,
-                  ),
-                  _ComposeAction(icon: LucideIcons.hash, onTap: triggerChannel),
-                  _ComposeAction(
-                    icon: LucideIcons.aLargeSmall,
-                    active: showFormatting.value,
-                    onTap: () => showFormatting.value = !showFormatting.value,
-                  ),
-                  const Spacer(),
-                  _SendButton(
-                    isDisabled: hasPendingUploads,
-                    isSending: isSending.value,
-                    onTap: send,
-                  ),
-                ],
-              ),
-            ],
-          ),
+    final motionDuration = reducedMotion
+        ? Duration.zero
+        : Duration(
+            milliseconds:
+                attachmentSurface.value == _AttachmentSurface.camera ||
+                    attachmentSurface.value == _AttachmentSurface.photos
+                ? 320
+                : 250,
+          );
+    final suggestionOverlayController = useMemoized(
+      OverlayPortalController.new,
+    );
+
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) suggestionOverlayController.show();
+      });
+      return null;
+    }, [suggestionOverlayController]);
+
+    void expandComposer() {
+      if (isComposerExpanded.value) return;
+      attachmentSurface.value = _AttachmentSurface.closed;
+      isComposerExpanded.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) focusNode.requestFocus();
+      });
+    }
+
+    final suggestionPanel = channelSuggestions.isNotEmpty
+        ? KeyedSubtree(
+            key: const ValueKey('channel-suggestions'),
+            child: _ChannelSuggestions(
+              suggestions: channelSuggestions,
+              onSelect: insertChannel,
+            ),
+          )
+        : suggestions.isNotEmpty
+        ? KeyedSubtree(
+            key: const ValueKey('mention-suggestions'),
+            child: _MentionSuggestions(
+              suggestions: suggestions,
+              userCache: userCache,
+              currentPubkey: currentPubkey,
+              isDmChannel: isDmChannel,
+              onSelect: insertMention,
+            ),
+          )
+        : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+    Widget buildOverlayPanel(_AttachmentSurface surface) {
+      return _AttachmentSurfacePanel(
+        key: ValueKey(
+          surface == _AttachmentSurface.closed
+              ? 'composer-suggestions'
+              : 'attachment-surface',
         ),
-      ],
+        surface: surface,
+        suggestionPanel: suggestionPanel,
+        onBack: () => attachmentSurface.value = _AttachmentSurface.menu,
+        onCamera: openCamera,
+        onPhotos: () {
+          focusNode.unfocus();
+          attachmentSurface.value = _AttachmentSurface.photos;
+        },
+        onVideo: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickGalleryVideo,
+            upload: service.uploadVideo,
+          );
+        }),
+        onFiles: () => chooseAttachment(() {
+          final service = ref.read(mediaUploadServiceProvider);
+          return pickThenUpload(
+            pick: service.pickAttachmentFile,
+            upload: service.uploadFile,
+          );
+        }),
+        onCapture: (image) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await pickAndUpload(
+            () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+          );
+        },
+        onPickAllPhotos: ref.read(mediaUploadServiceProvider).pickGalleryImages,
+        onChoosePhotos: (photos) async {
+          attachmentSurface.value = _AttachmentSurface.closed;
+          await uploadImages(photos);
+        },
+      );
+    }
+
+    // Suggestions and attachments live in the overlay so showing them cannot
+    // reflow the composer. Both stay anchored just above the capsule.
+    return Padding(
+      padding: EdgeInsets.only(
+        left: Grid.twelve,
+        right: Grid.twelve,
+        bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
+      ),
+      child: OverlayPortal.overlayChildLayoutBuilder(
+        controller: suggestionOverlayController,
+        overlayChildBuilder: (context, layoutInfo) {
+          final composerOrigin = MatrixUtils.transformPoint(
+            layoutInfo.childPaintTransform,
+            Offset.zero,
+          );
+          return ValueListenableBuilder<_AttachmentSurface>(
+            valueListenable: attachmentSurface,
+            builder: (context, surface, _) {
+              final surfaceDuration = reducedMotion
+                  ? Duration.zero
+                  : Duration(
+                      milliseconds:
+                          surface == _AttachmentSurface.camera ||
+                              surface == _AttachmentSurface.photos
+                          ? 320
+                          : 250,
+                    );
+              final expandedSurfaceCoversComposer =
+                  surface == _AttachmentSurface.camera ||
+                  surface == _AttachmentSurface.photos;
+              final overlayAnchorY =
+                  composerOrigin.dy +
+                  (expandedSurfaceCoversComposer
+                      ? layoutInfo.childSize.height + Grid.twelve
+                      : 0);
+              return AnimatedPositioned(
+                duration: surfaceDuration,
+                curve:
+                    surface == _AttachmentSurface.camera ||
+                        surface == _AttachmentSurface.photos
+                    ? const Cubic(0.34, 1.25, 0.64, 1)
+                    : const Cubic(0.22, 1, 0.36, 1),
+                left: composerOrigin.dx,
+                bottom: layoutInfo.overlaySize.height - overlayAnchorY,
+                width: layoutInfo.childSize.width,
+                child: ClipRect(
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: Grid.xxs),
+                    child: surface == _AttachmentSurface.closed
+                        ? _SuggestionPanelMotion(
+                            duration: surfaceDuration,
+                            alignment: Alignment.bottomLeft,
+                            child: buildOverlayPanel(surface),
+                          )
+                        : buildOverlayPanel(surface),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+        child: _ComposeBarLayout(
+          attachments: attachments.value,
+          uploadingCount: uploadingCount.value,
+          onRemoveAttachment: removeAttachment,
+          uploadError: uploadError.value,
+          isExpanded: isComposerExpanded.value,
+          controller: controller,
+          focusNode: focusNode,
+          contextMenuBuilder: buildContextMenu,
+          onContentInserted: uploadPastedImage,
+          onSend: () => unawaited(send()),
+          resolvedHint: resolvedHint,
+          attachmentSurface: attachmentSurface.value,
+          onAttachmentTap: handleAttachmentTap,
+          onExpand: expandComposer,
+          expansionValue: composerExpansionValue,
+          expansionProgress: composerExpansionProgress,
+          formattingOpen: showFormatting.value,
+          onCloseFormatting: () => showFormatting.value = false,
+          motionDuration: motionDuration,
+          onFormat: applyFormat,
+          onMention: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerMention();
+          },
+          onChannel: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            triggerChannel();
+          },
+          onEmoji: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showEmojiPicker(context: context, onSelect: insertEmoji);
+          },
+          onOpenFormatting: () {
+            attachmentSurface.value = _AttachmentSurface.closed;
+            showFormatting.value = true;
+          },
+          hasPendingUploads: hasPendingUploads,
+          isSending: isSending.value,
+        ),
+      ),
     );
   }
 }

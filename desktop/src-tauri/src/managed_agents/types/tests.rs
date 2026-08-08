@@ -1,4 +1,4 @@
-use super::{AgentDefinition, ManagedAgentRecord};
+use super::{AgentDefinition, CatalogSource, ManagedAgentRecord};
 use std::path::PathBuf;
 
 #[test]
@@ -482,8 +482,10 @@ fn sample_persona() -> AgentDefinition {
         name_pool: vec!["Nimble".to_string()],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: Some("helper".to_string()),
+        catalog_source: None,
         env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -491,6 +493,49 @@ fn sample_persona() -> AgentDefinition {
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-02T00:00:00Z".to_string(),
     }
+}
+
+#[test]
+fn persona_record_without_catalog_source_deserializes_and_omits_it() {
+    // Every persona already on disk predates the field — an old record must
+    // load as "not a catalog copy" and must not gain a null key on save.
+    let record: AgentDefinition = serde_json::from_str(
+        r#"{
+            "id": "persona-1",
+            "display_name": "Test",
+            "avatar_url": null,
+            "system_prompt": "Prompt",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#,
+    )
+    .expect("pre-catalog-source persona should deserialize");
+
+    assert_eq!(record.catalog_source, None);
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(
+        !json.contains("catalog_source"),
+        "absent provenance must stay absent on disk: {json}"
+    );
+}
+
+#[test]
+fn persona_catalog_source_survives_the_agent_store_fold() {
+    // Provenance is only useful if it is still there on the next launch, and
+    // `save_personas` funnels every definition through `into_agent_record`.
+    let mut persona = sample_persona();
+    persona.catalog_source = Some(CatalogSource {
+        owner_pubkey: "a".repeat(64),
+        persona_id: "helper".to_string(),
+    });
+
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .expect("slugged record must present a persona view");
+
+    assert_eq!(view.catalog_source, persona.catalog_source);
 }
 
 #[test]

@@ -158,6 +158,7 @@ mod tests {
             version: 1,
             definition: AgentSnapshotDefinition {
                 name: "Tree Trunks".to_string(),
+                source_is_builtin: false,
                 system_prompt: Some("You are a helpful agent.".to_string()),
                 runtime: Some("goose".to_string()),
                 model: None,
