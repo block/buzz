@@ -42,6 +42,9 @@ enum PairingMode {
 #[derive(Clone)]
 struct PairingTaskContext {
     mode: PairingMode,
+    /// Which NIP-11 branch produced the pairing URL. Carried purely so a
+    /// failed handshake can say why it dialled where it did.
+    route: PairingRelay,
     generation: Arc<AtomicU64>,
     generation_fence: Arc<std::sync::Mutex<()>>,
     task_generation: u64,
@@ -129,7 +132,8 @@ async fn start_pairing_session(
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let pairing_route = probe_pairing_relay(&ws_url).await;
+    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, pairing_route.clone())?;
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
     if mode == PairingMode::RecoverIdentity {
@@ -166,6 +170,7 @@ async fn start_pairing_session(
         Arc::clone(&pairing.session),
         PairingTaskContext {
             mode,
+            route: pairing_route,
             generation: Arc::clone(&pairing.generation),
             generation_fence: Arc::clone(&pairing.generation_fence),
             task_generation,
@@ -305,7 +310,7 @@ async fn pairing_ws_task_inner(
 ) -> Result<(), String> {
     let (ws, _) = connect_async(relay_url)
         .await
-        .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+        .map_err(|e| describe_connect_failure(&context.route, relay_url, &e))?;
     let (mut write, mut read) = ws.split();
 
     handle_nip42_auth(&mut read, &mut write, session, relay_url).await?;
@@ -663,8 +668,50 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr::Event> {
     serde_json::from_value(arr[2].clone()).ok()
 }
 
+/// Explain a failed pairing handshake in terms of the route that produced the
+/// URL, rather than as a bare transport error.
+///
+/// The 404 case is the one worth spelling out. A relay that enforces
+/// membership advertises NIP-43, and if it advertises no `pairing_relay_url`
+/// then [`resolve_pairing_relay_url`] appends `/pair` to the relay's own host
+/// — an address chosen from an *advertisement*, never probed. When nothing
+/// serves it the user saw only `WebSocket connection failed: HTTP error: 404
+/// Not Found`, which names neither the URL that was dialled, nor the branch
+/// that chose it, nor either lever that fixes it. Self-hosters have had to
+/// read `config.rs` and this file to get unstuck.
+///
+/// Every other failure keeps the original transport error and gains the
+/// attempted URL, which is what the split-domain case needs when a configured
+/// `pairing_relay_url` is simply wrong.
+fn describe_connect_failure(
+    route: &PairingRelay,
+    url: &str,
+    error: &tokio_tungstenite::tungstenite::Error,
+) -> String {
+    let not_found = matches!(
+        error,
+        tokio_tungstenite::tungstenite::Error::Http(response) if response.status().as_u16() == 404
+    );
+
+    if not_found && matches!(route, PairingRelay::LegacyPath) {
+        return format!(
+            "Pairing endpoint {url} not found (404). This relay advertises NIP-43 but no \
+             pairing_relay_url, so pairing fell back to {url}, and nothing is serving that \
+             path. The relay operator needs to set BUZZ_PAIRING_RELAY_URL on the relay, or \
+             route /pair to a buzz-pair-relay instance (see deploy/compose/README.md, \
+             \"Device pairing\")."
+        );
+    }
+
+    format!("WebSocket connection failed: {error} (pairing endpoint: {url})")
+}
+
 /// Pairing route discovered from the main relay's NIP-11 document.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// `Clone` so the decision can be carried into the WebSocket task alongside
+/// the URL it produced: which branch was taken is most of what makes a failed
+/// handshake diagnosable, and it is lost the moment this collapses to a String.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PairingRelay {
     Configured(String),
     LegacyPath,
