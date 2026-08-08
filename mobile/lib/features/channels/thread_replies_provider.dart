@@ -29,12 +29,22 @@ class _ThreadCursor {
   const _ThreadCursor({required this.createdAt, required this.eventId});
 }
 
-final threadRepliesProvider =
-    FutureProvider.family<List<NostrEvent>, ThreadRepliesArgs>((
-      ref,
-      args,
-    ) async {
-      final session = ref.watch(relaySessionProvider.notifier);
+final threadRepliesProvider = FutureProvider.autoDispose
+    .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
+      // Refetch when the relay session reconnects: a reply that arrives while
+      // the connection is down is otherwise unreachable — the replayed live
+      // subscription only starts at the reconnect time, and the channel
+      // window backfill carries thread summaries, not reply bodies. Listening
+      // for the connected edge (rather than watching the status) refreshes
+      // exactly once per successful reconnect, does nothing on the disconnect
+      // edge, and keeps the previous replies rendered while the refresh runs.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (previous?.status != SessionStatus.connected &&
+            next.status == SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final session = ref.read(relaySessionProvider.notifier);
       final replies = <NostrEvent>[];
       _ThreadCursor? cursor;
       for (var page = 0; page < 500; page++) {
@@ -99,11 +109,13 @@ final threadLocalRepliesProvider =
 
 /// Relay-backed replies merged with signed local replies that are still
 /// waiting for acknowledgement.
-final threadRepliesWithLocalProvider =
-    Provider.family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((
-      ref,
-      args,
-    ) {
+///
+/// Auto-disposed together with [threadRepliesProvider] so a reopened thread
+/// always starts from a fresh authoritative query; [threadLocalRepliesProvider]
+/// stays alive so an optimistic just-sent reply survives route changes until
+/// the relay confirms it.
+final threadRepliesWithLocalProvider = Provider.autoDispose
+    .family<AsyncValue<List<NostrEvent>>, ThreadRepliesArgs>((ref, args) {
       final relayReplies = ref.watch(threadRepliesProvider(args));
       final localReplies = ref.watch(threadLocalRepliesProvider(args));
       final authoritative = relayReplies.value;
