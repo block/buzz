@@ -1,14 +1,17 @@
 import * as React from "react";
 
+import { isTauri } from "@tauri-apps/api/core";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { isWindowsPlatform } from "@/shared/lib/platform";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
   type DesktopNotificationPermissionState,
 } from "./lib/desktop";
+import { ensureDesktopNotificationPermission } from "./lib/permission";
 import {
   COMING_SOON_SLOTS,
   DEFAULT_SLOT_ALERTS_ENABLED,
@@ -248,10 +251,12 @@ export function useNotificationSettings(pubkey?: string) {
 
     try {
       let nextPermission = await refreshPermission();
-      if (nextPermission === "default") {
-        nextPermission = await requestDesktopNotificationAccess();
-        setPermission(nextPermission);
-      }
+      nextPermission = await ensureDesktopNotificationPermission({
+        currentPermission: nextPermission,
+        isWindowsTauri: isWindowsPlatform() && isTauri(),
+        requestAccess: requestDesktopNotificationAccess,
+      });
+      setPermission(nextPermission);
 
       if (nextPermission !== "granted") {
         setSettings((current) => ({
