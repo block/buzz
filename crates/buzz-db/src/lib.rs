@@ -3066,6 +3066,15 @@ impl Db {
         .await
     }
 
+    /// Returns public metadata for a live v2 invite link preview.
+    pub async fn get_relay_invite_preview(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<relay_invite::InvitePreview>> {
+        relay_invite::get_relay_invite_preview(&self.pool, community, token_hash).await
+    }
+
     /// Delete one bounded batch of invites expired before `cutoff`.
     pub async fn reap_expired_relay_invites(
         &self,

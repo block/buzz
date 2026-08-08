@@ -176,6 +176,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     if path.starts_with("/assets/") {
                         return files.oneshot(req).await.map(IntoResponse::into_response);
                     }
+                    if is_invite_landing_path(path) {
+                        return Ok(read_invite_spa_index(&index, path, req.headers(), &state).await);
+                    }
                     if should_serve_spa(path, serve_git_web_gui) {
                         return Ok(read_spa_index(&index).await);
                     }
@@ -231,6 +234,81 @@ async fn read_spa_index(index: &std::path::Path) -> axum::response::Response {
         Ok(body) => axum::response::Html(body).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+async fn read_invite_spa_index(
+    index: &std::path::Path,
+    path: &str,
+    headers: &HeaderMap,
+    state: &Arc<AppState>,
+) -> axum::response::Response {
+    let Ok(mut html) = tokio::fs::read_to_string(index).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let code = path.trim_start_matches("/invite/");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .ok();
+    let preview = if code.starts_with("v2.") {
+        match (tenant.as_ref(), buzz_core::invite::hash_v2_code(code)) {
+            (Some(tenant), hash) => state
+                .db
+                .get_relay_invite_preview(tenant.community(), &hash)
+                .await
+                .ok()
+                .flatten(),
+            (None, _) => None,
+        }
+    } else {
+        None
+    };
+    let channel = preview
+        .and_then(|preview| preview.channel_name)
+        .map(|name| format!("#{name}"));
+    let title = channel
+        .as_deref()
+        .map(|name| format!("Join {name} on Buzz"))
+        .unwrap_or_else(|| "Join this community on Buzz".to_string());
+    let community = tenant
+        .as_ref()
+        .map(|tenant| tenant.host())
+        .unwrap_or(raw_host);
+    let description = format!("You've been invited to join {community} on Buzz.");
+    let icon = match tenant {
+        Some(tenant) => state
+            .db
+            .get_community_icon(tenant.community())
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    }
+    .unwrap_or_else(|| format!("https://{raw_host}/app-icon@3x.png"));
+    let canonical_url = format!("https://{raw_host}{path}");
+    let tags = format!(
+        "<meta property=\"og:type\" content=\"website\" />\n<meta property=\"og:site_name\" content=\"Buzz\" />\n<meta property=\"og:title\" content=\"{}\" />\n<meta property=\"og:description\" content=\"{}\" />\n<meta property=\"og:image\" content=\"{}\" />\n<meta property=\"og:url\" content=\"{}\" />\n<meta name=\"twitter:card\" content=\"summary\" />\n<meta name=\"twitter:title\" content=\"{}\" />\n<meta name=\"twitter:description\" content=\"{}\" />\n<meta name=\"twitter:image\" content=\"{}\" />",
+        escape_html_attribute(&title),
+        escape_html_attribute(&description),
+        escape_html_attribute(&icon),
+        escape_html_attribute(&canonical_url),
+        escape_html_attribute(&title),
+        escape_html_attribute(&description),
+        escape_html_attribute(&icon),
+    );
+    html = html.replacen("</head>", &format!("{tags}\n</head>"), 1);
+    axum::response::Html(html).into_response()
 }
 
 /// Build the health-only router for K8s probes (port 8080 in CAKE).
@@ -488,6 +566,14 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[test]
+    fn invite_preview_metadata_escapes_untrusted_values() {
+        assert_eq!(
+            escape_html_attribute("#friends & \"family\" <3"),
+            "#friends &amp; &quot;family&quot; &lt;3"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

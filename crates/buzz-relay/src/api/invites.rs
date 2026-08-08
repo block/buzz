@@ -316,9 +316,7 @@ pub async fn mint_invite(
             .find(|member| member.pubkey == sender_bytes)
             .map(|member| member.role);
         let can_manage_relay = role == "owner" || role == "admin";
-        if !can_manage_relay
-            && !matches!(channel_role.as_deref(), Some("owner" | "admin"))
-        {
+        if !can_manage_relay && !matches!(channel_role.as_deref(), Some("owner" | "admin")) {
             return Err(api_error(
                 StatusCode::FORBIDDEN,
                 "only community or channel owners and admins can create channel invites",

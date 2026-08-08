@@ -78,6 +78,41 @@ pub struct MintedInvite {
     pub channel_id: Option<uuid::Uuid>,
 }
 
+/// Public, non-secret metadata used to render an invite link preview.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InvitePreview {
+    /// Channel name for a channel-scoped invite.
+    pub channel_name: Option<String>,
+}
+
+/// Resolve display-safe metadata for a live v2 invite.
+pub async fn get_relay_invite_preview(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+) -> Result<Option<InvitePreview>> {
+    let row = sqlx::query(
+        "SELECT c.name AS channel_name \
+         FROM relay_invites ri \
+         LEFT JOIN channels c ON c.community_id = ri.community_id \
+            AND c.id = ri.channel_id AND c.deleted_at IS NULL \
+         WHERE ri.community_id = $1 AND ri.token_hash = $2 \
+            AND ri.expires_at > now() \
+            AND (ri.max_uses IS NULL OR ri.use_count < ri.max_uses)",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| {
+        Ok(InvitePreview {
+            channel_name: row.try_get("channel_name")?,
+        })
+    })
+    .transpose()
+}
+
 fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
     if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl_secs) {
         return Err(crate::error::DbError::InvalidData(format!(
