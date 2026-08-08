@@ -1,3 +1,4 @@
+import { normalizeRelayUrl as normalizeRelayUrlShared } from "@/shared/lib/normalizeRelayUrl";
 import type {
   Channel,
   ChannelMember,
@@ -286,7 +287,7 @@ export function welcomeChannelEnsuredStorageKey(
   communityScope: string,
 ) {
   return `${WELCOME_CHANNEL_ENSURED_STORAGE_KEY}:${encodeURIComponent(
-    communityScope,
+    normalizeRelayUrlShared(communityScope),
   )}:${pubkey}`;
 }
 
