@@ -1,4 +1,11 @@
-import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
+import {
+  Bell,
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  MailOpen,
+  Newspaper,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -175,10 +182,13 @@ type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
+  /** When set, Catch up mode replaces the conversation list area. */
+  catchUpPane?: React.ReactNode;
   draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
+  onCatchUpToggle?: () => void;
   onFilterChange: (filter: InboxFilter) => void;
   onDeleteDraft: (draftKey: string) => void;
   onMarkRead: (itemId: string) => void;
@@ -203,11 +213,13 @@ export function InboxListPane({
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
+  catchUpPane,
   draftItems,
   doneSet,
   filter,
   items,
   onFilterChange,
+  onCatchUpToggle,
   onDeleteDraft,
   onMarkRead,
   onMarkUnread,
@@ -513,6 +525,22 @@ export function InboxListPane({
         <div className="px-5 py-2">
           <div className="flex min-h-9 w-full min-w-0 items-center justify-between gap-3">
             <div className="order-2 ml-auto flex shrink-0 items-center justify-end">
+              {onCatchUpToggle ? (
+                <button
+                  aria-label="Catch up"
+                  aria-pressed={catchUpPane != null}
+                  className={cn(
+                    INBOX_HEADER_ICON_BUTTON_CLASS,
+                    catchUpPane != null && "bg-muted text-foreground",
+                  )}
+                  data-testid="inbox-catchup-toggle"
+                  onClick={onCatchUpToggle}
+                  title="Catch up"
+                  type="button"
+                >
+                  <Newspaper className="h-4 w-4" />
+                </button>
+              ) : null}
               <Popover>
                 <PopoverTrigger asChild>
                   <button
@@ -576,7 +604,9 @@ export function InboxListPane({
         </div>
       </TopChromeInsetHeader>
 
-      {isReminders ? (
+      {catchUpPane != null ? (
+        catchUpPane
+      ) : isReminders ? (
         <div
           className="-mt-13 flex min-h-0 flex-1 flex-col overflow-hidden pt-13"
           data-testid="home-inbox-reminders"

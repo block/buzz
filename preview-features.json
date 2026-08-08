@@ -26,6 +26,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "attention",
+      "name": "Attention",
+      "description": "Personal attention layer: what needs you right now, across channels and agents",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "agentManagedProfiles",
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",

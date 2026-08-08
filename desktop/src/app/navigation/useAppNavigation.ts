@@ -91,6 +91,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goAttention = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/attention",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProjects = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -315,6 +326,7 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goAttention,
     goChannel,
     goForumPost,
     goHome,

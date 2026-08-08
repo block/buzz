@@ -43,7 +43,9 @@ import {
 } from "@/features/home/useResizableInboxListWidth";
 import { getHomePaneLayout } from "@/features/home/lib/homePaneLayout";
 import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapabilities";
+import { CatchUpView } from "@/features/home/ui/CatchUpView";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
+import { useFeatureEnabled } from "@/shared/features";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
@@ -110,6 +112,8 @@ export function HomeView({
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
   const [unreadOnly, setUnreadOnly] = React.useState(false);
+  const catchUpEnabled = useFeatureEnabled("attention");
+  const [catchUpOpen, setCatchUpOpen] = React.useState(false);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
@@ -687,11 +691,27 @@ export function HomeView({
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
+              catchUpPane={
+                catchUpEnabled && catchUpOpen ? (
+                  <CatchUpView
+                    currentPubkey={currentPubkey}
+                    doneSet={effectiveDoneSet}
+                    items={inboxItems}
+                    onMarkRead={markItemRead}
+                    onOpenMessage={onOpenContext}
+                  />
+                ) : null
+              }
               draftItems={draftItems}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
               filter={filter}
               items={filteredItems}
+              onCatchUpToggle={
+                catchUpEnabled
+                  ? () => setCatchUpOpen((open) => !open)
+                  : undefined
+              }
               onDeleteDraft={handleDeleteDraft}
               onFilterChange={handleFilterChange}
               onMarkRead={markItemRead}
