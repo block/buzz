@@ -157,6 +157,62 @@ fn is_word_boundary(s: &str) -> bool {
     })
 }
 
+/// Reserved broadcast keywords that expand to *every* member of the channel.
+///
+/// Matched case-insensitively as `@everyone` / `@channel`. These are the two
+/// keywords people reach for (Slack/Discord `@channel`, Discord/Slack
+/// `@everyone`). `@here` is intentionally excluded: it implies presence-based
+/// filtering ("active members only") that Buzz does not track, so honoring it
+/// would silently over- or under-notify.
+pub const EVERYONE_KEYWORDS: &[&str] = &["everyone", "channel"];
+
+/// Returns `true` when `content` contains an `@everyone` / `@channel` broadcast
+/// keyword.
+///
+/// The keyword must obey the same boundary rules as a regular `@mention`: the
+/// `@` sits at start-of-input or is preceded by ASCII whitespace, and the
+/// keyword is followed by a word boundary (whitespace, common punctuation, or
+/// end-of-input). Matching is case-insensitive.
+///
+/// Callers should pass content that has already had code regions removed via
+/// [`strip_code_regions`] so keywords inside code spans/blocks are ignored,
+/// mirroring how ordinary mentions are scanned.
+pub fn contains_everyone_keyword(content: &str) -> bool {
+    if content.is_empty() || !content.contains('@') {
+        return false;
+    }
+    for (i, _) in content.match_indices('@') {
+        let preceded = i == 0 || content.as_bytes()[i - 1].is_ascii_whitespace();
+        if !preceded {
+            continue;
+        }
+        let rest = &content[i + 1..];
+        for kw in EVERYONE_KEYWORDS {
+            // `get(..len)` guards against a keyword length landing mid-character
+            // in multi-byte UTF-8 content (would otherwise panic on slicing).
+            let matches_kw = rest
+                .get(..kw.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(kw) && is_word_boundary(&rest[kw.len()..]));
+            if matches_kw {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` if `name` is a reserved broadcast keyword (`everyone` /
+/// `channel`), compared case-insensitively.
+///
+/// Used to drop these tokens from ordinary name-resolution so they are not
+/// treated as (missing) member display names, since they are expanded to the
+/// full member set separately.
+pub fn is_everyone_keyword(name: &str) -> bool {
+    EVERYONE_KEYWORDS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(name))
+}
+
 /// Match extracted `@names` against channel-member profiles.
 ///
 /// For each profile, parses its `content_json` and reads the
@@ -540,6 +596,65 @@ mod tests {
         // Reverse case: multi-byte known name against ASCII content.
         let result = extract_at_mentions_with_known("@alice hello", &["日本語"]);
         assert_eq!(result, vec!["alice"]);
+    }
+
+    #[test]
+    fn everyone_keyword_matches_basic_forms() {
+        assert!(contains_everyone_keyword("heads up @everyone"));
+        assert!(contains_everyone_keyword("@channel standup in 5"));
+        assert!(contains_everyone_keyword("@everyone"));
+        assert!(contains_everyone_keyword("@channel"));
+    }
+
+    #[test]
+    fn everyone_keyword_is_case_insensitive() {
+        assert!(contains_everyone_keyword("@Everyone"));
+        assert!(contains_everyone_keyword("@CHANNEL now"));
+        assert!(contains_everyone_keyword("@EveryOne please"));
+    }
+
+    #[test]
+    fn everyone_keyword_respects_word_boundary() {
+        // A keyword glued to more name characters is NOT a broadcast.
+        assert!(!contains_everyone_keyword("@everyonehere"));
+        assert!(!contains_everyone_keyword("@channels"));
+        assert!(!contains_everyone_keyword("@channel-ops"));
+        // Punctuation boundary IS allowed.
+        assert!(contains_everyone_keyword("cc @everyone, please review"));
+        assert!(contains_everyone_keyword("@channel."));
+    }
+
+    #[test]
+    fn everyone_keyword_requires_leading_boundary() {
+        // Mid-word / email-like @ does not trigger a broadcast.
+        assert!(!contains_everyone_keyword("user@channel.com"));
+        assert!(!contains_everyone_keyword("foo@everyone"));
+    }
+
+    #[test]
+    fn everyone_keyword_absent_and_empty() {
+        assert!(!contains_everyone_keyword(""));
+        assert!(!contains_everyone_keyword("no mentions here"));
+        assert!(!contains_everyone_keyword("@alice and @bob"));
+        assert!(!contains_everyone_keyword("@here")); // deliberately excluded
+    }
+
+    #[test]
+    fn everyone_keyword_multibyte_does_not_panic() {
+        // Multi-byte content following '@' must not panic on the length slice.
+        assert!(!contains_everyone_keyword("@日本語 hello"));
+        // A real broadcast still resolves amid unicode prose.
+        assert!(contains_everyone_keyword("こんにちは @everyone"));
+    }
+
+    #[test]
+    fn is_everyone_keyword_recognizes_reserved_tokens() {
+        assert!(is_everyone_keyword("everyone"));
+        assert!(is_everyone_keyword("Everyone"));
+        assert!(is_everyone_keyword("CHANNEL"));
+        assert!(!is_everyone_keyword("alice"));
+        assert!(!is_everyone_keyword("here"));
+        assert!(!is_everyone_keyword(""));
     }
 
     fn profile<'a>(pk: &'a str, json: &'a str) -> MentionProfile<'a> {
