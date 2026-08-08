@@ -52,6 +52,7 @@ type RawProjectRepoSnapshot = {
   latest_commit: RawProjectRepoCommit | null;
   commits?: RawProjectRepoCommit[];
   files: RawProjectRepoFile[];
+  total_file_count?: number;
   contributors?: RawProjectRepoContributor[];
 };
 
@@ -137,6 +138,10 @@ function fromRawProjectRepoSnapshot(
         ? fromRawProjectRepoCommit(file.latest_commit)
         : null,
     })),
+    totalFileCount: Math.max(
+      snapshot.files.length,
+      snapshot.total_file_count ?? snapshot.files.length,
+    ),
     contributors: (snapshot.contributors ?? []).map((contributor) => ({
       name: contributor.name,
       email: contributor.email,
