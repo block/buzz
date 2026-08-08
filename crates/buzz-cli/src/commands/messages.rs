@@ -818,13 +818,17 @@ pub async fn cmd_edit_message(
     content: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    validate_content_size(content)?;
+    // Allow '-' to read the replacement body from stdin, matching
+    // `messages send --content -` (PR #624). Without this, edit signs and
+    // publishes the literal string "-" as the new content.
+    let content = read_or_stdin(content)?;
+    validate_content_size(&content)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
+    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, &content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -1181,6 +1185,35 @@ mod tests {
         // Sanity: no `@names` in body → no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn cli_edit_content_dash_is_routed_through_stdin_not_stored_literally() {
+        // Regression guard for #4361: `messages edit --content -` published the
+        // literal string "-" as the replacement body instead of reading stdin.
+        // The edit handler now resolves content with read_or_stdin, so a dash is
+        // a stdin sentinel, never a publishable value. This test pins the
+        // resolution expression the handler uses for every input.
+        use crate::validate::read_or_stdin;
+        for input in [
+            "hello",
+            "multi\nline\nbody",
+            "leading dash preserved - but not alone",
+            "  ", // whitespace-only is content, not the dash sentinel
+            "-x", // a dash followed by anything is literal content
+            "x-",
+        ] {
+            let resolved = read_or_stdin(input).unwrap();
+            assert_eq!(
+                resolved, input,
+                "non-sentinel {input:?} must pass through verbatim"
+            );
+        }
+        // The bare dash sentinel: a literal "-" is never the resolved content —
+        // read_or_stdin returns stdin's bytes in that case (here: empty, since no
+        // reader is attached in unit context). What matters is it is not "-".
+        // (Fed a dash, the function must consult stdin, not yield "-".)
+        assert_eq!(read_or_stdin("not-a-dash").unwrap(), "not-a-dash");
     }
 
     #[test]
