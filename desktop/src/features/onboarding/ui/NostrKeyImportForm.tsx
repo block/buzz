@@ -582,7 +582,7 @@ export function NostrKeyImportForm({
             : undefined
         }
       >
-        {mode === "key" || isPasswordStage ? (
+        {mode === "key" || isPasswordStage || isValid ? (
           <Button
             className={
               // Only the spotlight (onboarding) treatment gets the docked pill CTA.
