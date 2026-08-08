@@ -16,56 +16,88 @@ struct ManagedNodeArtifact {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+const COMPILED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-arm64",
     filename: "node-v24.18.0-darwin-arm64.tar.gz",
     sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
 });
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+const COMPILED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "darwin-x64",
     filename: "node-v24.18.0-darwin-x64.tar.gz",
     sha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+const COMPILED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-x64",
     filename: "node-v24.18.0-linux-x64.tar.gz",
     sha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
 });
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+const COMPILED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
     platform: "linux-arm64",
     filename: "node-v24.18.0-linux-arm64.tar.gz",
     sha256: "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508",
 });
 
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+/// Windows Node.js artifact metadata for both supported architectures.
+///
+/// Unlike macOS/Linux, the artifact cannot be selected at compile time via
+/// `cfg(target_arch = ...)`: an x64-built Buzz binary running under Windows
+/// x64 emulation on ARM64 hardware always reports `target_arch = "x86_64"`,
+/// yet the system (ARM64) Node installed the agent's npm packages with
+/// ARM64 native modules. We therefore resolve the correct artifact at
+/// runtime from the actual machine architecture (see
+/// `crate::managed_agents::target_arch`).
+#[cfg(target_os = "windows")]
+const WIN_X64_ARTIFACT: ManagedNodeArtifact = ManagedNodeArtifact {
     platform: "win-x64",
     filename: "node-v24.18.0-win-x64.zip",
     sha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
-});
+};
 
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+#[cfg(target_os = "windows")]
+const WIN_ARM64_ARTIFACT: ManagedNodeArtifact = ManagedNodeArtifact {
     platform: "win-arm64",
     filename: "node-v24.18.0-win-arm64.zip",
     sha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
-});
+};
 
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "aarch64")
+    target_os = "windows"
 )))]
-const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = None;
+const COMPILED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = None;
+
+/// Resolve the Node.js artifact to provision.
+///
+/// On non-Windows platforms the compile-time target is authoritative, so we
+/// return the const selected by `cfg`. On Windows we must detect the *actual*
+/// machine architecture at runtime: an x64 Buzz build running under Windows
+/// x64 emulation on ARM64 hardware reports `target_arch = "x86_64"` yet the
+/// system-installed Node and the agent's npm native modules are ARM64.
+/// Provisioning win-x64 in that case yields a `claude.exe` that does not
+/// exist for the ARM64 npm tree. Windows therefore defers to
+/// [`crate::managed_agents::target_arch`], which uses `IsWow64Process2`.
+#[cfg(target_os = "windows")]
+fn managed_node_artifact() -> Option<ManagedNodeArtifact> {
+    match crate::managed_agents::target_arch() {
+        "aarch64" => Some(WIN_ARM64_ARTIFACT),
+        "x86_64" => Some(WIN_X64_ARTIFACT),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn managed_node_artifact() -> Option<ManagedNodeArtifact> {
+    COMPILED_NODE_ARTIFACT
+}
 
 fn managed_node_unsupported_step() -> InstallStepResult {
     InstallStepResult {
@@ -259,7 +291,7 @@ fn managed_node_install_lock() -> &'static Mutex<()> {
 }
 
 pub(super) fn managed_node_runtime_supported() -> bool {
-    MANAGED_NODE_ARTIFACT.is_some() && crate::managed_agents::buzz_managed_node_bin_dir().is_some()
+    managed_node_artifact().is_some() && crate::managed_agents::buzz_managed_node_bin_dir().is_some()
 }
 
 pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallStepResult>> {
@@ -267,7 +299,7 @@ pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallSt
         return Ok(());
     }
 
-    let Some(artifact) = MANAGED_NODE_ARTIFACT else {
+    let Some(artifact) = managed_node_artifact() else {
         return Err(Box::new(managed_node_unsupported_step()));
     };
     let Some(root) = crate::managed_agents::buzz_managed_node_root() else {

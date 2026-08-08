@@ -479,3 +479,36 @@ fn test_managed_node_runtime_ready_returns_false_when_binary_absent() {
         "managed_node_runtime_ready must return false when the binary file does not exist"
     );
 }
+
+/// The artifact resolver must return an artifact whose `platform` string
+/// matches the runtime arch. On Windows this exercises the runtime
+/// detection path instead of a compile-time constant.
+#[test]
+fn managed_node_artifact_returns_artifact_matching_runtime_platform() {
+    let artifact = managed_node_artifact().expect("supported platform must yield artifact");
+    let runtime_platform = match std::env::consts::OS {
+        "macos" => match crate::managed_agents::target_arch() {
+            "aarch64" => "darwin-arm64",
+            "x86_64" => "darwin-x64",
+            other => panic!("unexpected macos arch: {other}"),
+        },
+        "linux" => match crate::managed_agents::target_arch() {
+            "x86_64" => "linux-x64",
+            "aarch64" => "linux-arm64",
+            other => panic!("unexpected linux arch: {other}"),
+        },
+        "windows" => match crate::managed_agents::target_arch() {
+            "x86_64" => "win-x64",
+            "aarch64" => "win-arm64",
+            other => panic!("unexpected windows arch: {other}"),
+        },
+        other => panic!("unsupported os: {other}"),
+    };
+    assert_eq!(
+        artifact.platform,
+        runtime_platform,
+        "artifact platform must match runtime platform (compile-time arch: {}, runtime arch: {})",
+        std::env::consts::ARCH,
+        crate::managed_agents::target_arch()
+    );
+}

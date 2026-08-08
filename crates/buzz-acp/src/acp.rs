@@ -112,11 +112,19 @@ pub enum AcpError {
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
 /// detail (e.g. a `data` field) is not lost.
+///
+/// When both `message` and `data` are present, append the serialized
+/// `data` payload to the message so actionable detail (e.g. "Claude
+/// native binary not found for win32-x64...") is not dropped.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-    let message = match error.get("message").and_then(|m| m.as_str()) {
+    let base_message = match error.get("message").and_then(|m| m.as_str()) {
         Some(m) => m.to_string(),
         None => error.to_string(),
+    };
+    let message = match error.get("data") {
+        Some(data) if !data.is_null() => format!("{base_message} {}", data),
+        _ => base_message,
     };
     AcpError::AgentError { code, message }
 }
@@ -4375,6 +4383,29 @@ mod tests {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_appends_data_when_message_and_data_present() {
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": "Claude native binary not found for win32-x64: install win32-arm64 build"
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.contains("Internal error"),
+                    "expected base message preserved, got: {message}"
+                );
+                assert!(
+                    message.contains("win32-x64"),
+                    "expected data payload preserved, got: {message}"
+                );
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
