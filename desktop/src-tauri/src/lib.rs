@@ -49,8 +49,9 @@ use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
+    acknowledge_pending_community_deep_link, acknowledge_pending_import_claim_deep_link,
+    handle_deep_link_url, take_pending_community_deep_link, take_pending_import_claim_deep_link,
+    PendingCommunityDeepLinks, PendingImportClaimDeepLinks,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -304,6 +305,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingImportClaimDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -616,6 +618,8 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            take_pending_import_claim_deep_link,
+            acknowledge_pending_import_claim_deep_link,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

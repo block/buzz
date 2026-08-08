@@ -4,6 +4,7 @@ pub mod channels;
 pub mod dms;
 pub mod emoji;
 pub mod feed;
+pub mod import;
 pub mod issues;
 pub mod mem;
 pub mod messages;

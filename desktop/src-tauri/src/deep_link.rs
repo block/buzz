@@ -15,6 +15,8 @@ pub(crate) struct PendingCommunityDeepLink {
     code: Option<String>,
     policy_receipt: Option<String>,
     name: Option<String>,
+    /// Claim-service base URL, only set for the `join-slack` kind.
+    service: Option<String>,
 }
 
 #[derive(Default)]
@@ -29,6 +31,7 @@ impl PendingCommunityDeepLinks {
                 && item.code == pending.code
                 && item.policy_receipt == pending.policy_receipt
                 && item.name == pending.name
+                && item.service == pending.service
         }) {
             return;
         }
@@ -54,6 +57,69 @@ impl PendingCommunityDeepLinks {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingImportClaimDeepLink {
+    request_id: String,
+    #[serde(flatten)]
+    payload: ImportClaimDeepLinkPayload,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingImportClaimDeepLinks(Mutex<VecDeque<PendingImportClaimDeepLink>>);
+
+impl PendingImportClaimDeepLinks {
+    fn enqueue(&self, pending: PendingImportClaimDeepLink) {
+        let mut queue = self
+            .0
+            .lock()
+            .expect("pending import-claim deep-link queue poisoned");
+        if queue.iter().any(|item| item.payload == pending.payload) {
+            return;
+        }
+        queue.push_back(pending);
+    }
+
+    fn first(&self) -> Option<PendingImportClaimDeepLink> {
+        self.0
+            .lock()
+            .expect("pending import-claim deep-link queue poisoned")
+            .front()
+            .cloned()
+    }
+
+    fn acknowledge(&self, request_id: &str) -> bool {
+        let mut queue = self
+            .0
+            .lock()
+            .expect("pending import-claim deep-link queue poisoned");
+        if queue
+            .front()
+            .is_some_and(|item| item.request_id == request_id)
+        {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_import_claim_deep_link(
+    pending: State<'_, PendingImportClaimDeepLinks>,
+) -> Option<PendingImportClaimDeepLink> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_import_claim_deep_link(
+    request_id: String,
+    pending: State<'_, PendingImportClaimDeepLinks>,
+) -> bool {
+    pending.acknowledge(&request_id)
+}
+
 #[tauri::command]
 pub(crate) fn take_pending_community_deep_link(
     pending: State<'_, PendingCommunityDeepLinks>,
@@ -69,6 +135,7 @@ pub(crate) fn acknowledge_pending_community_deep_link(
     pending.acknowledge(&id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn queue_community_deep_link(
     app: &tauri::AppHandle,
     kind: &str,
@@ -76,6 +143,7 @@ fn queue_community_deep_link(
     code: Option<String>,
     policy_receipt: Option<String>,
     name: Option<String>,
+    service: Option<String>,
 ) {
     app.state::<PendingCommunityDeepLinks>()
         .enqueue(PendingCommunityDeepLink {
@@ -85,6 +153,7 @@ fn queue_community_deep_link(
             code,
             policy_receipt,
             name,
+            service,
         });
 }
 
@@ -291,6 +360,145 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportClaimDeepLinkPayload {
+    /// `<source>:<foreign id>`, e.g. `slack:T0266FRGM:U060976D0QN`.
+    subject: String,
+    /// Email channel: the single-use magic-link token to redeem at `service`.
+    token: Option<String>,
+    /// Base URL of the operator claim-service. The email channel POSTs to
+    /// `/email/complete`; the OIDC channel uses it to bind the callback to the
+    /// pending `join-slack` transaction.
+    service: Option<String>,
+    /// OIDC channel marker (`"oidc"`). The service has NOT yet published the
+    /// attestation — the app must first redeem `code` at `/oidc/finalize` with a
+    /// signed self-claim (proof of key possession), then publish that self-claim.
+    via: Option<String>,
+    /// OIDC join channel: relay that received membership + attestation.
+    relay_url: Option<String>,
+    /// OIDC join channel: short-lived finalize code from the Slack callback.
+    code: Option<String>,
+}
+
+/// A foreign-identity subject is `<source>:<id>` with both parts present and an
+/// alphanumeric source (e.g. `slack:T0266FRGM:U060`).
+fn validate_import_claim_subject(subject: &str) -> Result<(), String> {
+    let (source, id) = subject
+        .split_once(':')
+        .ok_or_else(|| "subject must be <source>:<id>".to_string())?;
+    if source.is_empty() || id.is_empty() {
+        return Err("subject must be <source>:<id>".into());
+    }
+    if !source.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("subject source must be alphanumeric".into());
+    }
+    Ok(())
+}
+
+/// The claim-service URL is attacker-influenced (it rides in the link), so pin
+/// it to a plain http(s) origin with no embedded credentials before the app
+/// will POST to it.
+fn validate_claim_service(service: &str) -> Result<(), String> {
+    let url = Url::parse(service).map_err(|error| format!("invalid service url: {error}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("service must use http or https".into());
+    }
+    if url.host_str().is_none() {
+        return Err("service missing host".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("service must not include credentials".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("service must not include a query or fragment".into());
+    }
+    if url.path() != "/" {
+        return Err("service must be an origin without a path".into());
+    }
+    if url.scheme() == "http" && !is_loopback_host(&url) {
+        return Err("service must use https unless it is local development".into());
+    }
+    Ok(())
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// `buzz://import-claim?subject=slack:T0266FRGM:U060&token=…&service=https://…`
+/// (email), or
+/// `buzz://import-claim?subject=slack:T0266FRGM:U060&via=oidc&relay=wss://…&service=https://…`
+/// (OIDC). Rejects a link that identifies neither complete channel so the
+/// dialog never sees a half-formed one.
+fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload, String> {
+    let subject = non_empty_param(url, "subject")?;
+    validate_import_claim_subject(&subject)?;
+    let token = optional_non_empty_param(url, "token");
+    let service = optional_non_empty_param(url, "service");
+    let via = optional_non_empty_param(url, "via");
+    let code = optional_non_empty_param(url, "code");
+    let mut relay_url = None;
+
+    match (token.as_deref(), service.as_deref(), via.as_deref()) {
+        // Email channel: both halves present; the service must be well-formed.
+        (Some(_), Some(service), None) => validate_claim_service(service)?,
+        // OIDC channel: bind the callback to the target relay and the claim
+        // service from the pending join-slack transaction, and require the
+        // short-lived finalize code the app redeems with its signed self-claim.
+        (None, Some(service), Some("oidc")) => {
+            validate_claim_service(service)?;
+            if code.is_none() {
+                return Err("import-claim OIDC requires a finalize code".into());
+            }
+            relay_url = Some(
+                parse_websocket_relay_param(url)
+                    .ok_or_else(|| "import-claim OIDC requires a valid relay".to_string())?,
+            );
+        }
+        _ => {
+            return Err(
+                "import-claim requires token+service (email) or via=oidc+code+relay+service".into(),
+            )
+        }
+    }
+
+    Ok(ImportClaimDeepLinkPayload {
+        subject,
+        token,
+        service,
+        via,
+        relay_url,
+        code,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinSlackDeepLinkPayload {
+    relay_url: String,
+    service: String,
+}
+
+/// `buzz://join-slack?relay=<ws(s)://...>&service=<https://...>` — the join
+/// method for a Slack-migration community. The person signs in with Slack at
+/// `service`, which registers them and attests their imported identity; the
+/// relay is the community they join. Both params are required and validated so
+/// onboarding never sees a half-formed link.
+fn parse_join_slack_deep_link(url: &Url) -> Result<JoinSlackDeepLinkPayload, String> {
+    let relay_url =
+        parse_websocket_relay_param(url).ok_or_else(|| "missing or invalid relay".to_string())?;
+    let service = non_empty_param(url, "service")?;
+    validate_claim_service(&service)?;
+    Ok(JoinSlackDeepLinkPayload { relay_url, service })
+}
+
 /// Handle an incoming `buzz://` deep link URL.
 ///
 /// Currently supports:
@@ -316,7 +524,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 return;
             };
             activate_main_window(app);
-            queue_community_deep_link(app, "connect", relay_url.clone(), None, None, None);
+            queue_community_deep_link(app, "connect", relay_url.clone(), None, None, None, None);
             let _ = app.emit("deep-link-connect", relay_url);
         }
         Some("join") => {
@@ -331,7 +539,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             let relay_url = payload["relayUrl"].as_str().unwrap_or_default().to_owned();
             let code = payload["code"].as_str().map(str::to_owned);
             let policy_receipt = payload["policyReceipt"].as_str().map(str::to_owned);
-            queue_community_deep_link(app, "join", relay_url, code, policy_receipt, None);
+            queue_community_deep_link(app, "join", relay_url, code, policy_receipt, None, None);
             let _ = app.emit("deep-link-join", payload);
         }
         Some("add-community") => {
@@ -347,6 +555,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 None,
                 None,
                 payload.name.clone(),
+                None,
             );
             let _ = app.emit("deep-link-add-community", payload);
         }
@@ -375,6 +584,43 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
             }
         },
+        Some("import-claim") => match parse_import_claim_deep_link(&url) {
+            Ok(payload) => {
+                activate_main_window(app);
+                // OAuth commonly returns while the app is already open, but a
+                // relaunch must not lose the callback before React subscribes.
+                let pending = PendingImportClaimDeepLink {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    payload,
+                };
+                app.state::<PendingImportClaimDeepLinks>()
+                    .enqueue(pending.clone());
+                let _ = app.emit("deep-link-import-claim", pending);
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: rejecting import-claim deep link: {error}: {url_str}");
+            }
+        },
+        Some("join-slack") => match parse_join_slack_deep_link(&url) {
+            Ok(payload) => {
+                activate_main_window(app);
+                // Queue for cold-launch survival: a fresh install must create a
+                // key before the Slack sign-in can begin.
+                queue_community_deep_link(
+                    app,
+                    "join-slack",
+                    payload.relay_url.clone(),
+                    None,
+                    None,
+                    None,
+                    Some(payload.service.clone()),
+                );
+                let _ = app.emit("deep-link-join-slack", payload);
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: rejecting join-slack deep link: {error}: {url_str}");
+            }
+        },
         Some(action) => {
             eprintln!("buzz-desktop: unknown deep link action: {action}");
         }
@@ -385,327 +631,4 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use url::Url;
-
-    use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
-    };
-
-    fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
-        PendingCommunityDeepLink {
-            id: id.to_owned(),
-            kind: if code.is_some() { "join" } else { "connect" }.to_owned(),
-            relay_url: relay_url.to_owned(),
-            code: code.map(str::to_owned),
-            policy_receipt: None,
-            name: None,
-        }
-    }
-
-    #[test]
-    fn pending_join_serializes_policy_receipt_for_cold_launch_recovery() {
-        let mut link = pending("join", "wss://relay.example", Some("invite"));
-        link.policy_receipt = Some("relay-signed-receipt".to_owned());
-
-        let payload = serde_json::to_value(link).unwrap();
-        assert_eq!(payload["policyReceipt"], "relay-signed-receipt");
-    }
-
-    #[test]
-    fn pending_community_links_are_fifo_and_acknowledged_in_order() {
-        let queue = PendingCommunityDeepLinks::default();
-        queue.enqueue(pending("first", "wss://one.example", Some("one")));
-        queue.enqueue(pending("second", "wss://two.example", Some("two")));
-        assert_eq!(queue.first().unwrap().id, "first");
-        assert!(!queue.acknowledge("second"));
-        assert!(queue.acknowledge("first"));
-        assert_eq!(queue.first().unwrap().id, "second");
-    }
-
-    #[test]
-    fn pending_community_links_dedupe_exact_intents() {
-        let queue = PendingCommunityDeepLinks::default();
-        queue.enqueue(pending("first", "wss://one.example", Some("one")));
-        queue.enqueue(pending("duplicate", "wss://one.example", Some("one")));
-        assert!(queue.acknowledge("first"));
-        assert!(queue.first().is_none());
-    }
-
-    fn valid_nostr_bind_url() -> Url {
-        Url::parse(
-            "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn parse_add_community_deep_link_extracts_relay_and_name() {
-        let url = Url::parse(
-            "buzz://add-community?relay=wss%3A%2F%2Facme.communities.buzz.xyz&name=Acme%20Team&ignored=value",
-        )
-        .unwrap();
-        let payload = parse_add_community_deep_link(&url).unwrap();
-        assert_eq!(payload.relay_url, "wss://acme.communities.buzz.xyz");
-        assert_eq!(payload.name.as_deref(), Some("Acme Team"));
-    }
-
-    #[test]
-    fn parse_add_community_deep_link_accepts_an_omitted_or_empty_name() {
-        for raw in [
-            "buzz://add-community?relay=wss%3A%2F%2Facme.example",
-            "buzz://add-community?relay=wss%3A%2F%2Facme.example&name=",
-        ] {
-            assert!(parse_add_community_deep_link(&Url::parse(raw).unwrap())
-                .unwrap()
-                .name
-                .is_none());
-        }
-    }
-
-    #[test]
-    fn parse_add_community_deep_link_rejects_invalid_relays() {
-        for raw in [
-            "buzz://add-community",
-            "buzz://add-community?relay=",
-            "buzz://add-community?relay=not-a-url",
-            "buzz://add-community?relay=https%3A%2F%2Facme.example",
-            "buzz://add-community?relay=wss%3A%2F%2F",
-        ] {
-            assert!(parse_add_community_deep_link(&Url::parse(raw).unwrap()).is_none());
-        }
-    }
-
-    #[test]
-    fn parse_message_deep_link_extracts_required_params() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["channelId"], "abc");
-        assert_eq!(payload["messageId"], "xyz");
-        assert!(payload["threadRootId"].is_null());
-    }
-
-    #[test]
-    fn parse_message_deep_link_accepts_buzz_scheme() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["channelId"], "abc");
-        assert_eq!(payload["messageId"], "xyz");
-    }
-
-    #[test]
-    fn parse_message_deep_link_includes_thread_root() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=root1").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["threadRootId"], "root1");
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_missing_id() {
-        let url = Url::parse("buzz://message?channel=abc").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_empty_channel() {
-        // Regression: `channel=&id=foo` previously produced channelId: "".
-        let url = Url::parse("buzz://message?channel=&id=foo").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_empty_id() {
-        let url = Url::parse("buzz://message?channel=abc&id=").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_treats_empty_thread_as_absent() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert!(payload["threadRootId"].is_null());
-    }
-
-    #[test]
-    fn parse_join_deep_link_extracts_relay_and_code() {
-        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc.def").unwrap();
-        let payload = parse_join_deep_link(&url).expect("required params present");
-        assert_eq!(payload["relayUrl"], "wss://relay.example");
-        assert_eq!(payload["code"], "abc.def");
-        assert!(payload["policyReceipt"].is_null());
-    }
-
-    #[test]
-    fn parse_join_deep_link_extracts_policy_receipt() {
-        let url = Url::parse(
-            "buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc.def&policy_receipt=receipt.value",
-        )
-        .unwrap();
-        let payload = parse_join_deep_link(&url).expect("required params present");
-        assert_eq!(payload["policyReceipt"], "receipt.value");
-    }
-
-    #[test]
-    fn parse_join_deep_link_rejects_missing_code() {
-        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example").unwrap();
-        assert!(parse_join_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_join_deep_link_rejects_empty_code() {
-        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example&code=").unwrap();
-        assert!(parse_join_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_join_deep_link_rejects_missing_relay() {
-        let url = Url::parse("buzz://join?code=abc.def").unwrap();
-        assert!(parse_join_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_join_deep_link_rejects_non_websocket_relay() {
-        let url = Url::parse("buzz://join?relay=https%3A%2F%2Frelay.example&code=abc.def").unwrap();
-        assert!(parse_join_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_accepts_valid_url() {
-        let payload = parse_nostr_bind_deep_link(&valid_nostr_bind_url()).unwrap();
-        assert_eq!(payload.challenge_id, "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(payload.nonce, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567");
-        assert_eq!(payload.verification_code, "123456");
-        assert_eq!(payload.audience, "buzz:nostr-identity");
-        assert_eq!(payload.action, "bind_nostr_identity");
-        assert_eq!(payload.protocol, "buzz-nostr-identity");
-        assert_eq!(payload.version, "1");
-        assert_eq!(payload.origin, "https://example.com");
-        assert_eq!(payload.expires_at, "2999-01-01T00:00:00Z");
-        assert_eq!(payload.return_mode, "clipboard");
-        assert_eq!(payload.callback_url, None);
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_accepts_same_origin_callback_url() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=https%3A%2F%2Fexample.com%2Fbuzz%3FmockSession%3D1").unwrap();
-        let payload = parse_nostr_bind_deep_link(&url).unwrap();
-        assert_eq!(
-            payload.callback_url.as_deref(),
-            Some("https://example.com/buzz?mockSession=1")
-        );
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_accepts_browser_fragment_return() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz").unwrap();
-        let payload = parse_nostr_bind_deep_link(&url).unwrap();
-
-        assert_eq!(payload.return_mode, "browser_fragment_v1");
-        assert_eq!(
-            payload.callback_url.as_deref(),
-            Some("https://example.com/buzz")
-        );
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_requires_callback_for_browser_fragment_return() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1").unwrap();
-
-        assert_eq!(
-            parse_nostr_bind_deep_link(&url).unwrap_err(),
-            "browser_fragment_v1 requires callback_url"
-        );
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_cross_origin_callback_url() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=https%3A%2F%2Fevil.example%2Fbuzz").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_http_callback_url() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard&callback_url=http%3A%2F%2Fexample.com%2Fbuzz").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_missing_challenge_id() {
-        let url = Url::parse("buzz://nostr-bind?nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_empty_nonce() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_missing_verification_code() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_short_verification_code() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=12345&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_long_verification_code() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=1234567&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_non_digit_verification_code() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=12345a&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_wrong_action() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=wrong&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_wrong_audience() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=other&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_non_https_origin() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=http%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_origin_with_path() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com%2Fbind&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_origin_with_credentials() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fuser%40example.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_rejects_unsupported_return_mode() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=callback").unwrap();
-        assert!(parse_nostr_bind_deep_link(&url).is_err());
-    }
-
-    #[test]
-    fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
-        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
-        let payload = parse_nostr_bind_deep_link(&url).unwrap();
-        assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
-    }
-}
+mod tests;

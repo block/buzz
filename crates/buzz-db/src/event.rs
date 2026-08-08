@@ -1293,13 +1293,32 @@ pub async fn insert_event_with_thread_metadata(
     event: &Event,
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
+    backfill: bool,
 ) -> Result<(StoredEvent, bool)> {
     let mut tx = pool.begin().await?;
+    if backfill {
+        disarm_floor_guard_tx(&mut tx).await?;
+    }
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, community_id, event, channel_id, thread_meta)
             .await?;
     tx.commit().await?;
     Ok(result)
+}
+
+/// Disarm the commit-time `created_at` floor guard (migration 0021) for the
+/// current transaction only.
+///
+/// Used by authorized history imports: the guard's GUC is transaction-locally
+/// cleared so a backdated row can commit. Callers MUST pair this with
+/// [`crate::replica_fence::ReplicaFence::backfill_begin`]/`backfill_end` on
+/// replica-enabled deployments — a floor-exempt commit is outside the fence
+/// proof until the next fresh handshake.
+async fn disarm_floor_guard_tx(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+    sqlx::query("SELECT set_config('buzz.created_at_floor', '', true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Atomically insert a kind:7 reaction event and its reaction row.
@@ -1317,8 +1336,12 @@ pub async fn insert_reaction_event_with_thread_metadata(
     target_event_id: &[u8],
     actor_pubkey: &[u8],
     emoji: &str,
+    backfill: bool,
 ) -> Result<ReactionEventInsertOutcome> {
     let mut tx = pool.begin().await?;
+    if backfill {
+        disarm_floor_guard_tx(&mut tx).await?;
+    }
 
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
@@ -2004,6 +2027,7 @@ mod tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            false,
         )
         .await
         .expect("first reaction insert");
@@ -2024,6 +2048,7 @@ mod tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            false,
         )
         .await
         .expect("duplicate reaction insert");
@@ -2062,6 +2087,7 @@ mod tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            false,
         )
         .await
         .expect("cross-community reaction attempt");
@@ -2121,6 +2147,7 @@ mod tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            false,
         )
         .await
         .expect_err("ephemeral event insert must fail after reaction upsert attempt");
@@ -2170,6 +2197,7 @@ mod tests {
                 target.id.as_bytes(),
                 &actor_pubkey,
                 "👍",
+                false,
             )
             .await
             .expect("first reaction insert"),
@@ -2195,6 +2223,7 @@ mod tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            false,
         )
         .await
         .expect("reactivate reaction");
