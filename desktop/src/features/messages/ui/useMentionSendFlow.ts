@@ -38,6 +38,8 @@ import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
+  type AgentReadinessFailure,
+  describeAgentReadinessFailures,
   getErrorMessage,
   isManagedAgentRunning,
   isProviderBackedAgent,
@@ -183,7 +185,7 @@ export function useMentionSendFlow({
     ) => {
       if (!capturedChannelId || mentionPubkeys.length === 0) {
         return {
-          errors: [] as string[],
+          errors: [] as AgentReadinessFailure[],
           pubkeys: [] as string[],
         };
       }
@@ -195,13 +197,14 @@ export function useMentionSendFlow({
         ...mentions.memberPubkeys,
         ...preparedParticipantPubkeys.map(normalizePubkey),
       ]);
-      const errors: string[] = [];
+      const errors: AgentReadinessFailure[] = [];
       const pubkeys: string[] = [];
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) {
           continue;
         }
+        const isExistingMember = mentions.memberPubkeys.has(pubkey);
         try {
           if (participantPubkeys.has(pubkey)) {
             if (isProviderBackedAgent(agent)) {
@@ -220,12 +223,13 @@ export function useMentionSendFlow({
           }
           pubkeys.push(pubkey);
         } catch (error) {
-          errors.push(
-            `${agent.name}: ${getErrorMessage(
+          errors.push({
+            blocking: !isExistingMember,
+            message: `${agent.name}: ${getErrorMessage(
               error,
               "Could not prepare agent.",
             )}`,
-          );
+          });
         }
       }
       return {
@@ -452,17 +456,13 @@ export function useMentionSendFlow({
           persistPreflightDraft();
           return;
         }
-        if (agentReadiness.errors.length > 0) {
-          const message =
-            agentReadiness.errors.length === 1
-              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
-              : `Could not start agent mentions: ${agentReadiness.errors.join(
-                  "; ",
-                )}`;
-          setNonMemberPromptError(message);
-          toast.error(message);
+        const readiness = describeAgentReadinessFailures(agentReadiness.errors);
+        if (readiness.blocking) {
+          setNonMemberPromptError(readiness.blocking);
+          toast.error(readiness.blocking);
           return;
         }
+        if (readiness.warning) toast.warning(readiness.warning);
         if (preparedAgentPubkeys.length > 0 && sendChannelId) {
           try {
             await invokeTauri("sync_agents_to_active_huddle", {

@@ -1553,6 +1553,104 @@ test("mentioning an in-channel provider managed agent deploys it before sending"
   await expect(mentionChip).toBeVisible();
 });
 
+test("mentioning an in-channel agent still sends when its start fails", async ({
+  page,
+}) => {
+  // #5099: the agent runs on the user's own server, so this desktop holds no
+  // key for it and the launch can never succeed. It is a member of the channel
+  // and answers there, so the mention has to be published anyway.
+  const startError = "agent has no private key available";
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: OUT_OF_CHANNEL_PROVIDER_AGENT_PUBKEY,
+        name: "portal",
+        status: "not_deployed",
+        channelNames: ["general"],
+        backend: {
+          type: "provider",
+          id: "portal",
+          config: { region: "test" },
+        },
+      },
+    ],
+    startManagedAgentErrors: [startError],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @portal");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("portal")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+  await page.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText(startError, { exact: false }).first(),
+  ).toBeVisible();
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "portal" });
+  await expect(mentionChip).toBeVisible();
+});
+
+test("a start failure never reports delivery when the send itself fails", async ({
+  page,
+}) => {
+  // The start notice is emitted before Huddle sync, media upload and the send,
+  // so it has to stay pre-send tense: a later abort must not leave the user
+  // with a message that claims the mention went out.
+  const startError = "agent has no private key available";
+  const sendError = "Mock send failed.";
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: OUT_OF_CHANNEL_PROVIDER_AGENT_PUBKEY,
+        name: "portal",
+        status: "not_deployed",
+        channelNames: ["general"],
+        backend: {
+          type: "provider",
+          id: "portal",
+          config: { region: "test" },
+        },
+      },
+    ],
+    startManagedAgentErrors: [startError],
+    sendMessageErrors: [sendError],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @portal");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("portal")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+  await page.getByTestId("send-message").click();
+
+  await expect(
+    page.getByText("sending the mention anyway", { exact: false }).first(),
+  ).toBeVisible();
+  // The send aborted: the composer keeps the draft and nothing reached the
+  // timeline, so the notice above must not have claimed delivery.
+  await expect(input).toContainText("portal");
+  await expect(
+    page
+      .getByTestId("message-row")
+      .locator("[data-mention].agent-mention-highlight", { hasText: "portal" }),
+  ).toHaveCount(0);
+  await expect(page.getByText(/message sent/i)).toHaveCount(0);
+});
+
 test("mentioning a non-member managed agent adds and starts it before sending", async ({
   page,
 }) => {
