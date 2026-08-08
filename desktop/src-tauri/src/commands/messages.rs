@@ -3,16 +3,18 @@ use tauri::{AppHandle, State};
 
 mod forum;
 
-use forum::{forum_message_from_event, forum_reply_from_event};
+use forum::{
+    apply_link_preview_suppression, fetch_agent_owner_pubkeys, link_preview_suppression_targets,
+};
+pub use forum::{get_forum_posts, get_forum_thread};
 
 use crate::{
     app_state::AppState,
     events,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
     models::{
-        FeedItemInfo, FeedMeta, FeedResponse, FeedSections, ForumMessageInfo, ForumPostsResponse,
-        ForumThreadReplyInfo, ForumThreadResponse, SearchResponse, SendChannelMessageResponse,
-        ThreadRepliesResponse,
+        FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SearchResponse,
+        SendChannelMessageResponse, ThreadRepliesResponse,
     },
     nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
@@ -90,9 +92,30 @@ pub async fn get_feed(
         Vec::new()
     };
 
+    let mention_ids = mention_events
+        .iter()
+        .map(|event| event.id.to_hex())
+        .collect::<Vec<_>>();
+    let mention_edits = if mention_ids.is_empty() {
+        Vec::new()
+    } else {
+        query_relay(
+            &state,
+            &[serde_json::json!({ "kinds": [40003], "#e": mention_ids })],
+        )
+        .await
+        .unwrap_or_default()
+    };
+    let mention_owner_pubkeys = fetch_agent_owner_pubkeys(&state, &mention_events).await;
+    let suppressed_mentions =
+        link_preview_suppression_targets(&mention_events, &mention_edits, &mention_owner_pubkeys);
     let mut mentions: Vec<FeedItemInfo> = mention_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "mentions"))
+        .map(|ev| {
+            let mut item = feed_item_from_event(ev, "mentions");
+            apply_link_preview_suppression(&mut item.tags, &item.id, &suppressed_mentions);
+            item
+        })
         .collect();
     crate::commands::edit_overlay::apply_to_feed_items(&state, &mention_events, &mut mentions)
         .await;
@@ -183,99 +206,6 @@ pub async fn search_messages(
 
     let events = query_relay(&state, &[filter]).await?;
     Ok(nostr_convert::search_response_from_events(&events))
-}
-
-#[tauri::command]
-pub async fn get_forum_posts(
-    channel_id: String,
-    limit: Option<u32>,
-    before: Option<i64>,
-    state: State<'_, AppState>,
-) -> Result<ForumPostsResponse, String> {
-    let cap = limit.unwrap_or(20).min(100);
-    let mut filter = serde_json::Map::new();
-    filter.insert("kinds".to_string(), serde_json::json!(forum_root_kinds()));
-    filter.insert("#h".to_string(), serde_json::json!([channel_id.clone()]));
-    filter.insert("limit".to_string(), serde_json::json!(cap));
-    if let Some(t) = before {
-        filter.insert("until".to_string(), serde_json::json!(t));
-    }
-
-    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
-    let messages: Vec<ForumMessageInfo> = events
-        .iter()
-        .map(|ev| forum_message_from_event(ev, &channel_id))
-        .collect();
-
-    let next_cursor = messages.last().map(|m| m.created_at);
-    Ok(ForumPostsResponse {
-        messages,
-        next_cursor,
-    })
-}
-
-#[tauri::command]
-pub async fn get_forum_thread(
-    channel_id: String,
-    event_id: String,
-    limit: Option<u32>,
-    cursor: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<ForumThreadResponse, String> {
-    let _ = (limit, cursor);
-    // Two filters: the root event itself, plus any reply (kinds 9/45003)
-    // that references it via #e.
-    let events = query_relay(
-        &state,
-        &[
-            serde_json::json!({ "ids": [event_id.clone()], "kinds": forum_thread_kinds() }),
-            serde_json::json!({
-                "kinds": forum_thread_kinds(),
-                "#e": [event_id.clone()],
-                "#h": [channel_id.clone()],
-            }),
-        ],
-    )
-    .await?;
-
-    // Second phase: edits are addressed to the event they replace, so a reply's
-    // edit carries the REPLY's id, not the root's. Look them up by the exact
-    // ids this page returned — a channel-window scan would miss reply edits
-    // entirely and could drop the relevant one on a busy channel.
-    let target_ids: Vec<String> = events.iter().map(|ev| ev.id.to_hex()).collect();
-    let latest_edit =
-        crate::commands::edit_overlay::fetch_latest_edits(&state, &target_ids, Some(&channel_id))
-            .await;
-
-    let mut root: Option<ForumMessageInfo> = None;
-    let mut replies: Vec<ForumThreadReplyInfo> = Vec::new();
-    for ev in &events {
-        if u32::from(ev.kind.as_u16()) == buzz_core_pkg::kind::KIND_STREAM_MESSAGE_EDIT {
-            continue;
-        }
-        if ev.id.to_hex() == event_id {
-            let mut info = forum_message_from_event(ev, &channel_id);
-            if let Some(content) = latest_edit.get(&info.event_id) {
-                info.content = content.clone();
-            }
-            root = Some(info);
-        } else {
-            let mut info = forum_reply_from_event(ev, &channel_id, &event_id);
-            if let Some(content) = latest_edit.get(&info.event_id) {
-                info.content = content.clone();
-            }
-            replies.push(info);
-        }
-    }
-    let total_replies = replies.len() as u32;
-
-    let root = root.ok_or_else(|| "forum thread root event not found".to_string())?;
-    Ok(ForumThreadResponse {
-        root,
-        replies,
-        total_replies,
-        next_cursor: None,
-    })
 }
 
 /// Fetch the full reply subtree under a thread root, server-side.
@@ -534,6 +464,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    link_preview_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -545,6 +476,8 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let link_previews = link_preview_tags.unwrap_or_default();
+    let relay_base = crate::relay::relay_api_base_url_with_override(&state);
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
@@ -589,6 +522,8 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &link_previews,
+                &relay_base,
             )?
         }
     };
@@ -755,6 +690,8 @@ fn build_managed_agent_channel_message(
         &[],
         &[],
         &[],
+        &[],
+        &crate::relay::relay_api_base_url(),
         client_tags,
     )
 }
@@ -918,38 +855,48 @@ pub async fn remove_reaction(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn edit_message(
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditMessageInput {
     channel_id: String,
     event_id: String,
     content: String,
+    #[serde(default)]
     media_tags: Vec<Vec<String>>,
-    emoji_tags: Option<Vec<Vec<String>>>,
-    // Pubkeys of mentions *newly added* by this edit (the composer diffs the
-    // edited body against the original). Only these get a `p` tag, so a typo-fix
-    // edit that leaves the mention set unchanged never re-wakes anyone.
-    mention_pubkeys: Option<Vec<String>>,
+    #[serde(default)]
+    emoji_tags: Vec<Vec<String>>,
+    // Pubkeys of mentions *newly added* by this edit. Only these get a `p`
+    // tag, so a typo-fix edit never re-wakes existing mentions.
+    #[serde(default)]
+    mention_pubkeys: Vec<String>,
+    #[serde(default)]
+    suppress_link_previews: bool,
+}
+
+#[tauri::command]
+pub async fn edit_message(
+    input: EditMessageInput,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
-        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
-    let target_eid = EventId::from_hex(&event_id).map_err(|e| format!("invalid event ID: {e}"))?;
-    let trimmed = content.trim();
+    let channel_uuid = uuid::Uuid::parse_str(&input.channel_id)
+        .map_err(|_| format!("invalid channel UUID: {}", input.channel_id))?;
+    let target_eid =
+        EventId::from_hex(&input.event_id).map_err(|e| format!("invalid event ID: {e}"))?;
+    let trimmed = input.content.trim();
     // Empty text is allowed when the edit still carries imeta attachments
     // (a media-only edit). Reject only when both are empty.
-    if trimmed.is_empty() && media_tags.is_empty() {
+    if trimmed.is_empty() && input.media_tags.is_empty() {
         return Err("edit must have content or attachments".into());
     }
-    let emoji = emoji_tags.unwrap_or_default();
-    let mentions = mention_pubkeys.unwrap_or_default();
-    let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let mention_refs: Vec<&str> = input.mention_pubkeys.iter().map(|s| s.as_str()).collect();
     let builder = events::build_message_edit(
         channel_uuid,
         target_eid,
         trimmed,
-        &media_tags,
-        &emoji,
+        &input.media_tags,
+        &input.emoji_tags,
         &mention_refs,
+        input.suppress_link_previews,
     )?;
     submit_event(builder, &state).await?;
     Ok(())

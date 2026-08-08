@@ -98,20 +98,29 @@ fn strip_catalog_prefix(model: &str) -> &str {
 
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
-/// API shape selection (per Anthropic extended-thinking support table,
-/// https://platform.claude.com/docs/en/build-with-claude/extended-thinking, July 2025):
+/// API shape selection (per Anthropic thinking docs and per-model support table,
+/// https://platform.claude.com/docs/en/build-with-claude/thinking and
+/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models):
 ///
-/// **Adaptive families** — `thinking: {type:"adaptive"}` + `output_config: {effort}`.
-/// These models use adaptive thinking; `thinking:{type:"adaptive"}` is required to enable
-/// thinking — without it requests run without thinking even when `output_config.effort` is set.
-/// Doc-verified (extended-thinking table): Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5.x, Sonnet 4.6.
-/// Matched by explicit version strings (no wildcard over version numbers).
+/// **Adaptive families — `thinking:{type:"adaptive"}` activates effort control**:
+///
+///   - Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6: status **Off** — thinking is OFF by default;
+///     `thinking:{type:"adaptive"}` is required to enable thinking; without it no thinking occurs.
+///   - Opus 5, Sonnet 5: status **On** — thinking is on by default (can be disabled);
+///     we still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///   - Fable 5, Mythos 5, Mythos Preview: status **Always on** — thinking cannot be disabled;
+///     we still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// In all three sub-buckets `output_config: {effort}` controls depth, clamped per-model.
+/// Also sends `thinking: {display:"summarized"}` so thinking text is always visible in the
+/// observer feed (without this, Anthropic defaults to `display:"omitted"` on newest models).
 ///
 /// **Manual-budget families** — `thinking: {type:"enabled", budget_tokens}`.
 /// `budget_tokens` is clamped to `min(level_budget, max_output_tokens - 1024)` to preserve
 /// at least 1024 answer tokens. If the result is < 1024 (i.e., `max_output_tokens <= 2047`),
 /// thinking is omitted entirely with a `warn!`.
 /// Doc-verified: claude-3* (legacy), claude-opus-4-5 (effort page: "uses manual thinking").
+/// Also sends `display:"summarized"` to ensure thinking text is returned.
 ///
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
@@ -155,17 +164,20 @@ pub fn anthropic_thinking_config(
             return (None, None);
         }
         (
-            Some(json!({ "type": "enabled", "budget_tokens": budget })),
+            Some(json!({ "type": "enabled", "budget_tokens": budget, "display": "summarized" })),
             None,
         )
     } else if is_adaptive_thinking_model(model) {
-        // Adaptive families: thinking must be explicitly enabled via type:"adaptive".
-        // output_config.effort controls the depth. Both fields are required together.
+        // Adaptive families: we always send type:"adaptive" to activate output_config.effort.
+        // Sub-bucket A (Off: Opus 4.6/4.7/4.8, Sonnet 4.6): this field is required to enable
+        // thinking at all. Sub-bucket B (On: Opus 5/Sonnet 5) and sub-bucket C (Always on:
+        // Fable 5/Mythos 5/Mythos Preview): thinking is already on; we send the field so
+        // output_config.effort is honoured, not to enable thinking.
         // Apply per-model effort clamping: if the requested level exceeds the model's
         // doc-verified maximum, clamp down to the highest supported level with a warning.
         let clamped = clamp_adaptive_effort(model, effort);
         (
-            Some(json!({ "type": "adaptive" })),
+            Some(json!({ "type": "adaptive", "display": "summarized" })),
             Some(json!({ "effort": clamped.anthropic_effort_str() })),
         )
     } else {
@@ -588,14 +600,23 @@ fn is_manual_budget_model(model: &str) -> bool {
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
 
-/// Returns true for Claude model families that use adaptive thinking (doc-verified, July 2025).
+/// Returns true for Claude model families that use adaptive thinking (doc-verified against
+/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models).
 ///
-/// Sources: https://platform.claude.com/docs/en/build-with-claude/extended-thinking (support table)
-///          https://platform.claude.com/docs/en/build-with-claude/effort (effort page)
+/// **Sub-bucket A — status Off (thinking OFF until `thinking:{type:"adaptive"}` is sent)**:
+///   Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6.
 ///
-/// Adaptive thinking models (always-on or default-on):
-///   Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5.x, Sonnet 4.6,
-///   Fable 5 (always-on), Mythos 5 (always-on), Mythos Preview (default-on).
+/// **Sub-bucket B — status On (thinking on by default; can be disabled)**:
+///   Opus 5, Sonnet 5.
+///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// **Sub-bucket C — status Always on (thinking cannot be disabled)**:
+///   Fable 5, Mythos 5, Mythos Preview.
+///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
+///
+/// All three sub-buckets accept the same request shape. The distinction matters only when
+/// thinking effort is NOT configured: sub-bucket B/C models still produce thinking even
+/// without us sending the field; sub-bucket A models do not.
 ///
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
@@ -612,12 +633,64 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
         || model.starts_with("claude-sonnet-5")
         // Sonnet 4.6 exactly (not Sonnet 4.5 or earlier — not in the adaptive table).
         || model.starts_with("claude-sonnet-4-6")
-        // Fable 5 and Mythos 5 (always-on adaptive thinking, July 2025).
+        // Fable 5 and Mythos 5 (Always on — thinking cannot be disabled, July 2025).
         || model.starts_with("claude-fable-5")
         || model.starts_with("claude-mythos-5")
-        // Mythos Preview (default-on adaptive thinking, July 2025).
+        // Mythos Preview (Always on — thinking cannot be disabled, July 2025).
         // Note: xhigh is NOT available on Mythos Preview — clamp_adaptive_effort handles this.
         || model.starts_with("claude-mythos-preview")
+}
+
+/// Reasoning summary mode for the OpenAI Responses API route.
+///
+/// Controls the `reasoning.summary` field sent alongside `reasoning.effort` in
+/// `responses_body`. The Responses API only returns populated `summary` arrays
+/// when a summary mode is requested — without it, `summary: []` is returned and
+/// the observer feed shows no reasoning text even though the model billed thinking
+/// tokens.
+///
+/// **Responses-route only.** On the Anthropic route, thinking blocks contain the
+/// full reasoning text directly (no summary concept); this field is ignored there.
+/// On Chat Completions and OpenRouter paths the field is also ignored.
+///
+/// Set via `BUZZ_AGENT_THINKING_SUMMARY` (`auto|concise|detailed`).
+/// Unset/empty → `auto` (the provider chooses the best available summary for the
+/// model). Use `detailed` for maximum reasoning visibility in the observer feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingSummary {
+    /// Provider selects the best available summary format for the model.
+    Auto,
+    /// Shorter summaries — lower token overhead.
+    Concise,
+    /// Full-length summaries — maximum reasoning visibility.
+    Detailed,
+}
+
+impl ThinkingSummary {
+    /// The string value sent in the `reasoning.summary` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThinkingSummary::Auto => "auto",
+            ThinkingSummary::Concise => "concise",
+            ThinkingSummary::Detailed => "detailed",
+        }
+    }
+}
+
+/// Parse `BUZZ_AGENT_THINKING_SUMMARY`. Pure (env-free) for testability.
+///
+/// Unset or empty → `Auto` (the safe default that works for all Responses-capable models).
+/// Invalid value → startup error.
+pub fn parse_thinking_summary(raw: Option<&str>) -> Result<ThinkingSummary, String> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok(ThinkingSummary::Auto),
+        Some("auto") => Ok(ThinkingSummary::Auto),
+        Some("concise") => Ok(ThinkingSummary::Concise),
+        Some("detailed") => Ok(ThinkingSummary::Detailed),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_THINKING_SUMMARY={other} not supported (use auto|concise|detailed)"
+        )),
+    }
 }
 
 /// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
@@ -770,6 +843,12 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Reasoning summary mode for the OpenAI Responses route. Controls the
+    /// `reasoning.summary` field emitted alongside `reasoning.effort`; only
+    /// takes effect when `thinking_effort` is also set. Default `Auto`.
+    /// Set via `BUZZ_AGENT_THINKING_SUMMARY`. Ignored on Anthropic, Chat
+    /// Completions, and OpenRouter routes.
+    pub thinking_summary: ThinkingSummary,
     /// Emit Anthropic `cache_control` breakpoints on the stable prefix
     /// (tools + system prompt) and the rolling conversation tail. Default on;
     /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Consulted on every route that
@@ -885,6 +964,9 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            thinking_summary: parse_thinking_summary(
+                env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
+            )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
         };
         cfg.validate()?;
@@ -928,6 +1010,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
         }
     }
@@ -1416,6 +1499,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_thinking_summary_round_trips_all_values() {
+        for (raw, expected) in [
+            ("auto", ThinkingSummary::Auto),
+            ("concise", ThinkingSummary::Concise),
+            ("detailed", ThinkingSummary::Detailed),
+        ] {
+            assert_eq!(
+                parse_thinking_summary(Some(raw)).unwrap(),
+                expected,
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thinking_summary_unset_and_empty_yield_auto() {
+        assert_eq!(parse_thinking_summary(None).unwrap(), ThinkingSummary::Auto);
+        assert_eq!(
+            parse_thinking_summary(Some("")).unwrap(),
+            ThinkingSummary::Auto
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("   ")).unwrap(),
+            ThinkingSummary::Auto
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_is_case_insensitive() {
+        assert_eq!(
+            parse_thinking_summary(Some("DETAILED")).unwrap(),
+            ThinkingSummary::Detailed
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("  Concise  ")).unwrap(),
+            ThinkingSummary::Concise
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_rejects_unknown_value() {
+        let err = parse_thinking_summary(Some("verbose")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_SUMMARY=verbose"), "{err}");
+        assert!(err.contains("auto|concise|detailed"), "{err}");
+    }
+
+    #[test]
+    fn thinking_summary_as_str_mapping() {
+        assert_eq!(ThinkingSummary::Auto.as_str(), "auto");
+        assert_eq!(ThinkingSummary::Concise.as_str(), "concise");
+        assert_eq!(ThinkingSummary::Detailed.as_str(), "detailed");
+    }
+
+    #[test]
     fn thinking_effort_anthropic_budget_tokens_mapping() {
         assert_eq!(ThinkingEffort::Low.anthropic_budget_tokens(), 1_024);
         assert_eq!(ThinkingEffort::Medium.anthropic_budget_tokens(), 8_192);
@@ -1711,6 +1848,56 @@ mod tests {
         assert_eq!(t["type"], "adaptive");
         let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
         assert_eq!(oc["effort"], "max");
+    }
+
+    // ---- anthropic_thinking_config: display:"summarized" in all enabled shapes ----
+
+    #[test]
+    fn anthropic_thinking_config_adaptive_emits_display_summarized() {
+        // Adaptive families (Opus 4.7, Sonnet 5, Fable 5, etc.) must include
+        // display:"summarized" so thinking text is returned, not omitted.
+        for model in &[
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-5-20250901",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            let (thinking, _) = anthropic_thinking_config(model, ThinkingEffort::High, 32_768);
+            let t = thinking
+                .unwrap_or_else(|| panic!("thinking must be present for adaptive model {model}"));
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for adaptive model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_manual_budget_emits_display_summarized() {
+        // Manual-budget families (claude-3.x, opus-4-5) must also include
+        // display:"summarized" so thinking text is returned.
+        for model in &["claude-3-7-sonnet-20250219", "claude-opus-4-5"] {
+            let (thinking, _) = anthropic_thinking_config(model, ThinkingEffort::High, 65_536);
+            let t = thinking.unwrap_or_else(|| {
+                panic!("thinking must be present for manual-budget model {model}")
+            });
+            assert_eq!(
+                t["display"], "summarized",
+                "display:summarized must be present for manual-budget model {model}: got {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_omitted_when_no_thinking_has_no_display_field() {
+        // Models that don't produce a thinking field at all should have no display key.
+        let (thinking, _) =
+            anthropic_thinking_config("claude-haiku-4-5", ThinkingEffort::High, 32_768);
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for unknown model"
+        );
     }
 
     // ---- clamp_adaptive_effort — per-model clamping tests ----
@@ -2143,7 +2330,7 @@ mod tests {
 
     #[test]
     fn anthropic_thinking_config_mythos_preview_emits_adaptive_and_effort() {
-        // Mythos Preview — default-on adaptive thinking.
+        // Mythos Preview — Always on adaptive thinking.
         let (thinking, output_config) =
             anthropic_thinking_config("claude-mythos-preview", ThinkingEffort::Low, 32_768);
         let t = thinking.expect("thinking must be present for claude-mythos-preview");

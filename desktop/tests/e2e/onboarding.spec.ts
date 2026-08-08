@@ -202,8 +202,23 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   const bannerBox = await banner.boundingBox();
   const personaMentionBox = await personaMention.boundingBox();
   const composerBox = await composer.boundingBox();
+  const dockBackdropBox = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .boundingBox();
+  const guidanceLayer = page.getByTestId("welcome-composer-guidance-layer");
+  const guidanceBackdrop = page.getByTestId(
+    "welcome-composer-guidance-backdrop",
+  );
+  const guidanceBackdropBox = await guidanceBackdrop.boundingBox();
 
-  if (!bannerBox || !personaMentionBox || !composerBox) {
+  if (
+    !bannerBox ||
+    !personaMentionBox ||
+    !composerBox ||
+    !dockBackdropBox ||
+    !guidanceBackdropBox
+  ) {
     throw new Error("Could not measure welcome composer banner layout");
   }
 
@@ -212,11 +227,40 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
   expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
+  expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
+  expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
+  expect(
+    Math.abs(
+      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
+    ),
+  ).toBeLessThanOrEqual(1);
+  const [guidanceZIndex, backdropZIndex] = await Promise.all([
+    guidanceLayer.evaluate((element) =>
+      Number(window.getComputedStyle(element).zIndex),
+    ),
+    page
+      .getByTestId("composer-dock-backdrop")
+      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
+  ]);
+  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  expect(
+    await page
+      .getByTestId("channel-composer-overlay")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(1);
+  expect(
+    await page
+      .getByTestId("composer-dock-backdrop")
+      .getByTestId("welcome-composer-guidance-layer")
+      .count(),
+  ).toBe(0);
 
   const radii = await banner.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
       backdropFilter: styles.backdropFilter,
+      backgroundColor: styles.backgroundColor,
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
       filter: styles.filter,
@@ -227,11 +271,24 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
       willChange: styles.willChange,
     };
   });
+  const composerBackgroundColor = await composer.evaluate(
+    (element) => window.getComputedStyle(element).backgroundColor,
+  );
+  const dockBackdropFilter = await page
+    .getByTestId("composer-dock-backdrop")
+    .locator("div")
+    .evaluate((element) => window.getComputedStyle(element).backdropFilter);
+  const guidanceBackdropFilter = await guidanceBackdrop.evaluate(
+    (element) => window.getComputedStyle(element).backdropFilter,
+  );
 
   expect(radii.topLeft).toBe(radii.topRight);
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
   expect(radii.backdropFilter).toBe("none");
+  expect(radii.backgroundColor).not.toBe(composerBackgroundColor);
+  expect(dockBackdropFilter).not.toBe("none");
+  expect(guidanceBackdropFilter).toBe(dockBackdropFilter);
   expect(radii.filter).toBe("none");
   expect(radii.transform).toBe("none");
   expect(radii.willChange).toBe("auto");
@@ -385,6 +442,11 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
 ) {
   const banner = page.getByTestId("welcome-composer-guide-banner");
   const channelIntro = page.getByTestId("message-channel-intro");
+  const composer = page.getByTestId("message-composer");
+  const initialComposerBox = await composer.boundingBox();
+  if (!initialComposerBox) {
+    throw new Error("Could not measure the Welcome composer");
+  }
 
   await page.getByTestId("message-input").fill("Thanks @Fizz");
   await page.getByTestId("send-message").click();
@@ -403,6 +465,17 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
   await expect(channelIntro).toBeVisible();
+  const completeComposerBox = await composer.boundingBox();
+  expect(completeComposerBox).not.toBeNull();
+  expect(
+    Math.abs((completeComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
+  await expect(banner).toHaveCount(0, { timeout: 6_000 });
+  const hiddenComposerBox = await composer.boundingBox();
+  expect(hiddenComposerBox).not.toBeNull();
+  expect(
+    Math.abs((hiddenComposerBox?.y ?? 0) - initialComposerBox.y),
+  ).toBeLessThanOrEqual(1);
 }
 
 async function getMockChannels(page: Page) {
@@ -728,6 +801,32 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+});
+
+test("imported-key users can skip out of harness setup", async ({ page }) => {
+  // Regression: importing an existing key sets the onboarding state machine's
+  // "continuing" marker, which pinned the stage to onboarding even after
+  // complete() ran — so Skip/Next silently did nothing. The fresh-key skip
+  // tests never exercised the import path, so this gap shipped. Prove an
+  // imported-key user actually leaves onboarding on Skip.
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await page.getByTestId("onboarding-setup-skip").click();
+
+  // Reaching community onboarding proves machine onboarding completed rather
+  // than staying pinned on the setup step.
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-2")).toHaveCount(0);
 });
 
 test("first-launch encrypted backup import asks for a passphrase and continues", async ({
@@ -2912,27 +3011,6 @@ test("first-run onboarding keeps the shell hidden and lands on private Welcome a
   await expectWelcomeGuideIntro(page);
 });
 
-function retryToast(page: Page, title: string) {
-  return page
-    .locator("[data-sonner-toast][data-removed='false']")
-    .filter({ hasText: title });
-}
-
-async function retryToastAction(
-  page: Page,
-  { command, title }: { command: string; title: string },
-) {
-  const activeToast = retryToast(page, title);
-  await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-  const before = await commandCount(page, command);
-  await activeToast
-    .getByRole("button", { name: "Retry" })
-    .dispatchEvent("click");
-  await expect.poll(() => commandCount(page, command)).toBeGreaterThan(before);
-}
-
 async function commandCount(page: Page, command: string) {
   return page.evaluate(
     (target) =>
@@ -2942,16 +3020,14 @@ async function commandCount(page: Page, command: string) {
   );
 }
 
-test("failed starter channel retries recreate actionable toasts", async ({
+test("failed public starter channel setup does not show a retry toast", async ({
   page,
 }) => {
   const starterError = "Mock starter channel setup failed.";
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError, starterError],
-    },
+    { ensureStarterChannelsErrors: [starterError, starterError] },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -2960,45 +3036,12 @@ test("failed starter channel retries recreate actionable toasts", async ({
   await completeProfileOnboarding(page);
 
   await expectPrivateWelcomeLanding(page);
-  const title = "Couldn't set up starter channels";
-  const activeToast = retryToast(page, title);
-  await expect(activeToast).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(activeToast).toContainText(starterError);
   await expect(
-    activeToast.getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-});
-
-test("successful starter channel retry clears its actionable toast", async ({
-  page,
-}) => {
-  const starterError = "Mock starter channel setup failed.";
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      ensureStarterChannelsErrors: [starterError, starterError],
-    },
-    { skipOnboardingSeed: true },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await completeProfileOnboarding(page);
-
-  const title = "Couldn't set up starter channels";
-  await expect(retryToast(page, title)).toContainText(starterError);
-  await retryToastAction(page, {
-    command: "ensure_starter_channels",
-    title,
-  });
-  await expect(retryToast(page, title)).toHaveCount(0);
-  await expectWelcomeView(page);
-  await expectStarterChannels(page);
+    page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Couldn't set up starter channels" }),
+  ).toHaveCount(0);
+  expect(await commandCount(page, "ensure_starter_channels")).toBe(2);
 });
 
 test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {

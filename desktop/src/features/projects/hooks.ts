@@ -62,6 +62,7 @@ import {
 } from "./projectModels";
 import {
   buildProjectsFromFetcher,
+  type FetchProjectEventsExhaustively,
   fetchProjectEventsExhaustively,
 } from "./projectEnumeration";
 import { projectMatchesRouteId } from "./projectRoutes";
@@ -163,9 +164,7 @@ export function eventToProject(
 }
 
 export async function fetchProjects(
-  fetchExhaustively: (
-    kinds: number[],
-  ) => Promise<RelayEvent[]> = fetchProjectEventsExhaustively,
+  fetchExhaustively: FetchProjectEventsExhaustively = fetchProjectEventsExhaustively,
 ): Promise<Project[]> {
   // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
   // is the pure, Tauri-free core of this operation. That helper's javadoc

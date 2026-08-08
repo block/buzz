@@ -18,6 +18,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
 import { KIND_SURFACE } from "@/shared/constants/kinds";
 import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
+import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type InboxDisplayMessage = InboxContextMessage & {
@@ -220,6 +221,10 @@ export function InboxMessageRow({
                   isKnownAgentPubkey,
                 )}
                 content={message.content}
+                messageId={message.id}
+                linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                  timelineMessage.tags,
+                )}
                 customEmoji={customEmoji}
                 mentionNames={message.mentionNames}
                 mentionPubkeysByName={message.mentionPubkeysByName}

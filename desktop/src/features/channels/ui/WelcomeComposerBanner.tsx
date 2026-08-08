@@ -2,6 +2,7 @@ import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Bot, Check } from "lucide-react";
 
+import { ComposerDockGlassBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { cn } from "@/shared/lib/cn";
 
 const WELCOME_PERSONA_NAMES = ["Fizz"] as const;
@@ -412,5 +413,31 @@ export function WelcomeComposerBanner({
         </motion.div>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+type WelcomeComposerGuidanceLayerProps = WelcomeComposerBannerProps & {
+  children: React.ReactNode;
+};
+
+export function WelcomeComposerGuidanceLayer({
+  children,
+  settingUp,
+  state,
+}: WelcomeComposerGuidanceLayerProps) {
+  return (
+    <div
+      className="absolute inset-x-0 bottom-full z-[-1]"
+      data-testid="welcome-composer-guidance-layer"
+    >
+      <div className="relative">
+        <ComposerDockGlassBackdrop
+          className="absolute inset-x-5 top-0 bottom-3 z-0 rounded-t-2xl"
+          testId="welcome-composer-guidance-backdrop"
+        />
+        {children}
+        <WelcomeComposerBanner settingUp={settingUp} state={state} />
+      </div>
+    </div>
   );
 }

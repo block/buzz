@@ -17,6 +17,7 @@ import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
 import { KIND_SURFACE } from "@/shared/constants/kinds";
 import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
+import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import { formatRelativeTime } from "../lib/time";
@@ -122,6 +123,9 @@ function ReplyRow({
             channelNames={channelNames}
             className="text-sm"
             content={reply.content}
+            messageId={reply.eventId}
+            linkPreviewsSuppressed={hasLinkPreviewSuppression(reply.tags)}
+            linkPreviewTags={reply.tags}
             imetaByUrl={parseImetaTags(reply.tags)}
             mentionNames={replyMentionNames}
             mentionPubkeysByName={replyMentionPubkeysByName}
@@ -271,6 +275,9 @@ export function ForumThreadPanel({
                 channelNames={channelNames}
                 className="text-sm"
                 content={post.content}
+                messageId={post.eventId}
+                linkPreviewsSuppressed={hasLinkPreviewSuppression(post.tags)}
+                linkPreviewTags={post.tags}
                 imetaByUrl={parseImetaTags(post.tags)}
                 mentionNames={postMentionNames}
                 mentionPubkeysByName={postMentionPubkeysByName}

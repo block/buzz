@@ -138,7 +138,6 @@ test("Buzz shared compute explains automatic model selection", async ({
   });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await chooseSharedComputeProvider(page);
 
   await expect
@@ -167,7 +166,6 @@ test("create agent persists Buzz shared compute with auto model", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill(agentName);
 
   await chooseSharedComputeProvider(page);
@@ -175,9 +173,12 @@ test("create agent persists Buzz shared compute with auto model", async ({
   const model = page.locator("#persona-model");
   await expect(model).toContainText("Automatic");
   await page.getByTestId("persona-dialog-submit").click();
-  await expect(
-    page.getByRole("heading", { name: "Agent created" }),
-  ).toBeVisible({ timeout: 10_000 });
+  const createdToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Agent created" });
+  await expect(createdToast).toBeVisible({ timeout: 10_000 });
+  await expect(createdToast).toHaveCount(1);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   const createPayload = await page.evaluate((name) => {
     const log = (
@@ -211,7 +212,6 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
 
   await page.locator("#persona-display-name").fill(agentName);
   await page
@@ -252,10 +252,12 @@ test("create agent supports parallelism and system prompt overrides", async ({
   // the definition (agents always start after creation).
   await page.getByTestId("persona-dialog-submit").click();
 
-  await expect(
-    page.getByRole("heading", { name: "Agent created" }),
-  ).toBeVisible({ timeout: 10_000 });
-  await page.getByRole("button", { name: "Done" }).click();
+  const createdToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Agent created" });
+  await expect(createdToast).toBeVisible({ timeout: 10_000 });
+  await expect(createdToast).toHaveCount(1);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,

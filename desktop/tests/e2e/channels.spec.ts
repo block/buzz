@@ -3774,7 +3774,7 @@ test("channel header actions show tooltips", async ({ page }) => {
   }
 });
 
-test("members sidebar collapses same-persona managed agents", async ({
+test("members sidebar retains distinct same-persona managed agents", async ({
   page,
 }) => {
   const inChannelAgentPubkey =
@@ -3824,8 +3824,8 @@ test("members sidebar collapses same-persona managed agents", async ({
   ).toHaveCount(0);
   await expect(
     page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
-  ).toHaveCount(0);
-  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
+  ).toBeVisible();
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
 test("private-channel members cannot add people without owner/admin", async ({
