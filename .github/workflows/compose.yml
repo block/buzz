@@ -1,0 +1,33 @@
+name: Production Compose
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/compose/**"
+      - "prometheus.yml"
+      - ".github/workflows/compose.yml"
+  pull_request:
+    paths:
+      - "deploy/compose/**"
+      - "prometheus.yml"
+      - ".github/workflows/compose.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compose-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Validate production Compose renders
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Check deployment scripts
+        run: shellcheck deploy/compose/run.sh deploy/compose/test.sh
+      - name: Render base, TLS, and development stacks
+        run: deploy/compose/test.sh
