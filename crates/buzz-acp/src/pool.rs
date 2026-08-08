@@ -2183,20 +2183,6 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            let raw_turn_text = agent.acp.take_accumulated_text();
-            let turn_text = clean_agent_text_response(&raw_turn_text);
-            if !turn_text.is_empty() {
-                if let (PromptSource::Channel(channel_id), Some(ref b)) = (&source, &batch) {
-                    let thread_tags = b
-                        .events
-                        .last()
-                        .map(|be| crate::queue::parse_thread_tags(&be.event))
-                        .unwrap_or_default();
-                    post_failure_notice(&ctx.rest_client, *channel_id, &thread_tags, &turn_text)
-                        .await;
-                }
-            }
-
             send_prompt_result(
                 &result_tx,
                 &turn_id,
@@ -3877,64 +3863,6 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
     }
-}
-
-pub(crate) fn clean_agent_text_response(text: &str) -> String {
-    let mut cleaned = text.to_string();
-
-    if let Some(pos) = cleaned.rfind("```json") {
-        let block = &cleaned[pos..];
-        if block.contains("reply_to")
-            || block.contains("channel")
-            || block.contains("command")
-            || block.contains("accept")
-            || block.contains("event_id")
-        {
-            cleaned.truncate(pos);
-        }
-    }
-    if let Some(pos) = cleaned.rfind("```python") {
-        let block = &cleaned[pos..];
-        if block.contains("reply_to")
-            || block.contains("publish_response")
-            || block.contains("channel")
-            || block.contains("event_id")
-            || block.contains("execute")
-        {
-            cleaned.truncate(pos);
-        }
-    }
-    if let Some(pos) = cleaned.rfind("{\"accept\"") {
-        cleaned.truncate(pos);
-    }
-    if let Some(pos) = cleaned.rfind("{\"accepted\"") {
-        cleaned.truncate(pos);
-    }
-    if let Some(pos) = cleaned.rfind("{\"reply_to\"") {
-        cleaned.truncate(pos);
-    }
-    if let Some(pos) = cleaned.rfind("call:buzz-dev-mcp") {
-        cleaned.truncate(pos);
-    }
-    if let Some(pos) = cleaned.rfind("Call reply_to") {
-        cleaned.truncate(pos);
-    }
-
-    cleaned = cleaned
-        .replace("<|tool_call>", "")
-        .replace("<|tool_calls>", "")
-        .replace("<|im_end|>", "")
-        .replace("<|endoftext|>", "")
-        .replace("<|im_start|>", "");
-
-    let trimmed = cleaned.trim();
-    if trimmed.starts_with("Step 1:")
-        && (trimmed.contains("reply_to_mention") || trimmed.contains("execute the reply"))
-    {
-        return String::new();
-    }
-
-    trimmed.to_string()
 }
 
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
@@ -7066,17 +6994,5 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
-    }
-
-    #[test]
-    fn test_clean_agent_text_response_python_and_json_cleaning() {
-        let python_code = "Step 1: Acknowledge the request.\nStep 2: reply with the requested message.\n\n```python\ndef reply_to_mention(event_id, channel_uuid):\n    pass\n```\nStep 3: execute the reply.\n\n```python\nreply_to_mention()\n```";
-        assert_eq!(super::clean_agent_text_response(python_code), "");
-
-        let cli_json = "I'll set up those two tasks and draft the message.\n\n[Draft]\n@Bumble, please ask @Honey to introduce herself.\n\n{\"accept\": true, \"event_id\": \"5c32b8c3d5879d942cc...\"}";
-        assert_eq!(
-            super::clean_agent_text_response(cli_json),
-            "I'll set up those two tasks and draft the message.\n\n[Draft]\n@Bumble, please ask @Honey to introduce herself."
-        );
     }
 }
