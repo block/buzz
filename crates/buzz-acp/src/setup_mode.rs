@@ -73,7 +73,7 @@ pub(crate) enum AcpAvailabilityStatus {
 use crate::{
     author_allowed,
     config::Config,
-    event_mentions_agent, filter,
+    effective_inbound_author, event_mentions_agent, filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
 
@@ -382,6 +382,18 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     let publisher = relay.event_publisher();
     let rest_client = relay.rest_client();
+    let trusted_relay_pubkey = match rest_client.relay_self_pubkey().await {
+        Ok(pubkey) => {
+            tracing::info!("setup-mode: trusted relay workflow signer: {pubkey}");
+            Some(pubkey)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "setup-mode: failed to resolve trusted relay workflow signer; workflow attribution disabled: {error}"
+            );
+            None
+        }
+    };
 
     let channel_info = crate::pool::ChannelInfoResolver::new(channel_info_map, rest_client.clone());
 
@@ -428,7 +440,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // Apply the same author gate as normal mode so the nudge only goes
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
-        let author_hex = buzz_event.event.pubkey.to_hex();
+        let author_hex =
+            effective_inbound_author(&buzz_event.event, trusted_relay_pubkey.as_deref());
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,
