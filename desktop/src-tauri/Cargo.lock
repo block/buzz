@@ -11063,6 +11063,7 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
