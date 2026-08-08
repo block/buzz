@@ -14,6 +14,7 @@ pub mod patches;
 pub mod pr;
 pub mod projects;
 pub mod reactions;
+pub mod relay;
 pub mod repos;
 pub mod social;
 pub mod upload;
