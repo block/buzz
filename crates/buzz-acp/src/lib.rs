@@ -3360,6 +3360,28 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Returns true when an [`acp::AcpError::AgentError`] actually reports a dead
+/// agent *process* — i.e., the underlying adapter's child has exited but the
+/// adapter wrapped it as a JSON-RPC application error instead of the
+/// transport-class [`acp::AcpError::AgentExited`].
+///
+/// #4127: the Claude Code adapter (and others) surface their child-process
+/// death as `AgentError { code: -32603, message: "..exited unexpectedly" }`.
+/// Routing that through the application-error arm returns the corpse to the
+/// pool, poisoning every subsequent turn on the slot with the same error.
+///
+/// The exact substring is the wording adapters use for their "the child has
+/// exited" case (`buzz-acp`'s canonical form in [`acp::AcpError::AgentExited`]
+/// is the same phrase, keeping this in lockstep). False positives trigger an
+/// extra respawn — strictly better than the alternative (a slot that stays
+/// dead until process restart).
+fn is_agent_exit_error(error: &acp::AcpError) -> bool {
+    let acp::AcpError::AgentError { message, .. } = error else {
+        return false;
+    };
+    message.contains("exited unexpectedly")
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3673,13 +3695,19 @@ fn handle_prompt_result(
         }
         // Errors fall into two categories:
         //
-        // 1. Transport-class (Io, WriteTimeout, Timeout, Protocol): the stdio
-        //    pipe may be corrupted or the agent desynchronized. These are fatal
-        //    to the agent regardless of whether they occurred during session
-        //    creation or an active prompt — respawn unconditionally.
+        // 1. Transport-class (Io, WriteTimeout, Timeout, Protocol, AgentExited,
+        //    and AgentError whose message reports the child process exited —
+        //    see #4127): the stdio pipe may be corrupted or the agent process
+        //    itself is dead. These are fatal to the slot regardless of whether
+        //    they occurred during session creation or an active prompt —
+        //    respawn unconditionally. Some adapters surface child-process death
+        //    as `AgentError` instead of the dedicated `AgentExited` variant; we
+        //    recognise that shape via `is_agent_exit_error` so the corpse does
+        //    not round-trip through the pool.
         //
-        // 2. Application-class (IdleTimeout, HardTimeout, Json): the pipe is
-        //    intact but the prompt failed. Return the agent to the pool so it
+        // 2. Application-class (IdleTimeout, HardTimeout, Json, remaining
+        //    AgentError shapes): the pipe is intact and the agent process is
+        //    alive, but the prompt failed. Return the agent to the pool so it
         //    can be reused for the next event.
 
         // Intentional cancel — agent is healthy, return it to the pool.
@@ -3703,7 +3731,8 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
-            );
+                    | acp::AcpError::AgentExited
+            ) || is_agent_exit_error(e);
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
@@ -7427,6 +7456,60 @@ mod error_outcome_emission_tests {
             !is_auth_error(&timeout),
             "WriteTimeout must not be classified as auth error"
         );
+    }
+
+    // ── is_agent_exit_error classification (#4127) ──────────────────────────
+
+    #[test]
+    fn is_agent_exit_error_matches_adapter_exited_unexpectedly_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32603,
+            message: "Internal error: The Claude Agent process exited unexpectedly".to_string(),
+        };
+        assert!(
+            is_agent_exit_error(&e),
+            "adapter-wrapped child-process death must be classified as exit-class"
+        );
+    }
+
+    #[test]
+    fn is_agent_exit_error_rejects_other_agent_error_messages() {
+        // Auth errors, schema errors, and rate-limit errors must NOT be
+        // reclassified as exit-class — they don't imply a dead process and
+        // respawning on them wastes the slot's restart budget.
+        for (code, message) in [
+            (
+                -32000,
+                "API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+            ),
+            (-32601, "Method not found"),
+            (-32602, "Invalid params"),
+            (
+                -32000,
+                "API Error: 429 rate limited — please retry after 30 seconds",
+            ),
+        ] {
+            let e = acp::AcpError::AgentError {
+                code,
+                message: message.to_string(),
+            };
+            assert!(
+                !is_agent_exit_error(&e),
+                "{message} must NOT be classified as exit-class"
+            );
+        }
+    }
+
+    #[test]
+    fn is_agent_exit_error_rejects_transport_and_other_variants() {
+        // Non-AgentError variants must never be classified as exit-class —
+        // they're already handled by their own transport/timeout arms.
+        let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
+        assert!(!is_agent_exit_error(&io));
+        let idle = acp::AcpError::IdleTimeout(std::time::Duration::from_secs(1));
+        assert!(!is_agent_exit_error(&idle));
+        let protocol = acp::AcpError::Protocol("bad handshake".to_string());
+        assert!(!is_agent_exit_error(&protocol));
     }
 
     // ── auth error dead-letter behavior ────────────────────────────────────
