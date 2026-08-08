@@ -376,6 +376,9 @@ fn runtime_env_vars(persona: &LoadedPersona) -> Vec<(String, String)> {
                     vars.push(("BUZZ_AGENT_PROVIDER".to_owned(), p.to_owned()));
                 }
             }
+            Some("antigravity") | Some("buzz-acp-antigravity") => {
+                vars.push(("GEMINI_MODEL".to_owned(), model_id.to_owned()));
+            }
             _ => {
                 if let Some(p) = provider {
                     vars.push(("GOOSE_PROVIDER".to_owned(), p.to_owned()));

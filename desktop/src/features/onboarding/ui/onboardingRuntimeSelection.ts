@@ -5,6 +5,7 @@ export const ONBOARDING_RUNTIME_ORDER = [
   "codex",
   "goose",
   "buzz-agent",
+  "antigravity",
 ];
 
 const VISIBLE_ONBOARDING_RUNTIME_IDS = new Set<string>(

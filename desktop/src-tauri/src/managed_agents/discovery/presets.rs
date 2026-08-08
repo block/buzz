@@ -91,6 +91,16 @@ pub(super) fn preset_catalog_entry(
 
 pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
     PresetHarness {
+        id: "antigravity",
+        label: "Antigravity",
+        command: "buzz-acp-antigravity",
+        args: &[],
+        install_instructions_url: "https://github.com/block/buzz/tree/main/acp-harnesses/antigravity",
+        install_hint: "Buzz talks to Google DeepMind's Antigravity through the Antigravity ACP harness.",
+        underlying_cli: None,
+    },
+
+    PresetHarness {
         id: "devin",
         label: "Devin",
         command: "devin",
