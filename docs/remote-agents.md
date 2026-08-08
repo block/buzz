@@ -1084,7 +1084,7 @@ individually:
 | source | env var |
 |---|---|
 | `relay_url` | `BUZZ_RELAY_URL` |
-| `private_key_nsec` | `BUZZ_PRIVATE_KEY` and `NOSTR_PRIVATE_KEY` (the git helpers read the latter) |
+| `private_key_nsec` | `BUZZ_PRIVATE_KEY` and `NOSTR_PRIVATE_KEY` (git helpers prefer `NOSTR_PRIVATE_KEY`, then fall back to `BUZZ_PRIVATE_KEY`) |
 | `auth_tag` | `BUZZ_AUTH_TAG` (omitted when null; then `launch.owner_pubkey` → `BUZZ_ACP_AGENT_OWNER` is REQUIRED — §Launch data owner rule) |
 | `launch.command` | `BUZZ_ACP_AGENT_COMMAND` — the *name*, resolved against the image's own PATH; never a forwarded host path |
 | `launch.args` | `BUZZ_ACP_AGENT_ARGS`, comma-joined |

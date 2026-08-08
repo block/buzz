@@ -20,6 +20,7 @@ fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
         .stderr(Stdio::piped())
         .current_dir(std::env::temp_dir())
         .env_remove("NOSTR_PRIVATE_KEY")
+        .env_remove("BUZZ_PRIVATE_KEY")
         .env_remove("BUZZ_AUTH_TAG")
         .env_remove("GIT_CONFIG_COUNT")
         // Prevent git config on the test machine from supplying credentials.
@@ -352,5 +353,88 @@ fn bad_keyfile_permissions() {
     assert!(
         stderr.contains("insecure permissions"),
         "expected 'insecure permissions' in stderr, got:\n{stderr}"
+    );
+}
+
+/// The helper must accept `BUZZ_PRIVATE_KEY` as a fallback when `NOSTR_PRIVATE_KEY`
+/// is not set, so users who export the ecosystem-standard env get the right
+/// identity (regression for #4712).
+#[test]
+fn buzz_private_key_only() {
+    let nsec = fresh_nsec();
+    let keys = Keys::parse(&nsec).expect("valid nsec");
+    let out = run_helper(&valid_input(), &[("BUZZ_PRIVATE_KEY", &nsec)]);
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let credential = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("credential="))
+        .expect("credential output");
+    let event_json = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .expect("base64 credential");
+    let event: nostr::Event = serde_json::from_slice(&event_json).expect("NIP-98 event");
+
+    assert!(event.verify().is_ok(), "event must verify");
+    assert_eq!(
+        event.pubkey.to_hex(),
+        keys.public_key().to_hex(),
+        "helper must sign with the BUZZ_PRIVATE_KEY identity"
+    );
+}
+
+/// When both identity env vars are set to different values, `NOSTR_PRIVATE_KEY`
+/// wins for backward compatibility and the helper warns that `BUZZ_PRIVATE_KEY`
+/// is being ignored.
+#[test]
+fn both_envs_set_and_different_warns() {
+    let nostr_keys = Keys::generate();
+    let buzz_keys = Keys::generate();
+    let nostr_nsec = nostr_keys.secret_key().to_bech32().unwrap();
+    let buzz_nsec = buzz_keys.secret_key().to_bech32().unwrap();
+
+    let out = run_helper(
+        &valid_input(),
+        &[
+            ("NOSTR_PRIVATE_KEY", &nostr_nsec),
+            ("BUZZ_PRIVATE_KEY", &buzz_nsec),
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let credential = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("credential="))
+        .expect("credential output");
+    let event_json = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .expect("base64 credential");
+    let event: nostr::Event = serde_json::from_slice(&event_json).expect("NIP-98 event");
+
+    assert!(event.verify().is_ok(), "event must verify");
+    assert_eq!(
+        event.pubkey.to_hex(),
+        nostr_keys.public_key().to_hex(),
+        "NOSTR_PRIVATE_KEY must take precedence"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning:"),
+        "expected a warning on stderr when BUZZ_PRIVATE_KEY is set but unused, got:\n{stderr}"
     );
 }
