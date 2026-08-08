@@ -222,16 +222,16 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+By default, the ACP harness subscribes to actionable stream kinds (9 messages, 40003 edits that add a mention, 46010 workflow approvals, and 40007 reminders). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
 
 **CLI flags:**
 ```bash
-buzz-acp --kinds 9,46010,40007,45001,45002,45003 --no-mention-filter
+buzz-acp --kinds 9,40003,46010,40007,45001,45002,45003 --no-mention-filter
 ```
 
 **Or with `--subscribe all`:**
 ```bash
-buzz-acp --subscribe all --kinds 9,46010,40007,45001,45002,45003
+buzz-acp --subscribe all --kinds 9,40003,46010,40007,45001,45002,45003
 ```
 
 **Per-channel config:**
