@@ -70,6 +70,27 @@ typedef PairingSocketFactory =
       required void Function(Object? error) onDisconnected,
     });
 
+
+String pairingEndpointNotFoundMessage(String relayUrl) {
+  final sanitized = relayUrl.trim();
+  if (sanitized.isEmpty) {
+    return 'Pairing endpoint not found (404). The relay advertises NIP-43 without '
+        'a working /pair route. Ask the operator to set BUZZ_PAIRING_RELAY_URL or '
+        'route /pair to buzz-pair-relay, then create a new QR code on desktop.';
+  }
+  return 'Pairing endpoint $sanitized not found (404). The relay advertises NIP-43 '
+      'without a working /pair route. Ask the operator to set BUZZ_PAIRING_RELAY_URL '
+      'or route /pair to buzz-pair-relay, then create a new QR code on desktop.';
+}
+
+bool pairingLooksLikeMissingLegacyEndpoint(Object error, {String? relayUrl}) {
+  final message = error.toString().toLowerCase();
+  final mentions404 = message.contains('404') || message.contains('not found');
+  final legacyPath = relayUrl?.contains('/pair') == true || message.contains('/pair');
+  return mentions404 && legacyPath;
+}
+
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   PairingSocket? _socket;
@@ -179,6 +200,7 @@ class PairingNotifier extends Notifier<PairingState> {
 
   Future<void> _pairNipAb(String uri) async {
     state = const PairingState(status: PairingStatus.connecting);
+    String? pairingRelayUrl;
 
     try {
       // 1. Parse the nostrpair:// URI.
@@ -188,7 +210,8 @@ class PairingNotifier extends Notifier<PairingState> {
       _sendIdentityToSource =
           Uri.parse(uri).queryParameters['mode'] == 'recover';
 
-      final relayWsUrl = qr.relays.first;
+      pairingRelayUrl = qr.relays.first;
+      final relayWsUrl = pairingRelayUrl!;
 
       // 2. Generate ephemeral keypair.
       final keychain = nostr.Keys.generate();
@@ -272,13 +295,16 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: _friendlyErrorMessage(e),
+        errorMessage: _friendlyErrorMessage(e, relayUrl: pairingRelayUrl),
       );
     }
   }
 
-  static String _friendlyErrorMessage(Object error) {
+  static String _friendlyErrorMessage(Object error, {String? relayUrl}) {
     final message = error.toString();
+    if (pairingLooksLikeMissingLegacyEndpoint(error, relayUrl: relayUrl)) {
+      return pairingEndpointNotFoundMessage(relayUrl ?? '');
+    }
     if (message.contains('SocketException') ||
         message.contains('Connection refused') ||
         message.contains('Network is unreachable') ||
