@@ -357,6 +357,61 @@ function appendExpandedReplies(params: {
   }
 }
 
+/**
+ * Initial ancestor-expansion set for a freshly opened thread panel.
+ *
+ * The panel starts with `expandedReplyIds = ∅`, so a depth-1 child that has
+ * any descendant renders as a collapsed `MessageThreadSummaryRow` and every
+ * deeper reply under it is omitted from `visibleReplies`. That collapse is
+ * correct for long-standing branches the user has already seen, but it
+ * silently hides depth-2+ replies the user has NOT seen (the classic case:
+ * an agent anchors a reply to a *non-latest* thread message — parent=B,
+ * depth=2 — after the viewer last read the thread; see block/buzz#3799).
+ *
+ * This helper names the minimal set of intermediate ancestors that must
+ * start expanded so depth-2+ replies are visible at open. It does NOT
+ * force-expand every reply (the LP4 open-at-level contract for manual
+ * drilling is preserved); it only un-collapses exactly the intermediate
+ * parents that otherwise would swallow a descendant's first paint. Every
+ * depth-2+ reply present expands its chain. (Callers that want to scope the
+ * seed to a subset — e.g. only currently-unread replies — can filter
+ * `messages` before calling rather than passing a second set here.)
+ */
+export function computeInitialExpandedReplyIds(
+  messages: TimelineMessage[],
+  openThreadHeadId: string,
+): Set<string> {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const expanded = new Set<string>();
+
+  for (const message of messages) {
+    // We only care about replies nested at depth >= 2. A depth-1 child is
+    // always reachable via appendExpandedReplies regardless of expansion
+    // state, so only deeper branches can be hidden by the collapse.
+    if (message.depth < 2) {
+      continue;
+    }
+
+    // Walk ancestors from the reply up to (but not including) the thread
+    // head, adding each intermediate id. Stops on missing parents, on
+    // already-pinned chains, or after a hop bound to keep malformed event
+    // graphs from hanging the panel.
+    let ancestorId = message.parentId;
+    let hops = 0;
+    const maxHops = messages.length + 1;
+    while (ancestorId && ancestorId !== openThreadHeadId && hops < maxHops) {
+      if (expanded.has(ancestorId)) {
+        break;
+      }
+      expanded.add(ancestorId);
+      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
+      hops += 1;
+    }
+  }
+
+  return expanded;
+}
+
 function buildVisibleThreadReplies(params: {
   openThreadHeadId: string;
   directChildrenByParentId: Map<string, TimelineMessage[]>;

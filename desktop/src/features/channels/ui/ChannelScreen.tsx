@@ -52,6 +52,7 @@ import {
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
+import { useThreadPanelInitialExpansion } from "@/features/messages/useThreadPanelInitialExpansion";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -433,6 +434,23 @@ export function ChannelScreen({
     messages: timelineMessages,
     onSearchHit: handleFindSearchHit,
   });
+  // block/buzz#3799: seed the panel's initial expansion from the ancestors of
+  // any depth-2+ reply so an agent reply anchored to a *non-latest* message
+  // renders on first paint instead of hiding inside a collapsed summary row.
+  useThreadPanelInitialExpansion({
+    activeChannel,
+    threadReplyEvents,
+    openThreadHeadId: effectiveOpenThreadHeadId,
+    setExpandedThreadReplyIds,
+    currentPubkey,
+    currentAvatarUrl: currentProfile?.avatarUrl ?? null,
+    profiles: messageProfiles,
+    members: channelMembers,
+    personaLookup,
+    respondToLookup,
+    relaySelfPubkey,
+    ownerProfiles: messageOwnerProfiles,
+  });
   const threadPanelData = useIndependentThreadPanel({
     activeChannel,
     channelEvents: resolvedMessages,
@@ -471,6 +489,7 @@ export function ChannelScreen({
     threadReplyTargetId,
     expandedThreadReplyIds,
     openThreadMessages: threadPanelData.visibleReplies,
+    activeThreadMessages: threadPanelData.messages,
     clearChannelUnreadSource,
     getChannelReadAt,
     getMessageReadAt,

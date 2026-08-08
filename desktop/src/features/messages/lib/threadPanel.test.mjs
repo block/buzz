@@ -8,6 +8,7 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
   buildThreadSummaryFromVisibleEntries,
+  computeInitialExpandedReplyIds,
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
@@ -700,4 +701,212 @@ test("buildMainTimelineEntries merges local knowledge over the relay floor", () 
     entry.summary?.participants.map((participant) => participant.id),
     ["relay", "local"],
   );
+});
+
+// --- block/buzz#3799: missing replies in thread view after non-latest anchor ---
+
+test("computeInitialExpandedReplyIds expands the ancestor chain of a depth-2 reply", () => {
+  // Geometry from block/buzz#3799: A is the thread head; the user's own B is
+  // a depth-1 child; then an agent anchors its reply R to B (depth 2).
+  // Without auto-expansion the panel renders B as a collapsed summary row and
+  // R is invisible — the exact reported bug.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+    tags: [["e", "a", "", "reply"]],
+  });
+  const r = message({
+    id: "r",
+    createdAt: 3,
+    parentId: "b",
+    rootId: "a",
+    depth: 2,
+    tags: [
+      ["e", "a", "", "root"],
+      ["e", "b", "", "reply"],
+    ],
+  });
+
+  assert.deepEqual(
+    [...computeInitialExpandedReplyIds([root, b, r], "a")].sort(),
+    ["b"],
+  );
+});
+
+test("computeInitialExpandedReplyIds keeps depth-1-only threads collapsed", () => {
+  // No depth-2 reply present → nothing to expand, preserving the LP4
+  // open-at-level contract for ordinary threads.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+    tags: [["e", "a", "", "reply"]],
+  });
+  const c = message({
+    id: "c",
+    createdAt: 3,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+    tags: [["e", "a", "", "reply"]],
+  });
+
+  assert.deepEqual([...computeInitialExpandedReplyIds([root, b, c], "a")], []);
+});
+
+test("computeInitialExpandedReplyIds scoped to unread depth-2 replies expands only their chains", () => {
+  // Two branches: b (has depth-2 reply r1, unread) and d (has depth-2 reply
+  // r2, already read). Because the helper takes no second unread set, the
+  // caller scopes by filtering the message list first (per the helper doc):
+  // only b should be auto-expanded.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+  });
+  const r1 = message({
+    id: "r1",
+    createdAt: 3,
+    parentId: "b",
+    rootId: "a",
+    depth: 2,
+  });
+  const d = message({
+    id: "d",
+    createdAt: 4,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+  });
+  const r2 = message({
+    id: "r2",
+    createdAt: 5,
+    parentId: "d",
+    rootId: "a",
+    depth: 2,
+  });
+  const unreadDepth2Plus = [root, b, r1, d, r2].filter(
+    (m) => m.depth < 2 || m.id === "r1",
+  );
+
+  assert.deepEqual(
+    [...computeInitialExpandedReplyIds(unreadDepth2Plus, "a")].sort(),
+    ["b"],
+  );
+});
+
+test("computeInitialExpandedReplyIds handles a depth-3 reply by pinning every intermediate parent", () => {
+  // Chain a → b (d1) → c (d2) → r (d3): both b and c must be expanded for r
+  // to render. Iterative chains should not stop at the first ancestor.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+  });
+  const c = message({
+    id: "c",
+    createdAt: 3,
+    parentId: "b",
+    rootId: "a",
+    depth: 2,
+  });
+  const r = message({
+    id: "r",
+    createdAt: 4,
+    parentId: "c",
+    rootId: "a",
+    depth: 3,
+  });
+
+  assert.deepEqual(
+    [...computeInitialExpandedReplyIds([root, b, c, r], "a")].sort(),
+    ["b", "c"],
+  );
+});
+
+test("computeInitialExpandedReplyIds tolerates cycles and missing parents without hanging", () => {
+  // Malformed event graphs (cycle b↔c, or a reply whose parent is absent)
+  // must not hang the panel — the hop bound and the already-pinned early-exit
+  // cap the walk. The head id is never added to the expansion set.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "c",
+    rootId: "a",
+    depth: 2,
+  });
+  const c = message({
+    id: "c",
+    createdAt: 3,
+    parentId: "b",
+    rootId: "a",
+    depth: 2,
+  });
+  const orphan = message({
+    id: "r",
+    createdAt: 4,
+    parentId: "missing",
+    rootId: "a",
+    depth: 2,
+  });
+
+  const expanded = computeInitialExpandedReplyIds([root, b, c, orphan], "a");
+  assert.ok(
+    !expanded.has("a"),
+    "thread head must never be in the expansion set",
+  );
+  // Cycle terminates because revisiting an already-pinned ancestor breaks the
+  // walk; the missing parent terminates because messageById lookup fails.
+  assert.ok(expanded.size <= 3);
+});
+
+test("buildThreadPanelData with computed initial expansion surfaces a depth-2 reply under a collapsed depth-1 branch (#3799 regression)", () => {
+  // End-to-end geometry: panel opens with the initial expansion computed
+  // from the present message set. The depth-2 reply R under B must land in
+  // visibleReplies immediately, not require a manual expand click.
+  const root = message({ id: "a", createdAt: 1 });
+  const b = message({
+    id: "b",
+    createdAt: 2,
+    parentId: "a",
+    rootId: "a",
+    depth: 1,
+  });
+  const r = message({
+    id: "r",
+    createdAt: 3,
+    parentId: "b",
+    rootId: "a",
+    depth: 2,
+    tags: [
+      ["e", "a", "", "root"],
+      ["e", "b", "", "reply"],
+    ],
+  });
+  const messages = [root, b, r];
+  const initialExpanded = computeInitialExpandedReplyIds(messages, "a");
+
+  const panel = buildThreadPanelData(messages, "a", "a", initialExpanded);
+
+  assert.deepEqual(
+    panel.visibleReplies.map((entry) => entry.message.id),
+    ["b", "r"],
+  );
+  // B's branch is expanded, so it renders as live rows (summary=null), not
+  // as a collapsed MessageThreadSummaryRow.
+  assert.equal(panel.visibleReplies[0].summary, null);
 });

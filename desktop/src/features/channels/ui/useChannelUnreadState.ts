@@ -7,7 +7,10 @@ import {
   buildRepliesByRootId,
   collectReplyDescendantIds,
 } from "@/features/channels/lib/subtreeCreatedAt";
-import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
+import {
+  computeThreadReplyUnreadCounts,
+  unionScopeMessages,
+} from "@/features/channels/lib/threadReplyUnreadCounts";
 import { computeThreadBadgeCounts } from "@/features/channels/lib/threadBadgeCounts";
 import {
   useStableArrayShallow,
@@ -35,6 +38,7 @@ type UseChannelUnreadStateOptions = {
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
   openThreadMessages?: MainTimelineEntry[];
+  activeThreadMessages?: TimelineMessage[];
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
   clearChannelUnreadSource: (
@@ -67,6 +71,7 @@ export function useChannelUnreadState({
   threadReplyTargetId,
   expandedThreadReplyIds,
   openThreadMessages,
+  activeThreadMessages,
   getChannelReadAt,
   getMessageReadAt,
   clearChannelUnreadSource,
@@ -146,6 +151,22 @@ export function useChannelUnreadState({
     () => buildDirectReplyIdsByParentId(timelineMessages),
     [timelineMessages],
   );
+  // block/buzz#3799 (scope-b): build one *widened* id-tree over the
+  // channel-window timeline ∪ the open thread's fetched message set, so the
+  // per-row subtree-unread walk reaches a fresh depth-2+ reply that lives
+  // only in `threadRepliesKey` while the channel-window projection lags.
+  // Kept separate from directReplyIdsByParentId because it is consumed only
+  // by threadReplyUnreadCounts; the other memoized readers stay window-scoped.
+  const widenedDirectReplyIdsByParentId = React.useMemo(() => {
+    if (!activeThreadMessages || activeThreadMessages.length === 0) {
+      return directReplyIdsByParentId;
+    }
+    const seen = new Set(timelineMessages.map((m) => m.id));
+    const additions = activeThreadMessages.filter((m) => !seen.has(m.id));
+    if (additions.length === 0) return directReplyIdsByParentId;
+    const unioned = [...timelineMessages, ...additions];
+    return buildDirectReplyIdsByParentId(unioned);
+  }, [activeThreadMessages, directReplyIdsByParentId, timelineMessages]);
   const repliesByRootId = React.useMemo(
     () => buildRepliesByRootId(timelineMessages),
     [timelineMessages],
@@ -158,6 +179,11 @@ export function useChannelUnreadState({
     (messageId: string) =>
       collectReplyDescendantIds(messageId, directReplyIdsByParentId),
     [directReplyIdsByParentId],
+  );
+  const getReplyDescendantIdsForMessageWidened = React.useCallback(
+    (messageId: string) =>
+      collectReplyDescendantIds(messageId, widenedDirectReplyIdsByParentId),
+    [widenedDirectReplyIdsByParentId],
   );
   const createdAtByMessageId = React.useMemo(
     () => buildCreatedAtByMessageId(timelineMessages),
@@ -313,13 +339,22 @@ export function useChannelUnreadState({
   // unread descendant with no separate expanded-subtree gate. readStateVersion
   // is an intentional recompute trigger so the counts re-read after any marker
   // advances.
+  // block/buzz#3799 (scope-b): the scope must be the UNION of the channel
+  // window projection and the open thread's fetched message set — a fresh
+  // depth-2+ reply may live only in `threadRepliesKey` while the window
+  // projection lags, and without it the collapsed ancestor row's badge is 0.
+  const threadUnreadScope = React.useMemo(
+    () => unionScopeMessages(timelineMessages, activeThreadMessages ?? []),
+    [timelineMessages, activeThreadMessages],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
   const threadReplyUnreadCounts = React.useMemo(
     () =>
       openThreadHeadId
         ? computeThreadReplyUnreadCounts({
-            timelineMessages,
-            subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
+            timelineMessages: threadUnreadScope,
+            subtreeReplyIds:
+              getReplyDescendantIdsForMessageWidened(openThreadHeadId),
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
             getReadAt: getMessageReadAt,
@@ -330,10 +365,10 @@ export function useChannelUnreadState({
     [
       openThreadHeadId,
       threadMessages,
-      timelineMessages,
+      threadUnreadScope,
       getMessageReadAt,
       expandedThreadReplyIds,
-      getReplyDescendantIdsForMessage,
+      getReplyDescendantIdsForMessageWidened,
       currentPubkey,
       isMsgForcedUnread,
       readStateVersion,
