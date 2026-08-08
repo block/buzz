@@ -17,6 +17,8 @@ use crate::{
 use super::{pending, retain_persona_pending, trim_optional, trim_required};
 
 #[cfg(test)]
+mod behavior_cascade_tests;
+#[cfg(test)]
 mod name_propagation_tests;
 
 /// Return value of the `update_persona` command. Uses flatten so all
@@ -56,6 +58,53 @@ fn propagate_persona_name_rename(
 
 /// Profile sync params collected under the store lock for async relay publish.
 type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
+
+/// Propagate a persona definition's behavioral-group edit to linked agent
+/// instances. Discrimination rule (mirrors the pool-name rule in
+/// [`propagate_persona_name_rename`]): an instance whose `respond_to` still
+/// equals the PRE-edit definition mode (`old_mode`) was inheriting → it
+/// adopts the new definition value; an instance carrying a different value
+/// holds an explicit instance-level override → preserved. Every linked
+/// instance's definition-mirror fields (`definition_respond_to` &c.) refresh
+/// regardless, so future mint/inspect paths see the current definition bytes.
+///
+/// Returns `true` when at least one linked record was touched (caller must
+/// persist the records store).
+fn propagate_persona_behavior(
+    records: &mut [ManagedAgentRecord],
+    persona_id: &str,
+    old_mode: crate::managed_agents::RespondTo,
+    persona: &AgentDefinition,
+) -> Result<bool, String> {
+    let mut linked = false;
+    for record in records.iter_mut() {
+        if record.persona_id.as_deref() != Some(persona_id) {
+            continue;
+        }
+        linked = true;
+
+        record.definition_respond_to = persona.respond_to.clone();
+        record.definition_respond_to_allowlist = persona.respond_to_allowlist.clone();
+        record.definition_parallelism = persona.parallelism;
+
+        if record.respond_to == old_mode {
+            // Still inheriting — adopt the new definition value as the
+            // instance's effective gate. `None` on the definition means "no
+            // explicit mode": the harness default (owner-only) applies. The
+            // allowlist travels with the mode exactly as
+            // `apply_persona_behavior` stored it (empty for non-allowlist).
+            record.respond_to = match persona.respond_to.as_deref() {
+                Some(wire) => crate::managed_agents::RespondTo::parse_wire(wire)?,
+                None => crate::managed_agents::RespondTo::default(),
+            };
+            record.respond_to_allowlist = persona.respond_to_allowlist.clone();
+            if let Some(parallelism) = persona.parallelism {
+                record.parallelism = parallelism;
+            }
+        }
+    }
+    Ok(linked)
+}
 
 #[tauri::command]
 pub async fn update_persona(
@@ -111,6 +160,14 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
+            // Pre-edit behavioral signature — the definition value linked
+            // instances were minted against. Used post-save to cascade
+            // behavior edits ONLY to instances that were still inheriting
+            // (record.respond_to == pre-edit definition value), never to
+            // instances carrying an explicit instance-level override.
+            let old_respond_to = persona.respond_to.clone();
+            let old_respond_to_allowlist = persona.respond_to_allowlist.clone();
+            let old_parallelism = persona.parallelism;
 
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
@@ -133,6 +190,29 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 
             let result = persona.clone();
             save_personas(&app, &personas)?;
+
+            // Cascade behavior edits to linked instance records that were
+            // still inheriting the definition value. Discrimination rule
+            // (mirrors the pool-name rule for display_name): an instance
+            // whose record.respond_to already equals the OLD definition value
+            // was inheriting → adopt the new value + mirrors. An instance
+            // whose record.respond_to differs is an explicit override →
+            // preserve it; only the definition mirror fields refresh. The
+            // empty-allowlist-ignores-mode asymmetry in apply_persona_behavior
+            // (non-allowlist modes store an empty list) is preserved verbatim.
+            let behavior_changed = old_respond_to != result.respond_to
+                || old_respond_to_allowlist != result.respond_to_allowlist
+                || old_parallelism != result.parallelism;
+            if behavior_changed {
+                let mut records = load_managed_agents(&app)?;
+                let old_mode = old_respond_to
+                    .as_deref()
+                    .and_then(|wire| crate::managed_agents::RespondTo::parse_wire(wire).ok())
+                    .unwrap_or_default();
+                if propagate_persona_behavior(&mut records, &result.id, old_mode, &result)? {
+                    save_managed_agents(&app, &records)?;
+                }
+            }
 
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
