@@ -718,9 +718,17 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// startup budget (see block/buzz#3355). Skip that unrelated global startup
 /// by default; an operator or persona can still opt back in by setting the
 /// variable explicitly.
+///
+/// Claude: set a 200,000-token automatic-compaction window for Buzz-owned
+/// children only. Claude Code caps this to the selected model's context
+/// capacity. An inherited parent value or explicit persona value wins, so an
+/// operator can select a different window without modifying Claude settings.
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
         "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            &[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")]
+        }
         _ => &[],
     }
 }
@@ -1641,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn default_agent_env_recognizes_hermes_identities() {
+    fn default_agent_env_recognizes_runtime_identities() {
         for command in [
             "hermes",
             "hermes-agent",
@@ -1656,10 +1664,24 @@ mod tests {
                 "unexpected env defaults for {command}"
             );
         }
-        for command in ["goose", "codex-acp", "claude-agent-acp", "buzz-agent", ""] {
+        for command in [
+            "claude-agent-acp",
+            "claude-code-acp",
+            "claude-code",
+            "claudecode",
+            "/opt/claude/bin/claude-agent-acp",
+            r"C:\Users\test\AppData\Roaming\npm\CLAUDE-CODE-ACP.cmd",
+        ] {
+            assert_eq!(
+                default_agent_env(command),
+                &[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")],
+                "unexpected env defaults for {command}"
+            );
+        }
+        for command in ["goose", "codex-acp", "buzz-agent", ""] {
             assert!(
                 default_agent_env(command).is_empty(),
-                "non-Hermes command must have no env defaults: {command}"
+                "unrecognized command must have no env defaults: {command}"
             );
         }
     }

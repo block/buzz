@@ -2933,28 +2933,51 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn spawn_applies_runtime_env_defaults_with_extra_env_precedence() {
-        const VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
-        if std::env::var_os(VAR).is_some() {
+        const HERMES_VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
+        const CLAUDE_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+        if std::env::var_os(HERMES_VAR).is_some() || std::env::var_os(CLAUDE_VAR).is_some() {
             // Inherited parent values win over both layers; the default and
             // override behavior below is unobservable in such an environment.
             return;
         }
 
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[]).await,
+            spawn_named_and_read_child_env("hermes-acp", HERMES_VAR, &[]).await,
             "1",
-            "Hermes spawns must default {VAR}=1"
+            "Hermes spawns must default {HERMES_VAR}=1"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())]).await,
+            spawn_named_and_read_child_env(
+                "hermes-acp",
+                HERMES_VAR,
+                &[(HERMES_VAR.into(), "0".into())]
+            )
+            .await,
             "0",
             "an explicit extra_env entry must override the runtime default"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
-            "<unset>",
-            "non-Hermes spawns must not receive Hermes defaults"
+            spawn_named_and_read_child_env("claude-agent-acp", CLAUDE_VAR, &[]).await,
+            "200000",
+            "Claude spawns must default {CLAUDE_VAR}=200000"
         );
+        assert_eq!(
+            spawn_named_and_read_child_env(
+                "claude-agent-acp",
+                CLAUDE_VAR,
+                &[(CLAUDE_VAR.into(), "300000".into())]
+            )
+            .await,
+            "300000",
+            "an explicit extra_env entry must override the runtime default"
+        );
+        for agent in ["goose", "codex-acp", "other-agent"] {
+            assert_eq!(
+                spawn_named_and_read_child_env(agent, CLAUDE_VAR, &[]).await,
+                "<unset>",
+                "non-Claude spawn {agent} must not receive Claude defaults"
+            );
+        }
     }
 
     #[tokio::test]
