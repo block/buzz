@@ -32,6 +32,7 @@ import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
+import { handleMentionBoundaryBeforeInput } from "./mentionBoundaryBeforeInput";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -530,6 +531,10 @@ export function useRichTextEditor({
           class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
           spellcheck: "true",
+        },
+        handleDOMEvents: {
+          beforeinput: (view, event) =>
+            handleMentionBoundaryBeforeInput(view, event as InputEvent),
         },
         // ArrowUp in an empty composer → edit your last message (Slack
         // parity). Handled here in ProseMirror's own DOM `keydown` hook —
