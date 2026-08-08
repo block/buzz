@@ -32,7 +32,7 @@ pub(crate) const MAX_TEAM_SNAPSHOT_PNG_BYTES: usize = 50 * 1024 * 1024;
 const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 const ZIP_MAGIC_PREFIX: [u8; 2] = [0x50, 0x4b];
 const LEGACY_TEAM_ERROR: &str =
-    "Legacy team files are no longer supported. Export a buzz-team-snapshot v1 .team.json or .team.png instead.";
+    "Legacy team files are no longer supported. Export a buzz-team-snapshot v1 .buzzteam or .team.png instead.";
 
 /// Decode a canonical team snapshot, rejecting retired flat team JSON and
 /// persona-pack ZIP files with a migration-oriented error.
@@ -72,6 +72,14 @@ pub(crate) fn decode_team_snapshot_from_bytes(file_bytes: &[u8]) -> Result<TeamS
     }
 
     decode_team_snapshot_json(file_bytes)
+}
+
+fn snapshot_file_name(slug: &str, is_png: bool) -> String {
+    if is_png {
+        format!("{slug}.team.png")
+    } else {
+        format!("{slug}.buzzteam")
+    }
 }
 
 fn parse_format_is_png(format: &str) -> Result<bool, String> {
@@ -388,16 +396,16 @@ async fn materialize_team_snapshot_bytes(
                 "Team snapshot exceeds the 50 MiB size limit for .team.png files.".to_string(),
             );
         }
-        (bytes, format!("{slug}.team.png"))
+        (bytes, snapshot_file_name(&slug, true))
     } else {
         let bytes = encode_team_snapshot_json(&snapshot)
-            .map_err(|e| format!("Failed to encode .team.json: {e}"))?;
+            .map_err(|e| format!("Failed to encode .buzzteam: {e}"))?;
         if bytes.len() > MAX_TEAM_SNAPSHOT_JSON_BYTES {
             return Err(
-                "Team snapshot exceeds the 25 MiB size limit for .team.json files.".to_string(),
+                "Team snapshot exceeds the 25 MiB size limit for .buzzteam files.".to_string(),
             );
         }
-        (bytes, format!("{slug}.team.json"))
+        (bytes, snapshot_file_name(&slug, false))
     };
     Ok(EncodedTeamSnapshotPayload {
         file_bytes,
@@ -431,8 +439,8 @@ pub async fn export_team_snapshot(
         save_bytes_with_dialog(
             &app,
             &payload.file_name,
-            "Team snapshot",
-            &["json"],
+            "Buzz team",
+            &["buzzteam"],
             &payload.file_bytes,
         )
         .await

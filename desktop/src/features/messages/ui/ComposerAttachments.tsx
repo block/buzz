@@ -111,15 +111,21 @@ function formatAttachmentSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type SnapshotKind = "agent" | "team";
+export type SnapshotKind = "agent" | "team";
 
-function getSnapshotKind(attachment: ImetaMedia): SnapshotKind | null {
+export function getSnapshotKind(
+  attachment: Pick<ImetaMedia, "filename" | "sha256">,
+): SnapshotKind | null {
   const filename = attachment.filename?.toLowerCase();
   if (attachment.sha256.length !== 64) return null;
   if (filename?.endsWith(".agent.png") || filename?.endsWith(".agent.json")) {
     return "agent";
   }
-  if (filename?.endsWith(".team.png") || filename?.endsWith(".team.json")) {
+  if (
+    filename?.endsWith(".team.png") ||
+    filename?.endsWith(".team.json") ||
+    filename?.endsWith(".buzzteam")
+  ) {
     return "team";
   }
   return null;

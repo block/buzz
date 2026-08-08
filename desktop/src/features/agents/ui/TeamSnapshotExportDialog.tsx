@@ -39,7 +39,7 @@ const MEMORY_LEVELS: {
 ];
 
 const FORMAT_OPTIONS: { value: SnapshotFormat; label: string }[] = [
-  { value: "json", label: "JSON" },
+  { value: "json", label: "Buzz team" },
   { value: "png", label: "PNG" },
 ];
 
@@ -57,7 +57,7 @@ export function TeamSnapshotExportDialog({
 }: TeamSnapshotExportDialogProps) {
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
-  const [format, setFormat] = React.useState<SnapshotFormat>("png");
+  const [format, setFormat] = React.useState<SnapshotFormat>("json");
   const shouldReduceMotion = useReducedMotion();
   const showMemoryWarning = memoryLevel !== "none";
   const modalResizeTransition = shouldReduceMotion
@@ -67,7 +67,7 @@ export function TeamSnapshotExportDialog({
   React.useEffect(() => {
     if (open) {
       setMemoryLevel("none");
-      setFormat("png");
+      setFormat("json");
     }
   }, [open]);
 

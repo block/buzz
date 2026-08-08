@@ -1,7 +1,17 @@
 import { createRootRoute } from "@tanstack/react-router";
 
 import { AppShell } from "@/app/AppShell";
+import { NativeTeamSnapshotBridge } from "@/features/agents/NativeTeamSnapshotBridge";
 
 export const Route = createRootRoute({
-  component: AppShell,
+  component: RootRoute,
 });
+
+function RootRoute() {
+  return (
+    <>
+      <NativeTeamSnapshotBridge />
+      <AppShell />
+    </>
+  );
+}
