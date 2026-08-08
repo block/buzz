@@ -12,7 +12,10 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  formatOwnerLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -84,6 +87,7 @@ export const MessageRow = React.memo(
     isUnread,
     layoutVariant = "default",
     message,
+    currentPubkey,
     onCollapseDepthGuide,
     onCollapseDepthGuideHoverChange,
     onCollapseDescendants,
@@ -123,6 +127,7 @@ export const MessageRow = React.memo(
     isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
+    currentPubkey?: string;
     onCollapseDepthGuide?: (message: TimelineMessage) => void;
     onCollapseDepthGuideHoverChange?: (
       message: TimelineMessage,
@@ -235,11 +240,11 @@ export const MessageRow = React.memo(
       },
       [knownAgentPubkeys, profiles],
     );
-    const profilePopoverRole =
+    const displayedAuthorIsAgent =
       message.role === "bot" ||
-      (message.pubkey && isKnownAgentPubkey(message.pubkey))
-        ? "bot"
-        : message.role;
+      message.isAgent === true ||
+      Boolean(message.pubkey && isKnownAgentPubkey(message.pubkey));
+    const profilePopoverRole = displayedAuthorIsAgent ? "bot" : message.role;
     const agentMentionPubkeysByName = React.useMemo(() => {
       if (!mentionPubkeysByName) {
         return undefined;
@@ -272,7 +277,8 @@ export const MessageRow = React.memo(
       message.body,
       message.tags,
     );
-    const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
+    const bodyOffsetClass =
+      layoutVariant === "thread-reply" || emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
     const openVideoReviewAt = useOpenVideoReviewAt();
@@ -394,6 +400,8 @@ export const MessageRow = React.memo(
               channelNames={channelNames}
               className={cn(
                 "max-w-full text-sm",
+                layoutVariant === "thread-reply" &&
+                  "leading-relaxed [&>p+p]:mt-2 [&>ol]:space-y-1.5 [&>ul]:space-y-1.5",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -533,10 +541,18 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
-    const agentOwnerNode = message.isAgent ? (
+    const agentOwnerPubkey =
+      message.ownerPubkey ??
+      (message.pubkey
+        ? profiles?.[normalizePubkey(message.pubkey)]?.ownerPubkey
+        : null);
+    const agentOwnerLabel =
+      message.ownerLabel ??
+      formatOwnerLabel(agentOwnerPubkey, currentPubkey, profiles);
+    const agentOwnerNode = displayedAuthorIsAgent ? (
       <MessageAgentOwner
-        ownerLabel={message.ownerLabel}
-        ownerPubkey={message.ownerPubkey}
+        ownerLabel={agentOwnerLabel}
+        ownerPubkey={agentOwnerPubkey}
       />
     ) : null;
 
@@ -853,7 +869,7 @@ export const MessageRow = React.memo(
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
-            "py-1",
+            isThreadReplyLayout ? "py-2" : "py-1",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
               : isThreadReplyLayout
@@ -902,6 +918,7 @@ export const MessageRow = React.memo(
     prev.message.isAgent === next.message.isAgent &&
     prev.message.ownerPubkey === next.message.ownerPubkey &&
     prev.message.ownerLabel === next.message.ownerLabel &&
+    prev.currentPubkey === next.currentPubkey &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
     prev.message.time === next.message.time &&

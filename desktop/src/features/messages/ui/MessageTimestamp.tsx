@@ -1,8 +1,10 @@
 import {
   formatFullDateTime,
+  formatMessageTimestamp,
   formatTimeWithoutDayPeriod,
 } from "@/features/messages/lib/dateFormatters";
 import { cn } from "@/shared/lib/cn";
+import { useMinuteNow } from "@/shared/lib/useMinuteNow";
 import {
   Tooltip,
   TooltipContent,
@@ -23,7 +25,10 @@ export function MessageTimestamp({
   hideDayPeriod?: boolean;
   time: string;
 }) {
-  const displayTime = hideDayPeriod ? formatTimeWithoutDayPeriod(time) : time;
+  const now = useMinuteNow();
+  const displayTime = hideDayPeriod
+    ? formatTimeWithoutDayPeriod(time)
+    : formatMessageTimestamp(createdAt, now / 1_000);
 
   return (
     <TooltipProvider
@@ -34,7 +39,7 @@ export function MessageTimestamp({
         <TooltipTrigger asChild>
           <p
             className={cn(
-              "shrink-0 cursor-default whitespace-nowrap text-xs font-normal leading-4 tabular-nums text-muted-foreground/55",
+              "shrink-0 cursor-default whitespace-nowrap text-2xs font-normal leading-4 tabular-nums text-muted-foreground",
               className,
             )}
             data-testid="message-timestamp"

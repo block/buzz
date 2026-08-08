@@ -37,6 +37,17 @@ const SHORT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
 });
 
+const SHORT_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+});
+
+const SHORT_DATE_WITH_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+
 /** Short clock time, e.g. "2:34 PM". */
 export function formatTime(unixSeconds: number): string {
   return TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
@@ -50,6 +61,39 @@ export function formatTimeWithoutDayPeriod(time: string): string {
 /** Full date + time for tooltips, e.g. "Wednesday, April 2, 2026 at 2:34 PM". */
 export function formatFullDateTime(unixSeconds: number): string {
   return FULL_DATE_TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+}
+
+/**
+ * Compact, recency-aware message timestamp.
+ *
+ * Recent messages use terse relative units ("Just now", "8m", "3h"). From
+ * the previous calendar day through six calendar days ago, use the weekday and
+ * clock time ("Wednesday at 2:34 PM"). Older messages use a short date and
+ * clock time, adding the year only when it differs from the current year.
+ */
+export function formatMessageTimestamp(
+  unixSeconds: number,
+  nowSeconds = Date.now() / 1_000,
+): string {
+  const diffSeconds = Math.max(0, nowSeconds - unixSeconds);
+  if (diffSeconds < 60) return "Just now";
+  if (diffSeconds < 3_600) return `${Math.floor(diffSeconds / 60)}m ago`;
+  if (diffSeconds < 86_400) return `${Math.floor(diffSeconds / 3_600)}h ago`;
+
+  const date = new Date(unixSeconds * 1_000);
+  const now = new Date(nowSeconds * 1_000);
+  const calendarDayDiff = differenceInLocalCalendarDays(date, now);
+  const time = TIME_FORMATTER.format(date);
+
+  if (calendarDayDiff >= 1 && calendarDayDiff <= 6) {
+    return `${WEEKDAY_FORMATTER.format(date)} at ${time}`;
+  }
+
+  const dateLabel =
+    date.getFullYear() === now.getFullYear()
+      ? SHORT_DATE_FORMATTER.format(date)
+      : SHORT_DATE_WITH_YEAR_FORMATTER.format(date);
+  return `${dateLabel} at ${time}`;
 }
 
 /**
@@ -129,6 +173,20 @@ function isSameDayDate(a: Date, b: Date): boolean {
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
   );
+}
+
+function differenceInLocalCalendarDays(earlier: Date, later: Date): number {
+  const earlierDay = new Date(
+    earlier.getFullYear(),
+    earlier.getMonth(),
+    earlier.getDate(),
+  );
+  const laterDay = new Date(
+    later.getFullYear(),
+    later.getMonth(),
+    later.getDate(),
+  );
+  return Math.round((laterDay.getTime() - earlierDay.getTime()) / 86_400_000);
 }
 
 function formatMonthDayOrdinal(

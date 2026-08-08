@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   formatDayHeading,
+  formatMessageTimestamp,
   formatShortMonthDayOrdinal,
   formatThreadSummaryLastReplyTime,
   formatTimeWithoutDayPeriod,
@@ -79,6 +80,37 @@ test("formatTimeWithoutDayPeriod removes AM/PM suffixes", () => {
   assert.equal(formatTimeWithoutDayPeriod("8:00 AM"), "8:00");
   assert.equal(formatTimeWithoutDayPeriod("12:34\u202fPM"), "12:34");
   assert.equal(formatTimeWithoutDayPeriod("16:20"), "16:20");
+});
+
+test("formatMessageTimestamp uses compact relative units for recent messages", () => {
+  const now = new Date(2026, 7, 6, 21, 0).getTime() / 1_000;
+
+  assert.equal(formatMessageTimestamp(now - 30, now), "Just now");
+  assert.equal(formatMessageTimestamp(now - 60, now), "1m ago");
+  assert.equal(formatMessageTimestamp(now - 59 * 60, now), "59m ago");
+  assert.equal(formatMessageTimestamp(now - 60 * 60, now), "1h ago");
+  assert.equal(formatMessageTimestamp(now - 23 * 60 * 60, now), "23h ago");
+});
+
+test("formatMessageTimestamp uses weekday and time for the previous six calendar days", () => {
+  const now = new Date(2026, 7, 6, 21, 0).getTime() / 1_000;
+  const yesterday = new Date(2026, 7, 5, 20, 15).getTime() / 1_000;
+  const sixDaysAgo = new Date(2026, 6, 31, 9, 30).getTime() / 1_000;
+
+  assert.equal(formatMessageTimestamp(yesterday, now), "Wednesday at 8:15 PM");
+  assert.equal(formatMessageTimestamp(sixDaysAgo, now), "Friday at 9:30 AM");
+});
+
+test("formatMessageTimestamp uses short dates after six calendar days", () => {
+  const now = new Date(2026, 7, 6, 21, 0).getTime() / 1_000;
+  const sevenDaysAgo = new Date(2026, 6, 30, 9, 30).getTime() / 1_000;
+  const previousYear = new Date(2025, 11, 15, 14, 5).getTime() / 1_000;
+
+  assert.equal(formatMessageTimestamp(sevenDaysAgo, now), "Jul 30 at 9:30 AM");
+  assert.equal(
+    formatMessageTimestamp(previousYear, now),
+    "Dec 15, 2025 at 2:05 PM",
+  );
 });
 
 test("formatThreadSummaryLastReplyTime expands relative units", () => {
