@@ -20,6 +20,14 @@ services:
       BUZZ_GIT_REPO_PATH: /data/git
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+      # Advertised in NIP-11 so the desktop/mobile pairing client connects
+      # directly instead of falling back to the legacy "<relay>/pair"
+      # convention. Required for mobile pairing whenever
+      # BUZZ_REQUIRE_RELAY_MEMBERSHIP=true, since that flag makes the relay
+      # advertise NIP-43 (device pairing) whether or not a pairing relay is
+      # actually wired up. Points at the bundled `pairing-relay` service
+      # below, routed through /pair — see compose.caddy.yml + Caddyfile.
+      BUZZ_PAIRING_RELAY_URL: ${BUZZ_PAIRING_RELAY_URL:-}
     ports:
       - "${BUZZ_HTTP_PORT:-3000}:3000"
     volumes:
@@ -44,6 +52,32 @@ services:
       timeout: 3s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  # Sidecar relay for NIP-AB mobile device pairing (kind:24134 handshake).
+  # Same image as `relay` (the runtime bundles buzz-relay, buzz-admin, and
+  # buzz-pair-relay), just a different entrypoint. Stateless/ephemeral — no
+  # DB, Redis, or secrets required. Not published to the host: it must sit
+  # behind a reverse proxy that routes only /pair to it (see
+  # crates/buzz-pair-relay's module docs for why). compose.caddy.yml wires
+  # that route automatically; a custom reverse proxy needs the equivalent
+  # rule pointed at pairing-relay:5000 over the buzz-net network.
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    # Plain TCP connect check (buzz-pair-relay has no HTTP health endpoint —
+    # matches the tcpSocket probe used for this same binary in
+    # deploy/charts/buzz/templates/pairing-relay.yaml).
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
     networks:
       - buzz-net
