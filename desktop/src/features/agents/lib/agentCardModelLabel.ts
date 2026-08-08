@@ -19,7 +19,9 @@ import type { ManagedAgent } from "@/shared/api/types";
  * than falling through to "inherited" for lack of an instance.
  */
 export function resolveAgentCardModelLabel(input: {
-  agent: Pick<ManagedAgent, "modelSource" | "model"> | undefined;
+  agent:
+    | Pick<ManagedAgent, "modelSource" | "model" | "agentCommand">
+    | undefined;
   personaModel: string | null | undefined;
   defaultModel: string;
 }): string {
@@ -27,6 +29,9 @@ export function resolveAgentCardModelLabel(input: {
     const isInherited =
       !input.agent.modelSource || input.agent.modelSource === "global";
     if (isInherited) {
+      if (!input.defaultModel.trim() && input.agent.agentCommand === "openclaw") {
+        return "Managed by OpenClaw";
+      }
       return formatDefaultModelLabel(input.defaultModel);
     }
     return input.agent.model?.trim()
