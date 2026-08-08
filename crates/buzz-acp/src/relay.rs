@@ -51,6 +51,13 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for individual ws.send() calls. Prevents a stalled socket from
 /// wedging the background task indefinitely.
 const WS_SEND_TIMEOUT_SECS: u64 = 10;
+/// Idle-connection watchdog: if no websocket frame of ANY kind (pong, event,
+/// notice, close, error) arrives within this window, the read arm of the select
+/// loop is parked on a half-open socket and the ping loop can never fire —
+/// leaving the agent "online" but permanently silent (issue #3969). A healthy
+/// relay answers our 30s ping with a pong well inside this window, so any trip
+/// is a genuine stuck socket, not idle quiet.
+const IDLE_READ_WATCHDOG: Duration = Duration::from_secs(90);
 /// Diagnostic threshold: log when a connection has been stable for this long.
 /// The stability block resets `BgState::backoff_step` to 0 here so the next
 /// drop after a long healthy run retries at the short end of the ladder again.
@@ -1634,6 +1641,14 @@ async fn run_background_task(
     let mut connected_since = Instant::now();
     let mut stable_logged = false;
 
+    // Idle-read watchdog timestamp. `Instant::now()` resumes the loop, so
+    // storing a fresh `Instant` here implicitly pins the watchdog arm's sleep
+    // (see the `sleep_until(last_read + IDLE_READ_WATCHDOG)` select arm). The
+    // read arm and pong handler reset this to "now", so a healthy socket never
+    // trips; only a half-open socket that stops delivering ALL frames (including
+    // pongs) lets it elapse. Loop-scoped so it survives reconnects.
+    let mut last_read = Instant::now();
+
     // Pacing timer for select-integrated rate-limit drain.
     // `None` = no pending drain or budget window is open; `Some(t)` = next
     // allowed drain tick. The select! arm below fires when `t` elapses and
@@ -1799,6 +1814,10 @@ async fn run_background_task(
 
         tokio::select! {
                    raw = ws.next() => {
+                       // Any frame (pong, event, notice, close, error) or a clean
+                       // end to the stream is read activity — reset the idle
+                       // watchdog so a healthy socket never trips it.
+                       last_read = Instant::now();
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
                            Some(Ok(msg)) => {
@@ -1875,11 +1894,55 @@ async fn run_background_task(
                                connected_since = Instant::now();
                                stable_logged = false;
                            }
-                           } // end match outcome
+                            } // end match outcome
+                        }
+                    }
+
+                   // Idle-read watchdog. The read arm above resets `last_read` on
+                   // ANY inbound frame; a healthy relay also answers our 30s ping
+                   // with a pong, so this arm only fires when the socket has gone
+                   // half-open and stopped delivering ALL frames — the state where
+                   // the loop would otherwise park on `ws.next()` forever and the
+                   // ping arm could never run (issues #3969). On trip we force the
+                   // same autonomous-reconnect path a pong-timeout would.
+                   _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last_read) + IDLE_READ_WATCHDOG) => {
+                       warn!(
+                           idle_secs = IDLE_READ_WATCHDOG.as_secs(),
+                           "no frames received from relay within idle watchdog — socket half-open, reconnecting"
+                       );
+                       // try_send so recovery never stalls on a full event channel.
+                       let _ = event_tx.try_send(None);
+                       match try_autonomous_reconnect(
+                           &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                           &agent_pubkey_hex, &event_tx, &observer_control_tx,
+                           auth_tag.as_ref(),
+                       ).await {
+                           ReconnectOutcome::Shutdown => return,
+                           ReconnectOutcome::Ok => {
+                               if matches!(
+                                   drain_post_reconnect(&mut ws, &mut cmd_rx, &mut state, &agent_pubkey_hex).await,
+                                   ReconnectOutcome::Shutdown
+                               ) { return; }
+                           }
+                           ReconnectOutcome::Failed => {
+                               if matches!(
+                                   wait_for_reconnect(
+                                       &mut ws, &mut cmd_rx, &mut state, &keys, &relay_url,
+                                       &agent_pubkey_hex, &event_tx, &observer_control_tx, true,
+                                       auth_tag.as_ref(),
+                                   ).await,
+                                   ReconnectOutcome::Shutdown
+                               ) { return; }
+                           }
                        }
+                       ping_sent = false;
+                       last_pong = Instant::now();
+                       last_read = Instant::now();
+                       connected_since = Instant::now();
+                       stable_logged = false;
                    }
 
-                   cmd = cmd_rx.recv() => {
+                    cmd = cmd_rx.recv() => {
                        match cmd {
                            Some(RelayCommand::Reconnect) => {
                                if matches!(
@@ -4431,6 +4494,49 @@ mod tests {
         let frame = next_test_frame(&mut server).await;
         assert_eq!(frame[0], "REQ");
         assert_eq!(frame[1], channel_sub_id(channel_id));
+    }
+
+    #[tokio::test]
+    async fn idle_read_watchdog_fires_only_when_socket_is_silent() {
+        // Issue #3969: a half-open socket that stops delivering ALL frames parks
+        // the select loop on `ws.next()` and the ping arm can never run. The
+        // watchdog must outlive a full missed ping+pong window so it only trips
+        // on a genuinely silent socket.
+        assert!(
+            IDLE_READ_WATCHDOG > PING_INTERVAL + PONG_TIMEOUT,
+            "watchdog ({:?}) must outlive the missed ping+pong window ({:?}+{:?})",
+            IDLE_READ_WATCHDOG,
+            PING_INTERVAL,
+            PONG_TIMEOUT
+        );
+
+        // The watchdog math is `sleep_until(last_read + window)`: a stale
+        // `last_read` resolves immediately, a fresh one waits `window`. Prove
+        // both arms with a short stand-in window (the loop uses
+        // IDLE_READ_WATCHDOG; the mechanism is identical).
+        let window = Duration::from_millis(80);
+
+        // Stale timestamp (socket silent longer than `window`) ⇒ fires fast.
+        let stale = tokio::time::Instant::now() - Duration::from_millis(2 * window.as_millis() as u64);
+        let stale_fire = tokio::time::timeout(
+            Duration::from_millis(400),
+            tokio::time::sleep_until(stale + window),
+        )
+        .await;
+        assert!(
+            stale_fire.is_ok(),
+            "watchdog must fire for a socket silent longer than the window"
+        );
+
+        // Fresh timestamp (recent read activity) ⇒ waits the full `window`, so
+        // a shorter timeout does NOT trip it.
+        let fresh = tokio::time::Instant::now();
+        let fresh_fire =
+            tokio::time::timeout(window / 2, tokio::time::sleep_until(fresh + window)).await;
+        assert!(
+            fresh_fire.is_err(),
+            "watchdog must not fire while read activity is recent"
+        );
     }
 
     #[tokio::test]
