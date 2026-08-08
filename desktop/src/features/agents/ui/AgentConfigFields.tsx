@@ -18,6 +18,13 @@ import type {
   GlobalAgentConfig,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import {
@@ -207,7 +214,6 @@ export type AgentConfigFieldsProps = {
   disclosure?: AgentConfigDisclosure;
   unstyled?: boolean;
   useCustomSelect?: boolean;
-  useChevronSelectIcon?: boolean;
 };
 
 export function AgentConfigFields({
@@ -226,7 +232,6 @@ export function AgentConfigFields({
   disclosure = "full",
   unstyled = false,
   useCustomSelect = false,
-  useChevronSelectIcon = false,
 }: AgentConfigFieldsProps) {
   const shouldReduceMotion = useReducedMotion();
   const {
@@ -690,22 +695,18 @@ export function AgentConfigFields({
       value={providerSelectValue}
     />
   ) : (
-    <select
-      className={cn(
-        "flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs",
-        useChevronSelectIcon && "appearance-none pr-10",
-        selectClassName,
-      )}
-      id="global-agent-provider"
-      onChange={(e) => handleProviderChange(e.target.value)}
-      value={providerSelectValue}
-    >
-      {providerDropdownOptions.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
+    <Select onValueChange={handleProviderChange} value={providerSelectValue}>
+      <SelectTrigger className={selectClassName} id="global-agent-provider">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {providerDropdownOptions.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 
   const providerContent = providerFieldVisible ? (
@@ -716,17 +717,7 @@ export function AgentConfigFields({
       >
         Provider
       </label>
-      {!useCustomSelect && useChevronSelectIcon ? (
-        <div className="relative">
-          {providerSelect}
-          <ChevronDown
-            aria-hidden="true"
-            className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
-          />
-        </div>
-      ) : (
-        providerSelect
-      )}
+      {providerSelect}
       {isCustomProvider ? (
         <AgentConfigTextInput
           aria-label="Custom global provider ID"
@@ -838,7 +829,6 @@ export function AgentConfigFields({
             )}
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}
-            useChevronIcon={useChevronSelectIcon}
             usePersonaInputStyle={progressiveDefaults}
           />
         </div>

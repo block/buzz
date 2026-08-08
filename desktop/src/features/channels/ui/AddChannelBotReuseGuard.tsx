@@ -1,4 +1,11 @@
 import type { ManagedAgent } from "@/shared/api/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 
 type AddChannelBotReuseGuardProps = {
   reusableAgent: ManagedAgent;
@@ -23,16 +30,19 @@ export function AddChannelBotReuseGuard({
       <label className="text-sm font-medium" htmlFor="agent-instance-mode">
         Agent instance
       </label>
-      <select
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+      <Select
         disabled={disabled}
-        id="agent-instance-mode"
-        onChange={(e) => onForceNewChange(e.target.value === "new")}
+        onValueChange={(value) => onForceNewChange(value === "new")}
         value={forceNew ? "new" : "reuse"}
       >
-        <option value="reuse">Reuse existing agent</option>
-        <option value="new">Create new instance</option>
-      </select>
+        <SelectTrigger id="agent-instance-mode">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="reuse">Reuse existing agent</SelectItem>
+          <SelectItem value="new">Create new instance</SelectItem>
+        </SelectContent>
+      </Select>
       <p className="text-xs text-muted-foreground">
         <span className="font-medium text-foreground">
           {reusableAgent.name}

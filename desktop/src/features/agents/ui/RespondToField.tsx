@@ -11,6 +11,13 @@ import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
@@ -216,20 +223,25 @@ export function CreateAgentRespondToField({
           value={mode}
         />
       ) : (
-        <select
-          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-          data-testid="agent-respond-to-select"
+        <Select
           disabled={disabled}
-          id="agent-respond-to"
-          onChange={(e) => onModeChange(e.target.value as RespondToMode)}
+          onValueChange={(value) => onModeChange(value as RespondToMode)}
           value={mode}
         >
-          {RESPOND_TO_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger
+            data-testid="agent-respond-to-select"
+            id="agent-respond-to"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RESPOND_TO_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
       {disabledReason ? (
         <p

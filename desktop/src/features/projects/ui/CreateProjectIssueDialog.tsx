@@ -5,6 +5,13 @@ import type { Project, Repository } from "@/features/projects/hooks";
 import { useCreateProjectIssueMutation } from "@/features/projects/issueMutations";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
+import {
   CreateProjectWorkItemDialog,
   type CreateProjectWorkItemDialogInput,
 } from "./CreateProjectWorkItemDialog";
@@ -78,27 +85,39 @@ export function CreateProjectIssueDialog({
       title="Create an issue"
       titlePlaceholder="Describe the issue"
     >
-      <label className="block space-y-1.5 text-sm font-medium">
-        <span>Repository</span>
-        <select
-          className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
-          data-testid="create-issue-repository"
+      <div className="space-y-1.5">
+        <label
+          className="text-sm font-medium"
+          htmlFor="create-issue-repository"
+        >
+          Repository
+        </label>
+        <Select
           disabled={createMutation.isPending}
-          onChange={(event) => setRepositoryId(event.target.value)}
+          onValueChange={setRepositoryId}
           value={repository?.id ?? ""}
         >
-          {repositoryOptions.map((candidate) => (
-            <option
-              key={candidate.repository.id}
-              value={candidate.repository.id}
-            >
-              {candidate.project.repositories.length > 1
-                ? `${candidate.project.name} / ${candidate.repository.name}`
-                : candidate.project.name}
-            </option>
-          ))}
-        </select>
-      </label>
+          <SelectTrigger
+            className="h-10 rounded-lg px-3 py-0"
+            data-testid="create-issue-repository"
+            id="create-issue-repository"
+          >
+            <SelectValue placeholder="Select a repository" />
+          </SelectTrigger>
+          <SelectContent>
+            {repositoryOptions.map((candidate) => (
+              <SelectItem
+                key={candidate.repository.id}
+                value={candidate.repository.id}
+              >
+                {candidate.project.repositories.length > 1
+                  ? `${candidate.project.name} / ${candidate.repository.name}`
+                  : candidate.project.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
     </CreateProjectWorkItemDialog>
   );
 }

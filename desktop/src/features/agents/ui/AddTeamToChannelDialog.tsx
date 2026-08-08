@@ -32,6 +32,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 
 type AddTeamToChannelDialogProps = {
   team: AgentTeam | null;
@@ -205,22 +212,28 @@ export function AddTeamToChannelDialog({
               <label className="text-sm font-medium" htmlFor="team-channel-id">
                 Channel
               </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+              <Select
                 disabled={channels.length === 0 || deployMutation.isPending}
-                id="team-channel-id"
-                onChange={(event) => setChannelId(event.target.value)}
+                onValueChange={setChannelId}
                 value={channelId}
               >
-                {channels.length === 0 ? (
-                  <option value="">No channels available</option>
-                ) : null}
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    {channel.name} · {channel.visibility}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger id="team-channel-id">
+                  <SelectValue
+                    placeholder={
+                      channels.length === 0
+                        ? "No channels available"
+                        : undefined
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {channels.map((channel) => (
+                    <SelectItem key={channel.id} value={channel.id}>
+                      {channel.name} · {channel.visibility}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-1.5">
@@ -230,20 +243,23 @@ export function AddTeamToChannelDialog({
               >
                 Role
               </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+              <Select
                 disabled={deployMutation.isPending}
-                id="team-channel-role"
-                onChange={(event) =>
-                  setRole(event.target.value as Exclude<ChannelRole, "owner">)
+                onValueChange={(value) =>
+                  setRole(value as Exclude<ChannelRole, "owner">)
                 }
                 value={role}
               >
-                <option value="bot">bot</option>
-                <option value="member">member</option>
-                <option value="guest">guest</option>
-                <option value="admin">admin</option>
-              </select>
+                <SelectTrigger id="team-channel-role">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="bot">bot</SelectItem>
+                  <SelectItem value="member">member</SelectItem>
+                  <SelectItem value="guest">guest</SelectItem>
+                  <SelectItem value="admin">admin</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             {missingPersonaCount > 0 ? (

@@ -10,7 +10,13 @@ import {
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useCreateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useProjectRepoSyncStatusQuery } from "@/features/projects/repoSyncHooks";
-
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import {
   CreateProjectWorkItemDialog,
   type CreateProjectWorkItemDialogInput,
@@ -179,62 +185,80 @@ export function CreatePullRequestDialog({
       titlePlaceholder="Describe the change"
     >
       <div className="grid gap-3 rounded-xl border border-border/60 bg-muted/25 p-3 sm:grid-cols-2">
-        <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
-          <span>Repository</span>
-          <select
-            className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
-            data-testid="create-pull-request-repository"
+        <div className="space-y-1.5 text-sm font-medium sm:col-span-2">
+          <label htmlFor="create-pull-request-repository">Repository</label>
+          <Select
             disabled={createMutation.isPending}
-            onChange={(event) => setRepositoryId(event.target.value)}
+            onValueChange={setRepositoryId}
             value={repository?.id ?? ""}
           >
-            {repositoryOptions.map((candidate) => (
-              <option
-                key={candidate.repository.id}
-                value={candidate.repository.id}
-              >
-                {candidate.project.repositories.length > 1
-                  ? `${candidate.project.name} / ${candidate.repository.name}`
-                  : candidate.project.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="space-y-1.5 text-sm font-medium">
-          <span>Base</span>
-          <select
-            className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
-            data-testid="create-pull-request-base-branch"
+            <SelectTrigger
+              className="h-10 rounded-lg px-3 py-0"
+              data-testid="create-pull-request-repository"
+              id="create-pull-request-repository"
+            >
+              <SelectValue placeholder="Select a repository" />
+            </SelectTrigger>
+            <SelectContent>
+              {repositoryOptions.map((candidate) => (
+                <SelectItem
+                  key={candidate.repository.id}
+                  value={candidate.repository.id}
+                >
+                  {candidate.project.repositories.length > 1
+                    ? `${candidate.project.name} / ${candidate.repository.name}`
+                    : candidate.project.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5 text-sm font-medium">
+          <label htmlFor="create-pull-request-base-branch">Base</label>
+          <Select
             disabled={createMutation.isPending}
-            onChange={(event) => setTargetBranch(event.target.value)}
+            onValueChange={setTargetBranch}
             value={targetBranch}
           >
-            {branchOptions.map((branch) => (
-              <option key={branch} value={branch}>
-                {branch}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="space-y-1.5 text-sm font-medium">
-          <span>Compare</span>
-          <select
-            className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
-            data-testid="create-pull-request-compare-branch"
+            <SelectTrigger
+              className="h-10 rounded-lg px-3 py-0"
+              data-testid="create-pull-request-base-branch"
+              id="create-pull-request-base-branch"
+            >
+              <SelectValue placeholder="Select a branch" />
+            </SelectTrigger>
+            <SelectContent>
+              {branchOptions.map((branch) => (
+                <SelectItem key={branch} value={branch}>
+                  {branch}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5 text-sm font-medium">
+          <label htmlFor="create-pull-request-compare-branch">Compare</label>
+          <Select
             disabled={createMutation.isPending}
-            onChange={(event) => setSourceBranch(event.target.value)}
+            onValueChange={setSourceBranch}
             value={sourceBranch}
           >
-            <option disabled value="">
-              Select branch
-            </option>
-            {branchOptions.map((branch) => (
-              <option key={branch} value={branch}>
-                {branch}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger
+              className="h-10 rounded-lg px-3 py-0"
+              data-testid="create-pull-request-compare-branch"
+              id="create-pull-request-compare-branch"
+            >
+              <SelectValue placeholder="Select branch" />
+            </SelectTrigger>
+            <SelectContent>
+              {branchOptions.map((branch) => (
+                <SelectItem key={branch} value={branch}>
+                  {branch}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         {selectionError ? (
           <p className="text-xs text-muted-foreground sm:col-span-2">
             {selectionError}

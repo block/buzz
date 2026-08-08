@@ -2,8 +2,15 @@ import { Trash2 } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Textarea } from "@/shared/ui/textarea";
-import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
+import { FieldLabel } from "./workflowFormPrimitives";
 import { ACTION_LABELS, ACTION_TYPES } from "./workflowFormTypes";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import type {
@@ -172,18 +179,22 @@ function StepConfigFields({
             <FieldLabel htmlFor={`${prefix}-method`}>
               Method (optional)
             </FieldLabel>
-            <FormSelect
+            <Select
               disabled={disabled}
-              id={`${prefix}-method`}
-              onChange={(value) => onUpdate({ ...step, method: value })}
+              onValueChange={(value) => onUpdate({ ...step, method: value })}
               value={step.method ?? "POST"}
             >
-              <option value="POST">POST</option>
-              <option value="GET">GET</option>
-              <option value="PUT">PUT</option>
-              <option value="PATCH">PATCH</option>
-              <option value="DELETE">DELETE</option>
-            </FormSelect>
+              <SelectTrigger id={`${prefix}-method`}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="POST">POST</SelectItem>
+                <SelectItem value="GET">GET</SelectItem>
+                <SelectItem value="PUT">PUT</SelectItem>
+                <SelectItem value="PATCH">PATCH</SelectItem>
+                <SelectItem value="DELETE">DELETE</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <WorkflowWebhookHeadersEditor
             disabled={disabled}
@@ -362,10 +373,9 @@ export function WorkflowStepCard({
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1.5">
           <FieldLabel htmlFor={`${prefix}-action`}>Action</FieldLabel>
-          <FormSelect
+          <Select
             disabled={disabled}
-            id={`${prefix}-action`}
-            onChange={(value) => {
+            onValueChange={(value) => {
               const next = { ...step, action: value as ActionType };
               if (value === "call_webhook" && !next.method) {
                 next.method = "POST";
@@ -374,12 +384,17 @@ export function WorkflowStepCard({
             }}
             value={step.action}
           >
-            {ACTION_TYPES.map((action) => (
-              <option key={action} value={action}>
-                {ACTION_LABELS[action]}
-              </option>
-            ))}
-          </FormSelect>
+            <SelectTrigger id={`${prefix}-action`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ACTION_TYPES.map((action) => (
+                <SelectItem key={action} value={action}>
+                  {ACTION_LABELS[action]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="space-y-1.5">
           <FieldLabel htmlFor={`${prefix}-timeout-secs`}>

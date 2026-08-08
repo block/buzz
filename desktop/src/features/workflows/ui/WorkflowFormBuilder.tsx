@@ -4,9 +4,16 @@ import * as React from "react";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Textarea } from "@/shared/ui/textarea";
 import { WorkflowStepCard } from "./WorkflowStepCard";
-import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
+import { FieldLabel } from "./workflowFormPrimitives";
 import {
   DEFAULT_FORM_STATE,
   TRIGGER_LABELS,
@@ -292,10 +299,9 @@ export function WorkflowFormBuilder({
           <div className="space-y-3">
             <div className="space-y-1.5">
               <FieldLabel htmlFor="wf-trigger-type">Trigger</FieldLabel>
-              <FormSelect
+              <Select
                 disabled={disabled}
-                id="wf-trigger-type"
-                onChange={(value) =>
+                onValueChange={(value) =>
                   updateFormState({
                     ...formState,
                     trigger: { on: value as TriggerType },
@@ -303,12 +309,17 @@ export function WorkflowFormBuilder({
                 }
                 value={formState.trigger.on}
               >
-                {TRIGGER_TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {TRIGGER_LABELS[type]}
-                  </option>
-                ))}
-              </FormSelect>
+                <SelectTrigger id="wf-trigger-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TRIGGER_TYPES.map((type) => (
+                    <SelectItem key={type} value={type}>
+                      {TRIGGER_LABELS[type]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <TriggerConfigFields
               onUpdate={(trigger) => updateFormState({ ...formState, trigger })}

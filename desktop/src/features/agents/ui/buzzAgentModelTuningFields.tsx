@@ -8,6 +8,13 @@
 import * as React from "react";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import type { NumericDescriptor } from "../lib/agentConfigCore";
 import { numericTuningPlaceholder } from "../lib/agentConfigCore";
@@ -142,27 +149,33 @@ export function EffortSelectField({
           value={currentEffort}
         />
       ) : (
-        <select
-          className={cn(
-            "flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60",
-            selectClassName,
-          )}
-          data-testid={testId}
+        <Select
           disabled={disabled}
-          id={htmlFor}
-          onChange={(event) => onChange(event.target.value)}
+          onValueChange={onChange}
           value={currentEffort}
         >
-          {effortOptions.map((option) => (
-            <option
-              disabled={option.disabled}
-              key={option.value}
-              value={option.value}
-            >
-              {option.label}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger
+            className={cn(
+              "disabled:cursor-not-allowed disabled:opacity-60",
+              selectClassName,
+            )}
+            data-testid={testId}
+            id={htmlFor}
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {effortOptions.map((option) => (
+              <SelectItem
+                disabled={option.disabled}
+                key={option.value}
+                value={option.value}
+              >
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
     </div>
   );

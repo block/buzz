@@ -6,11 +6,17 @@
  */
 import * as React from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
-
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -358,7 +364,6 @@ export function AgentModelField({
   useCustomSelect = false,
   showStatusMessage = true,
   showCustomModelOption = true,
-  useChevronIcon = false,
   usePersonaInputStyle = false,
 }: {
   disabled: boolean;
@@ -403,8 +408,6 @@ export function AgentModelField({
   showStatusMessage?: boolean;
   /** Hide the explicit custom-model escape hatch in compact presentations. */
   showCustomModelOption?: boolean;
-  /** Render a controlled chevron instead of the native select indicator. */
-  useChevronIcon?: boolean;
   /** Match custom agent text inputs when this field is shown in that flow. */
   usePersonaInputStyle?: boolean;
 }) {
@@ -552,28 +555,33 @@ export function AgentModelField({
       value={modelSelectValue}
     />
   ) : (
-    <select
-      aria-required={isRequired}
-      className={cn(
-        "flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60",
-        useChevronIcon && "appearance-none pr-10",
-        selectClassName,
-      )}
+    <Select
       disabled={selectDisabled}
-      id={id}
-      onChange={(event) => handleModelSelectChange(event.target.value)}
+      onValueChange={handleModelSelectChange}
       value={modelSelectValue}
     >
-      {modelOptions.map((option) => (
-        <option
-          disabled={option.disabled}
-          key={option.value}
-          value={option.value}
-        >
-          {option.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger
+        aria-required={isRequired}
+        className={cn(
+          "disabled:cursor-not-allowed disabled:opacity-60",
+          selectClassName,
+        )}
+        id={id}
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {modelOptions.map((option) => (
+          <SelectItem
+            disabled={option.disabled}
+            key={option.value}
+            value={option.value}
+          >
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 
   return (
@@ -585,17 +593,7 @@ export function AgentModelField({
       >
         Model
       </RequiredFieldLabel>
-      {!useCustomSelect && useChevronIcon ? (
-        <div className="relative">
-          {modelSelect}
-          <ChevronDown
-            aria-hidden="true"
-            className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
-          />
-        </div>
-      ) : (
-        modelSelect
-      )}
+      {modelSelect}
       {showCustomModelInput ? (
         <AgentConfigTextInput
           aria-label="Custom model ID"
@@ -646,26 +644,32 @@ export function AgentProviderField({
       <RequiredFieldLabel htmlFor="agent-provider" isRequired={isRequired}>
         LLM provider
       </RequiredFieldLabel>
-      <select
-        aria-required={isRequired}
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
+      <Select
         disabled={disabled}
-        id="agent-provider"
-        onChange={(event) => onProviderChange(event.target.value)}
+        onValueChange={onProviderChange}
         value={providerSelectValue}
       >
-        {providerOptions.map((option) => (
-          <option
-            key={option.id}
-            value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
-          >
-            {option.id ? providerDisplayLabel(option.label) : option.label}
-          </option>
-        ))}
-        <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
-          Custom provider...
-        </option>
-      </select>
+        <SelectTrigger
+          aria-required={isRequired}
+          className="disabled:cursor-not-allowed disabled:opacity-60"
+          id="agent-provider"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {providerOptions.map((option) => (
+            <SelectItem
+              key={option.id}
+              value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
+            >
+              {option.id ? providerDisplayLabel(option.label) : option.label}
+            </SelectItem>
+          ))}
+          <SelectItem value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
+            Custom provider...
+          </SelectItem>
+        </SelectContent>
+      </Select>
       {isCustomProviderEditing ? (
         <Input
           aria-label="Custom provider ID"

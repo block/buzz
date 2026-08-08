@@ -8,6 +8,13 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 
 const FIELD_SHELL_CLASS =
   "flex min-h-11 items-center rounded-xl border border-input bg-muted/40 px-3 transition-colors hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -136,25 +143,30 @@ export function AddProjectRepositoryDialog({
               Access channel
             </label>
             <div className={FIELD_SHELL_CLASS}>
-              <select
-                className={cn(FIELD_CONTROL_CLASS, "w-full")}
-                data-testid="add-project-repository-channel"
+              <Select
                 disabled={isCreating}
-                id="add-project-repository-channel"
-                onChange={(event) => {
-                  setSelectedChannelId(event.target.value);
+                onValueChange={(value) => {
+                  setSelectedChannelId(value);
                   setErrorMessage(null);
                 }}
                 required
                 value={selectedChannelId}
               >
-                <option value="">Select a channel</option>
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    {channel.name}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger
+                  className={cn(FIELD_CONTROL_CLASS, "w-full")}
+                  data-testid="add-project-repository-channel"
+                  id="add-project-repository-channel"
+                >
+                  <SelectValue placeholder="Select a channel" />
+                </SelectTrigger>
+                <SelectContent>
+                  {channels.map((channel) => (
+                    <SelectItem key={channel.id} value={channel.id}>
+                      {channel.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <p className="text-xs text-muted-foreground">
               Members of this channel can access the repository.
