@@ -9,7 +9,11 @@ import {
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentLive,
+  type ManagedAgentPresence,
+} from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -101,7 +105,9 @@ export type ProfileSummaryViewProps = {
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   /** Mint an agent trading card. Present only for owner-managed personas. */
   onCreateCard?: () => void;
-  presenceStatus: "online" | "away" | "offline" | undefined;
+  /** Relay presence for this profile: the status plus whether the query has resolved at all
+   * (get_presence omits offline pubkeys, so an absent entry only means "offline" once loaded). */
+  presence: ManagedAgentPresence;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
@@ -130,9 +136,11 @@ const PROFILE_HERO_PRESENCE_BADGE = {
 function resolveRuntimeTabStatus({
   diagnosticsError,
   managedAgent,
+  presence,
 }: {
   diagnosticsError: boolean;
   managedAgent: ManagedAgent | undefined;
+  presence: ManagedAgentPresence;
 }): RuntimeTabStatus | undefined {
   if (diagnosticsError || managedAgent?.lastError) {
     return "error";
@@ -142,11 +150,9 @@ function resolveRuntimeTabStatus({
     return undefined;
   }
 
-  if (managedAgent.status === "running" || managedAgent.status === "deployed") {
-    return "running";
-  }
-
-  return "stopped";
+  // I3: for remote agents the green dot must follow relay presence, not the deployment record —
+  // `deployed` never clears without an `undeploy` op, which v1 does not have.
+  return isManagedAgentLive(managedAgent, presence) ? "running" : "stopped";
 }
 
 function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
@@ -215,7 +221,7 @@ export function ProfileSummaryView({
   onTabChange,
   onOpenDm,
   onCreateCard,
-  presenceStatus,
+  presence,
   profile,
   pubkey,
   relayAgent,
@@ -268,9 +274,11 @@ export function ProfileSummaryView({
     ) : (
       "View"
     );
+  const presenceStatus = presence.status;
   const runtimeTabStatus = resolveRuntimeTabStatus({
     diagnosticsError: diagnosticsErrorField !== undefined,
     managedAgent,
+    presence,
   });
 
   const tabs = React.useMemo(() => {
@@ -359,12 +367,11 @@ export function ProfileSummaryView({
           agentActionDisabled={isAgentActionPending}
           agentActionLabel={
             isOwner === true && managedAgent
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? getManagedAgentPrimaryActionLabel(managedAgent, presence)
               : undefined
           }
           agentActionLive={
-            managedAgent?.status === "running" ||
-            managedAgent?.status === "deployed"
+            managedAgent ? isManagedAgentLive(managedAgent, presence) : false
           }
           onAgentPrimaryAction={
             isOwner === true && managedAgent

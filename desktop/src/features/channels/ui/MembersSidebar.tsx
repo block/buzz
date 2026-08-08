@@ -671,6 +671,7 @@ export function MembersSidebar({
               : undefined
           }
           pairAction={pairAction}
+          presenceLoaded={memberPresenceQuery.data !== undefined}
           presenceStatus={
             memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
           }

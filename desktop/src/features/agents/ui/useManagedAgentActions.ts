@@ -271,6 +271,14 @@ export function useManagedAgentActions() {
       });
       if (agent.backend.type === "local") {
         clearActiveTurnsForAgentOnStop(pubkey);
+      } else {
+        // Remote stop is a `!shutdown` message, not a mutation, so nothing invalidates on its
+        // own. Without this the roster lags up to 5 minutes and presence up to 60s, right when
+        // the user is watching for feedback. (The live transition still arrives over the kind:20001
+        // WS subscription; these refetches keep the other two axes from contradicting it.)
+        void managedPresenceQuery.refetch();
+        void relayAgentsQuery.refetch();
+        void managedAgentsQuery.refetch();
       }
       if (result.noticeMessage) {
         setActionNoticeMessage(result.noticeMessage);
