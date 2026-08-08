@@ -887,7 +887,8 @@ jobs:
 
   mobile-ios:
     name: Mobile iOS
-    runs-on: macos-15
+    # connectivity_plus 7.1.x uses the Xcode 26 Network framework API.
+    runs-on: macos-26
     timeout-minutes: 35
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
