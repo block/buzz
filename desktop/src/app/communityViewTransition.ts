@@ -1,3 +1,5 @@
+import { isLinuxPlatform } from "@/shared/lib/platform";
+
 const COMMUNITY_TRANSITION_TIMEOUT_MS = 5_000;
 
 let finishPendingTransition: (() => void) | null = null;
@@ -17,7 +19,16 @@ export async function runCommunityViewTransition(
   update: () => Promise<void> | void,
   options: { timeoutMs?: number } = {},
 ): Promise<void> {
-  if (!document.startViewTransition) {
+  // Linux WebKit (webkitgtk, as shipped by the buzz AppImage on distributions
+  // like Linux Mint) hangs indefinitely on `transition.updateCallbackDone`
+  // whenever a destructive community switch removes the currently painted
+  // frame mid-transition — the reasoning is not the 5s timeout, which does
+  // resolve `targetReady` and lets `update()` finish; the WebKit layer just
+  // never settles the view-transition promise on frame invalidation. That
+  // freezes the window and forces users to SIGKILL the app (see #3931).
+  // The transition is purely cosmetic; on Linux we lose nothing by running
+  // the update directly and skipping the browser's cross-fade.
+  if (!document.startViewTransition || isLinuxPlatform()) {
     try {
       await update();
     } catch (error) {
