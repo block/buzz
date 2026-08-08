@@ -24,7 +24,9 @@ quickstart: false
 # ── Image ────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/block/buzz
-  tag: ""                        # empty → .Chart.AppVersion
+  # Empty → Chart.appVersion (must be a post-auto-migrate image; see #2473).
+  # Pin to sha-<7> or a release tag for production.
+  tag: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
 
