@@ -727,7 +727,7 @@ test("credential persistence readiness check reflects keyring_verified as ready"
   });
   const check = result.readiness.find((c) => c.id === "credential_persistence");
   assert.equal(check?.status, "ready");
-  assert.equal(check?.detail, "Keyring entry verified");
+  assert.equal(check?.detail, "Keyring entry found");
 });
 
 test("credential persistence readiness check reflects inline_fallback as ready with detail", () => {
@@ -770,4 +770,17 @@ test("credential persistence check is positioned after authentication in the rea
   const authIdx = result.readiness.findIndex((c) => c.id === "authentication");
   const credIdx = result.readiness.findIndex((c) => c.id === "credential_persistence");
   assert.equal(credIdx, authIdx + 1);
+});
+
+test("lastVerifiedAt reflects observer events only, not catalog or runtime query refreshes", () => {
+  const result = manifest({
+    catalogObservedAt: "2026-07-26T09:00:00.000Z",
+    runtimeObservedAt: "2026-07-26T09:30:00.000Z",
+  });
+  // Observer events in the default manifest are at 01:01, 01:02, 01:03.
+  // Catalog/runtime refreshes are at 09:00 and 09:30 — much later.
+  // lastVerifiedAt must be the newest observer event (01:03), not the
+  // catalog/runtime refresh, so the card cannot claim "Verified just now"
+  // from a query refresh alone.
+  assert.equal(result.lastVerifiedAt, "2026-07-26T01:03:00.000Z");
 });
