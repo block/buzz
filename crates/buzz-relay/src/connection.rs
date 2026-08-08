@@ -18,6 +18,7 @@ use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
+use crate::client_info::ClientInfo;
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::{run_registered_community_connection, AppState};
@@ -120,11 +121,16 @@ impl ConnectionState {
 ///
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
+///
+/// `client` is the advisory `Buzz-Client` identity parsed from the upgrade
+/// request, or `None` when the client did not identify itself. It is used only
+/// for metrics and logs — never for any access decision.
 pub async fn handle_connection(
     socket: WebSocket,
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    client: Option<ClientInfo>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -138,7 +144,7 @@ pub async fn handle_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel, client),
     )
     .await;
 }
@@ -150,6 +156,7 @@ async fn handle_active_connection(
     tenant: TenantContext,
     conn_id: Uuid,
     cancel: CancellationToken,
+    client: Option<ClientInfo>,
 ) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -189,7 +196,14 @@ async fn handle_active_connection(
         grace_limit: state.config.slow_client_grace_limit,
     });
 
-    info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
+    info!(
+        conn_id = %conn_id,
+        addr = %addr,
+        client.app = client.as_ref().map(ClientInfo::app),
+        client.platform = client.as_ref().map(ClientInfo::platform),
+        client.app_version = client.as_ref().map(ClientInfo::app_version),
+        "WebSocket connection established"
+    );
     metrics::counter!(
         "buzz_ws_connections_total",
         "community" => conn.tenant.host().to_owned()
@@ -209,6 +223,10 @@ async fn handle_active_connection(
     // Gauge incremented AFTER challenge send succeeds — early disconnects
     // don't leak. Decremented in the cleanup path below.
     metrics::gauge!("buzz_ws_connections_active").increment(1.0);
+    // Per-client breakdown of the same lifecycle. Kept as a separate series
+    // because `buzz_ws_connections_active` is the unlabeled gauge the HPA
+    // scales on; labeling it would shard the autoscaler's input.
+    crate::client_info::increment_active(client.as_ref());
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -293,6 +311,7 @@ async fn handle_active_connection(
         }
     }
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
+    crate::client_info::decrement_active(client.as_ref());
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
     drop(permit);

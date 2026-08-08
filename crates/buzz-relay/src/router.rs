@@ -323,8 +323,12 @@ async fn nip11_or_ws_handler(
             if state.shutting_down.load(Ordering::Relaxed) {
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
+            // Advisory only: parsed before the upgrade purely so metrics and
+            // logs can attribute the connection to an app/platform/version.
+            // Never consulted for auth, tenant selection, or admission.
+            let client = crate::client_info::ClientInfo::from_headers(&headers);
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant, client))
                 .into_response()
         }
         Err(_) => {
