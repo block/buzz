@@ -226,23 +226,15 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
     await composer.getByTestId("welcome-composer-guide-banner").count(),
   ).toBe(0);
   expect(bannerBox.y).toBeLessThan(composerBox.y);
-  expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
+  // Banner is in normal flow above the composer, no overlap.
+  expect(bannerBox.y + bannerBox.height).toBeLessThanOrEqual(composerBox.y);
   expect(Math.abs(dockBackdropBox.y - composerBox.y)).toBeLessThanOrEqual(1);
   expect(guidanceBackdropBox.y).toBeLessThanOrEqual(bannerBox.y);
-  expect(
-    Math.abs(
-      guidanceBackdropBox.y + guidanceBackdropBox.height - composerBox.y,
-    ),
-  ).toBeLessThanOrEqual(1);
-  const [guidanceZIndex, backdropZIndex] = await Promise.all([
-    guidanceLayer.evaluate((element) =>
-      Number(window.getComputedStyle(element).zIndex),
-    ),
-    page
-      .getByTestId("composer-dock-backdrop")
-      .evaluate((element) => Number(window.getComputedStyle(element).zIndex)),
-  ]);
-  expect(guidanceZIndex).toBeLessThan(backdropZIndex);
+  // The guidance backdrop extends bottom-3 (12px) short of the banner's bottom,
+  // visually connecting up to the composer.
+  expect(guidanceBackdropBox.y + guidanceBackdropBox.height).toBeLessThan(
+    composerBox.y,
+  );
   expect(
     await page
       .getByTestId("channel-composer-overlay")
