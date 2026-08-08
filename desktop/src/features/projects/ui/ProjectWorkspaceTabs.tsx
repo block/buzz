@@ -18,6 +18,7 @@ import type {
   ProjectRepoSnapshot,
   Repository,
 } from "@/features/projects/hooks";
+import type { ProjectConnectionScope } from "@/shared/api/projectConnectionTypes";
 import {
   commitAuthorPubkeysFromPullRequests,
   type ViewerGitIdentity,
@@ -42,6 +43,8 @@ import {
   type GitDataState,
   ProjectOverviewPanel,
 } from "./ProjectOverviewPanel";
+import { ProjectConnectionsPanel } from "./ProjectConnectionsPanel";
+import { ProjectConnectionScopeUnavailable } from "./ProjectConnectionScopeUnavailable";
 import {
   PullRequestDetailHeader,
   PullRequestMetaRail,
@@ -129,7 +132,10 @@ export function WorkspaceTabs({
   localSnapshot,
   localSnapshotError,
   localSnapshotLoading,
+  initialSelectedTab = "overview",
   project,
+  projectScope,
+  projectScopeLoading,
   projectId,
   repoDiff,
   repoDiffError,
@@ -167,7 +173,10 @@ export function WorkspaceTabs({
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
+  initialSelectedTab?: string;
   project: Repository;
+  projectScope: ProjectConnectionScope | null;
+  projectScopeLoading?: boolean;
   projectId: string;
   repoDiff: ProjectRepoDiff | null | undefined;
   repoDiffError: unknown;
@@ -252,7 +261,7 @@ export function WorkspaceTabs({
     [pullRequests, selectedCommitHash],
   );
   const isPullRequestSelected = Boolean(selectedPullRequest);
-  const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [selectedTab, setSelectedTab] = React.useState(initialSelectedTab);
   const [pullRequestCommentTarget, setPullRequestCommentTarget] =
     React.useState<{
       anchor: ProjectPullRequestCommentAnchor;
@@ -330,36 +339,41 @@ export function WorkspaceTabs({
       onValueChange={handleTabChange}
       value={selectedTab}
     >
-      {repositoryLoaded ? (
-        <div className="flex h-10 min-w-0 items-center gap-1">
-          <ProjectTabsList prsActive={isPullRequestSelected} />
-          {onOpenTerminal ? (
-            <Button
-              aria-label="Open terminal"
-              className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-              onClick={() => onOpenTerminal()}
-              size="icon"
-              title={terminalTitle ?? "Open terminal"}
-              variant="ghost"
-            >
-              <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
-            </Button>
-          ) : null}
-          {updatePullRequestAction ? (
-            <Button
-              className="h-8 shrink-0 gap-1.5"
-              disabled={updatePullRequestAction.pending}
-              onClick={updatePullRequestAction.onUpdate}
-              size="sm"
-              title="Publish the pushed commit to this pull request"
-              variant="outline"
-            >
-              <RefreshCw className="h-4 w-4" />
-              {updatePullRequestAction.pending ? "Updating…" : "Update PR"}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="flex h-10 min-w-0 items-center gap-1">
+        <ProjectTabsList
+          prsActive={isPullRequestSelected}
+          repositoryLoaded={repositoryLoaded}
+        />
+        {repositoryLoaded ? (
+          <>
+            {onOpenTerminal ? (
+              <Button
+                aria-label="Open terminal"
+                className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={() => onOpenTerminal()}
+                size="icon"
+                title={terminalTitle ?? "Open terminal"}
+                variant="ghost"
+              >
+                <SquareTerminal className="h-[1.125rem] w-[1.125rem]" />
+              </Button>
+            ) : null}
+            {updatePullRequestAction ? (
+              <Button
+                className="h-8 shrink-0 gap-1.5"
+                disabled={updatePullRequestAction.pending}
+                onClick={updatePullRequestAction.onUpdate}
+                size="sm"
+                title="Publish the pushed commit to this pull request"
+                variant="outline"
+              >
+                <RefreshCw className="h-4 w-4" />
+                {updatePullRequestAction.pending ? "Updating…" : "Update PR"}
+              </Button>
+            ) : null}
+          </>
+        ) : null}
+      </div>
       {selectedPullRequest ? (
         <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
           {/* Two full-height columns: the meta rail runs all the way to the
@@ -554,6 +568,15 @@ export function WorkspaceTabs({
           profiles={profiles}
           repoContributors={displayedContributors}
         />
+      </TabsContent>
+      <TabsContent className="m-0" value="connections">
+        {projectScope ? (
+          <ProjectConnectionsPanel projectScope={projectScope} />
+        ) : (
+          <ProjectConnectionScopeUnavailable
+            loading={Boolean(projectScopeLoading)}
+          />
+        )}
       </TabsContent>
       {createPullRequestAction && createPullRequestOpen ? (
         <CreatePullRequestDialog

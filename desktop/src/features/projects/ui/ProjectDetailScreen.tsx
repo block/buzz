@@ -73,8 +73,8 @@ import {
 import type { CreateIssueDialogInput } from "./CreateIssueDialog";
 import { ProjectBranchActionDialogs } from "./ProjectBranchActionDialogs";
 import { ProjectDetailChrome } from "./ProjectDetailChrome";
-import { ProjectRepositoryManagement } from "./ProjectRepositoryManagement";
-import { UnavailableProjectRepositories } from "./UnavailableProjectRepositories";
+import { ProjectRepositoryHeaderControl } from "./ProjectRepositoryHeaderControl";
+import { ProjectWithoutRepositories } from "./ProjectWithoutRepositories";
 import {
   PROJECT_TAB_CRUMB_LABELS,
   projectPeople,
@@ -755,19 +755,26 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       </div>
     );
   }
+  const projectConnectionScope =
+    activeCommunity?.relayUrl && identityQuery.data?.pubkey
+      ? {
+          relayUrl: activeCommunity.relayUrl,
+          operatorPubkey: identityQuery.data.pubkey,
+          projectAddress: project.projectAddress,
+        }
+      : null;
   if (!repository) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-        <p className="text-sm font-medium text-foreground">{project.name}</p>
-        <p className="text-sm text-muted-foreground">
-          This project does not have any available repositories yet.
-        </p>
-        <UnavailableProjectRepositories project={project} />
-      </div>
+      <ProjectWithoutRepositories
+        chromeRef={projectDetailHeaderChromeRef}
+        connectionScope={projectConnectionScope}
+        connectionScopeLoading={identityQuery.isPending}
+        onGoChannel={(channelId) => void goChannel(channelId)}
+        onGoProjects={() => void goProjects()}
+        project={project}
+      />
     );
   }
-
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const selectedPullRequest =
     pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
@@ -814,6 +821,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     setSelectedPullRequestId(null);
     setSelectedIssueId(null);
     setSelectedCommitHash(null);
+    setActiveTab("overview");
     // Remount the workspace tabs so the project page opens on Overview
     // instead of whatever tab the work item left behind.
     setTabsResetKey((key) => key + 1);
@@ -886,18 +894,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       ) : null}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="hidden text-xs font-medium text-muted-foreground sm:inline">
-                      Repository
-                    </span>
-                    <ProjectRepositoryManagement
-                      identityPubkey={identityQuery.data?.pubkey}
-                      onChange={handleRepositoryChange}
-                      project={project}
-                      projects={projectsQuery.data ?? []}
-                      repository={repository}
-                    />
-                  </div>
+                  <ProjectRepositoryHeaderControl
+                    active={activeTab !== "connections"}
+                    identityPubkey={identityQuery.data?.pubkey}
+                    onChange={handleRepositoryChange}
+                    project={project}
+                    projects={projectsQuery.data ?? []}
+                    repository={repository}
+                  />
                 </div>
               </section>
 
@@ -931,6 +935,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshot={localRepoSnapshotQuery.data}
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
+                initialSelectedTab={
+                  activeTab === "connections" ? "connections" : "overview"
+                }
                 onBranchChange={handleBranchChange}
                 onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
                 onOpenTerminal={() => {
@@ -945,6 +952,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 onSelectedTabChange={setActiveTab}
                 profiles={profiles}
                 project={repository}
+                projectScope={projectConnectionScope}
+                projectScopeLoading={identityQuery.isPending}
                 projectId={project.id}
                 repoDiff={displayedRepoDiff}
                 repoDiffError={displayedRepoDiffError}

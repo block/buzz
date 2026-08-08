@@ -205,16 +205,20 @@ pub(crate) fn process_has_buzz_marker(_pid: u32, _instance_id: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result<(), String> {
+fn signal_process_group_or_leader_status(
+    pid: u32,
+    signal: i32,
+    action: &str,
+) -> Result<bool, String> {
     let pgid = -(pid as i32);
 
     if unsafe { libc::kill(pgid, signal) } == 0 {
-        return Ok(());
+        return Ok(true);
     }
 
     let group_err = std::io::Error::last_os_error();
     if !process_is_running(pid) {
-        return Ok(());
+        return Ok(false);
     }
 
     // Some local agent trees can no longer be signalled as a process group
@@ -225,12 +229,12 @@ fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result
         Some(libc::EPERM) | Some(libc::ESRCH)
     ) {
         if unsafe { libc::kill(pid as i32, signal) } == 0 {
-            return Ok(());
+            return Ok(true);
         }
 
         let leader_err = std::io::Error::last_os_error();
         if leader_err.raw_os_error() == Some(libc::ESRCH) || !process_is_running(pid) {
-            return Ok(());
+            return Ok(false);
         }
 
         return Err(format!("failed to {action} process {pid}: {leader_err}"));
@@ -242,13 +246,25 @@ fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result
 }
 
 #[cfg(unix)]
+fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result<(), String> {
+    signal_process_group_or_leader_status(pid, signal, action).map(|_| ())
+}
+
+#[cfg(unix)]
+fn process_group_or_leader_is_running(pid: u32) -> bool {
+    signal_process_group_or_leader_status(pid, 0, "inspect").unwrap_or(true)
+}
+
+#[cfg(unix)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     // Try graceful shutdown first (SIGTERM to the group).
     signal_process_group_or_leader(pid, libc::SIGTERM, "terminate")?;
 
-    // Wait up to 1s for graceful exit.
+    // Wait for every process in the group, not only the leader. An MCP server
+    // can exit promptly while a descendant that inherited its credentials
+    // ignores SIGTERM.
     for _ in 0..10 {
-        if !process_is_running(pid) {
+        if !process_group_or_leader_is_running(pid) {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -258,6 +274,45 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     signal_process_group_or_leader(pid, libc::SIGKILL, "kill")?;
 
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn terminate_child_process_group(child: &mut std::process::Child) -> Result<(), String> {
+    let pid = child.id();
+    signal_process_group_or_leader(pid, libc::SIGTERM, "terminate")?;
+    for _ in 0..10 {
+        child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect process {pid}: {error}"))?;
+        if !process_group_or_leader_is_running(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    signal_process_group_or_leader(pid, libc::SIGKILL, "kill")?;
+    for _ in 0..20 {
+        child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect process {pid}: {error}"))?;
+        if !process_group_or_leader_is_running(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!(
+        "process group {pid} remained after forced termination"
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn terminate_child_process_group(child: &mut std::process::Child) -> Result<(), String> {
+    let pid = child.id();
+    terminate_process(pid)?;
+    child
+        .wait()
+        .map(|_| ())
+        .map_err(|error| format!("failed to wait for process {pid}: {error}"))
 }
 
 #[cfg(windows)]
@@ -343,6 +398,59 @@ pub(super) fn resolve_pgids_and_kill(candidate_pids: &[i32]) {
     }
     let unique: Vec<i32> = pgids.into_iter().collect();
     sigterm_then_sigkill(&unique);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        io::BufRead as _,
+        os::unix::process::CommandExt as _,
+        process::{Command, Stdio},
+    };
+
+    #[test]
+    fn terminate_process_waits_for_credential_bearing_descendants() {
+        let mut harness = {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "trap 'exit 0' TERM; \
+                     /bin/sh -c 'trap \"\" TERM; while :; do /bin/sleep 1; done' & \
+                     echo $!; wait",
+                ])
+                .stdout(Stdio::piped())
+                .process_group(0);
+            command.spawn().expect("spawn process-group fixture")
+        };
+        let harness_pid = harness.id();
+        let descendant_pid: i32 = std::io::BufReader::new(harness.stdout.take().unwrap())
+            .lines()
+            .next()
+            .expect("fixture should report its descendant")
+            .expect("fixture PID should be readable")
+            .parse()
+            .expect("fixture PID should be numeric");
+        assert_eq!(
+            unsafe { libc::getpgid(descendant_pid) },
+            harness_pid as i32,
+            "fixture descendant must share the harness process group"
+        );
+
+        let result = super::terminate_child_process_group(&mut harness);
+        let group_survived = unsafe { libc::kill(-(harness_pid as i32), 0) } == 0;
+        if group_survived {
+            unsafe {
+                libc::kill(-(harness_pid as i32), libc::SIGKILL);
+            }
+        }
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !group_survived,
+            "terminate_process returned while a descendant still held the process group"
+        );
+    }
 }
 
 /// Resolve orphan candidate PIDs to their actual process group IDs, dedupe,

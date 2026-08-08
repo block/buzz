@@ -61,6 +61,7 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import type { ProjectConnection } from "@/shared/api/tauriProjectConnections";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   isValidLinkPreviewSnapshotCanonicalUrl,
@@ -265,6 +266,11 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    projectConnections?: ProjectConnection[];
+    projectConnectionSaveDelayMs?: number;
+    projectConnectionTestDelayMs?: number;
+    projectConnectionTestError?: string;
+    projectConnectionDeleteError?: string;
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
       ephemeral_added: boolean;
@@ -3007,6 +3013,207 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockProjectConnections: ProjectConnection[] = [];
+
+function projectConnectionScopesEqual(
+  left: ProjectConnection["projectScope"],
+  right: ProjectConnection["projectScope"],
+) {
+  return (
+    left.relayUrl === right.relayUrl &&
+    left.operatorPubkey === right.operatorPubkey &&
+    left.projectAddress === right.projectAddress
+  );
+}
+
+function cloneProjectConnection(
+  connection: ProjectConnection,
+): ProjectConnection {
+  return {
+    ...connection,
+    args: [...connection.args],
+    capabilityIds: [...connection.capabilityIds],
+    discoveredTools: [...connection.discoveredTools],
+    envKeys: [...connection.envKeys],
+    health: { ...connection.health },
+    projectScope: { ...connection.projectScope },
+  };
+}
+
+function resetMockProjectConnections(config?: E2eConfig) {
+  mockProjectConnections = (config?.mock?.projectConnections ?? []).map(
+    cloneProjectConnection,
+  );
+}
+
+function handleListProjectConnections(args: {
+  projectScope: ProjectConnection["projectScope"];
+}) {
+  return mockProjectConnections
+    .filter((connection) =>
+      projectConnectionScopesEqual(connection.projectScope, args.projectScope),
+    )
+    .map(cloneProjectConnection);
+}
+
+async function handleCreateProjectConnection(
+  args: {
+    input: {
+      projectScope: ProjectConnection["projectScope"];
+      name: string;
+      provider: string;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      executionAcknowledged: boolean;
+    };
+  },
+  config?: E2eConfig,
+) {
+  const delayMs = config?.mock?.projectConnectionSaveDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  if (!args.input.executionAcknowledged) {
+    throw new Error("Review and acknowledge this local program before saving.");
+  }
+  const now = new Date().toISOString();
+  const connection: ProjectConnection = {
+    id: crypto.randomUUID(),
+    projectScope: { ...args.input.projectScope },
+    name: args.input.name,
+    provider: args.input.provider,
+    capabilityIds: [],
+    discoveredTools: [],
+    command: args.input.command,
+    args: [...args.input.args],
+    envKeys: Object.keys(args.input.env),
+    health: { status: "not_tested", lastVerifiedAt: null, detail: null },
+    createdAt: now,
+    updatedAt: now,
+  };
+  mockProjectConnections.push(connection);
+  return cloneProjectConnection(connection);
+}
+
+function handleUpdateProjectConnection(args: {
+  input: {
+    id: string;
+    projectScope: ProjectConnection["projectScope"];
+    name: string;
+    provider: string;
+    command: string;
+    args: string[];
+    env: Record<string, string>;
+    removeEnvKeys?: string[];
+    executionAcknowledged: boolean;
+  };
+}) {
+  const connection = mockProjectConnections.find(
+    (candidate) =>
+      candidate.id === args.input.id &&
+      projectConnectionScopesEqual(
+        candidate.projectScope,
+        args.input.projectScope,
+      ),
+  );
+  if (!connection) throw new Error("Connection not found.");
+  const nextArgs = [...args.input.args];
+  const approvalIsStale = connection.health.status === "approval_required";
+  const executionChanged =
+    approvalIsStale ||
+    connection.command !== args.input.command ||
+    JSON.stringify(connection.args) !== JSON.stringify(nextArgs) ||
+    Object.keys(args.input.env).length > 0 ||
+    (args.input.removeEnvKeys?.length ?? 0) > 0;
+  if (executionChanged && !args.input.executionAcknowledged) {
+    throw new Error(
+      "Review and acknowledge the changed program, arguments, and credentials before saving.",
+    );
+  }
+  connection.name = args.input.name;
+  connection.provider = args.input.provider;
+  connection.command = args.input.command;
+  connection.args = nextArgs;
+  connection.envKeys = [
+    ...new Set(
+      [...connection.envKeys, ...Object.keys(args.input.env)].filter(
+        (key) => !args.input.removeEnvKeys?.includes(key),
+      ),
+    ),
+  ];
+  if (executionChanged) {
+    connection.capabilityIds = [];
+    connection.discoveredTools = [];
+    connection.health = {
+      status: "not_tested",
+      lastVerifiedAt: null,
+      detail: null,
+    };
+  }
+  connection.updatedAt = new Date().toISOString();
+  return cloneProjectConnection(connection);
+}
+
+async function handleTestProjectConnection(
+  args: {
+    projectScope: ProjectConnection["projectScope"];
+    connectionId: string;
+  },
+  config?: E2eConfig,
+) {
+  const delayMs = config?.mock?.projectConnectionTestDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  const connection = mockProjectConnections.find(
+    (candidate) =>
+      candidate.id === args.connectionId &&
+      projectConnectionScopesEqual(candidate.projectScope, args.projectScope),
+  );
+  if (!connection) throw new Error("Connection not found.");
+  if (config?.mock?.projectConnectionTestError) {
+    connection.health = {
+      status: "unavailable",
+      lastVerifiedAt: null,
+      detail: "The MCP server did not respond in time.",
+    };
+    connection.updatedAt = new Date().toISOString();
+    throw new Error(config.mock.projectConnectionTestError);
+  }
+  const discoveredTool = connection.provider
+    .toLocaleLowerCase()
+    .includes("linear")
+    ? "linear.search_issues"
+    : "analytics.weekly_summary";
+  connection.capabilityIds = [`mcp.tool.${connection.id}.${discoveredTool}`];
+  connection.discoveredTools = [discoveredTool];
+  connection.health = {
+    status: "ready",
+    lastVerifiedAt: new Date().toISOString(),
+    detail: null,
+  };
+  connection.updatedAt = new Date().toISOString();
+  return cloneProjectConnection(connection);
+}
+
+function handleDeleteProjectConnection(
+  args: {
+    projectScope: ProjectConnection["projectScope"];
+    connectionId: string;
+  },
+  config?: E2eConfig,
+) {
+  if (config?.mock?.projectConnectionDeleteError) {
+    throw new Error(config.mock.projectConnectionDeleteError);
+  }
+  mockProjectConnections = mockProjectConnections.filter(
+    (connection) =>
+      connection.id !== args.connectionId ||
+      !projectConnectionScopesEqual(connection.projectScope, args.projectScope),
+  );
+  return undefined;
+}
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -10051,6 +10258,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
+  resetMockProjectConnections(config);
   resetMockPersonas(config);
   resetMockTeams(config);
   seedMockSearchProfiles(config);
@@ -11841,6 +12049,29 @@ export function maybeInstallE2eTauriMocks() {
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
+          activeConfig,
+        );
+      case "list_project_connections":
+        return handleListProjectConnections(
+          payload as Parameters<typeof handleListProjectConnections>[0],
+        );
+      case "create_project_connection":
+        return handleCreateProjectConnection(
+          payload as Parameters<typeof handleCreateProjectConnection>[0],
+          activeConfig,
+        );
+      case "update_project_connection":
+        return handleUpdateProjectConnection(
+          payload as Parameters<typeof handleUpdateProjectConnection>[0],
+        );
+      case "test_project_connection":
+        return handleTestProjectConnection(
+          payload as Parameters<typeof handleTestProjectConnection>[0],
+          activeConfig,
+        );
+      case "delete_project_connection":
+        return handleDeleteProjectConnection(
+          payload as Parameters<typeof handleDeleteProjectConnection>[0],
           activeConfig,
         );
       case "get_channels": {
