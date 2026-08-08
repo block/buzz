@@ -52,12 +52,22 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
+  Set<String> archivedPubkeys = const {},
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
+  final currentLower = currentPubkey?.toLowerCase();
+
+  // Mirrors desktop's `useIsArchivedPredicate`: NIP-IA archived identities
+  // are hidden from every candidate source. Self-exempt — the current user
+  // is never folded from their own picker, even when archived, so archival
+  // stays non-silent (the anti-shadowban property of NIP-IA §Self Requests).
+  bool hiddenAsArchived(String pk) =>
+      pk != currentLower && archivedPubkeys.contains(pk);
 
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
+    if (hiddenAsArchived(pk)) continue;
     if (!seen.add(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
@@ -89,6 +99,7 @@ List<MentionCandidate> buildMentionCandidates({
 
   for (final agent in relayAgents) {
     final pk = agent.pubkey;
+    if (hiddenAsArchived(pk)) continue;
     if (seen.contains(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
     seen.add(pk);
@@ -108,9 +119,9 @@ List<MentionCandidate> buildMentionCandidates({
     );
   }
 
-  final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
+    if (hiddenAsArchived(pk)) continue;
     if (seen.contains(pk)) continue;
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
