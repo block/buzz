@@ -127,31 +127,32 @@ export function CommunityThemeController() {
       );
     };
 
-    void manager.fetchRemote().then((result) => {
-      if (scopeRef.current !== scope) return;
-      if (result.status === "valid") {
-        applyRemote(result.remote);
-        markCommunityThemeMigrated(pubkey);
-      } else if (shouldSeedCommunityTheme(result)) {
-        const local =
-          readCommunityThemeOutbox(pubkey, relayUrl) ??
-          readCommunityThemePreference(pubkey, relayUrl) ??
-          scopedPreferenceRef.current ??
-          DEFAULT_COMMUNITY_THEME;
-        writeCommunityThemePreference(pubkey, relayUrl, local);
-        writeCommunityThemeOutbox(pubkey, relayUrl, local);
-        markCommunityThemeMigrated(pubkey);
-        manager.publish(local);
-      }
-      // Invalid/future or unavailable records use the already-applied local
-      // fallback without publishing over relay state we cannot safely read.
-    });
-
     let unsubscribe: (() => Promise<void>) | null = null;
-    void manager.subscribe(applyRemote).then((dispose) => {
-      if (scopeRef.current !== scope) void dispose();
-      else unsubscribe = dispose;
-    });
+    void manager
+      .subscribeAndFetch(applyRemote)
+      .then(({ result, unsubscribe: dispose }) => {
+        if (scopeRef.current !== scope) {
+          void dispose();
+          return;
+        }
+        unsubscribe = dispose;
+        if (result.status === "valid") {
+          applyRemote(result.remote);
+          markCommunityThemeMigrated(pubkey);
+        } else if (shouldSeedCommunityTheme(result)) {
+          const local =
+            readCommunityThemeOutbox(pubkey, relayUrl) ??
+            readCommunityThemePreference(pubkey, relayUrl) ??
+            scopedPreferenceRef.current ??
+            DEFAULT_COMMUNITY_THEME;
+          writeCommunityThemePreference(pubkey, relayUrl, local);
+          writeCommunityThemeOutbox(pubkey, relayUrl, local);
+          markCommunityThemeMigrated(pubkey);
+          manager.publish(local);
+        }
+        // Invalid/future or unavailable records use the already-applied local
+        // fallback without publishing over relay state we cannot safely read.
+      });
     const unsubscribeReconnect = relayClient.subscribeToReconnects(() => {
       void manager.fetchRemote().then((result) => {
         if (result.status === "valid") {

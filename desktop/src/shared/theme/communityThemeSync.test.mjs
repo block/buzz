@@ -104,6 +104,57 @@ test("fetch distinguishes absent remote state from unreadable existing state", a
   }
 });
 
+test("live replacement delivered during empty onboarding fetch prevents default seeding", async () => {
+  const remotePreference = { ...preference, theme: "dracula" };
+  const updates = [];
+  let liveCallback;
+  globalThis.window ??= {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke(command) {
+      if (command === "nip44_decrypt_from_self") {
+        return Promise.resolve(JSON.stringify(remotePreference));
+      }
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+    liveCallback = callback;
+    return Promise.resolve(async () => {});
+  });
+  mock.method(relayClient, "fetchEvents", async () => {
+    liveCallback(
+      relayEvent({
+        id: "existing-theme",
+        content: "ciphertext",
+        created_at: 456,
+      }),
+    );
+    return [];
+  });
+  try {
+    const manager = new CommunityThemeSyncManager("alice");
+    const { result, unsubscribe } = await manager.subscribeAndFetch(
+      (remote) => {
+        updates.push(remote);
+      },
+    );
+
+    assert.deepEqual(result, {
+      status: "valid",
+      remote: {
+        preference: remotePreference,
+        createdAt: 456,
+        eventId: "existing-theme",
+      },
+    });
+    assert.deepEqual(updates, [result.remote]);
+    await unsubscribe();
+  } finally {
+    delete globalThis.window.__TAURI_INTERNALS__;
+    mock.reset();
+  }
+});
+
 test("fetch reports relay failures as unavailable rather than absent", async () => {
   mock.method(relayClient, "fetchEvents", () =>
     Promise.reject(new Error("offline")),
