@@ -809,12 +809,14 @@ async fn submit_event_authed(
     )
     .await
     {
+        // On closed relays, direct members return Ok(None) — but a valid
+        // NIP-OA auth tag is still cryptographically self-proving. Hoist
+        // the extraction out of the `require_relay_membership` conditional
+        // so the owner is materialized regardless of which membership
+        // branch granted access. (Previously, closed-relay + direct-member
+        // silently dropped the attestation; see #4223.)
         Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
-            }
+            super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
         }),
         Err(e) => {
             return SubmitOutcome::Err {
