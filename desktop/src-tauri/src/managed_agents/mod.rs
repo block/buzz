@@ -40,6 +40,7 @@ pub(crate) mod team_events;
 mod team_repair;
 mod teams;
 mod types;
+pub(crate) mod wsl;
 
 // Shared guard for tests that mutate or read process-global PATH.
 #[cfg(test)]

@@ -1500,6 +1500,17 @@ pub fn discover_acp_runtimes_from(
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
 
+    // Resolver shared by the preset and custom phases: Windows PATH first,
+    // then — on Windows hosts — the default WSL distribution, so harnesses
+    // that only exist inside WSL (common for Hermes Agent) still surface as
+    // Available. The WSL probe caches its resolution for the spawn path.
+    let resolve_with_wsl = |command: &str| {
+        find_command(command).or_else(|| {
+            crate::managed_agents::wsl::probe_wsl_command(command)
+                .map(|resolution| crate::managed_agents::wsl::wsl_display_path(&resolution))
+        })
+    };
+
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
@@ -1508,7 +1519,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, find_command));
+        entries.push(preset_catalog_entry(def, &resolve_with_wsl));
     }
 
     // Phase 3: load and append custom harness definitions.
@@ -1523,8 +1534,9 @@ pub fn discover_acp_runtimes_from(
                 continue;
             }
 
-            // Availability: command on PATH → Available, else NotInstalled.
-            let (availability, command, binary_path) = match find_command(&def.command) {
+            // Availability: command on PATH (or inside the default WSL
+            // distribution on Windows) → Available, else NotInstalled.
+            let (availability, command, binary_path) = match resolve_with_wsl(&def.command) {
                 Some(path) => (
                     AcpAvailabilityStatus::Available,
                     Some(def.command.clone()),
