@@ -54,6 +54,18 @@ pub enum SubscribeMode {
     Config,
 }
 
+/// Whether the agent's reply is anchored into a thread or posted at channel root.
+///
+/// `Thread` (default) replies land as children of the triggering event via
+/// `--reply-to`. `TopLevel` replies post at the channel root, useful when
+/// threading is easy to miss on mobile or in dense channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+pub enum ReplyAnchor {
+    #[default]
+    Thread,
+    TopLevel,
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum DedupMode {
     Drop,
@@ -329,6 +341,20 @@ pub struct CliArgs {
     )]
     pub subscribe: SubscribeMode,
 
+    /// Reply placement for human-facing turns.
+    ///
+    /// `thread` (default): replies anchor with `--reply-to` so conversations
+    /// stay threaded unless the human explicitly asks for channel-root.
+    /// `top-level`: replies post at the channel root with no `--reply-to` —
+    /// useful when thread replies are easy to miss (mobile, dense channels).
+    #[arg(
+        long,
+        env = "BUZZ_ACP_REPLY_ANCHOR",
+        default_value = "thread",
+        value_enum
+    )]
+    pub reply_anchor: ReplyAnchor,
+
     #[arg(long, env = "BUZZ_ACP_KINDS", value_delimiter = ',')]
     pub kinds: Option<Vec<u32>>,
 
@@ -514,6 +540,7 @@ pub struct Config {
     pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
+    pub reply_anchor: ReplyAnchor,
     pub dedup_mode: DedupMode,
     pub multiple_event_handling: MultipleEventHandling,
     pub ignore_self: bool,
@@ -1081,6 +1108,7 @@ impl Config {
                 .map(str::to_string),
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
+            reply_anchor: args.reply_anchor,
             dedup_mode: args.dedup,
             multiple_event_handling: args.multiple_event_handling,
             ignore_self: !args.no_ignore_self,
@@ -1131,7 +1159,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} reply_anchor={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1142,6 +1170,7 @@ impl Config {
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
+            self.reply_anchor,
             self.dedup_mode,
             self.multiple_event_handling,
             self.ignore_self,
@@ -1455,6 +1484,7 @@ mod tests {
             team_instructions: None,
             initial_message: None,
             subscribe_mode: mode,
+            reply_anchor: ReplyAnchor::Thread,
             dedup_mode: DedupMode::Queue,
             multiple_event_handling: MultipleEventHandling::Queue,
             ignore_self: true,
