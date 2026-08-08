@@ -11,7 +11,9 @@
 //! # Running (manual / runbook)
 //!
 //! ```text
-//! # 1. prepare the matching native runtime with `scripts/ensure-mesh-native-runtime.sh`
+//! # 1. the mesh-enabled desktop installs the signed native runtime itself on
+//! #    first init; on a machine with a pre-0.75 runtime cache, clear stale
+//! #    entries under ~/.cache/mesh-llm/native-runtimes first
 //! # 2. start the normal membership-gated relay and a mesh-enabled desktop
 //! # 3. have that desktop publish status, then run the trust assertions:
 //! RELAY_URL=ws://localhost:3000 \
