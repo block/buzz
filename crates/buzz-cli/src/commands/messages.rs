@@ -57,7 +57,7 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
-) -> Result<ThreadRef, CliError> {
+) -> Result<(ThreadRef, u16), CliError> {
     let parent_eid = parse_event_id(parent_event_id)?;
     let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
     let raw = client.query(&filter).await?;
@@ -67,6 +67,11 @@ async fn resolve_thread_ref(
         .as_array()
         .and_then(|a| a.first())
         .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
+    let parent_kind = event
+        .get("kind")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} missing kind")))?
+        as u16;
     let tags = event
         .get("tags")
         .cloned()
@@ -77,10 +82,30 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
-    })
+    Ok((
+        ThreadRef {
+            root_event_id: root_eid,
+            parent_event_id: parent_eid,
+        },
+        parent_kind,
+    ))
+}
+
+/// Decide the event kind to emit for a send.
+///
+/// A reply whose immediate parent is a forum topic (`45001`) or forum comment
+/// (`45003`) is emitted as a forum comment (`45003`) so it renders in the
+/// parent's forum thread, unless the caller passed `--kind` explicitly — in
+/// which case the explicit choice is preserved (so `--kind 9` remains an
+/// opt-out). Reporter: https://github.com/block/buzz/issues/3828
+fn resolve_send_kind(explicit: Option<u16>, parent_kind: Option<u16>) -> Option<u16> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    match parent_kind {
+        Some(45001) | Some(45003) => Some(45003),
+        _ => explicit,
+    }
 }
 
 /// Resolve the channel UUID for an event by querying for it via POST /query.
@@ -634,16 +659,22 @@ pub async fn cmd_send_message(
     };
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
-    // thread root is derived from the parent's NIP-10 tags via the relay.
-    let thread_ref = if let Some(ref r) = p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
+    // thread root is derived from the parent's NIP-10 tags via the relay. The
+    // parent's kind is captured so a reply into a forum topic/comment can be
+    // re-emitted as a forum comment (kind 45003) instead of a plain stream
+    // message (kind 9) even when the caller left `--kind` at the default.
+    // Reporter: https://github.com/block/buzz/issues/3828
+    let (thread_ref, parent_kind) = if let Some(ref r) = p.reply_to {
+        let (tr, kind) = resolve_thread_ref(client, r).await?;
+        (Some(tr), Some(kind))
     } else {
-        None
+        (None, None)
     };
+    let kind = resolve_send_kind(p.kind, parent_kind);
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    let builder = match p.kind {
+    let builder = match kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
@@ -744,9 +775,12 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
     };
 
     // `--reply-to` is the immediate parent; the thread root is derived from
-    // the parent's NIP-10 tags via the relay.
+    // the parent's NIP-10 tags via the relay. Diff replies always emit kind
+    // 40008 regardless of the parent's kind, so the resolved parent kind is
+    // intentionally unused here.
     let thread_ref = if let Some(r) = &p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
+        let (tr, _parent_kind) = resolve_thread_ref(client, r).await?;
+        Some(tr)
     } else {
         None
     };
@@ -995,7 +1029,7 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, resolve_send_kind,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1076,6 +1110,40 @@ mod tests {
     fn non_array_input_returns_none() {
         assert!(find_root_from_tags(&json!({})).is_none());
         assert!(find_root_from_tags(&json!(null)).is_none());
+    }
+
+    //
+    // resolve_send_kind — https://github.com/block/buzz/issues/3828
+    //
+
+    #[test]
+    fn send_kind_defaults_to_kind_45003_replying_to_forum_topic() {
+        // Reporter's exact scenario: harness supplies --reply-to, no --kind.
+        assert_eq!(resolve_send_kind(None, Some(45001)), Some(45003));
+    }
+
+    #[test]
+    fn send_kind_defaults_to_kind_45003_replying_to_forum_comment() {
+        assert_eq!(resolve_send_kind(None, Some(45003)), Some(45003));
+    }
+
+    #[test]
+    fn send_kind_defaults_to_none_replying_to_regular_message() {
+        // kind 9 parents and non-forum kinds leave the builder default (kind 9).
+        assert_eq!(resolve_send_kind(None, Some(9)), None);
+        assert_eq!(resolve_send_kind(None, Some(40008)), None);
+    }
+
+    #[test]
+    fn send_kind_defaults_to_none_without_reply_parent() {
+        assert_eq!(resolve_send_kind(None, None), None);
+    }
+
+    #[test]
+    fn send_kind_explicit_flag_wins_over_parent_kind() {
+        // --kind 9 remains an explicit opt-out even when replying into a forum.
+        assert_eq!(resolve_send_kind(Some(9), Some(45001)), Some(9));
+        assert_eq!(resolve_send_kind(Some(45003), Some(45001)), Some(45003));
     }
 
     //
