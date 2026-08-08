@@ -65,6 +65,15 @@ test("submit_gating_nsec_path_unchanged", () => {
   assert.equal(keyImportSubmitEnabled("", ""), false);
 });
 
+test("uppercase_nsec_classifies_and_gates_like_lowercase", () => {
+  // Bech32 permits all-uppercase encodings; a user who ran an nsec through
+  // a tool that uppercased it (common in printed/emergency backups) must not
+  // be told their valid key is invalid.
+  const upper = VALID_NSEC.toUpperCase();
+  assert.equal(classifyKeyImportInput(upper), "nsec");
+  assert.equal(keyImportSubmitEnabled(upper, ""), true);
+});
+
 test("submit_gating_ncryptsec_requires_passphrase", () => {
   assert.equal(keyImportSubmitEnabled(NCRYPTSEC, ""), false);
   assert.equal(keyImportSubmitEnabled(NCRYPTSEC, "hunter2hunter2"), true);
