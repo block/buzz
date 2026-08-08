@@ -1444,10 +1444,14 @@ async fn steer_rejected_on_empty_prompt() {
     let mut saw_reject = false;
     for _ in 0..40 {
         let v = h.recv().await;
+        // Wait specifically for the steer rejection response, independent of
+        // whether the session/prompt response has been read yet. Breaking on
+        // the prompt response (the prior shape) made this racy: if the prompt
+        // reply was read first the loop exited before the steer rejection
+        // arrived, intermittently failing the assertion.
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
-        } else if v["id"] == json!(p_id) {
             break;
         }
     }
