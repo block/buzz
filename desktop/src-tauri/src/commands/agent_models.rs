@@ -21,8 +21,8 @@ use crate::{
         find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
         load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
         resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        validate_provider_value, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -201,8 +201,10 @@ pub async fn discover_agent_models(
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-    // Also validate definition_env (caller-supplied, same trust level as env_vars).
     crate::managed_agents::validate_user_env_keys(&input.definition_env)?;
+    if let Some(provider) = input.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
 
     let acp_command = input
         .acp_command
@@ -345,13 +347,11 @@ use openrouter::{
 };
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai" | "openai-compat")
-    )
+    let normalized = provider.map(str::trim).map(str::to_ascii_lowercase);
+    matches!(normalized.as_deref(), Some("openai" | "openai-compat"))
+        || normalized
+            .as_deref()
+            .is_some_and(crate::managed_agents::provider_is_http_base_url)
 }
 
 #[cfg(test)]
@@ -697,32 +697,32 @@ use databricks::{
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 /// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
-/// to `record`, enforcing the linked-instance write guard: a definition-linked
-/// record's model/provider/prompt are definition-authoritative (see
+/// to `record`, enforcing the linked-instance write guard: a definition-linked record's
+/// model/provider/prompt are definition-authoritative (see
 /// `effective_config::resolve_linked`), so writes to these three fields are
 /// silently dropped for a linked instance rather than persisting a byte the
 /// resolver will never read. Definition-less instances accept the patch
-/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
-/// and its regression tests — a test that reimplements this check instead of
-/// calling it can go green after the real guard is deleted.
+/// as-is. This guard is exercised directly by regression tests so deleting it cannot go green.
 fn apply_model_provider_prompt_update(
     record: &mut crate::managed_agents::ManagedAgentRecord,
     model: Option<Option<String>>,
     provider: Option<Option<String>>,
     system_prompt: Option<Option<String>>,
-) {
+) -> Result<(), String> {
     if record.persona_id.is_some() {
-        return;
+        return Ok(());
     }
     if let Some(model_update) = model {
         record.model = model_update;
     }
     if let Some(provider_update) = provider {
+        validate_provider_value(provider_update.as_deref().unwrap_or_default())?;
         record.provider = provider_update;
     }
     if let Some(prompt_update) = system_prompt {
         record.system_prompt = prompt_update;
     }
+    Ok(())
 }
 
 /// Update mutable fields on an existing managed agent record.
@@ -769,7 +769,7 @@ pub async fn update_managed_agent(
             input.model,
             input.provider,
             input.system_prompt,
-        );
+        )?;
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }

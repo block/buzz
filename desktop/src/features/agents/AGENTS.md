@@ -171,6 +171,11 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Provider translation belongs to runtime metadata.** When Buzz's canonical
+    provider ID or env names differ from what a harness reads, declare the
+    mapping on `KnownAcpRuntime` and apply it after effective config precedence
+    is resolved. Do not duplicate provider aliases in UI components or
+    individual readiness, discovery, and spawn call sites.
 
 ## The tests that enforce this
 
