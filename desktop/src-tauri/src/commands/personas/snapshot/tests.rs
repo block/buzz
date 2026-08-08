@@ -960,3 +960,8 @@ mod encode_size;
 
 #[path = "tests_locked.rs"]
 mod locked_import;
+
+// ── Import: captured-scope relay invariant ─────────────────────────────────
+
+#[path = "tests_captured_scope.rs"]
+mod captured_scope;

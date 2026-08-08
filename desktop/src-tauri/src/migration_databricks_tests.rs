@@ -22,7 +22,8 @@ fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_on_block_build() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     assert_eq!(
@@ -56,7 +57,8 @@ fn reconcile_databricks_v1_to_v2_preserves_v1_provider_on_oss_build() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ false,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     // Provider field preserved.
@@ -92,7 +94,8 @@ fn reconcile_databricks_v1_to_v2_clears_model_on_provider_rewrite() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     // V1 records: provider migrated, model cleared.
@@ -126,7 +129,7 @@ fn reconcile_databricks_v1_to_v2_preserves_v2_provider() {
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
 
-    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true).unwrap();
 
     // File must be unchanged — no spurious re-write.
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
@@ -151,7 +154,8 @@ fn reconcile_databricks_v1_to_v2_strips_stale_buzz_agent_provider_from_env_vars(
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     // Stale derived key must be removed.
@@ -188,7 +192,8 @@ fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     let env_vars = &records[0]["env_vars"];
@@ -230,7 +235,8 @@ fn reconcile_databricks_v1_to_v2_handles_multiple_records_block_build() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     // A: provider rewritten, stale env_var stripped.
@@ -256,9 +262,9 @@ fn reconcile_databricks_v1_to_v2_is_idempotent() {
     );
     let path = dir.path().join("agents/managed-agents.json");
 
-    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true).unwrap();
     let after_first = std::fs::read_to_string(&path).unwrap();
-    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true).unwrap();
     let after_second = std::fs::read_to_string(&path).unwrap();
 
     assert_eq!(
@@ -279,7 +285,7 @@ fn reconcile_databricks_v1_to_v2_preserves_non_databricks_providers() {
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
 
-    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true).unwrap();
 
     // No provider is modified, so the file content is identical.
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
@@ -310,7 +316,8 @@ fn reconcile_databricks_v1_to_v2_strips_derived_keys_from_keyless_persona_defini
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     let env_vars = &records[0]["env_vars"];
@@ -348,7 +355,8 @@ fn reconcile_databricks_v1_to_v2_strips_derived_keys_case_insensitively() {
     reconcile_databricks_v1_to_v2_in_file(
         &dir.path().join("agents/managed-agents.json"),
         /*rewrite_v1_provider=*/ true,
-    );
+    )
+    .unwrap();
 
     let records = read_agents_json(dir.path());
     let env_vars = &records[0]["env_vars"];

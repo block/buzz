@@ -66,10 +66,9 @@ use huddle::{
 };
 use initial_window::*;
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    ensure_nest, list_managed_agent_runtimes, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, start_managed_agent_runtime,
+    stop_managed_agent_runtime,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -377,13 +376,10 @@ pub fn run() {
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
-            // set but no source_version). Must run before
-            // restore_managed_agents_on_launch so no agent spawns from an empty
-            // snapshot. Synchronous and best-effort — a failure here must not
-            // block launch, but a missing persona is logged loudly inside.
-            if let Err(e) = backfill_persona_snapshots(&app_handle) {
-                eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
-            }
+            // set but no source_version). Backfill now runs inside the per-scope
+            // initialization pipeline (`apply_workspace` prepare stage), so it
+            // runs BEFORE the first restore pass on the new scope. Nothing to do
+            // here at boot — the active scope is None until apply_workspace fires.
 
             // Warm the loaded-harness registry BEFORE restore so cold-launch
             // agent spawns can resolve custom/preset runtime ids without
@@ -504,7 +500,9 @@ pub fn run() {
                 }
             }
 
-            try_regenerate_nest(&app_handle);
+            // Nest context is regenerated post-commit in apply_workspace so the
+            // AGENTS.md reflects the active scope. No regeneration needed at boot
+            // since the active scope is None until apply_workspace fires.
 
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
@@ -525,17 +523,11 @@ pub fn run() {
                 });
             }
 
-            // Defer launch-time agent restoration until `apply_workspace` has
-            // installed the active workspace relay and identity. Starting here
-            // would race React initialization and send agents whose saved record
-            // has no relay override to the localhost fallback. Preserve the
-            // boot-time repos and identity recovery safety gates by only marking
-            // restoration pending when both allow it.
-            if restore_agents && !recovery_mode {
-                state
-                    .managed_agent_restore_pending
-                    .store(true, Ordering::Release);
-            }
+            // Agent restoration is now handled per-transition in apply_workspace
+            // (the `restore_managed_agents_on_launch` spawn on every successful
+            // workspace commit). The `managed_agent_restore_pending` one-shot is
+            // removed — no boot-time flag is needed.
+            let _ = restore_agents; // value captured above; no longer consumed here
 
             // Periodic sweep: reap orphaned agents from dead instances every 60s.
             // Catches agents that escaped both the Justfile trap and boot-time
@@ -784,6 +776,7 @@ pub fn run() {
             set_global_agent_config,
             mesh_start_node,
             mesh_stop_node,
+            mesh_stop_client,
             mesh_node_status,
             mesh_serving_usage,
             mesh_installed_models,

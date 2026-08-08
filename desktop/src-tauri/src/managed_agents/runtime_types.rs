@@ -50,6 +50,13 @@ pub struct ManagedAgentPairRuntime {
     /// Unpredictable identity for this exact harness generation. Lifecycle
     /// frames from prior processes are rejected even when the pair is live.
     pub start_nonce: String,
+    /// Scope ID of the workspace this runtime was spawned into. Used by drain
+    /// filtering and `list_managed_agent_runtimes` to detect cross-scope
+    /// entries (the seam that option 2 background-runtime pinning would build
+    /// on). Under active-scope-only policy, all live entries should always
+    /// match the current scope; this field makes the invariant testable.
+    #[allow(dead_code)] // Set at spawn; read in tests; seam for future option-2 pinning.
+    pub scope_id: Option<String>,
 }
 
 impl std::ops::Deref for ManagedAgentPairRuntime {
@@ -67,13 +74,14 @@ impl std::ops::DerefMut for ManagedAgentPairRuntime {
 }
 
 impl ManagedAgentPairRuntime {
-    pub fn starting(process: ManagedAgentProcess) -> Self {
+    pub fn starting(process: ManagedAgentProcess, scope_id: Option<String>) -> Self {
         let start_nonce = process.start_nonce.clone();
         Self {
             process,
             lifecycle: ManagedAgentRuntimeLifecycle::Starting,
             error: None,
             start_nonce,
+            scope_id,
         }
     }
 }
@@ -102,12 +110,6 @@ pub struct ManagedAgentRuntimeLifecycleObserverPayload {
     pub start_nonce: String,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManagedAgentCommunityTarget {
-    pub relay_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -361,8 +361,8 @@ pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
-pub(crate) async fn publish_stopped_status_once_at(
-    app: &AppHandle,
+pub(crate) async fn publish_stopped_status_once_at<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     relay_url: Option<&str>,
     reason: &str,
 ) {

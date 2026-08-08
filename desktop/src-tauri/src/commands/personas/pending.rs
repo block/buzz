@@ -46,6 +46,21 @@ pub(in crate::commands) fn retain_persona_pending(
     }
 }
 
+/// Retain a persona event using a pre-resolved [`RetentionScope`].
+///
+/// For snapshot-import callers that already hold a captured scope inside the
+/// `managed_agents_store_lock` — avoids re-reading live state at a point where
+/// the lock already prevents any workspace switch from succeeding.
+pub(in crate::commands) fn retain_persona_pending_in_scope(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    persona: &AgentDefinition,
+) {
+    if let Err(e) = prepare_persona_publication_at(&scope.db_path, &scope.owner_keys, persona, None)
+    {
+        eprintln!("buzz-desktop: persona-retain: {e}");
+    }
+}
+
 /// Build, sign, and durably retain a persona event in the active relay+owner
 /// scope.
 ///

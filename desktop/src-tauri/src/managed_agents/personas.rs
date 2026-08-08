@@ -1,7 +1,5 @@
 use std::fs;
 
-use tauri::AppHandle;
-
 use crate::{managed_agents::AgentDefinition, util::now_iso};
 
 struct BuiltInPersona {
@@ -325,7 +323,9 @@ pub fn validate_persona_activation_change(
     Ok(())
 }
 
-pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub fn load_personas<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Vec<AgentDefinition>, String> {
     let now = now_iso();
 
     // Post-fold: definitions live in the unified agent store, presented in
@@ -340,6 +340,28 @@ pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
     let (records, changed) = merge_personas(records, &now);
     if changed {
         save_personas(app, &records)?;
+    }
+
+    Ok(records)
+}
+
+/// Scoped variant of [`load_personas`]: load from an explicit definitions
+/// directory instead of resolving through the active scope. Used by
+/// operations that captured a [`WorkspaceAgentScope`] at entry to guarantee
+/// scope stability across awaits.
+pub(crate) fn load_personas_at(
+    definitions_dir: &std::path::Path,
+) -> Result<Vec<AgentDefinition>, String> {
+    let now = now_iso();
+
+    let records = crate::managed_agents::storage::load_agent_definitions_at(definitions_dir)?
+        .iter()
+        .filter_map(|record| record.to_definition_view())
+        .collect();
+
+    let (records, changed) = merge_personas(records, &now);
+    if changed {
+        save_personas_at(definitions_dir, &records)?;
     }
 
     Ok(records)
@@ -363,7 +385,10 @@ pub(crate) fn load_personas_from_path(
         .map_err(|error| format!("failed to parse persona store: {error}"))
 }
 
-pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(), String> {
+pub fn save_personas<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    records: &[AgentDefinition],
+) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_personas(&mut sorted);
 
@@ -374,6 +399,23 @@ pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(),
         .map(|persona| persona.into_agent_record())
         .collect();
     crate::managed_agents::storage::save_agent_definitions(app, &definitions)
+}
+
+/// Scoped variant of [`save_personas`]: write to an explicit definitions
+/// directory. Used by [`load_personas_at`] write-back and any operation that
+/// captured a [`WorkspaceAgentScope`] at entry.
+pub(crate) fn save_personas_at(
+    definitions_dir: &std::path::Path,
+    records: &[AgentDefinition],
+) -> Result<(), String> {
+    let mut sorted = records.to_vec();
+    sort_personas(&mut sorted);
+
+    let definitions: Vec<_> = sorted
+        .into_iter()
+        .map(|persona| persona.into_agent_record())
+        .collect();
+    crate::managed_agents::storage::save_agent_definitions_at(definitions_dir, &definitions)
 }
 
 #[cfg(test)]

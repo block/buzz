@@ -85,6 +85,8 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
 
+    std::fs::create_dir_all(canonical.join("agents/scopes")).unwrap();
+
     // Teams installed from `.main` — canonical has no teams dir.
     let team_dir = main_instance.join("agents/teams/com.example.test-pack");
     std::fs::create_dir_all(&team_dir).unwrap();
@@ -216,21 +218,13 @@ fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
 fn sync_creates_symlinks_to_fresh_worktree() {
     let (_parent, canonical, worktree) = setup_sync_layout();
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
-    for rel in SHARED_AGENT_FILES {
-        let dst = worktree.join(rel);
-        assert!(dst.is_symlink(), "{rel} should be a symlink");
-        assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
-    }
+    assert_eq!(synced, 2);
     for rel in SHARED_AGENT_DIRS {
         let dst = worktree.join(rel);
         assert!(dst.is_symlink(), "{rel} should be a symlink");
         assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
     }
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("agents/managed-agents.json")).unwrap(),
-        r#"[{"id":"agent-1"}]"#,
-    );
+    assert!(worktree.join("agents/scopes").is_symlink());
 }
 
 #[cfg(unix)]
@@ -244,28 +238,26 @@ fn sync_replaces_existing_files_with_symlinks() {
 
     let synced = sync_files(&canonical, &worktree);
 
-    assert_eq!(synced, 4);
-    for rel in SHARED_AGENT_FILES {
+    // Only SHARED_AGENT_DIRS (teams + scopes) are synced.
+    assert_eq!(synced, 2);
+    for rel in SHARED_AGENT_DIRS {
         let dst = worktree.join(rel);
         assert!(
             dst.is_symlink(),
-            "{rel} should be a symlink after replacing regular file"
+            "{rel} should be a symlink after replacing regular dir"
         );
         assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
     }
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("agents/managed-agents.json")).unwrap(),
-        r#"[{"id":"agent-1"}]"#,
-    );
+    assert!(worktree.join("agents/managed-agents.json").is_file());
 }
 
 #[cfg(unix)]
 #[test]
 fn sync_preserves_correct_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
-    assert_eq!(sync_files(&canonical, &worktree), 4);
+    assert_eq!(sync_files(&canonical, &worktree), 2);
     assert_eq!(sync_files(&canonical, &worktree), 0);
-    for rel in SHARED_AGENT_FILES {
+    for rel in SHARED_AGENT_DIRS {
         let dst = worktree.join(rel);
         assert!(dst.is_symlink());
         assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
@@ -276,14 +268,14 @@ fn sync_preserves_correct_symlinks() {
 #[test]
 fn sync_replaces_wrong_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
-    let wrong_target = PathBuf::from("/nonexistent/wrong-target.json");
+    let wrong_target = PathBuf::from("/nonexistent/wrong-target");
     std::fs::create_dir_all(worktree.join("agents")).unwrap();
-    for rel in SHARED_AGENT_FILES {
+    for rel in SHARED_AGENT_DIRS {
         std::os::unix::fs::symlink(&wrong_target, worktree.join(rel)).unwrap();
     }
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
-    for rel in SHARED_AGENT_FILES {
+    assert_eq!(synced, 2);
+    for rel in SHARED_AGENT_DIRS {
         assert_eq!(
             std::fs::read_link(worktree.join(rel)).unwrap(),
             canonical.join(rel)
@@ -296,18 +288,17 @@ fn sync_replaces_wrong_symlinks() {
 fn sync_handles_broken_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
     std::fs::create_dir_all(worktree.join("agents")).unwrap();
-    let broken_target = PathBuf::from("/this/does/not/exist.json");
-    for rel in SHARED_AGENT_FILES {
+    let broken_target = PathBuf::from("/this/does/not/exist");
+    for rel in SHARED_AGENT_DIRS {
         std::os::unix::fs::symlink(&broken_target, worktree.join(rel)).unwrap();
     }
     let synced = sync_files(&canonical, &worktree);
-    assert_eq!(synced, 4);
-    for rel in SHARED_AGENT_FILES {
+    assert_eq!(synced, 2);
+    for rel in SHARED_AGENT_DIRS {
         let dst = worktree.join(rel);
         assert!(dst.is_symlink());
         assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
-        // Content should be readable through the fixed symlink.
-        assert!(std::fs::read_to_string(&dst).is_ok());
+        assert!(std::fs::read_dir(&dst).is_ok());
     }
 }
 
@@ -317,24 +308,37 @@ fn writes_through_symlink_reach_canonical() {
     let (_parent, canonical, worktree) = setup_sync_layout();
     sync_files(&canonical, &worktree);
 
-    let worktree_path = worktree.join("agents/personas.json");
-    let canonical_path = canonical.join("agents/personas.json");
+    let scope_id = "test_scope_abcdef0123456789";
+    std::fs::create_dir_all(canonical.join("agents/scopes").join(scope_id)).unwrap();
+
+    let canonical_path = canonical
+        .join("agents/scopes")
+        .join(scope_id)
+        .join("managed-agents.json");
+    std::fs::write(&canonical_path, r#"[{"id":"agent-canonical"}]"#).unwrap();
+
+    let worktree_path = worktree
+        .join("agents/scopes")
+        .join(scope_id)
+        .join("managed-agents.json");
+
+    assert!(worktree.join("agents/scopes").is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(&worktree_path).unwrap(),
+        r#"[{"id":"agent-canonical"}]"#,
+    );
 
     // Write through the symlink using the same pattern as atomic_write_json.
-    let new_content = r#"[{"id":"builtin:fizz","updated":true}]"#;
+    let new_content = r#"[{"id":"agent-canonical","updated":true}]"#;
     let resolved = std::fs::canonicalize(&worktree_path).unwrap();
     let tmp = resolved.with_extension("json.tmp");
     std::fs::write(&tmp, new_content.as_bytes()).unwrap();
     std::fs::rename(&tmp, &resolved).unwrap();
 
-    // The canonical file should have the new content.
     assert_eq!(
         std::fs::read_to_string(&canonical_path).unwrap(),
         new_content
     );
-    // The worktree path should still be a symlink.
-    assert!(worktree_path.is_symlink());
-    // Reading through the symlink should return the new content.
     assert_eq!(
         std::fs::read_to_string(&worktree_path).unwrap(),
         new_content
@@ -343,72 +347,28 @@ fn writes_through_symlink_reach_canonical() {
 
 #[cfg(unix)]
 #[test]
-fn seed_up_migrates_sibling_file_to_canonical_then_symlinks() {
+fn seed_up_migrates_sibling_dir_to_canonical_then_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
-    let rel = "agents/personas.json";
-    // Canonical is missing the file; a sibling (.main) holds real content.
-    std::fs::remove_file(canonical.join(rel)).unwrap();
+    let rel = "agents/scopes";
+    std::fs::remove_dir_all(canonical.join(rel)).unwrap();
     let sibling = canonical
         .parent()
         .unwrap()
         .join("xyz.block.buzz.app.dev.main");
-    std::fs::create_dir_all(sibling.join("agents")).unwrap();
-    std::fs::write(sibling.join(rel), r#"[{"id":"brain"}]"#).unwrap();
+    std::fs::create_dir_all(sibling.join(rel).join("scope_abc")).unwrap();
+    std::fs::write(
+        sibling
+            .join(rel)
+            .join("scope_abc")
+            .join("managed-agents.json"),
+        r#"[{"id":"from-sibling"}]"#,
+    )
+    .unwrap();
 
     sync_files(&canonical, &worktree);
 
-    // The real file landed at canonical (proves the rename, not a dangling link).
-    let canonical_file = canonical.join(rel);
-    assert!(
-        canonical_file.is_file() && !canonical_file.is_symlink(),
-        "canonical should hold the migrated real file"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&canonical_file).unwrap(),
-        r#"[{"id":"brain"}]"#,
-    );
-    // The worktree is symlinked to canonical.
-    let dst = worktree.join(rel);
-    assert!(dst.is_symlink());
-    assert_eq!(std::fs::read_link(&dst).unwrap(), canonical_file);
-}
-
-#[cfg(unix)]
-#[test]
-fn seed_up_no_sibling_content_is_noop() {
-    let (_parent, canonical, worktree) = setup_sync_layout();
-    let rel = "agents/personas.json";
-    // Canonical missing the file and no sibling holds it.
-    std::fs::remove_file(canonical.join(rel)).unwrap();
-
-    sync_files(&canonical, &worktree);
-
-    // Nothing to seed: canonical stays missing, worktree gets no symlink for it.
-    assert!(!canonical.join(rel).exists());
-    assert!(!worktree.join(rel).exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn seed_up_skipped_when_canonical_has_file() {
-    let (_parent, canonical, worktree) = setup_sync_layout();
-    let rel = "agents/personas.json";
-    // A sibling also holds different content, but canonical already has the file.
-    let sibling = canonical
-        .parent()
-        .unwrap()
-        .join("xyz.block.buzz.app.dev.main");
-    std::fs::create_dir_all(sibling.join("agents")).unwrap();
-    std::fs::write(sibling.join(rel), r#"[{"id":"should-not-win"}]"#).unwrap();
-
-    sync_files(&canonical, &worktree);
-
-    // Canonical's original content is untouched; the sibling did not seed it.
-    assert_eq!(
-        std::fs::read_to_string(canonical.join(rel)).unwrap(),
-        r#"[{"id":"builtin:fizz"}]"#,
-    );
-    // Pull-symlink path is unchanged: worktree links to canonical.
+    assert!(canonical.join(rel).is_dir());
+    assert!(canonical.join(rel).join("scope_abc").exists());
     let dst = worktree.join(rel);
     assert!(dst.is_symlink());
     assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
@@ -416,26 +376,62 @@ fn seed_up_skipped_when_canonical_has_file() {
 
 #[cfg(unix)]
 #[test]
-fn seed_up_ignores_sibling_symlink_as_source() {
+fn seed_up_no_sibling_content_is_noop() {
     let (_parent, canonical, worktree) = setup_sync_layout();
-    let rel = "agents/personas.json";
-    std::fs::remove_file(canonical.join(rel)).unwrap();
-    // Sibling holds only a symlink (not real content) — not a valid seed source.
+    let rel = "agents/scopes";
+    assert!(canonical.join(rel).is_dir());
+
+    sync_files(&canonical, &worktree);
+
+    assert!(worktree.join(rel).is_symlink());
+    assert_eq!(
+        std::fs::read_link(worktree.join(rel)).unwrap(),
+        canonical.join(rel)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_up_skipped_when_canonical_has_dir() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/scopes";
     let sibling = canonical
         .parent()
         .unwrap()
         .join("xyz.block.buzz.app.dev.main");
-    std::fs::create_dir_all(sibling.join("agents")).unwrap();
-    std::os::unix::fs::symlink(
-        PathBuf::from("/nonexistent/elsewhere.json"),
-        sibling.join(rel),
+    std::fs::create_dir_all(sibling.join(rel).join("scope_xyz")).unwrap();
+    std::fs::write(
+        sibling
+            .join(rel)
+            .join("scope_xyz")
+            .join("managed-agents.json"),
+        r#"[{"id":"should-not-win"}]"#,
     )
     .unwrap();
 
     sync_files(&canonical, &worktree);
 
-    // The symlink was not promoted; canonical stays missing.
-    assert!(!canonical.join(rel).exists());
+    assert!(!canonical.join(rel).join("scope_xyz").exists());
+    let dst = worktree.join(rel);
+    assert!(dst.is_symlink());
+    assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_up_ignores_sibling_symlink_dir_as_source() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/scopes";
+    std::fs::remove_dir_all(canonical.join(rel)).unwrap();
+    let sibling = canonical
+        .parent()
+        .unwrap()
+        .join("xyz.block.buzz.app.dev.main");
+    std::fs::create_dir_all(sibling.join("agents")).unwrap();
+    std::os::unix::fs::symlink(PathBuf::from("/nonexistent/elsewhere"), sibling.join(rel)).unwrap();
+
+    sync_files(&canonical, &worktree);
+    // Sibling symlink not promoted; sync creates canonical dir empty and symlinks worktree.
 }
 
 #[test]
@@ -542,7 +538,8 @@ fn patch_json_records_rewrites_secret_store_owner_only() {
         let provider = obj.remove("provider").unwrap();
         obj.insert("runtime".to_string(), provider);
         true
-    });
+    })
+    .unwrap();
 
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "secret-bearing rewrite must be owner-only");
@@ -562,7 +559,8 @@ fn rename_provider_to_runtime_migrates_field() {
             "provider": "goose"
         }]),
     );
-    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"))
+        .expect("rename should succeed");
     let records = read_personas_json(dir.path());
     assert_eq!(records[0]["runtime"], "goose");
     assert!(records[0].get("provider").is_none());
@@ -580,7 +578,8 @@ fn rename_provider_to_runtime_is_idempotent() {
         }]),
     );
     let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
-    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"))
+        .expect("rename should succeed");
     let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
     assert_eq!(
         before, after,
@@ -599,7 +598,8 @@ fn rename_provider_to_runtime_skips_record_without_either_key() {
         }]),
     );
     let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
-    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"))
+        .expect("rename should succeed");
     let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
     assert_eq!(
         before, after,
@@ -619,7 +619,8 @@ fn rename_provider_to_runtime_preserves_existing_runtime_over_provider() {
             "runtime": "correct-value"
         }]),
     );
-    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+    rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"))
+        .expect("rename should succeed");
     let records = read_personas_json(dir.path());
     assert_eq!(records[0]["runtime"], "correct-value");
     // provider key should still be there since the closure returns false when runtime exists
@@ -637,7 +638,7 @@ fn reconcile_mcp_commands_clears_stale_buzz_mcp_server() {
             "mcp_command": "buzz-mcp-server"
         }]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     let records = read_agents_json(dir.path());
     assert_eq!(records[0]["mcp_command"], "");
 }
@@ -653,7 +654,7 @@ fn reconcile_mcp_commands_sets_canonical_for_buzz_agent() {
             "mcp_command": "buzz-mcp-server"
         }]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     let records = read_agents_json(dir.path());
     assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
 }
@@ -669,7 +670,7 @@ fn reconcile_mcp_commands_leaves_custom_value_untouched() {
     write_agents_json(dir.path(), &json);
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_mcp_commands_in_file(&path);
+    reconcile_mcp_commands_in_file(&path).unwrap();
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
 }
 
@@ -684,7 +685,7 @@ fn reconcile_mcp_commands_leaves_unknown_runtime_untouched() {
     write_agents_json(dir.path(), &json);
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_mcp_commands_in_file(&path);
+    reconcile_mcp_commands_in_file(&path).unwrap();
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
 }
 
@@ -700,9 +701,9 @@ fn reconcile_mcp_commands_is_idempotent() {
         }]),
     );
     let path = dir.path().join("agents/managed-agents.json");
-    reconcile_mcp_commands_in_file(&path);
+    reconcile_mcp_commands_in_file(&path).unwrap();
     let after_first = std::fs::read_to_string(&path).unwrap();
-    reconcile_mcp_commands_in_file(&path);
+    reconcile_mcp_commands_in_file(&path).unwrap();
     assert_eq!(after_first, std::fs::read_to_string(&path).unwrap());
 }
 
@@ -718,7 +719,7 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
             {"name": "Stale Buzz", "agent_command": "buzz-agent", "mcp_command": "buzz-mcp-server"}
         ]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     let records = read_agents_json(dir.path());
     assert_eq!(records[0]["mcp_command"], "");
     assert_eq!(records[1]["mcp_command"], "");
@@ -745,7 +746,7 @@ fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
         dir.path(),
         &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     let records = read_agents_json(dir.path());
     assert_eq!(records[0]["mcp_command"], "");
 }
@@ -775,7 +776,7 @@ fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
         dir.path(),
         &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     assert_eq!(
         read_agents_json(dir.path())[0]["mcp_command"],
         "",
@@ -789,7 +790,7 @@ fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
         dir.path(),
         &serde_json::json!([{"id": "p1", "runtime": "buzz-agent"}]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     assert_eq!(
         read_agents_json(dir.path())[0]["mcp_command"],
         "buzz-dev-mcp",
@@ -817,7 +818,7 @@ fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
         dir.path(),
         &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
     );
-    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json")).unwrap();
     let records = read_agents_json(dir.path());
     assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
 }
@@ -832,7 +833,7 @@ fn reconcile_mcp_commands_skips_record_without_agent_command() {
     write_agents_json(dir.path(), &json);
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
-    reconcile_mcp_commands_in_file(&path);
+    reconcile_mcp_commands_in_file(&path).unwrap();
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
 }
 

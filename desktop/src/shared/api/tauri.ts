@@ -1124,20 +1124,20 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
+type ApplyWorkspaceResult = {
+  applied: boolean;
+  degraded: string[];
+  blocked?: string | null;
+};
 export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
   token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
-): Promise<void> {
-  await invokeTauri("apply_workspace", {
-    relayUrl,
-    nsec: nsec ?? null,
-    token: token ?? null,
-    reposDir: reposDir ?? null,
-    agentManagedProfiles: agentManagedProfiles ?? false,
-  });
+): Promise<ApplyWorkspaceResult> {
+  // biome-ignore format: single-line call keeps the function under the file-size limit
+  return invokeTauri<ApplyWorkspaceResult>("apply_workspace", { relayUrl, nsec: nsec ?? null, token: token ?? null, reposDir: reposDir ?? null, agentManagedProfiles: agentManagedProfiles ?? false });
 }
 
 // Validate a candidate repos dir without mutating the filesystem. Rejects

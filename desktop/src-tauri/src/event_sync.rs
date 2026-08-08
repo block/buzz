@@ -13,10 +13,23 @@ use std::path::Path;
 /// `sync_team_personas` wrote in [`crate::migration::run_boot_migrations`]
 /// (see its `# Ordering` guard). Event signing needs the resolved owner keys,
 /// so this runs after identity resolution, not in the boot migrations.
-pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys, db_path: &Path) {
-    migrate_personas_to_events(app, owner_keys, db_path);
-    migrate_teams_to_events(app, owner_keys, db_path);
-    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
+///
+/// `definitions_dir` is the scoped definitions directory for this workspace
+/// (`WorkspaceAgentScope::definitions_dir`). Reads personas/teams/agents from
+/// that directory rather than the legacy unscoped `agents/` root.
+pub fn run_event_sync(
+    _app: &tauri::AppHandle,
+    owner_keys: &nostr::Keys,
+    db_path: &Path,
+    definitions_dir: &Path,
+) {
+    migrate_personas_to_events(definitions_dir, owner_keys, db_path);
+    migrate_teams_to_events(definitions_dir, owner_keys, db_path);
+    crate::managed_agents::reconcile::reconcile_agents_to_events(
+        definitions_dir,
+        owner_keys,
+        db_path,
+    );
 }
 
 /// Spawn the best-effort event reconcile off the synchronous Tauri setup path.
@@ -25,14 +38,21 @@ pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys, db_path:
 /// `AppState::keys` mutex. The reconcile itself is still synchronous JSON,
 /// SQLite, and signing work, so it runs on the blocking pool rather than an
 /// async worker.
+///
+/// The dispatch always succeeds (fire-and-forget); completion failures are
+/// logged internally via `eprintln!`. Event-sync does not emit a structured
+/// degradation event because `spawn_blocking` failure means the Tauri runtime
+/// is shutting down — there is no user-visible surface to deliver a toast to
+/// at that point.
 pub fn spawn_event_sync(
     app: tauri::AppHandle,
     owner_keys: nostr::Keys,
     db_path: std::path::PathBuf,
+    definitions_dir: std::path::PathBuf,
 ) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
-            run_event_sync(&app, &owner_keys, &db_path);
+            run_event_sync(&app, &owner_keys, &db_path, &definitions_dir);
         })
         .await
         {
@@ -61,14 +81,10 @@ pub fn spawn_event_sync(
 /// `pending_sync = 1` for later relay publish. Migration succeeds on local
 /// write, not relay acknowledgment. Every retained row is a real signed
 /// event — there is no placeholder path.
-pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_path: &Path) {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match migrate_personas_in_dir_at(&base_dir, keys, db_path) {
+///
+/// `definitions_dir` is the scoped definitions directory (`WorkspaceAgentScope::definitions_dir`).
+pub fn migrate_personas_to_events(definitions_dir: &Path, keys: &nostr::Keys, db_path: &Path) {
+    match migrate_personas_in_dir_at(definitions_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!(
@@ -219,14 +235,10 @@ fn migrate_personas_in_dir_at(
 ///
 /// Must run after the persisted identity is resolved (it signs each event with
 /// the owner's keys).
-pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_path: &Path) {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match migrate_teams_in_dir_at(&base_dir, keys, db_path) {
+///
+/// `definitions_dir` is the scoped definitions directory (`WorkspaceAgentScope::definitions_dir`).
+pub fn migrate_teams_to_events(definitions_dir: &Path, keys: &nostr::Keys, db_path: &Path) {
+    match migrate_teams_in_dir_at(definitions_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");

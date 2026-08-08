@@ -28,6 +28,7 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
+pub(in crate::commands) use pending::retain_persona_pending_in_scope;
 pub(super) use pending::tombstone_persona_pending;
 mod create;
 pub use create::create_persona;
@@ -244,7 +245,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             // _store_guard drops here, before try_regenerate_nest.
         }
 
-        try_regenerate_nest(&app);
+        try_regenerate_nest(&app).ok();
 
         Ok(())
     })
@@ -298,7 +299,7 @@ pub async fn set_persona_active(
 
         let updated = persona.clone();
         save_personas(&app, &personas)?;
-        try_regenerate_nest(&app);
+        try_regenerate_nest(&app).ok();
         Ok(updated)
     })
     .await
@@ -307,7 +308,7 @@ pub async fn set_persona_active(
 
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
 mod card;
-mod snapshot;
+pub(crate) mod snapshot;
 pub use card::*;
 #[cfg(test)]
 pub(crate) use snapshot::import::decode_snapshot_from_bytes;

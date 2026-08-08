@@ -92,7 +92,7 @@ pub(super) fn rollback_failed_agent_update(
             .ok_or_else(|| format!("agent {pubkey} not found after failed rename rollback"))?;
         super::agents::retain_managed_agent_pending(app, state, restored);
     }
-    try_regenerate_nest(app);
+    try_regenerate_nest(app).ok();
     Ok(())
 }
 

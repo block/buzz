@@ -517,7 +517,8 @@ fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
         &["agent-alpha".to_string(), "agent-beta".to_string()],
         &src,
         &dst,
-    );
+    )
+    .expect("copy_agent_keys_between_stores failed");
 
     assert_eq!(
         dst.stored
@@ -564,9 +565,8 @@ fn copy_agent_keys_skips_keys_already_in_dst() {
     let src = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1old");
     let dst = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1new");
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
-
-    // dst value must remain unchanged — src must not overwrite it.
+    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst)
+        .expect("copy should succeed");
     assert_eq!(
         dst.stored
             .borrow()
@@ -594,7 +594,8 @@ fn copy_agent_keys_skips_keys_absent_from_src() {
     let src = FakeKeyStore::reachable(); // empty
     let dst = FakeKeyStore::reachable();
 
-    super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst);
+    super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst)
+        .expect("copy with absent src key should succeed");
 
     assert!(
         dst.stored
@@ -622,7 +623,8 @@ fn copy_agent_keys_skips_all_when_dst_unreachable() {
     let src = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
     let dst = FakeKeyStore::unreachable();
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
+    let result = super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
+    assert!(result.is_err(), "unreachable dst must produce Err");
 
     // No writes attempted to an unreachable dst.
     assert_eq!(*dst.write_count.borrow(), 0);
@@ -643,9 +645,8 @@ fn copy_agent_keys_skips_entirely_when_marker_present() {
         .with_key(super::DEV_MIGRATION_MARKER, "done")
         .with_key(&agent_keyring_name("agent-alpha"), "nsec1dev");
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
-
-    // Src must not have been accessed at all.
+    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst)
+        .expect("copy with marker present should succeed (early return Ok)");
     assert_eq!(
         *src.read_count.borrow(),
         0,
@@ -675,7 +676,8 @@ fn copy_agent_keys_writes_marker_even_with_empty_agent_list() {
     let src = FakeKeyStore::reachable();
     let dst = FakeKeyStore::reachable();
 
-    super::copy_agent_keys_between_stores(&[], &src, &dst);
+    super::copy_agent_keys_between_stores(&[], &src, &dst)
+        .expect("copy with empty pubkeys should succeed");
 
     assert_eq!(
         dst.stored

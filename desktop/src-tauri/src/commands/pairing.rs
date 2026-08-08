@@ -473,7 +473,7 @@ async fn import_recovered_identity(
         let keys = nostr::Keys::parse(nsec.trim())
             .map_err(|e| format!("Phone sent an invalid identity: {e}"))?;
         let state = app.state::<AppState>();
-        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+        let _mutation_guard = state.identity_mutation.blocking_lock();
         commit_recovery_if_current(&generation, &generation_fence, task_generation, || {
             let data_dir = app
                 .path()

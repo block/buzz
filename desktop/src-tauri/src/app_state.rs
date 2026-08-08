@@ -9,12 +9,12 @@ use std::{
 
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
-#[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
 use crate::managed_agents::config_bridge::SessionConfigCache;
+use crate::managed_agents::scope::WorkspaceAgentScope;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
 pub struct AppState {
@@ -35,10 +35,6 @@ pub struct AppState {
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
-    pub managed_agent_restore_pending: AtomicBool,
     /// Whether desktop may repair managed-agent kind:0 profiles from its local
     /// records. Disabled by the agent-managed profiles experiment so an agent's
     /// own profile updates are not overwritten on start or restore.
@@ -93,7 +89,17 @@ pub struct AppState {
     /// a newer imported key during concurrent calls. Deliberately separate from
     /// `keys` so readers (signing, get_identity, etc.) are not blocked during
     /// keyring I/O.
-    pub identity_mutation: Mutex<()>,
+    ///
+    /// Layer 1 async lock (order: `identity_mutation` → `workspace_transition`
+    /// → Mesh `rearm_lock` → `mesh_llm_runtime`). May hold across `.await`.
+    pub identity_mutation: AsyncMutex<()>,
+    /// Serializes workspace transitions (`apply_workspace` and live identity
+    /// import). Layer 1 async lock; taken after `identity_mutation`.
+    pub workspace_transition: AsyncMutex<()>,
+    /// Active workspace agent scope. `None` until first `apply_workspace`.
+    /// Every agent command fails closed on `None` — no legacy-root fallback.
+    /// Layer 2 commit epoch (no `.await` while `managed_agents_store_lock` held).
+    pub active_agent_scope: Mutex<Option<WorkspaceAgentScope>>,
     /// Set when the boot-time Phase 2 reset attempted a wipe but verification
     /// failed. The sentinel is preserved so the next relaunch retries. All
     /// identity-dependent setup is skipped; the frontend shows a reset-failed
@@ -207,11 +213,12 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
-        managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
-        identity_mutation: Mutex::new(()),
+        identity_mutation: AsyncMutex::new(()),
+        workspace_transition: AsyncMutex::new(()),
+        active_agent_scope: Mutex::new(None),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
@@ -265,33 +272,6 @@ impl AppState {
     pub fn clear_agent_session_caches(&self, pubkey: &str) {
         if let Ok(mut map) = self.session_config_cache.lock() {
             map.retain(|key, _| key.pubkey != pubkey);
-        }
-    }
-
-    /// Record that `channel_id` was just created by `creator_pubkey` and its
-    /// kind:39002 owner membership has not yet been observed.
-    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
-    /// Bound to `my_pubkey` so an in-process identity swap never inherits
-    /// another identity's pending-owner entry for the same channel id.
-    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
-        self.pending_owned_channels
-            .lock()
-            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
-            .unwrap_or(false)
-    }
-
-    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
-    /// overlay once that identity's real kind:39002 membership has been
-    /// observed.
-    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
         }
     }
 

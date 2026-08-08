@@ -135,7 +135,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             save_personas(&app, &personas)?;
 
             let retained = retain(&app, &state, &result)?;
-            try_regenerate_nest(&app);
+            try_regenerate_nest(&app).ok();
 
             // If the avatar or display_name changed, propagate to linked agent
             // records and collect relay profile sync params for the async phase.

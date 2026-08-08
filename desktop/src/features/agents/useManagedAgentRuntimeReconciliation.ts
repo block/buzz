@@ -1,48 +1,42 @@
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
-import {
-  canonicalCommunityRelays,
-  classifyReconcileResult,
-  pendingReconcileRelays,
-  reconcileRetryDelayMs,
-} from "@/features/agents/managedAgentReconciliationPlan";
+import { reconcileRetryDelayMs } from "@/features/agents/managedAgentReconciliationPlan";
 import {
   cacheReconciledManagedAgentRuntimes,
   managedAgentRuntimesQueryKey,
 } from "@/features/agents/managedAgentRuntimeHooks";
-import { canonicalRelayUrl } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 import { reconcileManagedAgentRuntimes } from "@/shared/api/tauriManagedAgents";
 
 /**
- * Bootstrap a lazy harness pair for every auto-start local agent in every
- * configured community, incrementally and with retry.
+ * Bootstrap a lazy harness pair for every auto-start local agent in the active
+ * workspace, with retry on failure.
  *
- * Reconciliation is keyed by canonical relay URL: each configured relay is
- * reconciled once it appears (so adding a community mid-session spawns pairs
- * there without needing the add flow to also switch communities), and a relay
- * whose reconcile fails is retried with a capped backoff (5s / 30s / 2m) rather
- * than left un-spawned until the next switch or relaunch. Relays that reconcile
- * cleanly are never re-hit; once nothing is outstanding, no timer is left
- * running.
+ * Under the active-scope-only runtime policy the backend derives the sole
+ * target relay from the captured active scope — no community list is passed.
+ * Reconciliation runs once on mount; if it fails it is retried with a capped
+ * backoff (5s / 30s / 2m). Once it succeeds, no timer is left running.
+ *
+ * The `activeCommunityKey` parameter is a stable key that changes whenever the
+ * active workspace changes (e.g. `"${communityId}-${reinitKey}"`). A workspace
+ * switch unmounts/remounts the effect, resetting the reconcile state and
+ * re-running for the new scope.
  */
 export function useManagedAgentRuntimeReconciliation(
-  communities: readonly { relayUrl: string }[],
+  activeCommunityKey: string,
 ): void {
   const queryClient = useQueryClient();
-  // Canonical relay URLs that have reconciled cleanly — never re-hit.
-  const reconciledRef = React.useRef<Set<string>>(new Set());
-  // Canonical relay URLs with a reconcile call in flight — not re-dispatched.
-  const inFlightRef = React.useRef<Set<string>>(new Set());
-  // Consecutive failures per canonical relay URL, driving the retry backoff.
-  const failuresRef = React.useRef<Map<string, number>>(new Map());
+  const failureCountRef = React.useRef(0);
   const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
 
+  // activeCommunityKey changes on workspace switch, resetting the effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: activeCommunityKey is an intentional trigger dependency — the effect must re-run on workspace switch to reset reconcile state for the new scope.
   React.useEffect(() => {
     let cancelled = false;
+    failureCountRef.current = 0;
 
     const clearRetryTimer = () => {
       if (retryTimerRef.current !== null) {
@@ -51,77 +45,35 @@ export function useManagedAgentRuntimeReconciliation(
       }
     };
 
-    const scheduleRetry = (failed: readonly string[]) => {
-      // One shared timer fires at the soonest per-relay backoff; every failing
-      // relay is retried together (reconcile is idempotent), so re-hitting a
-      // longer-backoff relay early is harmless.
-      let soonest: number | null = null;
-      for (const relay of failed) {
-        const nextCount = (failuresRef.current.get(relay) ?? 0) + 1;
-        failuresRef.current.set(relay, nextCount);
-        const delay = reconcileRetryDelayMs(nextCount);
-        if (delay !== null && (soonest === null || delay < soonest)) {
-          soonest = delay;
-        }
-      }
+    const scheduleRetry = () => {
+      const nextCount = failureCountRef.current + 1;
+      failureCountRef.current = nextCount;
+      const delay = reconcileRetryDelayMs(nextCount);
       clearRetryTimer();
-      if (soonest === null) return; // all failing relays hit the retry cap
+      if (delay === null) return; // retry cap exhausted
       retryTimerRef.current = setTimeout(() => {
         retryTimerRef.current = null;
         if (!cancelled) runReconcile();
-      }, soonest);
+      }, delay);
     };
 
     const runReconcile = () => {
-      const canonicalToRequested = canonicalCommunityRelays(
-        communities,
-        canonicalRelayUrl,
-      );
-      // Forget bookkeeping for relays that are no longer configured so the sets
-      // stay bounded and re-adding a removed community reconciles it afresh.
-      for (const done of [...reconciledRef.current]) {
-        if (!canonicalToRequested.has(done)) reconciledRef.current.delete(done);
-      }
-      for (const failing of [...failuresRef.current.keys()]) {
-        if (!canonicalToRequested.has(failing)) {
-          failuresRef.current.delete(failing);
-        }
-      }
-
-      const pending = pendingReconcileRelays(
-        canonicalToRequested,
-        reconciledRef.current,
-        inFlightRef.current,
-      );
-      if (pending.length === 0) {
-        clearRetryTimer();
-        return;
-      }
-
-      for (const relay of pending) inFlightRef.current.add(relay);
-      const targets = pending.map((relay) => ({
-        relayUrl: canonicalToRequested.get(relay) as string,
-      }));
       const baseline = queryClient.getQueryData<ManagedAgentRuntimeStatus[]>(
         managedAgentRuntimesQueryKey,
       );
-
-      void reconcileManagedAgentRuntimes(targets)
+      void reconcileManagedAgentRuntimes()
         .then((runtimes) => {
-          cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
-          return classifyReconcileResult(pending, runtimes, canonicalRelayUrl);
+          if (!cancelled) {
+            cacheReconciledManagedAgentRuntimes(
+              queryClient,
+              baseline,
+              runtimes,
+            );
+          }
         })
         .catch((error) => {
           console.warn("[managed-agent-runtimes] reconcile failed:", error);
-          return classifyReconcileResult(pending, null, canonicalRelayUrl);
-        })
-        .then(({ succeeded, failed }) => {
-          for (const relay of pending) inFlightRef.current.delete(relay);
-          for (const relay of succeeded) {
-            reconciledRef.current.add(relay);
-            failuresRef.current.delete(relay);
-          }
-          if (!cancelled && failed.length > 0) scheduleRetry(failed);
+          if (!cancelled) scheduleRetry();
         });
     };
 
@@ -131,5 +83,5 @@ export function useManagedAgentRuntimeReconciliation(
       cancelled = true;
       clearRetryTimer();
     };
-  }, [communities, queryClient]);
+  }, [activeCommunityKey, queryClient]);
 }

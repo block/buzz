@@ -905,7 +905,7 @@ pub async fn update_managed_agent(
         (summary, sync_params, rollback)
     }; // lock dropped here
 
-    try_regenerate_nest(&app);
+    try_regenerate_nest(&app).ok();
 
     // Phase 2: relay profile sync (async, outside lock). A rename is committed
     // only when this succeeds; otherwise restore the complete pre-edit record

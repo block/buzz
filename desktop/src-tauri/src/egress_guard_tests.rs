@@ -263,14 +263,15 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/relay.rs", 2, 2),                             // boundaries 2, 4
     ("src/relay/submit.rs", 1, 1),                      // boundaries 1 + 3 (shared funnel)
     ("src/huddle/pipeline.rs", 1, 1),                   // boundary 5
-    ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
-    ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
+    ("src/commands/team_snapshot.rs", 1, 0), // boundary 6 guard in import.rs submit_engram_event (shared)
+    ("src/commands/personas/snapshot/import.rs", 1, 1), // boundary 6+7 (shared submit_engram_event) — injection test moved to import_tests.rs
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
     ("src/managed_agents/persona_events/tests.rs", 1, 0),
     ("src/commands/team_snapshot/tests.rs", 1, 0),
+    ("src/commands/personas/snapshot/import_tests.rs", 1, 0), // ncryptsec guard injection test (discard addr)
     // Mock-relay route in its in-file tests; production publish goes through
     // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
     ("src/commands/personas/sharing.rs", 1, 0),
@@ -437,6 +438,7 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/commands/team_snapshot.rs",
         "src/commands/team_snapshot/tests.rs",
         "src/commands/personas/snapshot/import.rs",
+        "src/commands/personas/snapshot/import_tests.rs",
         "src/native_websocket.rs",
     ];
 

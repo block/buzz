@@ -32,16 +32,14 @@ use nostr::JsonUtil;
 /// Reconcile `managed-agents.json` into kind:30177 events in the retention
 /// store. Boot-time entry point, called from `event_sync::run_event_sync`
 /// after the persona and team legs.
+///
+/// `definitions_dir` is the scoped definitions directory (`WorkspaceAgentScope::definitions_dir`).
 pub(crate) fn reconcile_agents_to_events(
-    app: &tauri::AppHandle,
+    definitions_dir: &Path,
     keys: &nostr::Keys,
     db_path: &Path,
 ) {
-    let Ok(base_dir) = super::managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match reconcile_agents_in_dir_at(&base_dir, keys, db_path) {
+    match reconcile_agents_in_dir_at(definitions_dir, keys, db_path) {
         Ok(0) => {}
         Ok(reconciled) => {
             eprintln!(

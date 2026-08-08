@@ -68,13 +68,17 @@ export function cacheReconciledManagedAgentRuntimes(
 }
 
 /**
- * Bootstrap runtime pairs in every configured community (fire-and-forget).
+ * Bootstrap runtime pairs for all auto-start agents in the active workspace
+ * (fire-and-forget).
  *
  * Called after an agent create: the create command spawns only the active
  * community's pair, and the startup reconcile won't run again until the next
  * launch or community switch, so without this kick a brand-new agent stays
- * deaf in every other community. Idempotent — live pairs are skipped and
+ * deaf in the active workspace. Idempotent — live pairs are skipped and
  * missing ones spawn lazily (warm socket, no LLM until first mention).
+ *
+ * The backend derives the sole target relay from the captured active scope;
+ * the frontend no longer passes a communities list.
  */
 export function bootstrapManagedAgentRuntimePairs(
   queryClient: QueryClient,
@@ -82,10 +86,7 @@ export function bootstrapManagedAgentRuntimePairs(
   const baseline = queryClient.getQueryData<ManagedAgentRuntimeStatus[]>(
     managedAgentRuntimesQueryKey,
   );
-  const communities = loadCommunities().map((community) => ({
-    relayUrl: community.relayUrl,
-  }));
-  void reconcileManagedAgentRuntimes(communities)
+  void reconcileManagedAgentRuntimes()
     .then((runtimes) => {
       cacheReconciledManagedAgentRuntimes(queryClient, baseline, runtimes);
     })

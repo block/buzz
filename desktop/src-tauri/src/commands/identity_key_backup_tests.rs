@@ -121,7 +121,7 @@ fn concurrent_identity_swap_vs_backup_is_serialized() {
         std::thread::spawn(move || {
             // Mirrors import_identity's locking: mutation guard held
             // across the key swap.
-            let _guard = state.identity_mutation.lock().unwrap();
+            let _guard = state.identity_mutation.blocking_lock();
             *state.keys.lock().unwrap() = key_b;
         })
     };

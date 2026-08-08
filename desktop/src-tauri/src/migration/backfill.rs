@@ -31,24 +31,9 @@ use crate::managed_agents::{
 /// The manufactured definition's slug is the agent's pubkey: 64-hex passes
 /// the NIP-AP slug grammar on both relay and desktop ends, and agent pubkeys
 /// are unique, so the coordinate is collision-free by construction.
-pub fn backfill_standalone_agents(app: &tauri::AppHandle) {
-    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
-        return;
-    };
-    match backfill_standalone_agents_in_dir(&base_dir) {
-        Ok(0) => {}
-        Ok(backfilled) => {
-            eprintln!(
-                "buzz-desktop: standalone-backfill: {backfilled} agents linked to manufactured definitions"
-            );
-        }
-        Err(e) => eprintln!("buzz-desktop: standalone-backfill: {e}"),
-    }
-}
-
 /// Core backfill logic, decoupled from the Tauri `AppHandle` for testing.
 /// Returns the number of records backfilled (0 = nothing to do).
-fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
+pub(crate) fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     let agents_path = base_dir.join("managed-agents.json");
     if !agents_path.exists() {
         return Ok(0);

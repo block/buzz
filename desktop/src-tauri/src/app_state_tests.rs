@@ -1322,7 +1322,6 @@ fn present_keyring_no_file_no_marker_self_heals_marker() {
 }
 
 // ── I1: uncached read-back verify ─────────────────────────────────────────
-
 #[test]
 fn verify_fails_store_does_not_write_marker_or_delete_file() {
     // I1: when verify_stored() returns Ok(false) (simulating a backend that
@@ -1364,7 +1363,6 @@ fn verify_fails_store_does_not_write_marker_or_delete_file() {
 }
 
 // ── I2: corrupt keyring + marker = Lost recovery ──────────────────────────
-
 #[test]
 fn corrupt_keyring_marker_present_no_file_is_lost() {
     // I2: Present(corrupt) + migration marker + no identity.key → the prior
@@ -1415,3 +1413,5 @@ fn corrupt_keyring_no_marker_no_file_generates_fresh() {
         "a fresh key must be stored in the keyring or the file after generate_and_persist"
     );
 }
+#[path = "app_state_scope_tests.rs"]
+mod scope_tests;

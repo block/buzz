@@ -77,7 +77,7 @@ pub async fn create_persona(
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
         retain_persona_pending(&app, &state, &persona);
-        try_regenerate_nest(&app);
+        try_regenerate_nest(&app).ok();
         Ok(persona)
     })
     .await

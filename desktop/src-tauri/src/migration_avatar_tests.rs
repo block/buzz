@@ -106,7 +106,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&records).unwrap()).unwrap();
 
-    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after");
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after").unwrap();
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -141,7 +141,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
     assert_eq!(migrated[4]["updated_at"], "before");
 
     let once = std::fs::read(&path).unwrap();
-    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "later");
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "later").unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), once);
 }
 
@@ -199,7 +199,7 @@ fn refresh_builtin_agent_avatars_updates_versions_without_stored_definitions() {
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&records).unwrap()).unwrap();
 
-    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after");
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after").unwrap();
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -272,7 +272,7 @@ fn refresh_builtin_agent_avatars_updates_uploaded_media_urls() {
     ]);
     std::fs::write(&path, serde_json::to_vec_pretty(&records).unwrap()).unwrap();
 
-    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after");
+    refresh_builtin_agent_avatars_in_file(&path, &legacy_avatars, "after").unwrap();
 
     let migrated: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

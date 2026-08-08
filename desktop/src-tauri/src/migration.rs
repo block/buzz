@@ -29,15 +29,13 @@ const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
 /// `identity.key` is deliberately excluded because worktree instances
 /// receive their identity via the `BUZZ_PRIVATE_KEY` env var.
-const SHARED_AGENT_FILES: &[&str] = &[
-    "agents/managed-agents.json",
-    "agents/personas.json",
-    "agents/teams.json",
-];
+/// Legacy unscoped agent files are absent; scoped stores live in `agents/scopes/`.
+const SHARED_AGENT_FILES: &[&str] = &[];
 
 /// Directories symlinked from worktree data directories to the canonical
 /// dev data directory. Each entry becomes a single directory symlink.
-const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
+/// `agents/scopes` shares all scoped stores across worktrees.
+const SHARED_AGENT_DIRS: &[&str] = &["agents/teams", "agents/scopes"];
 
 /// Returns `true` when `name` is a dev data dir name — i.e. it is exactly the
 /// canonical dev identifier or a worktree variant separated by a `.` (e.g.
@@ -157,40 +155,18 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
-    // Dev-build-only: copy any agent keys that exist in the production
-    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
-    // so existing agents don't lose their keys after the service-name split.
-    // Must run after sync_shared_agent_data (JSON symlinked) and before
-    // any load_managed_agents call (which runs hydrate_keys against the
-    // dev service and would log "has no key" for un-migrated entries).
-    #[cfg(debug_assertions)]
-    if is_dev {
-        crate::managed_agents::migrate_agent_keys_to_dev_service(app);
-    }
-    migrate_persona_provider_to_runtime(app);
-    reconcile_legacy_command_names(app);
-    // Fold personas.json into the unified store HERE: after the JSON-level
-    // personas.json migrations above (which must see the legacy file), and
-    // before every consumer of the load/save_personas shims below —
-    // sync_team_personas would otherwise operate on an empty definition set.
-    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
-    // back to the unified store's definitions.
-    fold_personas_into_agent_store(app);
-    // Clean the legacy baked team-instructions suffix out of stored prompts
-    // AFTER the fold (so definitions lifted out of personas.json are cleaned in
-    // the same boot) and BEFORE backfill_standalone_agents (so a manufactured
-    // definition never snapshots a suffix this strips).
-    strip_baked_team_instructions(app);
-    refresh_builtin_agent_avatars(app);
-    // B5: manufacture definitions for standalone agents AFTER the fold (so
-    // pre-existing definition slugs are present for collision checks) and
-    // before event sync republishes — the backfilled link is what flips the
-    // 30177 projection to its slim shape.
-    backfill_standalone_agents(app);
-    detach_directory_backed_teams(app);
-    reconcile_provider_mcp_commands(app);
-    reconcile_databricks_v1_to_v2(app);
-    materialize_agent_runtimes(app);
+    // Definition-touching migrations (fold, strip, backfill, etc.) and the
+    // dev-key keyring migration are NOT run here. They run inside the per-scope
+    // initialization pipeline (`scope_init::run_scoped_migrations` and
+    // `run_pre_ready_family`) after staged adoption so every scope sees exactly
+    // the migrations appropriate to its data.
+    //
+    // `migrate_persona_provider_to_runtime` moved to `run_scoped_migrations`
+    // as step 0 (before fold); runs on the scoped personas.json, not the legacy
+    // `agents/personas.json`.
+    //
+    // `migrate_agent_keys_to_dev_service` moved to `run_pre_ready_family` as
+    // step C (debug builds); runs after the scoped store is populated.
 }
 
 /// Copy one-time app state from the legacy app identifier directory to
@@ -492,17 +468,23 @@ fn copy_file_over_generated_default(src: &Path, dst: &Path) -> std::io::Result<(
 fn patch_json_records(
     path: &Path,
     mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> bool,
-) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return;
+) -> Result<(), String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(format!(
+                "patch-json-records: failed to read {}: {e}",
+                path.display()
+            ))
+        }
     };
-    let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        eprintln!(
-            "buzz-desktop: patch-json-records: failed to parse {}",
+    let mut records = serde_json::from_str::<Vec<serde_json::Value>>(&content).map_err(|e| {
+        format!(
+            "patch-json-records: failed to parse {}: {e}",
             path.display()
-        );
-        return;
-    };
+        )
+    })?;
     let mut changed = false;
     for record in &mut records {
         if let Some(obj) = record.as_object_mut() {
@@ -510,12 +492,15 @@ fn patch_json_records(
         }
     }
     if changed {
-        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
-                eprintln!("buzz-desktop: patch-json-records: {e}");
-            }
-        }
+        let bytes = serde_json::to_vec_pretty(&records).map_err(|e| {
+            format!(
+                "patch-json-records: failed to serialize {}: {e}",
+                path.display()
+            )
+        })?;
+        crate::managed_agents::atomic_write_json_restricted(path, &bytes)?;
     }
+    Ok(())
 }
 
 struct LegacyBuiltInAvatar<'a> {
@@ -554,40 +539,27 @@ struct LegacyAvatarMatch<'a> {
     was_uploaded: bool,
 }
 
-/// Refresh the prior seeded avatar on built-in definitions and linked agent
-/// instances while preserving any avatar the user customized. Matching by the
-/// exact data URL or content-addressed upload digest makes the migration
-/// idempotent and avoids relying on timestamps or other persona fields the
-/// user may also have edited.
-fn refresh_builtin_agent_avatars(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let path = dir.join("agents/managed-agents.json");
-    if path.exists() {
-        refresh_builtin_agent_avatars_in_file(
-            &path,
-            LEGACY_BUILTIN_AVATARS,
-            &crate::util::now_iso(),
-        );
-    }
-}
-
 fn refresh_builtin_agent_avatars_in_file(
     path: &Path,
     legacy_avatars: &[LegacyBuiltInAvatar<'_>],
     now: &str,
-) {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
+) -> Result<(), String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(format!(
+                "refresh-builtin-agent-avatars: failed to read {}: {e}",
+                path.display()
+            ))
+        }
     };
-    let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) else {
-        eprintln!(
-            "buzz-desktop: refresh-builtin-agent-avatars: invalid JSON in {}",
+    let mut records = serde_json::from_str::<Vec<serde_json::Value>>(&contents).map_err(|e| {
+        format!(
+            "refresh-builtin-agent-avatars: invalid JSON in {}: {e}",
             path.display()
-        );
-        return;
-    };
+        )
+    })?;
 
     // Definitions must be migrated first so linked instances can advance from
     // the exact old persona hash to the exact new one. Only advance an instance
@@ -661,12 +633,15 @@ fn refresh_builtin_agent_avatars_in_file(
     }
 
     if changed {
-        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
-                eprintln!("buzz-desktop: refresh-builtin-agent-avatars: {e}");
-            }
-        }
+        let bytes = serde_json::to_vec_pretty(&records).map_err(|e| {
+            format!(
+                "refresh-builtin-agent-avatars: failed to serialize {}: {e}",
+                path.display()
+            )
+        })?;
+        crate::managed_agents::atomic_write_json_restricted(path, &bytes)?;
     }
+    Ok(())
 }
 
 fn legacy_avatar_match<'a>(
@@ -972,7 +947,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     }
 }
 
-fn reconcile_mcp_commands_in_file(path: &Path) {
+fn reconcile_mcp_commands_in_file(path: &Path) -> Result<(), String> {
     // Resolve each record's EFFECTIVE harness (persona-wins, override-honored)
     // before deriving its mcp_command, so a persona-inherited harness switch
     // doesn't leave a stale persisted mcp_command. The persona runtime is read
@@ -1025,7 +1000,8 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
             serde_json::Value::String(expected.to_string()),
         );
         true
-    });
+    })?;
+    Ok(())
 }
 
 fn replace_command_field(
@@ -1049,7 +1025,7 @@ fn replace_command_field(
     true
 }
 
-fn reconcile_legacy_command_names_in_file(path: &Path) {
+fn reconcile_legacy_command_names_in_file(path: &Path) -> Result<(), String> {
     patch_json_records(path, |obj| {
         let mut changed = false;
 
@@ -1096,146 +1072,13 @@ fn reconcile_legacy_command_names_in_file(path: &Path) {
         }
 
         changed
-    });
+    })
 }
 
-fn reconcile_legacy_persona_runtimes_in_file(path: &Path) {
-    patch_json_records(path, |obj| {
-        let Some(runtime) = obj.get("runtime").and_then(|v| v.as_str()) else {
-            return false;
-        };
-        if runtime != "sprout-agent" {
-            return false;
-        }
-        eprintln!(
-            "buzz-desktop: command-rename-reconcile: persona {:?}: runtime {:?} → {:?}",
-            obj.get("display_name")
-                .or_else(|| obj.get("displayName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("?"),
-            runtime,
-            "buzz-agent",
-        );
-        obj.insert(
-            "runtime".to_string(),
-            serde_json::Value::String("buzz-agent".to_string()),
-        );
-        true
-    });
-}
-
-fn rewrite_legacy_persona_md_runtime(content: &str) -> Option<String> {
-    let (frontmatter, body) = buzz_persona_pkg::persona::split_frontmatter(content).ok()?;
-    let mut value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
-    let mapping = value.as_mapping_mut()?;
-    let runtime = mapping.get_mut(serde_yaml::Value::String("runtime".to_string()))?;
-    if runtime.as_str()? != "sprout-agent" {
-        return None;
-    }
-    *runtime = serde_yaml::Value::String("buzz-agent".to_string());
-    let frontmatter = serde_yaml::to_string(&value).ok()?;
-    Some(format!("---\n{frontmatter}---\n{body}"))
-}
-
-fn reconcile_legacy_team_persona_runtime_files(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() {
-            reconcile_legacy_team_persona_runtime_files(&path);
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".persona.md") {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(updated) = rewrite_legacy_persona_md_runtime(&content) else {
-            continue;
-        };
-        if updated == content {
-            continue;
-        }
-        match std::fs::write(&path, updated) {
-            Ok(()) => {
-                eprintln!(
-                    "buzz-desktop: command-rename-reconcile: updated {}",
-                    path.display()
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "buzz-desktop: command-rename-reconcile: failed to update {}: {error}",
-                    path.display()
-                );
-            }
-        }
-    }
-}
-
-/// Reconcile exact built-in command values persisted before the Sprout→Buzz
-/// rename. Custom commands and explicit paths are left untouched.
-pub fn reconcile_legacy_command_names(app: &tauri::AppHandle) {
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let mut dirs = vec![current_dir.clone()];
-    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
-        if canonical.exists() && canonical != current_dir {
-            dirs.push(canonical);
-        }
-    }
-    for dir in dirs {
-        let path = dir.join("agents/managed-agents.json");
-        if path.exists() {
-            reconcile_legacy_command_names_in_file(&path);
-        }
-        let personas_path = dir.join("agents/personas.json");
-        if personas_path.exists() {
-            reconcile_legacy_persona_runtimes_in_file(&personas_path);
-        }
-        let teams_dir = dir.join("agents/teams");
-        if teams_dir.exists() && !teams_dir.is_symlink() {
-            reconcile_legacy_team_persona_runtime_files(&teams_dir);
-        }
-    }
-}
-
-/// Reconcile `mcp_command` values in managed-agents.json against the
-/// discovery table. Known runtimes get their canonical mcp_command;
-/// unknown/custom agents are left untouched. Covers both the current
-/// app data dir and the canonical dev data dir (for worktree instances).
-pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let mut dirs = vec![current_dir.clone()];
-    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
-        if canonical.exists() && canonical != current_dir {
-            dirs.push(canonical);
-        }
-    }
-    for dir in dirs {
-        let path = dir.join("agents/managed-agents.json");
-        if path.exists() {
-            reconcile_mcp_commands_in_file(&path);
-        }
-    }
-}
-
-fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool) {
+fn reconcile_databricks_v1_to_v2_in_file(
+    path: &Path,
+    rewrite_v1_provider: bool,
+) -> Result<(), String> {
     use crate::managed_agents::is_derived_provider_model_key;
     patch_json_records(path, |obj| {
         let mut changed = false;
@@ -1292,7 +1135,7 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
         }
 
         changed
-    });
+    })
 }
 
 /// Strip stale derived provider/model keys from `env_vars` in all
@@ -1316,34 +1159,7 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
 /// Covers both the current app data dir and the canonical dev data dir
 /// (for worktree instances) — same dual-dir pattern as
 /// `reconcile_legacy_command_names` and `reconcile_provider_mcp_commands`.
-pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
-    use crate::managed_agents::baked_build_env;
-    // On Block builds, the baked env contains BUZZ_AGENT_PROVIDER=databricks_v2.
-    // Use that as a reliable signal that this is a Block build and the V1
-    // provider should be migrated. OSS builds have an empty baked env, so
-    // rewrite_v1_provider is false and the structured provider is preserved.
-    let rewrite_v1_provider = baked_build_env()
-        .get("BUZZ_AGENT_PROVIDER")
-        .map(|v| v == "databricks_v2")
-        .unwrap_or(false);
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let mut dirs = vec![current_dir.clone()];
-    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
-        if canonical.exists() && canonical != current_dir {
-            dirs.push(canonical);
-        }
-    }
-    for dir in dirs {
-        let path = dir.join("agents/managed-agents.json");
-        if path.exists() {
-            reconcile_databricks_v1_to_v2_in_file(&path, rewrite_v1_provider);
-        }
-    }
-}
-
-fn rename_provider_to_runtime_in_personas(path: &Path) {
+fn rename_provider_to_runtime_in_personas(path: &Path) -> Result<(), String> {
     patch_json_records(path, |obj| {
         if obj.contains_key("runtime") {
             return false;
@@ -1354,30 +1170,17 @@ fn rename_provider_to_runtime_in_personas(path: &Path) {
         } else {
             false
         }
-    });
+    })
+    .map_err(|e| format!("rename-provider-to-runtime: {e}"))
 }
-
-pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let path = dir.join("agents/personas.json");
-    if !path.exists() {
-        return;
-    }
-    rename_provider_to_runtime_in_personas(&path);
-}
-mod materialize;
-pub use materialize::materialize_agent_runtimes;
 mod fold;
-pub use fold::fold_personas_into_agent_store;
+mod materialize;
 use fold::load_persona_runtimes;
 mod backfill;
-pub use backfill::backfill_standalone_agents;
 mod detach;
-pub use detach::detach_directory_backed_teams;
 mod team_suffix;
-pub use team_suffix::strip_baked_team_instructions;
+
+include!("migration_scope.rs");
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]

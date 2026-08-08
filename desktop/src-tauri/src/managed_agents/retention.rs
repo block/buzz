@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::app_state::AppState;
+use crate::managed_agents::scope::derive_scope_id;
 
 mod legacy_migration;
 pub use legacy_migration::migrate_legacy_retention_db;
@@ -30,20 +30,33 @@ pub struct RetentionScope {
 }
 
 /// Decide whether `scope` — the workspace's active retention scope — is the one
-/// that owns an event delivered by `arrival_relay_url`.
+/// that owns an event delivered by `arrival_relay_url` from `arrival_owner_pubkey`.
 ///
 /// Inbound reconcile resolves its retention database when it PROCESSES an event,
 /// while the event belongs to the community that DELIVERED it. `None` means a
-/// workspace switch happened in between and the caller must drop the event
-/// rather than file community A's event into community B's store.
+/// workspace switch happened in between (relay or owner changed), and the caller
+/// must drop the event rather than file community A's event into community B's store.
+///
+/// Matching both relay and owner ensures that an in-flight old-owner event on
+/// the same relay cannot land in the new owner's active store after an identity
+/// switch.
 ///
 /// The comparison goes through the same normalization
-/// [`scoped_retention_db_path`] hashes, so "same relay" can never disagree with
+/// [`scoped_retention_db_path`] hashes, so "same scope" can never disagree with
 /// "same database".
-pub fn scope_for_arrival(scope: RetentionScope, arrival_relay_url: &str) -> Option<RetentionScope> {
-    let same_scope =
+pub fn scope_for_arrival(
+    scope: RetentionScope,
+    arrival_relay_url: &str,
+    arrival_owner_pubkey: &str,
+) -> Option<RetentionScope> {
+    let same_relay =
         normalized_relay_scope(&scope.relay_url) == normalized_relay_scope(arrival_relay_url);
-    same_scope.then_some(scope)
+    let same_owner = scope
+        .owner_keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(arrival_owner_pubkey.trim());
+    (same_relay && same_owner).then_some(scope)
 }
 
 /// Relay-URL form that identifies a retention scope: equivalent workspace URLs
@@ -54,28 +67,42 @@ fn normalized_relay_scope(relay_url: &str) -> &str {
 
 /// Resolve the retention database path for a relay + owner pair.
 ///
-/// The normalized scope is hashed so relay URLs never become path components.
-/// Trimming a trailing slash keeps equivalent workspace URLs on one scope.
+/// Delegates to [`derive_scope_id`] from the shared scope module so the hash
+/// is byte-identical between the retention DB path and the definition store
+/// path — "same scope" can never disagree between the two subsystems.
 pub fn scoped_retention_db_path(base_dir: &Path, relay_url: &str, owner_pubkey: &str) -> PathBuf {
-    let normalized_relay = normalized_relay_scope(relay_url);
-    let mut hasher = Sha256::new();
-    hasher.update(owner_pubkey.trim().to_ascii_lowercase().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(normalized_relay.as_bytes());
-    let scope_id = hex::encode(hasher.finalize());
+    let scope_id = derive_scope_id(relay_url, owner_pubkey);
     base_dir.join("retention").join(format!("{scope_id}.db"))
 }
 
 /// Snapshot the active relay + owner and resolve their durable event store.
 ///
+/// Derives relay and owner from the captured [`WorkspaceAgentScope`] so both
+/// the retention DB path and the definitions path come from the same single
+/// scope authority. Returns `Err` when no active scope exists (fail closed) or
+/// when the signing keys disagree with the scope's captured owner pubkey
+/// (defensive; the scope is the authority).
+///
 /// Callers keep the returned relay and keys alongside the path whenever work
 /// crosses an `.await`; a later workspace switch cannot retarget that work.
 pub fn active_retention_scope(app: &AppHandle, state: &AppState) -> Result<RetentionScope, String> {
-    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let scope = state.capture_active_scope().ok_or_else(|| {
+        "active_retention_scope: no active workspace scope — fail closed".to_string()
+    })?;
     let owner_keys = state.signing_keys()?;
+    // Validate that the signing keys agree with the scope's owner. In
+    // practice they are always consistent (committed together); this guard
+    // catches the narrow window where they haven't been committed yet.
+    let keys_pubkey = owner_keys.public_key().to_hex();
+    if !keys_pubkey.eq_ignore_ascii_case(&scope.owner_pubkey) {
+        return Err(format!(
+            "active_retention_scope: signing keys pubkey ({keys_pubkey}) does not match \
+             active scope owner ({}) — scope may not yet be fully committed",
+            scope.owner_pubkey
+        ));
+    }
     let base_dir = super::managed_agents_base_dir(app)?;
-    let db_path =
-        scoped_retention_db_path(&base_dir, &relay_url, &owner_keys.public_key().to_hex());
+    let db_path = scoped_retention_db_path(&base_dir, &scope.relay_url, &scope.owner_pubkey);
     let parent = db_path
         .parent()
         .ok_or_else(|| "retention scope path has no parent".to_string())?;
@@ -83,13 +110,39 @@ pub fn active_retention_scope(app: &AppHandle, state: &AppState) -> Result<Reten
         .map_err(|error| format!("failed to create retention scope directory: {error}"))?;
     Ok(RetentionScope {
         db_path,
-        relay_url,
+        relay_url: scope.relay_url,
+        owner_keys,
+    })
+}
+
+/// Build a `RetentionScope` from a captured [`WorkspaceAgentScope`] and keys.
+/// Use instead of [`active_retention_scope`] when a captured scope is held.
+/// Derives `base_dir` two levels up from `definitions_dir`.
+pub(crate) fn retention_scope_from_captured(
+    captured: &crate::managed_agents::scope::WorkspaceAgentScope,
+    owner_keys: nostr::Keys,
+) -> Result<RetentionScope, String> {
+    let base_dir = captured
+        .definitions_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("retention_scope_from_captured: definitions_dir has fewer than two parent levels")?;
+    let db_path = scoped_retention_db_path(base_dir, &captured.relay_url, &captured.owner_pubkey);
+    std::fs::create_dir_all(
+        db_path
+            .parent()
+            .ok_or("retention scope path has no parent")?,
+    )
+    .map_err(|e| format!("failed to create retention scope directory: {e}"))?;
+    Ok(RetentionScope {
+        db_path,
+        relay_url: captured.relay_url.clone(),
         owner_keys,
     })
 }
 
 /// Snapshot the active relay + owner, but only when it is the scope that owns
-/// events delivered by `arrival_relay_url`.
+/// events delivered by `arrival_relay_url` from `arrival_owner_pubkey`.
 ///
 /// Resolving the scope and matching it in one step is what closes the gap: the
 /// returned scope is both the one that will be written to and the one the event
@@ -99,10 +152,12 @@ pub fn arrival_retention_scope(
     app: &AppHandle,
     state: &AppState,
     arrival_relay_url: &str,
+    arrival_owner_pubkey: &str,
 ) -> Result<Option<RetentionScope>, String> {
     Ok(scope_for_arrival(
         active_retention_scope(app, state)?,
         arrival_relay_url,
+        arrival_owner_pubkey,
     ))
 }
 
@@ -496,12 +551,13 @@ mod tests {
         };
         let community_a = scoped_retention_db_path(base, "wss://a.example", &owner);
 
-        // "Same relay" and "same database" must never disagree: every URL the
+        // "Same relay + owner" and "same database" must never disagree: every URL the
         // match accepts has to hash to the scope's own db path, and every URL it
         // rejects has to hash somewhere else.
         for equivalent in ["wss://a.example", "wss://a.example/", " wss://a.example "] {
             assert_eq!(
-                scope_for_arrival(scope("wss://a.example"), equivalent).map(|scope| scope.db_path),
+                scope_for_arrival(scope("wss://a.example"), equivalent, &owner)
+                    .map(|scope| scope.db_path),
                 Some(community_a.clone()),
                 "{equivalent}"
             );
@@ -512,13 +568,22 @@ mod tests {
             );
         }
 
+        // Different relay must not match.
         assert!(
-            scope_for_arrival(scope("wss://b.example"), "wss://a.example").is_none(),
+            scope_for_arrival(scope("wss://b.example"), "wss://a.example", &owner).is_none(),
             "an event from community A must not be filed while community B is active"
         );
         assert_ne!(
             scoped_retention_db_path(base, "wss://b.example", &owner),
             community_a
+        );
+
+        // Different owner on same relay must not match.
+        let other_keys = nostr::Keys::generate();
+        let other_owner = other_keys.public_key().to_hex();
+        assert!(
+            scope_for_arrival(scope("wss://a.example"), "wss://a.example", &other_owner).is_none(),
+            "an event from a different owner must not be filed into the active scope"
         );
     }
 

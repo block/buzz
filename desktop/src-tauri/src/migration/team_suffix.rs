@@ -45,26 +45,12 @@ const TEAM_DELIMITER: &str = "\n\n---\n# Team Instructions\n";
 /// `personas.json` are cleaned in the same boot, and BEFORE
 /// `backfill_standalone_agents` so a manufactured definition never snapshots
 /// a suffix this migration is about to remove.
-pub fn strip_baked_team_instructions(app: &tauri::AppHandle) {
-    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
-        return;
-    };
-    match strip_baked_team_instructions_in_dir(&base_dir) {
-        Ok(0) => {}
-        Ok(stripped) => eprintln!(
-            "buzz-desktop: team-suffix-strip: removed the baked team-instructions suffix from \
-             {stripped} record(s)"
-        ),
-        Err(e) => eprintln!("buzz-desktop: team-suffix-strip: {e}"),
-    }
-}
-
 /// Core logic, decoupled from the Tauri `AppHandle` for testing.
 ///
 /// `base_dir` is the managed-agents base directory (`<AppDataDir>/agents/`).
 /// Returns the number of records changed; `Ok(0)` means nothing to do and
 /// nothing was written, so a second boot is a clean no-op.
-pub(super) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<usize, String> {
+pub(crate) fn strip_baked_team_instructions_in_dir(base_dir: &Path) -> Result<usize, String> {
     let agents_path = base_dir.join("managed-agents.json");
     if !agents_path.exists() {
         return Ok(0);
