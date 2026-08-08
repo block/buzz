@@ -248,8 +248,9 @@ export function MessageReactions({
 
   return (
     <div
+      data-selection-exclude=""
       className={cn(
-        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
+        "select-none group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
         className,
       )}
       data-testid="message-reactions"

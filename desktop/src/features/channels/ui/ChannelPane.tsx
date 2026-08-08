@@ -24,6 +24,7 @@ import {
 } from "@/features/channels/lib/dmHuddleMembers";
 import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
+import { useConversationSelectionScope } from "@/features/messages/ui/useConversationSelectionScope";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
@@ -168,6 +169,11 @@ export const ChannelPane = React.memo(function ChannelPane({
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  const conversationPaneRef = React.useRef<HTMLDivElement>(null);
+  // Clip native drag-selections to the conversation pane they began in so a
+  // channel drag cannot sweep thread content, reaction pills, or overlays
+  // (block/buzz#4077).
+  useConversationSelectionScope(conversationPaneRef);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
@@ -576,6 +582,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   return (
     <div
       className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
+      ref={conversationPaneRef}
       style={isHuddleTranscript ? HUDDLE_TRANSCRIPT_ROOT_STYLE : undefined}
     >
       {!isSinglePanelView && !isHuddleTranscript ? (
@@ -594,6 +601,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           aria-label="Channel messages and composer"
           className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           inert={channelIsCovered ? true : undefined}
+          data-selection-pane=""
           data-testid="channel-drop-zone"
           onDragEnter={
             canDropInMainColumn ? mainComposerMedia.handleDragEnter : undefined
