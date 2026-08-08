@@ -4,19 +4,62 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
-/// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
+/// List DM conversations by querying NIP-29 group metadata (kind:39000) for
+/// channels we are a member of, then filtering for DM channels.
+///
+/// The relay emits kind:39000 with a `["t", "dm"]` tag and `["hidden"]` tag for
+/// DM channels. We discover our memberships via kind:39002 (group members)
+/// filtered by our pubkey, then fetch the metadata for those channel IDs.
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
-    let limit = limit.unwrap_or(50).min(200);
-    let filter = serde_json::json!({
-        "kinds": [41001],
+    let effective_limit = limit.unwrap_or(50).min(200);
+
+    // Step 1: find channel IDs where we're a member (kind:39002).
+    let member_filter = serde_json::json!({
+        "kinds": [39002],
         "#p": [my_pk],
-        "limit": limit
     });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let member_events = client
+        .query_paginated(member_filter, effective_limit)
+        .await?;
+    let channel_ids: Vec<String> = member_events
+        .iter()
+        .map(extract_d_tag)
+        .filter(|id| !id.is_empty())
+        .collect();
+    if channel_ids.is_empty() {
+        println!("[]");
+        return Ok(());
+    }
+
+    // Step 2: fetch kind:39000 metadata for those channels.
+    let metadata_filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": channel_ids,
+    });
+    let events = client
+        .query_paginated(metadata_filter, effective_limit)
+        .await?;
+
+    // Step 3: filter for DM channels (tagged ["t", "dm"] and ["hidden"]).
     let dms: Vec<serde_json::Value> = events
         .iter()
+        .filter(|e| {
+            e.get("tags")
+                .and_then(|t| t.as_array())
+                .map(|tags| {
+                    tags.iter().any(|tag| {
+                        tag.as_array()
+                            .map(|a| {
+                                a.len() >= 2
+                                    && a.first().and_then(|v| v.as_str()) == Some("t")
+                                    && a.get(1).and_then(|v| v.as_str()) == Some("dm")
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        })
         .map(|e| {
             let dm_id = extract_d_tag(e);
             let participants: Vec<String> = e
