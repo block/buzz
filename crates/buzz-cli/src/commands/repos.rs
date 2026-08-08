@@ -30,6 +30,22 @@ async fn fetch_own_repo_announcement(
     Ok(events.into_iter().next())
 }
 
+/// Advance the `created_at` counter off an observed announcement head.
+///
+/// Returns `max(now, head.created_at + 1)` — strictly after the head, so the
+/// write cannot be dominated by the announcement it read, but never stale
+/// enough for the relay to reject it as "event timestamp too far from server
+/// time" once the head has aged past the accepted window.
+fn next_announcement_timestamp(head: &Event) -> Result<Timestamp, CliError> {
+    let after_head = head
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+
+    Ok(Timestamp::from(after_head.max(Timestamp::now().as_secs())))
+}
+
 fn repo_id_from_event(event: &Event) -> Result<&str, CliError> {
     event
         .tags
@@ -270,6 +286,53 @@ pub async fn cmd_create_repo(
     Ok(())
 }
 
+/// `buzz repos delete`
+///
+/// Head-based and verified, mirroring `buzz projects delete`:
+///   1. Fetch the caller's own live announcement head — `NotFound` if absent.
+///   2. Build a NIP-09 kind:5 addressable tombstone for
+///      `30617:<self>:<repo-id>` at `max(now, head.created_at + 1)`.
+///   3. Submit.
+///   4. Re-query the coordinate; if a head survived → `Conflict`.
+///
+/// Targets signer-self only: the filter is scoped to the caller's pubkey, so
+/// another author's announcement at the same `d` tag is never touched.
+pub async fn cmd_delete_repo(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
+    let head = current_repo(client, repo_id).await?;
+    let next_ts = next_announcement_timestamp(&head)?;
+
+    let pubkey_hex = client.keys().public_key().to_hex();
+    let tombstone =
+        buzz_sdk::build_delete_addressable(KIND_GIT_REPO_ANNOUNCEMENT, &pubkey_hex, repo_id)
+            .map_err(|error| CliError::Other(format!("failed to build delete event: {error}")))?
+            .custom_created_at(next_ts);
+
+    let event = client.sign_event(tombstone)?;
+    // Captured before submit: `submit_event` consumes the event, and the
+    // tombstone id is what an operator needs to audit the retraction.
+    let tombstone_id = event.id.to_hex();
+    let raw = client.submit_event(event).await?;
+    parse_write_response(&raw, "delete event was dominated; a newer head exists")?;
+
+    // Post-submit verification: re-query to confirm the head is gone.
+    if let Some(survivor) = fetch_own_repo_announcement(client, repo_id).await? {
+        return Err(CliError::Conflict(format!(
+            "repository {repo_id:?} still exists (head at {}); a concurrent write raced the delete",
+            survivor.created_at.as_secs()
+        )));
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "deleted": repo_id,
+            "event_id": tombstone_id,
+            "status": "ok",
+        })
+    );
+    Ok(())
+}
+
 pub async fn cmd_get_repo(
     client: &BuzzClient,
     repo_id: &str,
@@ -434,6 +497,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
         ReposCmd::Bind { id, channel } => cmd_bind_repo(client, &id, &channel).await,
+        ReposCmd::Delete { id } => cmd_delete_repo(client, &id).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {
@@ -468,7 +532,7 @@ mod tests {
 
     use super::{
         build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        next_announcement_timestamp, protection_rules_json, validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -843,5 +907,106 @@ mod tests {
                 "message": "saved",
             })
         );
+    }
+
+    // ── delete tombstone timestamp ────────────────────────────────────────────
+
+    /// An aged announcement must not produce an aged tombstone. `head + 1`
+    /// alone would sign an hour in the past here, which the relay rejects as
+    /// "event timestamp too far from server time" — and permanently, since the
+    /// stored head only ages further.
+    #[test]
+    fn next_announcement_timestamp_uses_wall_clock_when_head_is_aged() {
+        let now = Timestamp::now().as_secs();
+        let head = signed_repo(vec![tag(&["d", "demo"])], "", now - 3_600);
+
+        let next = next_announcement_timestamp(&head)
+            .expect("no overflow")
+            .as_secs();
+
+        assert!(
+            next >= now,
+            "aged head must advance to wall clock, got {next} against now {now}"
+        );
+    }
+
+    /// A head already inside the relay's window must land at wall clock rather
+    /// than jumping past it.
+    #[test]
+    fn next_announcement_timestamp_stays_at_wall_clock_for_a_current_head() {
+        let now = Timestamp::now().as_secs();
+        let head = signed_repo(vec![tag(&["d", "demo"])], "", now - 1);
+
+        let next = next_announcement_timestamp(&head)
+            .expect("no overflow")
+            .as_secs();
+
+        assert!(
+            next >= now && next <= now + 1,
+            "current head must land at wall clock, got {next} against now {now}"
+        );
+    }
+
+    /// A head in the future must still be superseded strictly, so a tombstone
+    /// can never be dominated by the announcement it is retracting.
+    #[test]
+    fn next_announcement_timestamp_returns_head_plus_one_when_head_is_ahead() {
+        let far_future = 9_999_999_999u64; // year 2286
+        let head = signed_repo(vec![tag(&["d", "demo"])], "", far_future);
+
+        let next = next_announcement_timestamp(&head)
+            .expect("no overflow")
+            .as_secs();
+
+        assert_eq!(
+            next,
+            far_future + 1,
+            "tombstone must be strictly after a future head"
+        );
+    }
+
+    /// `u64::MAX` cannot be advanced — the checked add must surface an error
+    /// rather than wrapping to zero and signing a 1970 timestamp.
+    #[test]
+    fn next_announcement_timestamp_rejects_overflow_at_u64_max() {
+        let head = signed_repo(vec![tag(&["d", "demo"])], "", u64::MAX);
+
+        let error = next_announcement_timestamp(&head).expect_err("u64::MAX must not advance");
+
+        assert!(
+            matches!(error, crate::error::CliError::Other(ref message)
+                if message.contains("timestamp cannot be advanced")),
+            "expected a timestamp-advance error, got {error:?}"
+        );
+    }
+
+    /// The tombstone must be a NIP-09 kind:5 carrying exactly the addressable
+    /// coordinate `30617:<pubkey>:<repo-id>` — that coordinate is what the
+    /// relay matches to retract the announcement.
+    #[test]
+    fn delete_tombstone_targets_the_repo_announcement_coordinate() {
+        let pubkey = "a".repeat(64);
+        let tombstone = buzz_sdk::build_delete_addressable(
+            buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT,
+            &pubkey,
+            "demo",
+        )
+        .expect("valid tombstone")
+        .custom_created_at(Timestamp::from(1_700_000_000u64))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign tombstone");
+
+        assert_eq!(tombstone.kind, Kind::Custom(5));
+        let coords: Vec<&str> = tombstone
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let values = t.as_slice();
+                (values.first().map(String::as_str) == Some("a"))
+                    .then(|| values.get(1).map(String::as_str))
+                    .flatten()
+            })
+            .collect();
+        assert_eq!(coords, vec![format!("30617:{pubkey}:demo").as_str()]);
     }
 }
