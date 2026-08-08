@@ -1,4 +1,5 @@
 import '../../../shared/mentions/agent_identity_provider.dart';
+import '../../../shared/identity_archive/archived_identities_provider.dart';
 import '../../profile/user_profile.dart';
 import '../channel_management_provider.dart';
 import 'mention_ranking.dart';
@@ -52,13 +53,21 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
   String? currentPubkey,
+  Set<String> archivedPubkeys = const {},
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
 
+  bool isArchived(String pubkey) => isArchivedForDiscovery(
+    pubkey: pubkey,
+    archivedPubkeys: archivedPubkeys,
+    currentPubkey: currentPubkey,
+  );
+
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
     if (!seen.add(pk)) continue;
+    if (isArchived(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
     final isAgent = member.isBot || ownerPubkey != null;
@@ -90,6 +99,7 @@ List<MentionCandidate> buildMentionCandidates({
   for (final agent in relayAgents) {
     final pk = agent.pubkey;
     if (seen.contains(pk)) continue;
+    if (isArchived(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
     seen.add(pk);
     final profile = userCache[pk];
@@ -112,6 +122,7 @@ List<MentionCandidate> buildMentionCandidates({
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
     if (seen.contains(pk)) continue;
+    if (isArchived(pk)) continue;
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
     if (isAgent) {

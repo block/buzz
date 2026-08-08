@@ -205,6 +205,13 @@ abstract final class NostrFilters {
   static NostrFilter relayMembers() =>
       const NostrFilter(kinds: [13534], limit: 1);
 
+  /// NIP-IA archived identities snapshot (kind:13535) signed by the relay.
+  static NostrFilter archivedIdentities(String relaySelfPubkey) => NostrFilter(
+    kinds: [EventKind.archivedIdentitiesList],
+    authors: [relaySelfPubkey],
+    limit: 1,
+  );
+
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>
       const NostrFilter(kinds: [10100], limit: 100);
