@@ -453,15 +453,7 @@ impl EventQueue {
         // Exponential backoff: BASE * 2^(attempt-1), capped at MAX, with ±20% jitter.
         let base_secs = BASE_RETRY_DELAY_SECS.saturating_mul(1u64 << (attempt - 1).min(6));
         let capped_secs = base_secs.min(MAX_RETRY_DELAY_SECS);
-        // Jitter: multiply by 0.8..1.2 using subsecond nanos as entropy source.
-        let jitter = {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos();
-            0.8 + (nanos as f64 / u32::MAX as f64) * 0.4
-        };
-        let delay = Duration::from_secs_f64(capped_secs as f64 * jitter);
+        let delay = crate::backoff::jittered_duration(Duration::from_secs(capped_secs));
 
         tracing::warn!(
             channel_id = %channel_id,
