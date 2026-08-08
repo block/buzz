@@ -244,6 +244,7 @@ export function buildOwnerFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
+  const isProviderManaged = managedAgent?.backend.type === "provider";
   const respondTo = managedAgent?.respondTo ?? relayAgent?.respondTo ?? null;
   const respondToDisplayValue = respondTo
     ? respondTo === "owner-only"
@@ -294,38 +295,40 @@ export function buildOwnerFields({
     return fields;
   }
 
-  if (managedAgent?.agentCommand) {
-    fields.push({
-      copyValue: managedAgent.agentCommand,
-      displayValue: runtimeLabel(managedAgent.agentCommand),
-      icon: Terminal,
-      label: "Runtime",
-      testId: "user-profile-runtime",
-    });
-  } else if (relayAgent?.agentType) {
-    fields.push({
-      copyValue: relayAgent.agentType,
-      displayValue: runtimeLabel(relayAgent.agentType),
-      icon: Terminal,
-      label: "Runtime",
-      testId: "user-profile-runtime",
-    });
-  } else if (persona?.runtime) {
-    fields.push({
-      copyValue: persona.runtime,
-      displayValue: runtimeLabel(persona.runtime),
-      icon: Terminal,
-      label: "Runtime",
-      testId: "user-profile-runtime",
-    });
-  } else if (ownerPubkey) {
-    fields.push({
-      copyValue: ownerPubkey,
-      displayValue: "Declared owner verified",
-      icon: UserRound,
-      label: "Agent profile",
-      testId: "user-profile-agent-profile",
-    });
+  if (!isProviderManaged) {
+    if (managedAgent?.agentCommand) {
+      fields.push({
+        copyValue: managedAgent.agentCommand,
+        displayValue: runtimeLabel(managedAgent.agentCommand),
+        icon: Terminal,
+        label: "Runtime",
+        testId: "user-profile-runtime",
+      });
+    } else if (relayAgent?.agentType) {
+      fields.push({
+        copyValue: relayAgent.agentType,
+        displayValue: runtimeLabel(relayAgent.agentType),
+        icon: Terminal,
+        label: "Runtime",
+        testId: "user-profile-runtime",
+      });
+    } else if (persona?.runtime) {
+      fields.push({
+        copyValue: persona.runtime,
+        displayValue: runtimeLabel(persona.runtime),
+        icon: Terminal,
+        label: "Runtime",
+        testId: "user-profile-runtime",
+      });
+    } else if (ownerPubkey) {
+      fields.push({
+        copyValue: ownerPubkey,
+        displayValue: "Declared owner verified",
+        icon: UserRound,
+        label: "Agent profile",
+        testId: "user-profile-agent-profile",
+      });
+    }
   }
 
   if (managedAgent) {
@@ -346,7 +349,7 @@ export function buildOwnerFields({
     });
   }
 
-  if (managedAgent?.acpCommand) {
+  if (managedAgent?.acpCommand && !isProviderManaged) {
     fields.push({
       copyValue: managedAgent.acpCommand,
       displayValue: managedAgent.acpCommand,
@@ -356,7 +359,7 @@ export function buildOwnerFields({
     });
   }
 
-  if (managedAgent?.mcpCommand) {
+  if (managedAgent?.mcpCommand && !isProviderManaged) {
     fields.push({
       copyValue: managedAgent.mcpCommand,
       displayValue: managedAgent.mcpCommand,
@@ -377,7 +380,7 @@ export function buildOwnerFields({
     });
   }
 
-  if (managedAgent) {
+  if (managedAgent && !isProviderManaged) {
     fields.push({
       displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
       icon: Server,

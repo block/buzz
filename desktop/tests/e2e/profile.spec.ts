@@ -142,6 +142,77 @@ async function addGenericAgent(
   );
 }
 
+async function addProviderAgent(
+  page: Page,
+  channelName: string,
+  agentName: string,
+): Promise<string> {
+  await page.getByTestId(`channel-${channelName}`).click();
+  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  const channelId = await page
+    .getByTestId(`channel-${channelName}`)
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error(`Channel ${channelName} is missing a data-channel-id.`);
+  }
+
+  return page.evaluate(
+    async ({ agentName, channelId }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<{ agent?: { pubkey: string } }>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) {
+        throw new Error("Mock bridge is not installed.");
+      }
+
+      const created = await invoke("create_managed_agent", {
+        input: {
+          name: agentName,
+          spawnAfterCreate: true,
+          systemPrompt: "Operate on the remote provider host.",
+          agentCommand: "claude-agent-acp",
+          acpCommand: "buzz-acp",
+          mcpCommand: "local-dev-mcp",
+          model: "local-fallback-model",
+          envVars: { PROVIDER_TEST_SECRET: "must-not-render" },
+          backend: {
+            type: "provider",
+            id: "remote-fleet",
+            config: {},
+          },
+        },
+      });
+      const pubkey = created.agent?.pubkey;
+      if (!pubkey) {
+        throw new Error(
+          "Mock provider agent creation did not return a pubkey.",
+        );
+      }
+
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await (
+        window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            invalidateQueries: () => Promise<void>;
+          };
+        }
+      ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+
+      return pubkey;
+    },
+    { agentName, channelId },
+  );
+}
+
 async function waitForMockLiveSubscription(page: Page, channelName: string) {
   await expect
     .poll(async () => {
@@ -980,6 +1051,64 @@ test("restored Inbox deep link hides the back arrow", async ({ page }) => {
   await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
   await page.getByTestId("auxiliary-panel-close").click();
   await expect(page.getByTestId("agent-session-thread-panel")).toHaveCount(0);
+});
+
+test("provider agent profile does not project local runtime configuration", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const agentPubkey = await addProviderAgent(
+    page,
+    "general",
+    "Remote Provider Agent",
+  );
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate(
+    ({ pubkey }) => {
+      const emit = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            pubkey: string;
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) {
+        throw new Error("Mock message emitter is unavailable.");
+      }
+      emit({
+        channelName: "general",
+        content: "Remote provider profile check",
+        pubkey,
+      });
+    },
+    { pubkey: agentPubkey },
+  );
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Remote provider profile check" });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.getByTestId("user-profile-backend")).toContainText(
+    "remote-fleet",
+  );
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-runtime")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-acp")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-mcp")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-start-on-launch")).toHaveCount(
+    0,
+  );
+  await expect(panel.getByText("local-fallback-model")).toHaveCount(0);
+  await expect(panel.getByText("must-not-render")).toHaveCount(0);
 });
 
 test("declared owner sees runtime tab for a remote relay agent", async ({

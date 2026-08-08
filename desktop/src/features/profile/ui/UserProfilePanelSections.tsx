@@ -441,7 +441,7 @@ export function ProfileSummaryView({
                 showDiagnosticsIngress={showDiagnosticsIngress}
                 showInstructionBlock={showInstructionBlock}
               />
-              {isOwner === true && managedAgent !== undefined ? (
+              {isOwner === true && managedAgent?.backend.type === "local" ? (
                 <div className="overflow-hidden rounded-2xl bg-muted/20">
                   <AgentConfigPanel
                     advancedMode="flat"
