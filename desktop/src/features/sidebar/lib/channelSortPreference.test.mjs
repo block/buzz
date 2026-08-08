@@ -170,19 +170,19 @@ test("stripOrphanedSectionModes: does not mutate the input store", () => {
 
 // ── sortChannelsForSidebar ───────────────────────────────────────────────────
 
-test("alpha: sorts by name with id tie-breaker", () => {
+test("alpha: sorts case-insensitively with deterministic code-unit collation", () => {
   const sorted = sortChannelsForSidebar(
     [
       makeChannel("2", "zeta"),
+      makeChannel("3", "Alpha"),
       makeChannel("1", "alpha"),
-      makeChannel("b", "same"),
-      makeChannel("a", "same"),
+      makeChannel("4", "Éclair"),
     ],
     "alpha",
   );
   assert.deepEqual(
     sorted.map((c) => c.id),
-    ["1", "a", "b", "2"],
+    ["1", "3", "2", "4"],
   );
 });
 

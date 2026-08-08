@@ -1,10 +1,12 @@
 import type * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { ChannelMember } from "@/shared/api/types";
+import type { ChannelMember, ChannelType } from "@/shared/api/types";
 
 export type ForumComposerProps = {
   channelId?: string | null;
+  /** Known channel type for channel-backed composers; omitted uses fail closed. */
+  channelType?: ChannelType | null;
   /** Override mention source when no channel is available (e.g. Pulse). */
   members?: ChannelMember[];
   className?: string;
@@ -18,6 +20,13 @@ export type ForumComposerProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) => undefined | Promise<unknown>;
+  /** Optional alternate submission using the same composed content. */
+  onSecondarySubmit?: (
+    content: string,
+    mentionPubkeys: string[],
+    mediaTags?: string[][],
+  ) => undefined | Promise<unknown>;
+  secondarySubmitLabel?: string;
   /** Render as a single-line composer until the user focuses it. */
   compact?: boolean;
   /** When true, autocomplete renders below the input (for top-of-view composers). */

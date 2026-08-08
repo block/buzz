@@ -1,0 +1,8 @@
+# Git for Windows defaults to core.autocrlf=true, so without this every text
+# file lands in the working copy with CRLF. Biome formats with LF
+# (biome.json sets no lineEnding override), which fails `biome check` on
+# effectively every file, and
+# desktop/src/features/messages/ui/virtuaWheelModePatch.test.mjs asserts on
+# patches/*.patch with `\n`-joined patterns. Normalize to LF in the working
+# copy on every platform; the stored blobs are already LF.
+* text=auto eol=lf

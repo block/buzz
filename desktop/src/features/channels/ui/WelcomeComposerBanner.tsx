@@ -2,6 +2,7 @@ import * as React from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Bot, Check } from "lucide-react";
 
+import { ComposerDockGlassBackdrop } from "@/features/messages/ui/ComposerDockBackdrop";
 import { cn } from "@/shared/lib/cn";
 
 const WELCOME_PERSONA_NAMES = ["Fizz"] as const;
@@ -13,14 +14,12 @@ const WELCOME_PERSONA_EXIT_DURATION_SECONDS = 0.432;
 const WELCOME_PERSONA_ENTER_STAGGER_SECONDS = 0.018;
 const WELCOME_PERSONA_EXIT_STAGGER_SECONDS = 0.011;
 const WELCOME_PERSONA_Y_OFFSET_PX = 9;
-const WELCOME_PERSONA_BLUR_PX = 6;
 const WELCOME_COMPOSER_BANNER_CONTENT_EXIT_DURATION_SECONDS = 0.18;
 const WELCOME_COMPOSER_BANNER_CONTENT_Y_OFFSET_PX = 4;
 const WELCOME_COMPOSER_BANNER_SUCCESS_ENTER_DURATION_SECONDS = 0.32;
 const WELCOME_COMPOSER_BANNER_SUCCESS_COPY_DELAY_SECONDS = 0.06;
 const WELCOME_COMPOSER_BANNER_SUCCESS_Y_OFFSET_PX = 6;
 export const WELCOME_COMPOSER_BANNER_DISMISS_DURATION_SECONDS = 0.25;
-const WELCOME_COMPOSER_BANNER_DISMISS_BLUR_PX = 3;
 export const WELCOME_COMPOSER_BANNER_HIDE_BUFFER_MS = 50;
 const WELCOME_COMPOSER_BANNER_DISMISS_Y_OFFSET_PX = 48;
 export const WELCOME_COMPOSER_BANNER_SUCCESS_SETTLE_MS = Math.round(
@@ -52,7 +51,6 @@ const welcomePersonaPhraseVariants = {
 
 const welcomePersonaCharacterVariants = {
   animate: {
-    filter: "blur(0px)",
     opacity: 1,
     transition: {
       duration: WELCOME_PERSONA_ENTER_DURATION_SECONDS,
@@ -61,7 +59,6 @@ const welcomePersonaCharacterVariants = {
     y: 0,
   },
   exit: {
-    filter: `blur(${WELCOME_PERSONA_BLUR_PX}px)`,
     opacity: 0,
     transition: {
       duration: WELCOME_PERSONA_EXIT_DURATION_SECONDS,
@@ -70,7 +67,6 @@ const welcomePersonaCharacterVariants = {
     y: -WELCOME_PERSONA_Y_OFFSET_PX,
   },
   initial: {
-    filter: `blur(${WELCOME_PERSONA_BLUR_PX}px)`,
     opacity: 0,
     y: WELCOME_PERSONA_Y_OFFSET_PX,
   },
@@ -272,7 +268,7 @@ function WelcomeComposerPersonaMention() {
         >
           {activeMentionCharacters.map(({ character, key }) => (
             <motion.span
-              className="inline-block whitespace-pre [backface-visibility:hidden] [transform-origin:50%_55%] will-change-[transform,opacity,filter]"
+              className="inline-block whitespace-pre [backface-visibility:hidden] [transform-origin:50%_55%] will-change-[transform,opacity]"
               data-testid="welcome-composer-persona-character"
               key={`${activeMention}-${key}`}
               variants={welcomePersonaCharacterVariants}
@@ -323,10 +319,6 @@ export function WelcomeComposerBanner({
       >
         <motion.div
           animate={{
-            filter:
-              state === "dismissing"
-                ? `blur(${WELCOME_COMPOSER_BANNER_DISMISS_BLUR_PX}px)`
-                : "blur(0px)",
             opacity: 1,
             y:
               state === "dismissing"
@@ -334,7 +326,7 @@ export function WelcomeComposerBanner({
                 : 0,
           }}
           className={cn(
-            "relative z-0 mx-5 -mb-3 flex transform-gpu items-center gap-2 rounded-t-2xl border border-b-0 px-4 pb-5 pt-2.5 text-sm leading-5 backdrop-blur-sm transition-colors will-change-[filter,transform]",
+            "relative z-[1] mx-5 -mb-3 flex items-center gap-2 rounded-t-2xl border border-b-0 px-4 pb-5 pt-2.5 text-sm leading-5 transition-colors",
             state !== "prompt"
               ? "border-emerald-500/30 bg-emerald-500/15 text-foreground"
               : "border-border/60 bg-muted/55 text-muted-foreground",
@@ -421,5 +413,31 @@ export function WelcomeComposerBanner({
         </motion.div>
       </motion.div>
     </AnimatePresence>
+  );
+}
+
+type WelcomeComposerGuidanceLayerProps = WelcomeComposerBannerProps & {
+  children: React.ReactNode;
+};
+
+export function WelcomeComposerGuidanceLayer({
+  children,
+  settingUp,
+  state,
+}: WelcomeComposerGuidanceLayerProps) {
+  return (
+    <div
+      className="absolute inset-x-0 bottom-full z-[-1]"
+      data-testid="welcome-composer-guidance-layer"
+    >
+      <div className="relative">
+        <ComposerDockGlassBackdrop
+          className="absolute inset-x-5 top-0 bottom-3 z-0 rounded-t-2xl"
+          testId="welcome-composer-guidance-backdrop"
+        />
+        {children}
+        <WelcomeComposerBanner settingUp={settingUp} state={state} />
+      </div>
+    </div>
   );
 }

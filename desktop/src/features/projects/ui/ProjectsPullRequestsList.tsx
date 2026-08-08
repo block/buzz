@@ -4,16 +4,19 @@ import type {
   Project,
   ProjectPullRequest,
   ProjectPullRequestListItem,
+  Repository,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { cn } from "@/shared/lib/cn";
 import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
+import { ProjectAuthorIdentity } from "./ProjectAuthorIdentity";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
@@ -28,56 +31,23 @@ import {
   PROJECT_LIST_ROW_TRAILING_CLASS,
 } from "./projectListRowStyles";
 
-/** Author name that opens the user profile popover. */
-function AuthorNameButton({
-  label,
-  pubkey,
-}: {
-  label: string;
-  pubkey: string;
-}) {
-  return (
-    <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button
-        className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-        type="button"
-      >
-        {label}
-      </button>
-    </UserProfilePopover>
-  );
-}
-
 type ProjectsPullRequestsListProps = {
+  /** Render without container chrome — a parent table container provides border and rounding. */
+  embedded?: boolean;
   error: unknown;
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
   isRetrying: boolean;
-  onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    pullRequest: ProjectPullRequest,
+  ) => void;
   onRetry: () => void;
   profiles?: UserProfileLookup;
   pullRequests: ProjectPullRequestListItem[];
   viewMode: "grid" | "list";
 };
-
-function formatRelativeTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
 
 function nextStepLabel(status: ProjectPullRequest["status"]) {
   if (status === "Draft") return "View draft";
@@ -103,7 +73,10 @@ function PullRequestGridCard({
   });
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
+    <Card
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent p-4 shadow-none transition-colors duration-150 hover:bg-muted/20"
+      data-projects-grid-card
+    >
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, pullRequest)}
@@ -152,11 +125,12 @@ function PullRequestGridCard({
             <span className="font-medium text-foreground">
               {pullRequest.status}
             </span>
-            <span>created {formatRelativeTime(pullRequest.createdAt)}</span>
+            <span>created {relativeTime(pullRequest.createdAt)}</span>
             <span>
               by{" "}
-              <AuthorNameButton
+              <ProjectAuthorIdentity
                 label={authorLabel}
+                profiles={profiles}
                 pubkey={pullRequest.author}
               />
             </span>
@@ -215,11 +189,13 @@ function PullRequestListRow({
             <span className="font-mono text-foreground">
               #{pullRequest.id.slice(0, 8)}
             </span>
-            <span>
-              by{" "}
-              <AuthorNameButton
+            <span className="inline-flex items-center gap-1">
+              <span>by</span>
+              <ProjectAuthorIdentity
                 label={authorLabel}
+                profiles={profiles}
                 pubkey={pullRequest.author}
+                testId="projects-pr-author"
               />
             </span>
             <span className="md:hidden">·</span>
@@ -243,7 +219,7 @@ function PullRequestListRow({
             data-testid="projects-row-date"
             title={new Date(pullRequest.createdAt * 1_000).toLocaleString()}
           >
-            {formatRelativeTime(pullRequest.createdAt)}
+            {relativeTime(pullRequest.createdAt)}
           </span>
           <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
             <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
@@ -258,6 +234,7 @@ function PullRequestListRow({
 }
 
 export function ProjectsPullRequestsList({
+  embedded,
   error,
   failedSections,
   isLoading,
@@ -270,7 +247,12 @@ export function ProjectsPullRequestsList({
 }: ProjectsPullRequestsListProps) {
   if (isLoading) {
     return (
-      <div className="border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "px-4 py-12 text-center text-sm text-muted-foreground",
+          !embedded && "border border-border/60",
+        )}
+      >
         Loading pull requests...
       </div>
     );
@@ -294,7 +276,12 @@ export function ProjectsPullRequestsList({
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        <div
+          className={cn(
+            "px-4 py-12 text-center text-sm text-muted-foreground",
+            !embedded && "border border-dashed border-border/60",
+          )}
+        >
           No pull requests yet.
         </div>
       </div>
@@ -306,10 +293,12 @@ export function ProjectsPullRequestsList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {pullRequests.map(({ project, pullRequest }) => (
+          {pullRequests.map(({ project, pullRequest, repository }) => (
             <PullRequestGridCard
-              key={pullRequest.id}
-              onOpen={onOpen}
+              key={`${repository.id}:${pullRequest.id}`}
+              onOpen={(selectedProject, selectedPullRequest) =>
+                onOpen(selectedProject, repository, selectedPullRequest)
+              }
               profiles={profiles}
               project={project}
               pullRequest={pullRequest}
@@ -323,11 +312,18 @@ export function ProjectsPullRequestsList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
-        {pullRequests.map(({ project, pullRequest }) => (
+      <div
+        className={
+          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
+        }
+        data-testid="projects-list-container"
+      >
+        {pullRequests.map(({ project, pullRequest, repository }) => (
           <PullRequestListRow
-            key={pullRequest.id}
-            onOpen={onOpen}
+            key={`${repository.id}:${pullRequest.id}`}
+            onOpen={(selectedProject, selectedPullRequest) =>
+              onOpen(selectedProject, repository, selectedPullRequest)
+            }
             profiles={profiles}
             project={project}
             pullRequest={pullRequest}

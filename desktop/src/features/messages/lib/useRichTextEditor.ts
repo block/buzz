@@ -9,6 +9,7 @@ import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
+import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
 import {
   hasPrimaryShortcutModifier,
   isMacPlatform,
@@ -28,6 +29,8 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
+import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
+import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
@@ -75,7 +78,7 @@ export type AutocompleteEdit = {
 
 export type RichTextEditorOptions = {
   placeholder?: string;
-  onUpdate?: (info: { text: string; cursor: number }) => void;
+  onUpdate?: (info: ReturnType<typeof buildPreviewUpdate>) => void;
   editable?: boolean;
   mentionNames?: string[];
   agentMentionNames?: string[];
@@ -132,6 +135,11 @@ function shouldAppendSpaceAfterPaste(text: string): boolean {
   const trimmedEnd = text.trimEnd();
   if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
   return PASTED_LINK_AT_END_RE.test(trimmedEnd);
+}
+
+function unwrapExactHttpLink(text: string): string | null {
+  const match = /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i.exec(text);
+  return match?.[1] ?? match?.[2] ?? null;
 }
 
 const LinkPasteTrailingSpace = Extension.create({
@@ -486,6 +494,36 @@ export function useRichTextEditor({
         }),
       ],
       editorProps: {
+        handleDOMEvents: {
+          paste: (view, event) => {
+            const clipboard = (event as ClipboardEvent).clipboardData;
+            if (
+              parseSnapshotClipboardHtml(clipboard?.getData("text/html") ?? "")
+            )
+              return false;
+            const url = unwrapExactHttpLink(
+              clipboard?.getData("text/plain") ?? "",
+            );
+            if (!url) return false;
+            const link = view.state.schema.marks.link;
+            if (!link) return false;
+            const { from, to } = view.state.selection;
+            let transaction = view.state.tr.replaceRangeWith(
+              from,
+              to,
+              view.state.schema.text(url, [link.create({ href: url })]),
+            );
+            const end = transaction.mapping.map(to);
+            transaction = transaction.insertText(" ", end);
+            transaction = transaction.removeMark(end, end + 1, link);
+            transaction = transaction.setSelection(
+              TextSelection.create(transaction.doc, end + 1),
+            );
+            view.dispatch(transaction.setStoredMarks([]).scrollIntoView());
+            event.preventDefault();
+            return true;
+          },
+        },
         attributes: {
           autocapitalize: "none",
           autocorrect: "off",
@@ -529,6 +567,39 @@ export function useRichTextEditor({
                 TextSelection.create(view.state.doc, position),
               ),
             );
+            return true;
+          }
+
+          // Cmd+Shift+V / Ctrl+Shift+V → paste the clipboard's plain-text
+          // representation. Embedded webviews permission-gate the browser
+          // clipboard API differently across operating systems, so packaged
+          // builds read through the native arboard command. Browser builds use
+          // navigator.clipboard as a fallback. Feed the result through
+          // ProseMirror's paste pipeline with clipboardData populated so its
+          // plain-text observers keep normal paste behavior.
+          if (
+            event.key.toLowerCase() === "v" &&
+            hasPrimaryShortcutModifier(event) &&
+            event.shiftKey &&
+            !event.altKey &&
+            !event.repeat &&
+            !event.isComposing
+          ) {
+            event.preventDefault();
+            void readTextFromSystemClipboard()
+              .then((text) => {
+                const clipboardData = new DataTransfer();
+                clipboardData.setData("text/plain", text);
+                view.pasteText(
+                  text,
+                  new ClipboardEvent("paste", { clipboardData }),
+                );
+              })
+              .catch(() => {
+                // The key is already consumed. Letting a delayed native paste
+                // race the asynchronous read could duplicate or unexpectedly
+                // format content.
+              });
             return true;
           }
 
@@ -585,11 +656,9 @@ export function useRichTextEditor({
         // still available through `getMarkdown()` for send/draft boundaries;
         // per-keystroke consumers only need textarea-shaped plain text for
         // autocomplete and empty/non-empty state.
-        const projection = buildPlainTextProjection(ed.state.doc);
-        onUpdateRef.current?.({
-          cursor: projection.mapPMToTextOffset(ed.state.selection.anchor),
-          text: projection.text,
-        });
+        onUpdateRef.current?.(
+          buildPreviewUpdate(ed.state.doc, ed.state.selection.anchor),
+        );
       },
     },
     [],

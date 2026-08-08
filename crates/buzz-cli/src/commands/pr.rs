@@ -1,4 +1,5 @@
 use crate::client::BuzzClient;
+use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
@@ -31,6 +32,7 @@ pub async fn cmd_open_pr(
     euc: Option<&str>,
     labels: &[String],
     to: &[String],
+    channel: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
@@ -44,6 +46,7 @@ pub async fn cmd_open_pr(
     let meta = GitPullRequestMeta {
         euc: euc.map(str::to_string),
         recipients: to.to_vec(),
+        channel_id: channel.map(str::to_string),
         subject: subject.to_string(),
         labels: labels.to_vec(),
         commit: commit.to_string(),
@@ -53,10 +56,16 @@ pub async fn cmd_open_pr(
         revision_of: revision_of.map(str::to_string),
     };
 
-    let builder = buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?;
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?,
+    )?;
     let event = client.sign_event(builder)?;
+    let event_id = event.id.to_hex();
     let resp = client.submit_event(event).await?;
-    println!("{resp}");
+    // `link` renders as a rich preview card in Buzz Desktop when included in
+    // a chat message — agents announce PRs with it (see base_prompt.md).
+    let link = crate::links::pull_request_link(&event_id, repo_owner, repo_id);
+    crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
 
@@ -95,7 +104,9 @@ pub async fn cmd_update_pr(
         merge_base: merge_base.map(str::to_string),
     };
 
-    let builder = buzz_sdk::build_git_pr_update(&repo, &content, &meta).map_err(sdk_err)?;
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_pr_update(&repo, &content, &meta).map_err(sdk_err)?,
+    )?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -204,7 +215,8 @@ pub async fn cmd_pr_status(
         applied_as_commits: vec![],
     };
 
-    let builder = buzz_sdk::build_git_status(status, &content, &meta).map_err(sdk_err)?;
+    let builder =
+        with_git_provenance(buzz_sdk::build_git_status(status, &content, &meta).map_err(sdk_err)?)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -227,6 +239,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             euc,
             label,
             to,
+            channel,
             revision_of,
         } => {
             cmd_open_pr(
@@ -243,6 +256,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 euc.as_deref(),
                 &label,
                 &to,
+                channel.as_deref(),
                 revision_of.as_deref(),
             )
             .await

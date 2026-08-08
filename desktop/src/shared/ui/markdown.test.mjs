@@ -521,9 +521,10 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links
-// end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for `buzz://message` and legacy `buzz://message` hrefs.
+// which would break copy → paste → click for `buzz://message?…` links and
+// `buzz://pr|issue|repo?…` entity links end-to-end. We pass a custom
+// `urlTransform` (`buzzDeepLinkUrlTransform`) that preserves valid Buzz
+// deep links and delegates everything else to `defaultUrlTransform`.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
@@ -534,12 +535,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+import { parseEntityLink } from "../lib/entityLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
-function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
-    return value;
-  }
+const OWNER_HEX =
+  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
+const EVENT_HEX =
+  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
+
+function buzzDeepLinkUrlTransform(value, key) {
+  if (key !== "href") return defaultUrlTransform(value);
+  if (isMessageLink(value)) return value;
+  if (parseEntityLink(value).ok) return value;
   return defaultUrlTransform(value);
 }
 
@@ -547,7 +554,7 @@ function renderMarkdown(content) {
   return renderToStaticMarkup(
     React.createElement(
       ReactMarkdown,
-      { urlTransform: messageLinkUrlTransform },
+      { urlTransform: buzzDeepLinkUrlTransform },
       content,
     ),
   );
@@ -592,7 +599,7 @@ test("messageLinkUrlTransform: preserves legacy buzz://message href", () => {
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
 });
 
-test("messageLinkUrlTransform: leaves non-message buzz:// schemes to default", () => {
+test("messageLinkUrlTransform: leaves non-entity buzz:// schemes to default", () => {
   // `buzz://connect?relay=…` is handled by a different code path (Tauri
   // single-instance). The markdown renderer should let it pass through
   // defaultUrlTransform (which strips it) since it's not clickable in-app.
@@ -600,6 +607,127 @@ test("messageLinkUrlTransform: leaves non-message buzz:// schemes to default", (
     "[connect](buzz://connect?relay=wss://relay.example)",
   );
   assert.match(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://pr entity link href", () => {
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[My PR](${prLink})`);
+  // The href must survive — our transform preserves valid entity links.
+  assert.match(html, /href="buzz:\/\/pr\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://pr autolink href", () => {
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`<${prLink}>`);
+  assert.match(html, /href="buzz:\/\/pr\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://issue entity link href", () => {
+  const issueLink = `buzz://issue?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[Issue title](${issueLink})`);
+  assert.match(html, /href="buzz:\/\/issue\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://repo entity link href", () => {
+  const repoLink = `buzz://repo?owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[My repo](${repoLink})`);
+  assert.match(html, /href="buzz:\/\/repo\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () => {
+  // Strict parser rejects unknown params — transform falls back to default sanitizer.
+  const html = renderMarkdown(
+    `[link](buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world&extra=ignored)`,
+  );
+  assert.match(html, /href=""/);
+});
+
+// ── renderEntityLinkAnchor: clone-URL anchor origin gating ───────────────────
+//
+// `renderEntityLinkAnchor` now accepts `relayOrigin` and passes it to
+// `parseSupportedLinkPreview`. A clone URL is only treated as an in-app entity
+// link when the URL origin exactly matches the active relay origin. This covers
+// the inline anchor click path (not just card extraction).
+
+import { renderEntityLinkAnchor } from "../ui/markdown/entityLinks.tsx";
+
+const CLONE_URL = `https://relay.example/git/${OWNER_HEX}/my-repo`;
+
+test("renderEntityLinkAnchor_matchingOriginCloneUrl_returnsEntityAnchor", () => {
+  // Origin matches active relay — anchor should navigate in-app (non-null).
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: "https://relay.example",
+  });
+  assert.notEqual(
+    el,
+    null,
+    "matching-origin clone URL must produce an entity anchor",
+  );
+  const html = renderToStaticMarkup(el);
+  // The entity anchor must be rendered — it carries the original href (for display)
+  // and navigates in-app via onClick. Verify the anchor is present with the cursor style.
+  assert.match(
+    html,
+    /cursor-pointer/,
+    "entity anchor must have the in-app navigation cursor style",
+  );
+});
+
+test("renderEntityLinkAnchor_lookalikeDomainCloneUrl_returnsNull", () => {
+  // Origin does NOT match active relay — must fall through to ExternalLinkAnchor.
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: "https://evil.example",
+  });
+  assert.equal(
+    el,
+    null,
+    "lookalike-origin clone URL must return null so the anchor falls through to external",
+  );
+});
+
+test("renderEntityLinkAnchor_noRelayOrigin_cloneUrlReturnsNull", () => {
+  // No known relay origin — must fail closed, not guess.
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: null,
+  });
+  assert.equal(
+    el,
+    null,
+    "clone URL without a relay origin must return null (fail closed)",
+  );
+});
+
+test("renderEntityLinkAnchor_directEntityLink_returnsAnchorRegardlessOfOrigin", () => {
+  // A direct buzz://pr link always resolves in-app — it does not require origin.
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "My PR"),
+    href: prLink,
+    onOpenEntityLink: () => {},
+    relayOrigin: null,
+  });
+  assert.notEqual(
+    el,
+    null,
+    "direct buzz://pr link must produce an entity anchor regardless of origin",
+  );
 });
 
 test("remarkSpoilers: block delimiter spoilers expose a block prop to React", () => {

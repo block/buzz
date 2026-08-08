@@ -58,6 +58,17 @@ tests:
       - failedTemplate:
           errorPattern: "Postgres source missing"
 
+  - it: rejects an invalid S3 addressing style
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      s3.endpoint: http://minio:9000
+      s3.addressingStyle: auto
+    asserts:
+      - failedTemplate:
+          errorPattern: "s3.addressingStyle: s3.addressingStyle must be one of the following:.*path.*virtual"
+
   - it: fails when S3/object-storage source is missing
     set:
       relayUrl: wss://buzz.example.com
