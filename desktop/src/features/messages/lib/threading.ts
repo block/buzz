@@ -101,29 +101,29 @@ export function diffAddedMentionPubkeys(
 export function buildReplyTags(
   channelId: string,
   authorPubkey: string,
+  parentAuthorPubkey: string | null,
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] = [],
 ) {
-  const tags: string[][] = [
-    ["p", authorPubkey],
-    ["h", channelId],
-  ];
-
-  // Add p-tags for mentioned users so mention-filtered subscriptions
-  // (e.g. ACP agent harness) receive the reply event.
-  // Best-effort normalization — relay performs authoritative validation.
-  for (const pubkey of normalizeMentionPubkeys(mentionPubkeys, authorPubkey)) {
-    tags.push(["p", pubkey]);
-  }
+  const tags: string[][] = [["h", channelId]];
 
   if (parentEventId === rootEventId) {
     tags.push(["e", rootEventId, "", "reply"]);
-    return tags;
+  } else {
+    tags.push(["e", rootEventId, "", "root"]);
+    tags.push(["e", parentEventId, "", "reply"]);
   }
 
-  tags.push(["e", rootEventId, "", "root"]);
-  tags.push(["e", parentEventId, "", "reply"]);
+  // Notify the immediate parent author as well as explicit mentions so
+  // mention-filtered subscriptions (e.g. ACP agent harness) receive replies.
+  // Best-effort normalization — relay performs authoritative validation.
+  const recipients = parentAuthorPubkey
+    ? [parentAuthorPubkey, ...mentionPubkeys]
+    : mentionPubkeys;
+  for (const pubkey of normalizeMentionPubkeys(recipients, authorPubkey)) {
+    tags.push(["p", pubkey]);
+  }
   return tags;
 }
 
@@ -152,11 +152,24 @@ export function resolveReplyRootId(
   parentEventId: string,
   events: RelayEvent[],
 ) {
+  return resolveReplyContext(parentEventId, events).rootEventId;
+}
+
+export function resolveReplyContext(
+  parentEventId: string,
+  events: RelayEvent[],
+) {
   const parent = events.find((event) => event.id === parentEventId);
   if (!parent) {
-    return parentEventId;
+    return {
+      parentAuthorPubkey: null,
+      rootEventId: parentEventId,
+    };
   }
 
   const thread = getThreadReference(parent.tags);
-  return thread.rootId ?? parent.id;
+  return {
+    parentAuthorPubkey: parent.pubkey,
+    rootEventId: thread.rootId ?? parent.id,
+  };
 }

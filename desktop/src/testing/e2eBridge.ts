@@ -3900,25 +3900,26 @@ function buildTopLevelMessageTags(
 function buildReplyMessageTags(
   channelId: string,
   authorPubkey: string,
+  parentAuthorPubkey: string | null,
   parentEventId: string,
   rootEventId: string,
   mentionPubkeys: string[] | undefined,
 ) {
-  // Preserve the reply tag ordering that the desktop message hooks already
-  // expect locally: author p, h, mention ps, then thread e-tags.
-  const tags: string[][] = [
-    ["p", authorPubkey],
-    ["h", channelId],
-  ];
-  appendMentionTags(tags, mentionPubkeys, authorPubkey);
+  const tags: string[][] = [["h", channelId]];
 
   if (parentEventId === rootEventId) {
     tags.push(["e", rootEventId, "", "reply"]);
-    return tags;
+  } else {
+    tags.push(["e", rootEventId, "", "root"]);
+    tags.push(["e", parentEventId, "", "reply"]);
   }
-
-  tags.push(["e", rootEventId, "", "root"]);
-  tags.push(["e", parentEventId, "", "reply"]);
+  appendMentionTags(
+    tags,
+    parentAuthorPubkey
+      ? [parentAuthorPubkey, ...(mentionPubkeys ?? [])]
+      : mentionPubkeys,
+    authorPubkey,
+  );
   return tags;
 }
 
@@ -4010,6 +4011,7 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               tags: buildReplyMessageTags(
                 channelId,
                 ALICE_PUBKEY,
+                "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
                 "mock-forum-release-thread",
                 "mock-forum-release-thread",
                 undefined,
@@ -4032,6 +4034,7 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               tags: buildReplyMessageTags(
                 channelId,
                 ALICE_PUBKEY,
+                "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
                 "mock-forum-release-thread",
                 "mock-forum-release-thread",
                 undefined,
@@ -4417,6 +4420,7 @@ function emitMockChannelMessage(
   const tags = buildReplyMessageTags(
     channelId,
     authorPubkey,
+    parentEvent?.pubkey ?? null,
     parentEventId,
     rootEventId,
     mentionPubkeys,
@@ -9110,6 +9114,7 @@ async function handleSendChannelMessage(
         ...buildReplyMessageTags(
           args.channelId,
           mockPubkey,
+          parentEvent?.pubkey ?? null,
           args.parentEventId,
           rootEventId,
           args.mentionPubkeys,
@@ -9133,12 +9138,16 @@ async function handleSendChannelMessage(
   }
 
   const relayIdentity = getRelayIdentity(config);
+  const relayReplyContext = args.parentEventId
+    ? await resolveRelayReplyContext(config, args.parentEventId)
+    : null;
   const tags = args.parentEventId
     ? buildReplyMessageTags(
         args.channelId,
         relayIdentity.pubkey,
+        relayReplyContext?.parentAuthorPubkey ?? null,
         args.parentEventId,
-        args.parentEventId,
+        relayReplyContext?.rootEventId ?? args.parentEventId,
         args.mentionPubkeys,
       )
     : buildTopLevelMessageTags(
@@ -9156,9 +9165,29 @@ async function handleSendChannelMessage(
   return {
     event_id: result.event_id,
     parent_event_id: args.parentEventId ?? null,
-    root_event_id: args.parentEventId ?? null,
-    depth: args.parentEventId ? 1 : 0,
+    root_event_id: relayReplyContext?.rootEventId ?? null,
+    depth: relayReplyContext?.depth ?? 0,
     created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function resolveRelayReplyContext(
+  config: E2eConfig | undefined,
+  parentEventId: string,
+) {
+  const [parentEvent] = await relayQuery(config, [
+    { ids: [parentEventId], limit: 1 },
+  ]);
+  if (!parentEvent) {
+    throw new Error(`Event not found: ${parentEventId}`);
+  }
+
+  const parentThread = getThreadReferenceFromTags(parentEvent.tags);
+  const rootEventId = parentThread.rootEventId ?? parentEventId;
+  return {
+    parentAuthorPubkey: parentEvent.pubkey,
+    rootEventId,
+    depth: rootEventId === parentEventId ? 1 : 2,
   };
 }
 
@@ -9195,10 +9224,16 @@ async function handleSendManagedAgentChannelMessage(
   }
 
   const createdAt = Math.floor(Date.now() / 1000);
+  const parentAuthor = args.parentEventId
+    ? (getMockMessageStore(args.channelId).find(
+        (event) => event.id === args.parentEventId,
+      )?.pubkey ?? null)
+    : null;
   const tags = args.parentEventId
     ? buildReplyMessageTags(
         args.channelId,
         agent.pubkey,
+        parentAuthor,
         args.parentEventId,
         args.parentEventId,
         args.mentionPubkeys ?? undefined,
@@ -9480,6 +9515,7 @@ async function resolveGetEvent(
         tags: buildReplyMessageTags(
           "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11",
           ALICE_PUBKEY,
+          "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
           "mock-forum-release-thread",
           "mock-forum-release-thread",
           undefined,

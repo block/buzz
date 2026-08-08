@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -12,7 +17,7 @@ import {
   getThreadReference,
   isBroadcastReply,
   normalizeMentionPubkeys,
-  resolveReplyRootId,
+  resolveReplyContext,
 } from "@/features/messages/lib/threading";
 import {
   projectChannelWindowMessages,
@@ -79,6 +84,25 @@ type MessageQueryContext = {
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
+type ReplyContextQueryClient = Pick<
+  QueryClient,
+  "getQueryData" | "getQueriesData"
+>;
+
+export function getCachedReplyContextEvents(
+  queryClient: ReplyContextQueryClient,
+  channelId: string,
+): RelayEvent[] {
+  const timeline =
+    queryClient.getQueryData<RelayEvent[]>(channelMessagesKey(channelId)) ?? [];
+  const threadReplies = queryClient
+    .getQueriesData<RelayEvent[]>({
+      queryKey: ["thread-replies", channelId],
+    })
+    .flatMap(([, events]) => events ?? []);
+  return [...threadReplies, ...timeline];
+}
+
 export function createOptimisticMessage(
   channelId: string,
   content: string,
@@ -92,12 +116,14 @@ export function createOptimisticMessage(
   const tags: string[][] = [];
 
   if (parentEventId) {
+    const replyContext = resolveReplyContext(parentEventId, currentMessages);
     tags.push(
       ...buildReplyTags(
         channelId,
         identity.pubkey,
+        replyContext.parentAuthorPubkey,
         parentEventId,
-        resolveReplyRootId(parentEventId, currentMessages),
+        replyContext.rootEventId,
         mentionPubkeys,
       ),
     );
@@ -475,10 +501,12 @@ export function useSendMessageMutation(
         emojiTags.length > 0 ||
         linkPreviewTags.length > 0
       ) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
+        const replyContext = parentEventId
+          ? resolveReplyContext(
+              parentEventId,
+              getCachedReplyContextEvents(queryClient, effectiveChannel.id),
+            )
+          : null;
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
@@ -491,20 +519,21 @@ export function useSendMessageMutation(
           linkPreviewTags,
         );
 
-        // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
-        // For replies, buildReplyTags already includes ["p", author] and ["h", channel].
+        // Build tags matching the relay-emitted reply shape, including the
+        // immediate parent author as an automatic recipient.
         // For non-replies (media-only), we add them ourselves.
         const replyTags = parentEventId
           ? buildReplyTags(
               effectiveChannel.id,
               identity.pubkey,
+              replyContext?.parentAuthorPubkey ?? null,
               parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
+              replyContext?.rootEventId ?? parentEventId,
               recipientPubkeys,
             )
           : [];
         const baseTags = parentEventId
-          ? replyTags // buildReplyTags includes h + author p + mention ps
+          ? replyTags // buildReplyTags includes h + thread refs + recipient ps
           : [
               ["h", effectiveChannel.id],
               ["p", identity.pubkey],
@@ -578,7 +607,7 @@ export function useSendMessageMutation(
         effectiveChannel.id,
         content.trim(),
         identity,
-        previousMessages,
+        getCachedReplyContextEvents(queryClient, effectiveChannel.id),
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],

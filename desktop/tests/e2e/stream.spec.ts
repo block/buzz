@@ -105,10 +105,12 @@ async function sendChannelMessage(
     channelName,
     content,
     mentionPubkeys,
+    parentEventId,
   }: {
     channelName: string;
     content: string;
     mentionPubkeys?: string[];
+    parentEventId?: string;
   },
 ) {
   await page.waitForFunction(
@@ -123,8 +125,13 @@ async function sendChannelMessage(
     { timeout: 5_000 },
   );
 
-  await page.evaluate(
-    async ({ channelName: targetChannelName, content, mentionPubkeys }) => {
+  return page.evaluate(
+    async ({
+      channelName: targetChannelName,
+      content,
+      mentionPubkeys,
+      parentEventId,
+    }) => {
       const tauriWindow = window as Window & {
         __TAURI_INTERNALS__?: {
           invoke: (
@@ -148,16 +155,21 @@ async function sendChannelMessage(
         throw new Error(`Channel not found: ${targetChannelName}`);
       }
 
-      await invoke("send_channel_message", {
+      return (await invoke("send_channel_message", {
         channelId: channel.id,
         content,
         kind: null,
         mediaTags: null,
         mentionPubkeys: mentionPubkeys ?? null,
-        parentEventId: null,
-      });
+        parentEventId: parentEventId ?? null,
+      })) as {
+        event_id: string;
+        parent_event_id: string | null;
+        root_event_id: string | null;
+        depth: number;
+      };
     },
-    { channelName, content, mentionPubkeys },
+    { channelName, content, mentionPubkeys, parentEventId },
   );
 }
 
@@ -292,6 +304,72 @@ test("sends a message through the real relay", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expectTimelineToContain(page, message);
+});
+
+test("relay-backed nested replies tag the immediate parent and preserve the root", async ({
+  browser,
+}) => {
+  const rootContext = await browser.newContext();
+  const parentContext = await browser.newContext();
+  const replyContext = await browser.newContext();
+  const rootPage = await rootContext.newPage();
+  const parentPage = await parentContext.newPage();
+  const replyPage = await replyContext.newPage();
+
+  try {
+    await installRelayBridge(rootPage, "alice");
+    await installRelayBridge(parentPage, "bob");
+    await installRelayBridge(replyPage, "tyler");
+    await rootPage.goto("/");
+    await parentPage.goto("/");
+    await replyPage.goto("/");
+
+    const root = await sendChannelMessage(rootPage, {
+      channelName: "general",
+      content: `Reply recipient root ${Date.now()}`,
+    });
+    const parent = await sendChannelMessage(parentPage, {
+      channelName: "general",
+      content: `Reply recipient parent ${Date.now()}`,
+      parentEventId: root.event_id,
+    });
+    const reply = await sendChannelMessage(replyPage, {
+      channelName: "general",
+      content: `Reply recipient nested reply ${Date.now()}`,
+      parentEventId: parent.event_id,
+    });
+
+    const rawEvent = await replyPage.evaluate(async (eventId) => {
+      const tauriWindow = window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+      return tauriWindow.__TAURI_INTERNALS__?.invoke("get_event", { eventId });
+    }, reply.event_id);
+    const event = JSON.parse(String(rawEvent)) as {
+      tags: string[][];
+    };
+
+    expect(reply.root_event_id).toBe(root.event_id);
+    expect(reply.depth).toBe(2);
+    expect(
+      event.tags.filter((tag) => tag[0] === "p").map((tag) => tag[1]),
+    ).toEqual([TEST_IDENTITIES.bob.pubkey]);
+    expect(event.tags).toEqual(
+      expect.arrayContaining([
+        ["e", root.event_id, "", "root"],
+        ["e", parent.event_id, "", "reply"],
+      ]),
+    );
+  } finally {
+    await rootContext.close();
+    await parentContext.close();
+    await replyContext.close();
+  }
 });
 
 test("delivers a message to a second browser context in real time", async ({

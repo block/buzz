@@ -473,6 +473,7 @@ async fn resolve_thread_ref(
     Ok(events::ThreadRef {
         root_event_id: root_eid,
         parent_event_id: parent_eid,
+        parent_author_pubkey: parent.pubkey.to_hex(),
     })
 }
 
