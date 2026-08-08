@@ -561,6 +561,28 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+/// Build the markdown fragment embedded in a message for one uploaded file.
+///
+/// Images and video use `![...](url)` so the desktop/mobile renderers treat
+/// them as inline media. Everything else (docs, archives, text) uses a plain
+/// `[filename](url)` link — the desktop `resolveFileCard` renderer keys off a
+/// markdown *link* (not an image embed) plus the accompanying imeta MIME to
+/// show a generic-file download card. The link text carries the original
+/// filename since Blossom is content-addressed and the URL itself is a hash.
+fn media_markdown_fragment(mime_type: &str, url: &str, file_path: &str) -> String {
+    if mime_type.starts_with("video/") {
+        format!("![video]({url})")
+    } else if mime_type.starts_with("image/") {
+        format!("![image]({url})")
+    } else {
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        format!("[{filename}]({url})")
+    }
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
@@ -619,13 +641,12 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_content.push('\n');
+        media_content.push_str(&media_markdown_fragment(
+            &desc.mime_type,
+            &desc.url,
+            file_path,
+        ));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -993,9 +1014,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        media_markdown_fragment, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1371,5 +1392,33 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn media_markdown_fragment_embeds_images() {
+        let md = media_markdown_fragment("image/png", "https://relay/x.png", "/tmp/photo.png");
+        assert_eq!(md, "![image](https://relay/x.png)");
+    }
+
+    #[test]
+    fn media_markdown_fragment_embeds_video() {
+        let md = media_markdown_fragment("video/mp4", "https://relay/x.mp4", "/tmp/clip.mp4");
+        assert_eq!(md, "![video](https://relay/x.mp4)");
+    }
+
+    #[test]
+    fn media_markdown_fragment_links_generic_files_with_original_filename() {
+        let md = media_markdown_fragment(
+            "application/pdf",
+            "https://relay/deadbeef.pdf",
+            "/home/abraham/reports/q3-plan.pdf",
+        );
+        assert_eq!(md, "[q3-plan.pdf](https://relay/deadbeef.pdf)");
+    }
+
+    #[test]
+    fn media_markdown_fragment_falls_back_to_file_when_path_has_no_filename() {
+        let md = media_markdown_fragment("text/plain", "https://relay/x.txt", "/");
+        assert_eq!(md, "[file](https://relay/x.txt)");
     }
 }
