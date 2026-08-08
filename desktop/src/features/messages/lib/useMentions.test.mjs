@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getMentionOffset, hasMention } from "./hasMention.ts";
+import {
+  getMentionOffset,
+  getMentionOffsets,
+  hasMention,
+} from "./hasMention.ts";
+import { extractMentionPubkeys } from "./extractMentionPubkeys.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -93,6 +98,111 @@ test("handles regex special characters in name", () => {
 test("does not false-positive on partial name match", () => {
   // "Al" should not match inside "@Alice"
   assert.equal(hasMention("@Alice", "Al"), false);
+});
+
+test("returns every mention offset", () => {
+  const text = "@Fast Fizz Codex and @Fast Fizz";
+  assert.deepEqual(getMentionOffsets(text, "Fast Fizz"), [0, 21]);
+});
+
+test("selected longer mention excludes a prefix member at the same offset", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "Hive Codex(@Fast Fizz Codex)",
+    selectedMentions: new Map([["Fast Fizz Codex", "codex-pubkey"]]),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey"]);
+});
+
+test("manual longer mention excludes its prefix member", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex",
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey"]);
+});
+
+test("manual prefix mentions choose the longest name at each offset", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex, please pair with @Fast Fizz.",
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["fast-fizz-pubkey", "codex-pubkey"]);
+});
+
+test("keeps manually typed prefix member mentions at distinct offsets", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex, please pair with @Fast Fizz.",
+    selectedMentions: new Map([["Fast Fizz Codex", "codex-pubkey"]]),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey", "fast-fizz-pubkey"]);
 });
 
 // ── Markdown code ─────────────────────────────────────────────────────
