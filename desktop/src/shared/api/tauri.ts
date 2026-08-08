@@ -157,6 +157,7 @@ export type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  resume_on_restart?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
@@ -414,9 +415,8 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
-    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
-    // "no canvas yet", and `undefined !== null` would make every fresh
-    // channel look already-seeded.
+    // Normalize absent keys to null: ensureWelcomeCanvas treats null as "no
+    // canvas yet"; `undefined !== null` makes fresh channels look seeded.
     updatedAt: response.updated_at ?? null,
     author: response.author ?? null,
   };
@@ -712,6 +712,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
+    resumeOnRestart: agent.resume_on_restart ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     respondTo: agent.respond_to ?? "owner-only",
@@ -785,9 +786,8 @@ export async function getMyRelayMembership(): Promise<RelayMember | null> {
     const raw = await invokeTauri<RawRelayMember>("get_my_relay_membership");
     return fromRawRelayMember(raw);
   } catch (error) {
-    // "relay returned 404 Not Found" = not a relay member — return null so
-    // the UI hides the Members tab. Re-throw real errors (network, auth, 500)
-    // so React Query surfaces them.
+    // "relay returned 404 Not Found" = not a relay member — return null so the
+    // UI hides the Members tab. Re-throw real errors so React Query shows them.
     if (
       error instanceof Error &&
       error.message.startsWith("relay returned 404")

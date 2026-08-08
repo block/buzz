@@ -27,6 +27,7 @@ fn base() -> SpawnConfigSnapshot {
         respond_to_allowlist: Some(vec!["a".repeat(64)]),
         idle_timeout_seconds: Some(600),
         max_turn_duration_seconds: Some(7200),
+        resume_on_restart: true,
         parallelism: 1,
     }
 }
@@ -69,6 +70,7 @@ fn mutations() -> Vec<Mutation> {
         ("max_turn_duration_seconds", |s| {
             s.max_turn_duration_seconds = None
         }),
+        ("resume_on_restart", |s| s.resume_on_restart = false),
         ("parallelism", |s| s.parallelism = 8),
     ]
 }

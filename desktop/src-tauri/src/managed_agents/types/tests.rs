@@ -53,6 +53,70 @@ fn managed_agent_record_without_auth_tag_deserializes() {
     assert_eq!(record.pubkey, "abcd1234");
 }
 
+/// Records written before the resume toggle lack `resume_on_restart`. The
+/// serde default must land them ON, matching the harness default, so an
+/// upgrade never silently disables resume for an existing agent.
+#[test]
+fn managed_agent_record_without_resume_on_restart_defaults_on() {
+    let record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("pre-toggle agent record should deserialize");
+
+    assert!(record.resume_on_restart);
+}
+
+/// An explicit `false` must survive a save/load cycle — the whole point of
+/// the toggle is that an opted-out agent stays opted out across restarts.
+#[test]
+fn managed_agent_record_resume_on_restart_false_round_trips() {
+    let record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "resume_on_restart": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("record with resume_on_restart should deserialize");
+    assert!(!record.resume_on_restart);
+
+    let serialized = serde_json::to_string(&record).expect("should serialize");
+    let reloaded: ManagedAgentRecord =
+        serde_json::from_str(&serialized).expect("round-trip should deserialize");
+    assert!(!reloaded.resume_on_restart);
+}
+
 /// Agent records WITH an auth_tag round-trip correctly through serde.
 #[test]
 fn managed_agent_record_with_auth_tag_round_trips() {
@@ -741,6 +805,7 @@ fn summary_fixture(
         last_error_code: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        resume_on_restart: false,
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),

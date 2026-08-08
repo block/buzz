@@ -40,6 +40,7 @@ fn record() -> ManagedAgentRecord {
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
+        resume_on_restart: true,
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
@@ -825,5 +826,18 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
         snapshot(&at_8, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&at_3, &[], &[], "wss://ws.example", &Default::default()),
         "parallelism 8 (clamps to 5) and 3 (runs as 3) must produce different snapshots"
+    );
+}
+
+#[test]
+fn resume_on_restart_toggle_changes_snapshot() {
+    // Flipping the toggle changes what a spawn writes
+    // (BUZZ_ACP_RESUME_ON_RESTART), so the restart-required badge must trip.
+    let on = record();
+    let mut off = record();
+    off.resume_on_restart = false;
+    assert_ne!(
+        snapshot(&on, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&off, &[], &[], "wss://ws.example", &Default::default())
     );
 }

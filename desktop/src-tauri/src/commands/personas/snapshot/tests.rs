@@ -45,6 +45,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        resume_on_restart: true,
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
@@ -509,8 +510,7 @@ fn import_none_level_with_entries_is_rejected() {
     );
 }
 
-/// A well-formed snapshot with memory level != none and non-empty entries
-/// is accepted.
+/// A well-formed snapshot with memory level != none and non-empty entries is accepted.
 #[test]
 fn import_memory_bearing_snapshot_is_accepted() {
     let entries = vec![
@@ -573,9 +573,9 @@ fn import_preview_includes_exported_definition_metadata() {
 
 // ── Import: resolve_snapshot_import_behavior — the production selection path
 //
-// All tests below call `resolve_snapshot_import_behavior` directly.  This is
-// the same function invoked by `confirm_agent_snapshot_import`, so the tests
-// exercise the exact production code path, not a reconstruction of it.
+// All tests below call `resolve_snapshot_import_behavior` directly — the same
+// function `confirm_agent_snapshot_import` invokes, so they exercise the
+// production path rather than a reconstruction.
 
 /// Uppercase hex pubkeys are lowercased and duplicates are removed before the
 /// resolved allowlist is persisted.

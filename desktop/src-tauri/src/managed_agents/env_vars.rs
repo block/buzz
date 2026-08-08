@@ -281,5 +281,21 @@ pub(crate) fn live_persona_env(
         .unwrap_or_default()
 }
 
+/// Emit `BUZZ_ACP_RESUME_ON_RESTART` onto a child `Command`, making the UI
+/// toggle authoritative in both directions.
+///
+/// Two-step: first `env_remove` clears any ambient value the desktop process
+/// inherited from its own environment, then `env` writes the record value
+/// unconditionally. This means `false` wins over an ambient `true` AND `true`
+/// wins over an ambient `false` — no leak in either direction.
+///
+/// `BUZZ_ACP_RESUME_ON_RESTART` is also in `RESERVED_ENV_KEYS`, so saved user
+/// env cannot reintroduce it after this call (reserved stripping happens in
+/// `merged_user_env`, applied when building `descriptor.env`).
+pub(crate) fn apply_resume_env(cmd: &mut std::process::Command, resume_on_restart: bool) {
+    cmd.env_remove("BUZZ_ACP_RESUME_ON_RESTART");
+    cmd.env("BUZZ_ACP_RESUME_ON_RESTART", resume_on_restart.to_string());
+}
+
 #[cfg(test)]
 mod tests;

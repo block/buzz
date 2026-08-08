@@ -228,8 +228,7 @@ fn build_env_legacy_record_without_auth_tag_emits_agent_owner() {
 
 #[test]
 fn build_env_legacy_record_without_owner_hex_removes_agent_owner() {
-    // No owner available to forward → make sure we don't inherit a leaked
-    // env var from the parent.
+    // No owner available to forward → make sure we don't inherit a leaked env var from the parent.
     let rec = fixture(RespondTo::OwnerOnly, vec![], None);
     let (_set, remove) = build_respond_to_env(&rec, None).unwrap();
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));

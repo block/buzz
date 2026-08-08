@@ -709,6 +709,20 @@ impl AgentPool {
         (&mut self.result_rx, &mut self.join_set)
     }
 
+    /// Three-way split-borrow variant of [`Self::rx_and_join_set`] that also
+    /// exposes `task_map`. Used by the shutdown drain, which needs to look
+    /// up a panicking task's `TaskMeta` inside the same `select!` that's
+    /// already polling `result_rx`/`join_set`.
+    pub fn rx_join_set_and_task_map(
+        &mut self,
+    ) -> (
+        &mut mpsc::UnboundedReceiver<PromptResult>,
+        &mut JoinSet<()>,
+        &mut HashMap<tokio::task::Id, TaskMeta>,
+    ) {
+        (&mut self.result_rx, &mut self.join_set, &mut self.task_map)
+    }
+
     /// Non-blocking drain of the result channel. Used during shutdown to
     /// collect agents that completed while join_set was being drained.
     pub fn result_rx_try_recv(&mut self) -> Result<PromptResult, mpsc::error::TryRecvError> {
@@ -863,7 +877,7 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 /// than an agent rename: `invalidate_channel` drops the session but not the
 /// resolver's cached entry, so a renamed channel keeps its old suffix until the
 /// process restarts. An agent rename lands on the next spawn (the desktop
-/// restart badge covers it — see `spawn_config_hash`).
+/// restart badge covers it — see the managed-agent spawn snapshot).
 async fn resolve_new_session_channel_context(
     channel_info: &ChannelInfoResolver,
     channel_id: Uuid,
@@ -5139,11 +5153,11 @@ mod tests {
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
             channel_id: Uuid::new_v4(),
-            events: vec![crate::queue::BatchEvent {
+            events: vec![crate::queue::BatchEvent::for_test(
                 event,
-                prompt_tag: "@mention".into(),
-                received_at: std::time::Instant::now(),
-            }],
+                "@mention".into(),
+                std::time::Instant::now(),
+            )],
             cancelled_events: vec![],
             cancel_reason: None,
         };
@@ -5465,11 +5479,11 @@ mod tests {
             .unwrap();
         FlushBatch {
             channel_id,
-            events: vec![crate::queue::BatchEvent {
+            events: vec![crate::queue::BatchEvent::for_test(
                 event,
-                prompt_tag: "test".into(),
-                received_at: std::time::Instant::now(),
-            }],
+                "test".into(),
+                std::time::Instant::now(),
+            )],
             cancelled_events: vec![],
             cancel_reason: None,
         }
