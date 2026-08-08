@@ -57,7 +57,7 @@ impl DevMcp {
 
     #[tool(
         name = "buzz_send_message",
-        description = "Publish a Buzz channel message or threaded reply through the harness-owned signer. Use the channel UUID and optional reply event id from the prompt Context. This tool accepts typed fields only and never exposes raw signing keys or signatures."
+        description = "Publish a Buzz channel message or threaded reply through the harness-owned signer. Use the channel UUID and optional reply event id from the prompt Context. Supply a stable idempotency_key unique to this logical send and reuse it only to retry the exact same fields after a timeout. This tool accepts typed fields only and never exposes raw signing keys or signatures."
     )]
     async fn buzz_send_message(
         &self,

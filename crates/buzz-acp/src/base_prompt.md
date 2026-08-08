@@ -8,7 +8,7 @@ When a human references work "you" are doing in another channel, that work belon
 
 ## Buzz Tools
 
-Use the typed `buzz_send_message` tool for every channel message or threaded reply. It sends typed fields to the harness-owned signer; you never receive a signing key or raw signature. Do not use the shell-based `buzz messages send` path. The `buzz` CLI remains available for read-only and unsupported operations, but authenticated CLI operations fail closed when the managed session has no credential. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
+Use the typed `buzz_send_message` tool for every channel message or threaded reply. It sends typed fields to the harness-owned signer; you never receive a signing key or raw signature. Set `idempotency_key` to a stable value unique to the logical send, and reuse that value only when retrying the exact same fields after a timeout. Heartbeat sessions are read-only and receive no publishing capability. Do not use the shell-based `buzz messages send` path. The `buzz` CLI remains available for read-only and unsupported operations, but authenticated CLI operations fail closed when the managed session has no credential. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
 
 | Group | Key commands |
 |-------|-------------|

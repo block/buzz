@@ -13,6 +13,9 @@ const REQUEST_TIMEOUT_SECONDS: u64 = 30;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMessageParams {
+    /// Stable identifier for this logical publish. Reuse the same value when
+    /// retrying after a timeout; use a new value for an intentional new send.
+    pub idempotency_key: String,
     /// Buzz channel UUID supplied in the turn's Context section.
     pub channel: String,
     /// Message body to publish.
@@ -34,6 +37,7 @@ pub struct PublisherClient {
 #[derive(Serialize)]
 struct PublishRequest<'a> {
     capability: &'a str,
+    idempotency_key: &'a str,
     channel: &'a str,
     content: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +64,7 @@ impl PublisherClient {
     async fn publish(&self, params: &SendMessageParams) -> Result<Value, String> {
         let request = PublishRequest {
             capability: &self.capability,
+            idempotency_key: &params.idempotency_key,
             channel: &params.channel,
             content: &params.content,
             reply_to: params.reply_to.as_deref(),
@@ -113,6 +118,15 @@ pub async fn run(
     if params.content.trim().is_empty() {
         return Err(ErrorData::invalid_params(
             "content must not be empty".to_string(),
+            None,
+        ));
+    }
+    if params.idempotency_key.is_empty()
+        || params.idempotency_key.len() > 128
+        || params.idempotency_key.chars().any(char::is_control)
+    {
+        return Err(ErrorData::invalid_params(
+            "idempotency_key must be 1-128 non-control bytes".to_string(),
             None,
         ));
     }
@@ -180,6 +194,7 @@ mod tests {
         let result = run(
             Some(&publisher),
             SendMessageParams {
+                idempotency_key: "typed-hello-1".to_string(),
                 channel: "a6e0737c-4205-4bcc-9741-2aad800e613f".to_string(),
                 content: "hello".to_string(),
                 reply_to: Some("f".repeat(64)),
@@ -192,6 +207,7 @@ mod tests {
         assert!(!result.is_error.unwrap_or(false));
         let request = server.await.expect("publisher server");
         assert_eq!(request["capability"], "opaque-session-capability");
+        assert_eq!(request["idempotency_key"], "typed-hello-1");
         assert_eq!(request["content"], "hello");
         assert_eq!(request["reply_to"], "f".repeat(64));
         assert_eq!(request["mentions"][0], "a".repeat(64));
@@ -202,6 +218,7 @@ mod tests {
         let error = run(
             None,
             SendMessageParams {
+                idempotency_key: "missing-publisher-1".to_string(),
                 channel: "a6e0737c-4205-4bcc-9741-2aad800e613f".to_string(),
                 content: "hello".to_string(),
                 reply_to: None,

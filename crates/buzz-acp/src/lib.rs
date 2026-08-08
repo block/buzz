@@ -1638,17 +1638,18 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
-    // The model-facing MCP server receives a loopback capability, never the
-    // Nostr private key. The broker retains signing authority in this harness
-    // process and accepts only typed message/reply requests.
-    let publisher_broker = if config.mcp_command.is_empty() {
-        None
-    } else {
+    let mcp_servers = build_mcp_servers(&config);
+    // Only the explicitly configured Buzz companion can receive a loopback
+    // capability. Arbitrary MCP configurations do not even start a signer
+    // broker, which keeps the authority surface absent rather than unreachable.
+    let publisher_broker = if mcp_servers.iter().any(McpServer::is_trusted_buzz_companion) {
         Some(
             publisher::PublisherBroker::start(relay.rest_client())
                 .await
                 .map_err(|error| anyhow::anyhow!("publisher broker start error: {error}"))?,
         )
+    } else {
+        None
     };
 
     relay
@@ -1824,7 +1825,7 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers,
         publisher_issuer: publisher_broker.as_ref().map(|broker| broker.issuer()),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
@@ -3972,6 +3973,8 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("`buzz_send_message.content`"));
         assert!(!prompt.contains("BUZZ_PRIVATE_KEY"));
         assert!(prompt.contains("Do not use the shell-based `buzz messages send` path"));
+        assert!(prompt.contains("`idempotency_key`"));
+        assert!(prompt.contains("Heartbeat sessions are read-only"));
     }
 
     #[test]
@@ -3993,9 +3996,9 @@ fn default_heartbeat_prompt() -> String {
          1. Run `buzz feed get --types needs_action` to check for pending workflow approvals or\n\
             high-priority requests addressed to you.\n\
          2. Run `buzz feed get --types mentions` to check for unanswered @mentions.\n\
-         3. If you find actionable items, address them using the appropriate CLI commands\n\
-            (e.g., `buzz workflows approve --token <UUID>` or `buzz_send_message`\n\
-            with the Context channel and reply event fields).\n\
+         3. Heartbeat sessions are read-only and receive no publishing capability.\n\
+            Do not attempt a channel send from this session; publishing is reserved\n\
+            for a channel-bound session with a channel-scoped grant.\n\
          4. If there are no pending actions or mentions, end your turn immediately.\n\n\
          Do not run `buzz channels list` or `buzz messages search` unless you have a specific reason.\n\
          Do not invent work — only act on items surfaced by the feed commands."

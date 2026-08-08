@@ -94,7 +94,6 @@ pub struct SessionState {
     /// harness-owned broker, so session invalidation also removes publish
     /// authority from the corresponding MCP server.
     publisher_leases: HashMap<Uuid, PublisherLease>,
-    heartbeat_publisher_lease: Option<PublisherLease>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
     pub turn_counts: HashMap<Uuid, u32>,
@@ -122,7 +121,6 @@ impl SessionState {
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
-                self.heartbeat_publisher_lease = None;
             }
         }
     }
@@ -143,7 +141,6 @@ impl SessionState {
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.publisher_leases.clear();
-        self.heartbeat_publisher_lease = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
         self.canvas_sections.clear();
@@ -924,10 +921,13 @@ async fn create_session_and_apply_model(
         .session_title
         .as_deref()
         .map(|agent_name| compose_session_title(agent_name, channel_name));
-    let publisher_lease = ctx
-        .publisher_issuer
-        .as_ref()
-        .map(|issuer| issuer.issue(channel_id));
+    // A publisher capability must bind to exactly one channel. Heartbeat
+    // sessions have no single channel and therefore receive no lease.
+    let publisher_lease = channel_id.and_then(|channel_id| {
+        ctx.publisher_issuer
+            .as_ref()
+            .map(|issuer| issuer.issue(channel_id))
+    });
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
         channel_id,
@@ -1040,13 +1040,8 @@ async fn create_session_and_apply_model(
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
     }
 
-    if let Some(lease) = publisher_lease {
-        match channel_id {
-            Some(channel_id) => {
-                agent.state.publisher_leases.insert(channel_id, lease);
-            }
-            None => agent.state.heartbeat_publisher_lease = Some(lease),
-        }
+    if let (Some(channel_id), Some(lease)) = (channel_id, publisher_lease) {
+        agent.state.publisher_leases.insert(channel_id, lease);
     }
 
     Ok(resp.session_id)
@@ -1078,8 +1073,19 @@ fn mcp_servers_with_git_origin(
             server.env.push(origin.clone());
         }
     }
+    for server in &mut servers {
+        server.env.retain(|entry| {
+            !matches!(
+                entry.name.as_str(),
+                "BUZZ_PUBLISHER_ENDPOINT" | "BUZZ_PUBLISHER_CAPABILITY"
+            )
+        });
+    }
     if let Some(publisher) = publisher {
         for server in &mut servers {
+            if !server.is_trusted_buzz_companion() {
+                continue;
+            }
             server.env.extend([
                 EnvVar {
                     name: "BUZZ_PUBLISHER_ENDPOINT".into(),
@@ -1736,6 +1742,11 @@ pub async fn run_prompt_task(
             }
         }
     };
+    if let PromptSource::Channel(channel_id) = &source {
+        if let Some(lease) = agent.state.publisher_leases.get(channel_id) {
+            lease.refresh();
+        }
+    }
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
@@ -4072,7 +4083,7 @@ mod tests {
 
     fn test_mcp_server() -> McpServer {
         McpServer {
-            name: "dev".into(),
+            name: "buzz-dev-mcp".into(),
             command: "buzz-dev-mcp".into(),
             args: vec![],
             env: vec![],
@@ -4144,6 +4155,59 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn unrelated_mcp_server_never_receives_publisher_access() {
+        let access = PublisherAccess {
+            endpoint: "127.0.0.1:12345".to_string(),
+            capability: "opaque-session-capability".to_string(),
+        };
+        let third_party = McpServer {
+            name: "third-party".into(),
+            command: "third-party-mcp".into(),
+            args: vec![],
+            env: vec![EnvVar {
+                name: "BUZZ_PUBLISHER_CAPABILITY".into(),
+                value: "stale-or-injected".into(),
+            }],
+        };
+        let servers = mcp_servers_with_git_origin(
+            &[third_party],
+            Some(Uuid::new_v4()),
+            Some("stream"),
+            None,
+            Some(&access),
+        );
+
+        assert!(!servers[0].env.iter().any(|entry| {
+            matches!(
+                entry.name.as_str(),
+                "BUZZ_PUBLISHER_ENDPOINT" | "BUZZ_PUBLISHER_CAPABILITY"
+            )
+        }));
+    }
+
+    #[test]
+    fn heartbeat_session_strips_any_stale_publisher_access() {
+        let mut companion = test_mcp_server();
+        companion.env.push(EnvVar {
+            name: "BUZZ_PUBLISHER_ENDPOINT".into(),
+            value: "127.0.0.1:12345".into(),
+        });
+        companion.env.push(EnvVar {
+            name: "BUZZ_PUBLISHER_CAPABILITY".into(),
+            value: "stale-capability".into(),
+        });
+
+        let servers = mcp_servers_with_git_origin(&[companion], None, None, None, None);
+
+        assert!(!servers[0].env.iter().any(|entry| {
+            matches!(
+                entry.name.as_str(),
+                "BUZZ_PUBLISHER_ENDPOINT" | "BUZZ_PUBLISHER_CAPABILITY"
+            )
+        }));
+    }
+
     #[tokio::test]
     async fn invalidating_channel_session_revokes_its_publisher_capability() {
         let rest_client = RestClient {
@@ -4157,7 +4221,7 @@ mod tests {
             .expect("start broker");
         let issuer = broker.issuer();
         let channel = Uuid::new_v4();
-        let lease = issuer.issue(Some(channel));
+        let lease = issuer.issue(channel);
         let capability = lease.access().capability.clone();
         let mut state = SessionState::default();
         state.sessions.insert(channel, "session-id".to_string());

@@ -33,6 +33,18 @@ pub struct McpServer {
     pub env: Vec<EnvVar>,
 }
 
+impl McpServer {
+    /// Publisher authority is reserved for the explicitly configured Buzz
+    /// companion executable. Every other MCP server is untrusted by default.
+    pub fn is_trusted_buzz_companion(&self) -> bool {
+        self.name == "buzz-dev-mcp"
+            && std::path::Path::new(&self.command)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                == Some("buzz-dev-mcp")
+    }
+}
+
 /// A single environment variable for an MCP server.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvVar {
@@ -1903,10 +1915,11 @@ impl AcpClient {
         }
     }
 
-    /// Auto-approve a `session/request_permission` request from the agent.
+    /// Resolve a `session/request_permission` request from the agent.
     ///
-    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
-    /// If no `allow_once` option exists, falls back to `reject_once`.
+    /// A correlated, already-observed typed Buzz publisher call may receive
+    /// `allow_once`. Every other request is denied with `reject_once` when the
+    /// adapter offers it, or cancelled otherwise.
     ///
     /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
