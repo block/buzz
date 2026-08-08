@@ -268,6 +268,7 @@ pub(super) fn commit_archive(
     conn: &Connection,
 ) -> Result<ArchiveBatchResult, String> {
     let mut persisted: u32 = 0;
+    let mut persisted_agent_metrics: u32 = 0;
     let mut dropped: u32 = pre_dropped;
 
     // Collect writes; count drops first, then execute inside a single
@@ -399,6 +400,36 @@ pub(super) fn commit_archive(
                 &w.scope_value,
                 now,
             )?;
+
+            // Index kind-44200 rows in the SAME transaction as the canonical
+            // insert (Rev 2 F5): the plaintext payload was already decrypted
+            // above into `w.raw_json`, so this is parse-only, no re-decrypt.
+            // `insert_metric_index_row`'s own `ON CONFLICT DO NOTHING` makes
+            // a duplicate call for an already-indexed id (e.g. re-ingest of
+            // a row seen in an earlier batch) a safe no-op — its `bool`
+            // return tells us whether this call actually inserted a new
+            // index row, which is exactly what `persisted_agent_metrics`
+            // counts (A5: newly-indexed rows, valid or invalid, not raw
+            // write attempts).
+            if w.kind == super::KIND_AGENT_TURN_METRIC as i64 {
+                let index_row = super::metric_store::AgentMetricIndexRow::from_payload(
+                    &w.raw_json,
+                    &w.eid,
+                    &w.pubkey,
+                    w.created_at,
+                    now,
+                );
+                let index_inserted = super::metric_store::insert_metric_index_row(
+                    &tx,
+                    identity_pk,
+                    relay_url,
+                    &index_row,
+                )?;
+                if index_inserted {
+                    persisted_agent_metrics += 1;
+                }
+            }
+
             persisted += 1;
         }
 
@@ -450,5 +481,9 @@ pub(super) fn commit_archive(
             .map_err(|e| format!("failed to commit archive transaction: {e}"))?;
     }
 
-    Ok(ArchiveBatchResult { persisted, dropped })
+    Ok(ArchiveBatchResult {
+        persisted,
+        persisted_agent_metrics,
+        dropped,
+    })
 }

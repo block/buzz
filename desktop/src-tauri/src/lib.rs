@@ -195,8 +195,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init());
 
     // The global-shortcut plugin is omitted from test builds: linking it into
-    // the lib-test binary makes it fail to load on Windows
-    // (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
+    // the lib-test binary makes it fail to load on Windows (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
     #[cfg(not(test))]
     let builder = builder.plugin({
         use tauri_plugin_global_shortcut::ShortcutState;
@@ -904,6 +903,7 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::get_agent_usage_series,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

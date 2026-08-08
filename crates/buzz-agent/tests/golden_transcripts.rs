@@ -760,6 +760,114 @@ async fn test_no_reasoning_no_thought_chunk() {
     h.shutdown().await;
 }
 
+/// An Anthropic Messages API response whose inclusive input sum overflows u64.
+/// `input_tokens: u64::MAX` + `cache_read_input_tokens: 1` → overflow.
+/// buzz-agent must emit a `usage_update` notification with `accumulatedInputTokens`
+/// **absent** (never null, never u64::MAX) and `accumulatedOutputTokens` present.
+fn anthropic_input_overflow_response() -> Value {
+    json!({
+        "id": "msg_overflow",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-fake",
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "overflow" }],
+        "usage": {
+            "input_tokens": u64::MAX,
+            "cache_read_input_tokens": 1,
+            "output_tokens": 7,
+        },
+    })
+}
+
+/// Collect every frame that arrives before the frame matching `pred`, then
+/// return (frames_before, matching_frame). Used to inspect notifications
+/// emitted before a specific response.
+async fn drain_until<F>(h: &mut Harness, mut pred: F) -> (Vec<Value>, Value)
+where
+    F: FnMut(&Value) -> bool,
+{
+    let mut before = Vec::new();
+    loop {
+        let v = h.recv().await;
+        if pred(&v) {
+            return (before, v);
+        }
+        before.push(v);
+    }
+}
+
+/// When the Anthropic parser produces an input-sum overflow, buzz-agent must
+/// omit `accumulatedInputTokens` from the `_goose/unstable/session/update`
+/// `usage_update` notification — never null, never u64::MAX — while still
+/// emitting `accumulatedOutputTokens` normally.
+///
+/// This is an end-to-end regression test: the canned response flows through
+/// parse_anthropic → run loop → wire emission via the real production code
+/// with no logic duplication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_anthropic_input_overflow_omits_accumulated_input_tokens() {
+    let url = spawn_fake_llm(vec![anthropic_input_overflow_response()]).await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "anthropic"),
+        ("ANTHROPIC_API_KEY", "test"),
+        ("ANTHROPIC_MODEL", "claude-fake"),
+        ("ANTHROPIC_BASE_URL", &url),
+        ("OPENAI_COMPAT_BASE_URL", ""),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "overflow test" }],
+            }),
+        )
+        .await;
+
+    let (frames, final_resp) = drain_until(&mut h, |v| v.get("id") == Some(&json!(p))).await;
+    assert_eq!(
+        final_resp["result"]["stopReason"], "end_turn",
+        "turn must complete normally despite input overflow"
+    );
+
+    // Find the usage_update notification emitted before the response.
+    let usage = frames
+        .iter()
+        .find(|v| {
+            v.get("method") == Some(&json!("_goose/unstable/session/update"))
+                && v["params"]["update"]["sessionUpdate"] == "usage_update"
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected _goose/unstable/session/update usage_update before response; frames: {frames:#?}"
+            )
+        });
+
+    let update = &usage["params"]["update"];
+
+    // Core regression: input overflow → accumulatedInputTokens ABSENT.
+    // A present value (even u64::MAX) would mean the saturated clamped sum
+    // leaked through the parse layer as an exact reading.
+    assert!(
+        update.get("accumulatedInputTokens").is_none(),
+        "accumulatedInputTokens must be absent when input sum overflows; got: {:?}",
+        update.get("accumulatedInputTokens")
+    );
+
+    // Output tokens are unaffected by the input overflow and must still emit.
+    assert_eq!(
+        update["accumulatedOutputTokens"],
+        json!(7u64),
+        "accumulatedOutputTokens must be present and exact despite input overflow"
+    );
+
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cancel_notification_no_reply() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
