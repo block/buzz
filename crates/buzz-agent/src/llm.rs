@@ -1932,9 +1932,24 @@ fn classify_body_read_error(
     }
 }
 
+/// Provider bodies that mean "this model cannot accept image input", the
+/// signal the agent loop uses to strip rejected images from history and
+/// continue the turn (see `replace_unsupported_images`).
+///
+/// Deliberately tight, same doctrine as [`is_context_length_error`]: each
+/// phrase is a verbatim capability rejection observed live. Misclassifying a
+/// generic 400 as recoverable would mutate history for an error that removing
+/// images cannot fix.
 fn is_unsupported_image_input_error(body: &str) -> bool {
-    body.to_ascii_lowercase()
-        .contains("no endpoints found that support image input")
+    let b = body.to_ascii_lowercase();
+    // OpenRouter 404: no provider endpoint accepts images for this model.
+    b.contains("no endpoints found that support image input")
+        // OpenAI-compatible 400 from text-only single-model deployments,
+        // e.g. Crusoe serverless GLM: `"crusoeai/GLM-5.2-NVFP4 is not a
+        // multimodal model"`. Without this arm the 400 is terminal, the image
+        // stays in history, and every subsequent request in the session fails
+        // identically — the turn wedges until the harness/user gives up.
+        || b.contains("is not a multimodal model")
 }
 
 /// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
@@ -2128,6 +2143,13 @@ where
                 return Err(PostError::Agent(AgentError::LlmContextExceeded(format!(
                     "{status}: {body}"
                 ))));
+            }
+            // Image-capability rejection is equally recoverable and equally
+            // deterministic: a text-only deployment 400s the same request
+            // forever. Typed here (not just on the 404 arm) because
+            // OpenAI-compatible providers report it as a 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(PostError::Agent(AgentError::UnsupportedImageInput(body)));
             }
             return Err(PostError::Agent(AgentError::Llm(format!(
                 "{status}: {body}"
@@ -2534,6 +2556,12 @@ async fn openrouter_post(
             // agents keep the permanent context-400 stuck loop.
             if status == 400 && is_context_length_error(&body) {
                 return Err(AgentError::LlmContextExceeded(format!("{status}: {body}")));
+            }
+            // Same 400-shaped image rejection as the shared `post()` terminal:
+            // OpenRouter normally reports this as a 404 (handled above), but a
+            // BYOK/passthrough upstream can surface the provider's own 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(AgentError::UnsupportedImageInput(body));
             }
             return Err(AgentError::Llm(format!("{status}: {body}")));
         }
@@ -7535,6 +7563,73 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
+            "image rejection must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// OpenAI-compatible text-only deployments report the image rejection as a
+    /// 400, not OpenRouter's 404 — Crusoe serverless GLM answers
+    /// `"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"` to every request
+    /// whose history contains an image. Before the 400 arm existed, this fell
+    /// through to terminal `AgentError::Llm`: the image stayed in history and
+    /// every later call in the session failed identically (measured live:
+    /// 8 wedged benchmark trials, 40 min of doomed retries each). Asserted
+    /// through `complete()` so the arm's return path into the convergence
+    /// mapper is covered, same doctrine as the context-400 tests above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_400_unsupported_image_is_typed_through_complete() {
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model","type":"invalid_request_error"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
+            "a text-only deployment's 400 must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            captured.lock().await.len(),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// Same 400-shaped rejection at the OpenRouter terminal, which has its own
+    /// status ladder: a BYOK/passthrough upstream can surface the provider's
+    /// own 400 body instead of OpenRouter's 404 routing error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_400_unsupported_image_is_typed_and_not_retried() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            400,
+            r#"{"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
             "image rejection must reach the history-recovery path: got {err:?}"
         );
         assert_eq!(
