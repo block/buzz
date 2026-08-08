@@ -1843,6 +1843,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        reply_anchor_mode: config.reply_anchor,
     });
 
     if !config.memory_enabled {
@@ -6185,6 +6186,7 @@ mod build_mcp_servers_tests {
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
+            reply_anchor: config::ReplyAnchor::Thread,
             dedup_mode: config::DedupMode::Queue,
             multiple_event_handling: config::MultipleEventHandling::Queue,
             ignore_self: true,
@@ -6407,6 +6409,7 @@ mod error_outcome_emission_tests {
             team_instructions: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
+            reply_anchor: config::ReplyAnchor::Thread,
             dedup_mode: config::DedupMode::Queue,
             multiple_event_handling: config::MultipleEventHandling::Queue,
             ignore_self: true,

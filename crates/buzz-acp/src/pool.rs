@@ -527,6 +527,8 @@ pub struct PromptContext {
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
+    /// Reply placement for human-facing turns (from `--reply-anchor`).
+    pub reply_anchor_mode: crate::config::ReplyAnchor,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
     /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
@@ -1916,6 +1918,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                reply_anchor_mode: ctx.reply_anchor_mode,
             },
         )
     } else {
@@ -6542,6 +6545,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            reply_anchor_mode: crate::config::ReplyAnchor::Thread,
         }
     }
 
