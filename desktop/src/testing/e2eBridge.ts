@@ -11012,8 +11012,11 @@ export function maybeInstallE2eTauriMocks() {
               installed: true,
               recommended: true,
               curated: true,
+              fitsDisk: true,
             },
           ],
+          diskFreeBytes: 128_000_000_000,
+          diskFreeDisplay: "128 GB",
         };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
