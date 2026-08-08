@@ -268,26 +268,17 @@ pub async fn handle_req(
         .iter()
         .enumerate()
         .map(|(idx, filter)| {
-            // Use per-filter #h channel scope when available, falling back to the
-            // subscription-level channel_id. This prevents unrelated accessible-channel
-            // rows from consuming the LIMIT when filters target specific channels but
-            // the subscription is global (multiple distinct #h values across filters).
-            let per_filter_channel = {
-                let h = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-                filter
-                    .generic_tags
-                    .get(&h)
-                    .and_then(|vs| {
-                        if vs.len() == 1 {
-                            vs.iter().next()?.parse::<uuid::Uuid>().ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .or(channel_id)
-            };
-            let mut params =
-                filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+            // Per-filter #h scope (single → channel_id, multi → channel_ids).
+            // If the filter names no #h, fall back to the subscription-level
+            // channel_id so global multi-filter REQs still pin single-channel
+            // filters when the subscription itself is channel-scoped.
+            let mut params = filter_to_query_params(filter, conn.tenant.community());
+            if params.channel_id.is_none() && params.channel_ids.is_none() {
+                if let Some(ch) = channel_id {
+                    params.channel_id = Some(ch);
+                }
+            }
+            let per_filter_channel = params.channel_id;
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
             // Shared-gated visibility pushdown: set reader bytes so query_events
             // appends the SQL visibility clause before ORDER/LIMIT, preventing
@@ -756,8 +747,7 @@ pub async fn build_event_query_from_filter(
     _state: &AppState,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
-    let channel_id = extract_channel_id_from_filter(filter);
-    filter_to_query_params(filter, channel_id, community)
+    filter_to_query_params(filter, community)
 }
 
 /// Maximum SQL candidate rows a non-pushable COUNT filter may inspect before
@@ -854,30 +844,65 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
         })
 }
 
-/// Extract a channel UUID from a single filter's `#h` tag.
-fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
+/// Channel scope derived from a single filter's `#h` tag values.
+///
+/// Returns:
+/// - `(None, None)` when the filter has no parseable `#h` UUID (global filter)
+/// - `(Some(id), None)` when exactly one distinct channel UUID is present
+/// - `(None, Some(ids))` when multiple distinct channel UUIDs are present
+///
+/// Multi-value `#h` must **not** collapse to the first (lexicographically
+/// smallest — `generic_tags` is a sorted set) id: that silently drops every
+/// other listed channel from the SQL scope (see #4579). Callers that only
+/// need a single optional id should use [`extract_channel_id_from_filter`].
+fn channel_scope_from_filter(
+    filter: &Filter,
+) -> (Option<uuid::Uuid>, Option<Vec<uuid::Uuid>>) {
+    let mut ids: Vec<uuid::Uuid> = Vec::new();
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
+        if key != "h" {
+            continue;
+        }
+        for val in tag_values {
+            if let Ok(id) = val.parse::<uuid::Uuid>() {
+                if !ids.contains(&id) {
+                    ids.push(id);
                 }
             }
         }
     }
-    None
+    match ids.len() {
+        0 => (None, None),
+        1 => (Some(ids[0]), None),
+        _ => (None, Some(ids)),
+    }
+}
+
+/// Extract a single channel UUID from a filter's `#h` tag, or `None` when the
+/// filter is global **or** names multiple distinct channels.
+///
+/// Multi-channel filters intentionally return `None` so SQL is not silently
+/// narrowed to the lexicographically first id (`#4579`). Prefer
+/// [`channel_scope_from_filter`] when multi-channel SQL pushdown is needed.
+fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
+    channel_scope_from_filter(filter).0
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
 ///
 /// Each filter is queried independently so that per-filter `limit` and time
 /// windows are respected. Results are deduplicated by event ID in the caller.
+///
+/// Channel scoping from `#h`:
+/// - one value → `channel_id`
+/// - multiple distinct values → `channel_ids` (never silently first-only)
+/// - none → unscoped (caller may inject access-scope `channel_ids`)
 fn filter_to_query_params(
     filter: &Filter,
-    channel_id: Option<uuid::Uuid>,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
+    let (channel_id, multi_channel_ids) = channel_scope_from_filter(filter);
     let kinds: Option<Vec<i32>> = filter.kinds.as_ref().map(|ks| {
         if ks.is_empty() {
             // kinds:[] means "match no kinds" — skip this filter entirely by
@@ -987,6 +1012,7 @@ fn filter_to_query_params(
 
     EventQuery {
         channel_id,
+        channel_ids: multi_channel_ids,
         kinds,
         pubkey,
         since,
@@ -1006,13 +1032,25 @@ fn filter_to_query_params(
 /// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
 /// scope by `EventQuery::channel_ids` contract; an explicit single-channel
 /// filter keeps its narrower `channel_id` predicate.
+///
+/// When the filter already named multiple `#h` channels (`query.channel_ids`
+/// is set), intersect that list with the access scope rather than replacing
+/// it with the full accessible set — multi-value `#h` must stay multi-value.
 pub(crate) fn apply_access_scope_to_query(
     query: &mut EventQuery,
     channel_id: Option<uuid::Uuid>,
     accessible_channels: &[uuid::Uuid],
 ) {
-    if channel_id.is_none() {
-        query.channel_ids = Some(accessible_channels.to_vec());
+    if channel_id.is_some() {
+        return;
+    }
+    match query.channel_ids.as_mut() {
+        Some(ids) => {
+            ids.retain(|id| accessible_channels.contains(id));
+        }
+        None => {
+            query.channel_ids = Some(accessible_channels.to_vec());
+        }
     }
 }
 
@@ -1462,15 +1500,12 @@ mod tests {
         // A filter asking for more than the relay advertises is clamped down to
         // exactly the advertised ceiling — the NIP-11 document is the promise,
         // this is the enforcement.
-        let greedy = filter_to_query_params(
-            &Filter::new().limit(advertised as usize * 10),
-            None,
-            community,
+        let greedy = filter_to_query_params(&Filter::new().limit(advertised as usize * 10), community,
         );
         assert_eq!(greedy.limit, Some(advertised));
 
         // A filter with no `limit` gets the same ceiling, not something larger.
-        let unbounded = filter_to_query_params(&Filter::new(), None, community);
+        let unbounded = filter_to_query_params(&Filter::new(), community);
         assert_eq!(unbounded.limit, Some(advertised));
 
         // Neither sets `max_limit`, so `query_events` applies its own default
@@ -1481,7 +1516,7 @@ mod tests {
         assert_eq!(buzz_db::DEFAULT_MAX_PAGE_LIMIT, advertised);
 
         // Under-ceiling requests are honored verbatim.
-        let modest = filter_to_query_params(&Filter::new().limit(10), None, community);
+        let modest = filter_to_query_params(&Filter::new().limit(10), community);
         assert_eq!(modest.limit, Some(10));
     }
 
@@ -1584,6 +1619,74 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    fn filter_with_channels(channel_ids: &[uuid::Uuid]) -> Filter {
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let values: Vec<String> = channel_ids.iter().map(|id| id.to_string()).collect();
+        Filter::new().custom_tags(h, values)
+    }
+
+    /// #4579: multi-value `#h` on a single filter must not collapse to the
+    /// lexicographically first id.
+    #[test]
+    fn extract_channel_id_from_filter_multi_h_returns_none() {
+        // Fixed UUIDs so the sorted-set order is deterministic: `a...` < `b...`.
+        let first = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let second = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let filter = filter_with_channels(&[first, second]);
+
+        // Before the fix this returned Some(first) because generic_tags is sorted
+        // and the old helper returned on the first parseable value.
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+
+        let (single, multi) = channel_scope_from_filter(&filter);
+        assert_eq!(single, None);
+        let multi = multi.expect("multi-#h must push channel_ids");
+        assert_eq!(multi.len(), 2);
+        assert!(multi.contains(&first) && multi.contains(&second));
+    }
+
+    #[test]
+    fn extract_channel_id_from_filter_single_h_returns_some() {
+        let channel_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            extract_channel_id_from_filter(&filter_with_channel(channel_id)),
+            Some(channel_id)
+        );
+    }
+
+    #[test]
+    fn filter_to_query_params_multi_h_sets_channel_ids_not_first_only() {
+        let first = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let second = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let q = filter_to_query_params(&filter_with_channels(&[first, second]), community);
+
+        assert_eq!(
+            q.channel_id, None,
+            "multi-#h must not set single channel_id (would drop other channels)"
+        );
+        let ids = q.channel_ids.expect("multi-#h must set channel_ids");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&first) && ids.contains(&second));
+    }
+
+    #[test]
+    fn apply_access_scope_intersects_multi_h_channel_ids() {
+        let a = uuid::Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let b = uuid::Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let c = uuid::Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let mut q = filter_to_query_params(&filter_with_channels(&[a, b, c]), community);
+
+        // Caller is only a member of a and c — b must be dropped, not replaced
+        // with the full accessible set.
+        apply_access_scope_to_query(&mut q, None, &[a, c]);
+        let ids = q.channel_ids.expect("channel_ids retained");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&a) && ids.contains(&c));
+        assert!(!ids.contains(&b));
     }
 
     #[test]
@@ -1742,10 +1845,7 @@ mod tests {
         let nip33_filter = Filter::new()
             .kind(nostr::Kind::Custom(30023))
             .custom_tags(d_tag, ["my-slug"]);
-        let q = filter_to_query_params(
-            &nip33_filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        let q = filter_to_query_params(&nip33_filter, buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q.d_tag, Some("my-slug".to_string()));
 
@@ -1753,10 +1853,7 @@ mod tests {
         let non_nip33_filter = Filter::new()
             .kind(nostr::Kind::Custom(1))
             .custom_tags(d_tag, ["some-value"]);
-        let q2 = filter_to_query_params(
-            &non_nip33_filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        let q2 = filter_to_query_params(&non_nip33_filter, buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q2.d_tag, None);
 
@@ -1764,19 +1861,13 @@ mod tests {
         let mixed_filter = Filter::new()
             .kinds([nostr::Kind::Custom(30023), nostr::Kind::Custom(1)])
             .custom_tags(d_tag, ["slug"]);
-        let q3 = filter_to_query_params(
-            &mixed_filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        let q3 = filter_to_query_params(&mixed_filter, buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q3.d_tag, None);
 
         // No kinds specified → pushdown NOT active
         let no_kinds_filter = Filter::new().custom_tags(d_tag, ["slug"]);
-        let q4 = filter_to_query_params(
-            &no_kinds_filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        let q4 = filter_to_query_params(&no_kinds_filter, buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q4.d_tag, None);
 
@@ -1784,10 +1875,7 @@ mod tests {
         let multi_d_filter = Filter::new()
             .kind(nostr::Kind::Custom(30023))
             .custom_tags(d_tag, ["slug-a", "slug-b"]);
-        let q5 = filter_to_query_params(
-            &multi_d_filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        let q5 = filter_to_query_params(&multi_d_filter, buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q5.d_tag, None);
     }
