@@ -39,12 +39,29 @@ pub struct TemplateAgentRoster {
     pub personas: Vec<TemplateAgentEntry>,
     #[serde(default)]
     pub teams: Vec<TemplateTeamEntry>,
+    /// #3953: direct relay pubkeys for agents that are long-running remote
+    /// identities (provider/VPS) rather than Desktop persona instances.
+    /// Roster entries that use this variant skip the persona→kind:30177
+    /// resolution entirely and add the pubkey directly — deterministic.
+    #[serde(default)]
+    pub agent_pubkeys: Vec<TemplatePubkeyEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateAgentEntry {
     pub persona_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplatePubkeyEntry {
+    /// 64-char hex Nostr pubkey of the agent to add as a member.
+    pub pubkey: String,
+    /// Optional human-readable label for the template report. Falls back to
+    /// a truncated pubkey if absent.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,5 +208,59 @@ mod tests {
         assert_eq!(t.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(t.agents.teams.len(), 1);
         assert_eq!(t.agents.teams[0].team_id, "team-1");
+        // #3953: templates written before the agentPubkeys field existed
+        // must deserialize with the new field as empty rather than erroring.
+        assert!(t.agents.agent_pubkeys.is_empty());
+    }
+
+    #[test]
+    fn load_templates_parses_direct_agent_pubkeys() {
+        // #3953: a remote/VPS-managed agent identity with no Desktop persona
+        // instance should be rosterable directly by relay pubkey, so the
+        // template no longer needs a sidecar persona definition.
+        let f = write_store(
+            r##"[{
+                "id":"t2","name":"Remote Ops","channelType":"stream","visibility":"open",
+                "agents":{
+                    "personas":[],
+                    "teams":[],
+                    "agentPubkeys":[
+                        {"pubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","label":"ops-bot"},
+                        {"pubkey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                    ]
+                },
+                "createdAt":"x","updatedAt":"x"
+            }]"##,
+        );
+        let t = find_template(f.path(), "Remote Ops").expect("found");
+        assert_eq!(t.agents.agent_pubkeys.len(), 2);
+        assert_eq!(
+            t.agents.agent_pubkeys[0].pubkey,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(t.agents.agent_pubkeys[0].label.as_deref(), Some("ops-bot"));
+        assert!(t.agents.agent_pubkeys[1].label.is_none());
+    }
+
+    #[test]
+    fn load_templates_rejects_invalid_pubkey_entry() {
+        // A malformed agentPubkeys entry (missing required pubkey) must fail
+        // parsing, not silently drop the entry — otherwise the roster
+        // silently under-delivers the same way persona skips did pre-#3953.
+        let f = write_store(
+            r##"[{
+                "id":"t3","name":"Bad Roster","channelType":"stream","visibility":"open",
+                "agents":{
+                    "agentPubkeys":[{"label":"missing-pubkey"}]
+                },
+                "createdAt":"x","updatedAt":"x"
+            }]"##,
+        );
+        let err = find_template(f.path(), "Bad Roster").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to parse"),
+            "malformed agentPubkeys entry should fail parse, got: {msg}"
+        );
     }
 }

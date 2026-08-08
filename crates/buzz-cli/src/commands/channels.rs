@@ -9,7 +9,9 @@ use crate::client::{
     print_create_response, BuzzClient,
 };
 use crate::commands::agents::fetch_archived_snapshot;
-use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
+use crate::commands::channel_templates::{
+    self, ChannelTemplateRecord, TemplateAgentRoster, TemplatePubkeyEntry,
+};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
@@ -606,6 +608,31 @@ fn finalize_roster_resolution(
 /// for the pure filter+cardinality core and the fail-open contract). Runs
 /// entirely before any channel-creation side effect — a cardinality error
 /// aborts with nothing created.
+/// #3953: expand direct relay-pubkey roster entries into `ResolvedAgent`s.
+///
+/// Long-running remote/VPS identities have no Desktop persona→kind:30177
+/// indirection to resolve; they're passed through verbatim so the
+/// `add_member` call downstream is deterministic. Pubkey validation is
+/// deferred to the member-add attempt — a malformed pubkey fails that one
+/// member and lands in `member_failures`, never in `skipped`. Label falls
+/// back to a truncated 16-char pubkey prefix (not the full 64-hex) so
+/// reports stay readable.
+fn expand_direct_pubkeys(entries: &[TemplatePubkeyEntry]) -> Vec<ResolvedAgent> {
+    entries
+        .iter()
+        .map(|entry| {
+            let persona_id = entry
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("pubkey:{}", &entry.pubkey[..entry.pubkey.len().min(16)]));
+            ResolvedAgent {
+                persona_id,
+                pubkey: entry.pubkey.clone(),
+            }
+        })
+        .collect()
+}
+
 async fn build_roster_resolution(
     client: &BuzzClient,
     owner: &str,
@@ -626,9 +653,11 @@ async fn build_roster_resolution(
         }
     }
 
+    let direct_agents = expand_direct_pubkeys(&roster.agent_pubkeys);
+
     if slugs.is_empty() {
         return Ok(RosterResolution {
-            agents: Vec::new(),
+            agents: direct_agents,
             skipped: Vec::new(),
             archived_excluded: Vec::new(),
             archive_state_warning: None,
@@ -639,7 +668,10 @@ async fn build_roster_resolution(
     let found = scan_managed_agents_by_owner(client, owner, &slug_set).await?;
 
     let archived_result = fetch_archived_snapshot(client).await;
-    finalize_roster_resolution(&slugs, found, archived_result, &mut std::io::stderr())
+    let mut resolved =
+        finalize_roster_resolution(&slugs, found, archived_result, &mut std::io::stderr())?;
+    resolved.agents.extend(direct_agents);
+    Ok(resolved)
 }
 
 /// `buzz channels create --template <name>`: load a desktop-local channel
@@ -1177,13 +1209,58 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        expand_direct_pubkeys, finalize_roster_resolution, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, ArchivedExclusion,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
+    use crate::commands::channel_templates::TemplatePubkeyEntry;
     use crate::CliError;
     use serde_json::json;
+
+    // ── #3953: direct relay-pubkey roster expansion ─────────────────────
+
+    #[test]
+    fn expand_direct_pubkeys_uses_label_when_present() {
+        let entries = vec![TemplatePubkeyEntry {
+            pubkey: "aabb".repeat(16),
+            label: Some("ops-bot".into()),
+        }];
+        let got = expand_direct_pubkeys(&entries);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].persona_id, "ops-bot");
+        assert_eq!(got[0].pubkey, "aabb".repeat(16));
+    }
+
+    #[test]
+    fn expand_direct_pubkeys_falls_back_to_truncated_pubkey_label() {
+        let pk = "aa".repeat(32); // 64-hex
+        let entries = vec![
+            TemplatePubkeyEntry {
+                pubkey: pk.clone(),
+                label: None,
+            },
+            TemplatePubkeyEntry {
+                pubkey: "short".into(),
+                label: None,
+            },
+        ];
+        let got = expand_direct_pubkeys(&entries);
+        assert_eq!(got.len(), 2);
+        // 64-hex pubkey → label truncated to first 16 chars.
+        assert_eq!(got[0].persona_id, format!("pubkey:{}", &pk[..16]));
+        // Short/malformed pubkey still passes through — label truncated to
+        // its actual length (no panics on a shorter-than-16 string).
+        assert_eq!(got[1].persona_id, "pubkey:short");
+        assert_eq!(got[1].pubkey, "short");
+    }
+
+    #[test]
+    fn expand_direct_pubkeys_empty_when_no_entries() {
+        let got = expand_direct_pubkeys(&[]);
+        assert!(got.is_empty());
+    }
+
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
