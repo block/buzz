@@ -9,10 +9,12 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+use crate::config::ComputerUseElicitationPolicy;
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
 
@@ -121,10 +123,10 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
-fn build_initialize_params() -> serde_json::Value {
+fn build_initialize_params(computer_use_elicitation_enabled: bool) -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": 2,
-        "clientCapabilities": build_client_capabilities(),
+        "clientCapabilities": build_client_capabilities(computer_use_elicitation_enabled),
         "clientInfo": {
             "name": "buzz-acp",
             "version": env!("CARGO_PKG_VERSION")
@@ -158,6 +160,9 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the rejection
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Optional identity-validated policy for session-scoped Computer Use form
+    /// elicitations. Absence preserves the harness-wide fail-closed behavior.
+    computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -459,8 +464,8 @@ enum SteerTransport {
     AcpExtension,
 }
 
-fn build_client_capabilities() -> serde_json::Value {
-    serde_json::json!({
+fn build_client_capabilities(computer_use_elicitation_enabled: bool) -> serde_json::Value {
+    let mut capabilities = serde_json::json!({
         // Signal to ACP adapters that Buzz can hand users to terminal-native
         // auth flows. Adapters decide which auth methods to expose; Buzz does
         // not hardcode vendor login commands from this capability.
@@ -479,7 +484,11 @@ fn build_client_capabilities() -> serde_json::Value {
             // keys are ignored by other adapters.
             "terminal-auth": true
         }
-    })
+    });
+    if computer_use_elicitation_enabled {
+        capabilities["elicitation"] = serde_json::json!({"form": {}});
+    }
+    capabilities
 }
 
 impl AcpClient {
@@ -525,6 +534,26 @@ impl AcpClient {
         args: &[String],
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
+    ) -> Result<Self, AcpError> {
+        Self::spawn_with_computer_use_elicitation_policy(
+            command,
+            args,
+            extra_env,
+            has_generated_codex_config,
+            None,
+        )
+        .await
+    }
+
+    /// Spawn an agent with an optional identity-validated Computer Use
+    /// elicitation policy. The policy must be present before `initialize` so
+    /// the ACP form-elicitation capability is advertised consistently.
+    pub(crate) async fn spawn_with_computer_use_elicitation_policy(
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
+        computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -624,6 +653,7 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            computer_use_elicitation_policy,
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -681,7 +711,7 @@ impl AcpClient {
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = build_initialize_params();
+        let params = build_initialize_params(self.computer_use_elicitation_policy.is_some());
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
@@ -1247,6 +1277,8 @@ impl AcpClient {
     /// - `session/update` notifications → logged via tracing
     /// - `session/request_permission` requests → rejected unless an owner has
     ///   already selected a non-interactive permission mode at session setup
+    /// - `elicitation/create` requests → declined because no active prompt
+    ///   session is bound to this generic setup/configuration loop
     /// - Any other messages → debug-logged and ignored; if they carry an `id`
     ///   (i.e. they are requests, not notifications), a JSON-RPC -32601 error is sent.
     ///
@@ -1323,6 +1355,9 @@ impl AcpClient {
                     }
                     "session/request_permission" => {
                         self.handle_permission_request(&msg).await?;
+                    }
+                    "elicitation/create" => {
+                        self.handle_elicitation_request(&msg, None).await?;
                     }
                     other => {
                         // If the unknown message has an id, it's a request expecting a reply.
@@ -1768,6 +1803,10 @@ impl AcpClient {
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
                             }
+                            "elicitation/create" => {
+                                self.handle_elicitation_request(&msg, Some(session_id))
+                                    .await?;
+                            }
                             other => {
                                 // If the unknown message has an id, it's a request expecting a reply.
                                 // Silence would cause the agent to hang waiting for a response.
@@ -2007,6 +2046,39 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Resolve an ACP form elicitation. Only the identity-validated Computer
+    /// Use bootstrap request for an allowlisted bundle in the currently active
+    /// prompt session is accepted; every other well-formed request is declined.
+    async fn handle_elicitation_request(
+        &mut self,
+        msg: &serde_json::Value,
+        active_session_id: Option<&str>,
+    ) -> Result<(), AcpError> {
+        let id = msg
+            .get("id")
+            .cloned()
+            .ok_or_else(|| AcpError::Protocol("elicitation request missing id".into()))?;
+        let params = msg.get("params").unwrap_or(&serde_json::Value::Null);
+        let response = computer_use_elicitation_response(
+            &id,
+            params,
+            active_session_id,
+            self.computer_use_elicitation_policy.as_deref(),
+        );
+        let action = response["result"]["action"].as_str().unwrap_or("decline");
+        let bundle_id = params
+            .pointer("/_meta/tool_params/app")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<missing>");
+        tracing::info!(
+            target: "acp::elicitation",
+            action,
+            bundle_id,
+            "resolved Computer Use form elicitation"
+        );
+        self.write_ndjson(&response).await
+    }
+
     /// Parse `stopReason` from a `session/prompt` result value.
     fn parse_stop_reason(&self, result: &serde_json::Value) -> Result<StopReason, AcpError> {
         let raw = result["stopReason"].as_str().ok_or_else(|| {
@@ -2094,6 +2166,118 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
         "jsonrpc": "2.0",
         "id": id,
         "result": { "outcome": { "outcome": "cancelled" } }
+    })
+}
+
+const COMPUTER_USE_BOOTSTRAP_TOOL: &str = "get_app_state";
+
+fn metadata_offers_session_persistence(params: &serde_json::Value) -> bool {
+    match params.pointer("/_meta/persist") {
+        Some(serde_json::Value::String(value)) => value == "session",
+        Some(serde_json::Value::Array(values)) => {
+            values.iter().any(|value| value.as_str() == Some("session"))
+        }
+        _ => false,
+    }
+}
+
+fn schema_offers_session_persistence(params: &serde_json::Value) -> bool {
+    let is_object_schema = params
+        .pointer("/requestedSchema/type")
+        .and_then(serde_json::Value::as_str)
+        == Some("object");
+    let persist = params.pointer("/requestedSchema/properties/persist");
+    let is_string = persist
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("string");
+    let offers_session = persist
+        .and_then(|value| value.get("oneOf"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice.get("const").and_then(serde_json::Value::as_str) == Some("session")
+            })
+        });
+    let persist_is_required = params
+        .pointer("/requestedSchema/required")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|required| {
+            required
+                .iter()
+                .any(|value| value.as_str() == Some("persist"))
+        });
+    is_object_schema && is_string && offers_session && persist_is_required
+}
+
+fn should_accept_computer_use_elicitation(
+    params: &serde_json::Value,
+    active_session_id: Option<&str>,
+    policy: Option<&ComputerUseElicitationPolicy>,
+) -> bool {
+    let Some(active_session_id) = active_session_id else {
+        return false;
+    };
+    let Some(policy) = policy else {
+        return false;
+    };
+    if params.get("mode").and_then(serde_json::Value::as_str) != Some("form")
+        || params.get("sessionId").and_then(serde_json::Value::as_str) != Some(active_session_id)
+        || params
+            .pointer("/_meta/codex_approval_kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("mcp_tool_call")
+        || params
+            .pointer("/_meta/codex_request_type")
+            .and_then(serde_json::Value::as_str)
+            != Some("approval_request")
+        || params
+            .pointer("/_meta/connector_id")
+            .and_then(serde_json::Value::as_str)
+            != Some("computer-use")
+        || params
+            .pointer("/_meta/tool_name")
+            .and_then(serde_json::Value::as_str)
+            != Some(COMPUTER_USE_BOOTSTRAP_TOOL)
+        || !metadata_offers_session_persistence(params)
+        || !schema_offers_session_persistence(params)
+    {
+        return false;
+    }
+
+    let Some(tool_params) = params
+        .pointer("/_meta/tool_params")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    if tool_params.len() != 1 {
+        return false;
+    }
+    tool_params
+        .get("app")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|bundle_id| policy.allows_bundle_id(bundle_id))
+}
+
+fn computer_use_elicitation_response(
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+    active_session_id: Option<&str>,
+    policy: Option<&ComputerUseElicitationPolicy>,
+) -> serde_json::Value {
+    let result = if should_accept_computer_use_elicitation(params, active_session_id, policy) {
+        serde_json::json!({
+            "action": "accept",
+            "content": {"persist": "session"}
+        })
+    } else {
+        serde_json::json!({"action": "decline"})
+    };
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
     })
 }
 
@@ -2342,6 +2526,7 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -2393,6 +2578,53 @@ mod tests {
 
     fn outcome(response: &serde_json::Value) -> Option<&str> {
         response["result"]["outcome"]["outcome"].as_str()
+    }
+
+    fn computer_use_policy() -> ComputerUseElicitationPolicy {
+        ComputerUseElicitationPolicy::new(
+            nostr::Keys::generate().public_key(),
+            BTreeSet::from([
+                "com.apple.Photos".to_string(),
+                "com.granola.app".to_string(),
+            ]),
+        )
+    }
+
+    fn computer_use_elicitation_params(app: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sessionId": "session-1",
+            "toolCallId": "call-1",
+            "mode": "form",
+            "message": "Allow Computer Use?",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "persist": {
+                        "type": "string",
+                        "oneOf": [
+                            {"const": "once", "title": "Allow once"},
+                            {"const": "session", "title": "Allow for this session"},
+                            {"const": "always", "title": "Always allow"}
+                        ],
+                        "default": "once"
+                    }
+                },
+                "required": ["persist"]
+            },
+            "_meta": {
+                "codex_approval_kind": "mcp_tool_call",
+                "codex_request_type": "approval_request",
+                "connector_id": "computer-use",
+                "connector_name": "Computer Use",
+                "persist": ["session", "always"],
+                "tool_name": "get_app_state",
+                "tool_params": {"app": app}
+            }
+        })
+    }
+
+    fn elicitation_action(response: &serde_json::Value) -> Option<&str> {
+        response["result"]["action"].as_str()
     }
 
     /// The offered `allow_once` and `allow_always` options must be ignored:
@@ -2480,6 +2712,150 @@ mod tests {
     }
 
     #[test]
+    fn computer_use_capability_is_default_off_and_policy_gated() {
+        let disabled = build_client_capabilities(false);
+        assert!(
+            disabled.get("elicitation").is_none(),
+            "form elicitation must stay absent without an identity-validated policy"
+        );
+
+        let enabled = build_client_capabilities(true);
+        assert_eq!(
+            enabled.pointer("/elicitation/form"),
+            Some(&serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn computer_use_elicitation_accepts_only_allowlisted_apps_for_active_session() {
+        let policy = computer_use_policy();
+        for (id, app) in [
+            (serde_json::json!(17), "com.apple.Photos"),
+            (serde_json::json!("request-18"), "com.granola.app"),
+        ] {
+            let params = computer_use_elicitation_params(app);
+            let response =
+                computer_use_elicitation_response(&id, &params, Some("session-1"), Some(&policy));
+            assert_eq!(response["id"], id, "JSON-RPC id must round-trip exactly");
+            assert_eq!(elicitation_action(&response), Some("accept"));
+            assert_eq!(
+                response["result"]["content"],
+                serde_json::json!({"persist": "session"}),
+                "the adapter reads persistence from content, never response _meta"
+            );
+            assert!(response["result"].get("_meta").is_none());
+        }
+    }
+
+    #[test]
+    fn computer_use_elicitation_declines_without_policy_or_active_session() {
+        let policy = computer_use_policy();
+        let params = computer_use_elicitation_params("com.apple.Photos");
+
+        for (active_session, configured_policy) in [
+            (None, Some(&policy)),
+            (Some("session-1"), None),
+            (Some("foreign-session"), Some(&policy)),
+        ] {
+            let response = computer_use_elicitation_response(
+                &serde_json::json!(1),
+                &params,
+                active_session,
+                configured_policy,
+            );
+            assert_eq!(elicitation_action(&response), Some("decline"));
+        }
+    }
+
+    #[test]
+    fn computer_use_elicitation_declines_wrong_app_connector_or_tool() {
+        let policy = computer_use_policy();
+        let mut cases = Vec::new();
+
+        cases.push(computer_use_elicitation_params("com.apple.MobileSMS"));
+        cases.push(computer_use_elicitation_params("com.apple.photos"));
+
+        let mut wrong_connector = computer_use_elicitation_params("com.apple.Photos");
+        wrong_connector["_meta"]["connector_id"] = serde_json::json!("other-connector");
+        cases.push(wrong_connector);
+
+        let mut write_tool = computer_use_elicitation_params("com.apple.Photos");
+        write_tool["_meta"]["tool_name"] = serde_json::json!("click");
+        cases.push(write_tool);
+
+        let mut extra_tool_param = computer_use_elicitation_params("com.apple.Photos");
+        extra_tool_param["_meta"]["tool_params"]["element_index"] = serde_json::json!(42);
+        cases.push(extra_tool_param);
+
+        for params in cases {
+            let response = computer_use_elicitation_response(
+                &serde_json::json!(2),
+                &params,
+                Some("session-1"),
+                Some(&policy),
+            );
+            assert_eq!(
+                elicitation_action(&response),
+                Some("decline"),
+                "unexpected approval for {params}"
+            );
+        }
+    }
+
+    #[test]
+    fn computer_use_elicitation_declines_generic_or_malformed_forms() {
+        let policy = computer_use_policy();
+        let baseline = computer_use_elicitation_params("com.apple.Photos");
+        let mut cases = Vec::new();
+
+        let mut generic_form = baseline.clone();
+        generic_form["_meta"] = serde_json::json!({"codex": {"autoResolutionMs": null}});
+        cases.push(generic_form);
+
+        let mut wrong_mode = baseline.clone();
+        wrong_mode["mode"] = serde_json::json!("url");
+        cases.push(wrong_mode);
+
+        let mut missing_request_type = baseline.clone();
+        missing_request_type["_meta"]
+            .as_object_mut()
+            .expect("meta object")
+            .remove("codex_request_type");
+        cases.push(missing_request_type);
+
+        let mut metadata_always_only = baseline.clone();
+        metadata_always_only["_meta"]["persist"] = serde_json::json!(["always"]);
+        cases.push(metadata_always_only);
+
+        let mut schema_always_only = baseline.clone();
+        schema_always_only["requestedSchema"]["properties"]["persist"]["oneOf"] =
+            serde_json::json!([{"const": "always"}]);
+        cases.push(schema_always_only);
+
+        let mut wrong_schema_type = baseline.clone();
+        wrong_schema_type["requestedSchema"]["type"] = serde_json::json!("array");
+        cases.push(wrong_schema_type);
+
+        let mut persist_not_required = baseline;
+        persist_not_required["requestedSchema"]["required"] = serde_json::json!([]);
+        cases.push(persist_not_required);
+
+        for params in cases {
+            let response = computer_use_elicitation_response(
+                &serde_json::json!(3),
+                &params,
+                Some("session-1"),
+                Some(&policy),
+            );
+            assert_eq!(
+                elicitation_action(&response),
+                Some("decline"),
+                "unexpected approval for {params}"
+            );
+        }
+    }
+
+    #[test]
     fn request_has_id_field() {
         let id: u64 = 42;
         let msg = serde_json::json!({
@@ -2520,7 +2896,7 @@ mod tests {
             "method": "initialize",
             "params": {
                 "protocolVersion": 2,
-                "clientCapabilities": build_client_capabilities(),
+                "clientCapabilities": build_client_capabilities(false),
                 "clientInfo": {
                     "name": "buzz-acp",
                     "version": "0.1.0"

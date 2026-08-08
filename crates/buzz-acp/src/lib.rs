@@ -31,8 +31,8 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, ComputerUseElicitationPolicy, Config,
+    DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -2161,10 +2161,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let computer_use_policy = config.computer_use_elicitation_policy.clone();
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        computer_use_policy,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -3967,12 +3977,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let computer_use_policy = config.computer_use_elicitation_policy.clone();
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            computer_use_policy,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4161,6 +4181,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let computer_use_policy = config.computer_use_elicitation_policy.clone();
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4172,7 +4193,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            computer_use_policy,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4245,6 +4275,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
@@ -4257,6 +4288,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            computer_use_elicitation_policy: config.computer_use_elicitation_policy.clone(),
             model: config.model.clone(),
             observer,
         }
@@ -4271,11 +4303,12 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
+        let spawn_result = AcpClient::spawn_with_computer_use_elicitation_policy(
             &startup.command,
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            startup.computer_use_elicitation_policy.clone(),
         )
         .await;
         match spawn_result {
@@ -4385,12 +4418,19 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn_with_computer_use_elicitation_policy(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        computer_use_elicitation_policy,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -6461,6 +6501,7 @@ mod build_mcp_servers_tests {
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
+            computer_use_elicitation_policy: None,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -6703,6 +6744,7 @@ mod error_outcome_emission_tests {
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
+            computer_use_elicitation_policy: None,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
