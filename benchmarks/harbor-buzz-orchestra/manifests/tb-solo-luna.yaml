@@ -1,0 +1,83 @@
+# Terminal-Bench single-agent baseline on the Databricks bring-up slate.
+#
+# One agent, no workers, one Buzz channel. This is the condition every
+# multi-agent result is measured against, so the lone agent gets byte-identical
+# wiring to a worker — same binaries, same MCP toolset, same env. The only
+# difference is the persona and the fact that there is nobody to delegate to.
+#
+# Endpoint names are exact Databricks serving-endpoint names: the runtime
+# passes the manifest endpoint name to the gateway as the model. They resolve
+# to provider/host/key via testbed/endpoints/databricks-live.json, which is
+# deployment config and deliberately outside this manifest.
+#
+# context_window_tokens is 272000, not the model's full window, on purpose.
+# 272k is the input boundary below which the short-context price table (doc 04
+# §7) applies, and it is what buzz-agent's compaction ceiling defaults to. Set
+# to the true window instead and every long trial would silently cross into an
+# unknown, higher rate tier (DB9).
+schema_version: "1"
+condition: tb-solo-luna
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Operator-supplied list prices, doc 04 §7. cache_read_rate stays 0.0 until
+  # DB10 is settled — these endpoints are on the OpenAI Responses route, which
+  # caches automatically, but the published cache-write line item implies
+  # opt-in caching that buzz-agent never requests. 0.0 over-reports by at most
+  # 10% of the input component, i.e. errs expensive.
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+trial_budget:
+  # 36000 = the dataset's longest task (12000s) at the 3x timeout multiplier the
+  # study runs with (DEFAULT_TIMEOUT_MULTIPLIER in scripts/benchmark.py). The two
+  # are one setting in two files: benchmark.py refuses to start if this is the
+  # smaller of the pair, because the harness would then cut a task short of the
+  # deadline Harbor granted it and record a timeout the agent never hit. A flat
+  # 900s did exactly that before the multiplier existed — 39 of the 89 tasks
+  # allow more than 900s, and one live trial died at 905s against a task budget
+  # of 1800s.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition, including the solo baselines. Harbor enforces
+  # a task's declared resources as hard Docker limits, and the Buzz stack runs
+  # *inside* that container, so a 3-agent roster would otherwise fit three
+  # buzz-acp/buzz-agent/buzz-dev-mcp process groups plus the task's own work
+  # into the 1 vCPU and 2 GB most Terminal-Bench tasks ask for. A team that
+  # thrashes there has been penalised for memory pressure rather than for
+  # coordinating badly — a confound in precisely what this study measures.
+  #
+  # Raising it only for the team tiers would trade that confound for a worse
+  # one, so the solos carry it too and every cell is measured on identical
+  # hardware.
+  #
+  # 4 and 8192 are the *maxima* the dataset declares (cpus: 83x1, 3x2, 3x4;
+  # memory_mb: 68x2048, 13x4096, 8x8192), and that is not a coincidence. Harbor
+  # replaces rather than raises — environments/base.py assigns
+  # `task_env_config.cpus = override_cpus` outright — so any smaller value would
+  # quietly shrink the 8 tasks that ask for 8 GB and the 3 that ask for 4 CPUs.
+  # Every task therefore gets at least what it requested, and most get more.
+  #
+  # storage_mb is deliberately absent: all 89 tasks already declare 10240, so an
+  # override would restate the status quo and add a knob with nothing to say.
+  override_cpus: 4
+  override_memory_mb: 8192

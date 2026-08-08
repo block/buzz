@@ -185,6 +185,7 @@ class BuzzTrialProvisioner:
                     AgentCredential(
                         agent_id=f"{entry.id}-{index}",
                         role=entry.kind,
+                        manifest_role=entry.role,
                         nostr_secret_key=keypair.secret_key,
                         nostr_pubkey=keypair.pubkey,
                         nostr_auth_tag=compute_auth_tag(

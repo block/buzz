@@ -1,0 +1,30 @@
+{
+  "databricks-gpt-5-6-sol": {
+    "provider": "databricks_v2",
+    "api_key_env": "DATABRICKS_TOKEN",
+    "env": {
+      "DATABRICKS_HOST": "https://block-lakehouse-staging.cloud.databricks.com"
+    }
+  },
+  "databricks-gpt-5-6-luna": {
+    "provider": "databricks_v2",
+    "api_key_env": "DATABRICKS_TOKEN",
+    "env": {
+      "DATABRICKS_HOST": "https://block-lakehouse-staging.cloud.databricks.com"
+    }
+  },
+  "databricks-claude-opus-5": {
+    "provider": "databricks_v2",
+    "api_key_env": "DATABRICKS_TOKEN",
+    "env": {
+      "DATABRICKS_HOST": "https://block-lakehouse-staging.cloud.databricks.com"
+    }
+  },
+  "databricks-gemini-3-6-flash": {
+    "provider": "databricks_v2",
+    "api_key_env": "DATABRICKS_TOKEN",
+    "env": {
+      "DATABRICKS_HOST": "https://block-lakehouse-staging.cloud.databricks.com"
+    }
+  }
+}

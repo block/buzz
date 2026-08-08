@@ -1,0 +1,93 @@
+# A1h -- solo luna at reasoning effort `high`, served direct from OpenAI.
+#
+# Part of the effort wave (doc 02 §3.2). A2x/A3x ask whether more thinking buys
+# solved tasks at the *frontier*; this pair of luna cells asks it at the cheap
+# floor, where the answer could plausibly differ: a weaker model has more
+# headroom to gain from thinking, and A1's 0.545 leaves a lot of room above it.
+#
+# TWO THINGS CHANGE FROM tb-solo-luna, NOT ONE, and that is deliberate but must
+# be stated wherever this cell is compared:
+#
+#   1. effort  medium -> high
+#   2. route   Databricks AI Gateway -> api.openai.com directly
+#
+# The route moved because the Databricks staging gateway rate-limited the
+# 2026-07-29 wave hard enough to distort results -- the Gemini cell breached on
+# 100% of its trials -- and a cell whose purpose is to isolate one dial cannot
+# also be absorbing 429 backoff. The cost is that an A1-vs-A1h delta is not a
+# clean effort measurement; it is effort plus whatever the two serving paths do
+# differently. Both models are the same `gpt-5.6-luna`, so the expected route
+# effect is small, but "expected small" is not "measured zero" and the honest
+# framing in the post is a joint one.
+#
+# RESOLVED 2026-07-29 -- it is now measured zero, so the post can say "effort"
+# rather than "effort plus route". tb-solo-luna-openai (A1r) holds effort at the
+# default and moves only the route: route alone is -0.023 at p = 0.815 (8:10
+# discordant, a null) while effort alone is -0.170 at p = 0.001 (2:17). The two
+# sum to -0.193 against the joint -0.195. Route was inert in cost and tokens as
+# well, within 3% on every column. Do not delete A1r; it is what licenses the
+# single-variable framing here.
+#
+# The within-wave comparisons are clean, because all four effort-wave cells sit
+# on this same route: A1h vs A5h (luna vs terra at high) and A1h vs B1h (solo vs
+# pair at high) vary exactly one thing each.
+#
+# Endpoint names here are literal OpenAI model ids, because the runtime sets
+# BUZZ_AGENT_MODEL from the manifest endpoint name. Resolution to
+# provider/key lives in testbed/endpoints/openai-live.json, outside this
+# manifest. No base-url override: the default lets OPENAI_COMPAT_API=auto pick
+# the Responses API, which is the route these reasoning models need.
+schema_version: "1"
+condition: tb-solo-luna-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      # Byte-identical to tb-solo-luna, tb-solo-sol and tb-solo-terra-high.
+      # Tuning the persona for a higher effort level would confound the dial
+      # with a prompt change.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      # The line this condition exists for. `high` rather than `xhigh` because
+      # the operator asked for high on the luna/terra arm; note the live probe
+      # measured luna at 1.22x reasoning tokens for high and only 1.25x for
+      # xhigh, so high captures nearly all of the available travel anyway.
+      thinking_effort: high
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Identical to tb-solo-luna's luna figures. Effort changes token *volume*, not
+  # the rate card, so holding the rates equal is what makes the cost delta a
+  # measurement of what the extra thinking cost.
+  gpt-5.6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    # Fallback only. On the direct OpenAI Responses route the provider reports
+    # the split at `usage.prompt_tokens_details.cached_tokens` and the harness
+    # threads it through, stamping
+    # `accounting_cache_read_tokens_are_measured: true`. 0.0 keeps an
+    # unmeasured run conservative rather than optimistic.
+    cache_read_rate: 0.0
+trial_budget:
+  # Unchanged from tb-solo-luna. This is the field most tempting to raise for a
+  # higher-effort run, and raising it would be a mistake: if `high` needs a
+  # longer clock to finish the same work, that is a *result* about effort, not
+  # a budgeting problem to engineer away.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

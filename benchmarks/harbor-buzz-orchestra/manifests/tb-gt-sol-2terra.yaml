@@ -1,0 +1,124 @@
+# G1st -- goosetown personas with a gpt-5.6-sol lead over one read-only terra
+# scout and one terra worker. Single provider, single route, direct from OpenAI.
+#
+# WHAT THIS ISOLATES. G1st is G1s with the two subordinate seats upgraded from
+# luna to terra and *nothing else touched*: same lead model, same three persona
+# files byte-for-byte, same headcount, same route, same container, same clock.
+# So G1s -> G1st is a clean one-variable read on the question G1s leaves open --
+# was the goosetown team's deficit caused by the *cheap seats being too weak* to
+# be worth delegating to?
+#
+# Why that is the live hypothesis. G0 -> G1s showed the LEAD model matters
+# enormously (+0.216 for sol over luna, p = 0.000, 4:23 discordant). The obvious
+# next question is whether the seats matter the same way. Every anti-team result
+# so far used luna seats, and luna solo scores 0.545 -- barely half the tasks. A
+# lead that cannot trust its subordinates' work has to redo it, which would show
+# up as exactly the pattern observed: more tokens, no more solves. Terra solo
+# scores 0.807 at high effort, so terra seats are a genuinely stronger hand.
+#
+# The comparison set:
+#
+#   G1s -> G1st  seat model only (luna -> terra); lead, personas, route,
+#                headcount, container and clock all held
+#   G1st vs A2   the whole question, with the strongest cheap seats available:
+#                does an orchestrated team beat sol working alone (0.843)?
+#   G1st vs A2r  the same, fully route-matched once A2r lands
+#   G1st -> G1ot lead model only (sol -> opus 5), the terra-seat analogue of
+#                G1s -> G1. NOTE that pair is NOT single-route: opus 5 is
+#                Databricks-only and terra is OpenAI-only, so G1ot moves the
+#                lead's provider as well as its model. See tb-gt-opus-2terra.yaml.
+#
+# EFFORT IS DELIBERATELY UNPINNED. The terra cells that already exist (A5h, B3h)
+# both pin `thinking_effort: high`, and it is tempting to copy that here since
+# terra's published numbers come from the high-effort runs. Do not. No manifest
+# in the G wave pins effort, so pinning it here would confound "stronger seats"
+# with "more thinking on the seats" and destroy the one-variable property that is
+# this cell's entire reason to exist. Unset means the harness omits the
+# `reasoning` field and the provider default applies -- identical treatment to
+# G0, G1s and G1.
+#
+# Endpoint names resolve via testbed/endpoints/openai-live.json.
+schema_version: "1"
+condition: tb-gt-sol-2terra
+roster:
+  - id: lead
+    kind: orchestrator
+    # See tb-gt-3luna.yaml: `lead`, `scout` and `worker` are all read verbatim
+    # out of the "Your team" table by the personas. Renaming any of them breaks
+    # addressing silently -- the @mention resolves to nobody, the send still
+    # reports success, and the trial stalls to its timeout.
+    role: lead
+    count: 1
+    endpoint: gpt-5.6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      # Byte-identical to the file G0, G1s, G1, G2s and G2 pin, so the lead's
+      # instructions are not a variable anywhere in this wave.
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+
+  - id: scout
+    kind: worker
+    role: scout
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+
+  - id: worker
+    kind: worker
+    role: worker
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+
+prices:
+  # Repriced 2026-07-30: terra 2.5/0.25/15.0 -> 2.00/0.20/12.00 (-20%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Both rows are load-bearing: this is a mixed-model cell, so the headline
+  # $/solved-task depends on the split between the seats as well as on the
+  # totals. Same figures every other sol and terra cell in the study carries.
+  #
+  # Note the seat/lead ratio: terra is 2.0/0.20/12.0 against sol's
+  # 5.00/0.50/30.00, exactly 40% on all three axes. Against G1s's luna seats
+  # (0.20/0.02/1.20) a terra seat is 10x the unit price, so this cell buys
+  # stronger seats at a real premium, and the token-tax comparison against G1s
+  # has to be read per-dollar as well as per-token.
+  #
+  # The 2026-07-30 drop widened that gap: it was 2.5x luna before (terra -20%,
+  # luna -80%), so any G1st-vs-G1s per-dollar reading taken before that date
+  # used a much flatter price ladder than this manifest now encodes.
+  gpt-5.6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    cache_read_rate: 0.0
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    # Fallback only; the direct OpenAI Responses route reports the real split
+    # and the harness prefers it. See tb-solo-luna-high.yaml.
+    output_per_million_usd: 12.0
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to the solo baselines. A team genuinely needs longer than a solo
+  # agent -- every handoff is a round trip -- but giving it a larger budget would
+  # confound the comparison it exists to make, and it does not bind anyway:
+  # Harbor enforces each task's own `[agent] timeout_sec` scaled by 3x.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

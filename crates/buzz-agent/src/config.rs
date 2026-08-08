@@ -857,6 +857,28 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// OpenRouter upstream pin: the `provider.order` list, from
+    /// `OPENROUTER_PROVIDER_ORDER` (comma-separated). Empty = let OpenRouter
+    /// route, which is the right default for interactive use and the wrong one
+    /// for a benchmark.
+    ///
+    /// An OpenRouter model id is not one deployment. `deepseek-v4-flash-0731`
+    /// is served by nine upstreams spanning fp4 to fp8, 262K to 1M context, and
+    /// a 1.6x price spread; `kimi-k3` by ten spanning a 1.5x spread. Unpinned,
+    /// consecutive requests land on different ones, so "the model" is a mixture
+    /// whose composition moves with provider load.
+    ///
+    /// It also decides whether prompt caching happens at all. Measured
+    /// 2026-08-01: pinned to `gmicloud/fp8`, deepseek serves a repeated prefix
+    /// from cache on every call; pinned to `siliconflow/fp8` it never does;
+    /// unpinned it did on one call in three. That is a ~7x swing on input cost
+    /// for identical work. (The `/endpoints` metadata is no guide here -- it
+    /// advertises `supports_implicit_caching: false` for every endpoint that
+    /// was then measured caching.)
+    ///
+    /// Set with `allow_fallbacks: false` in the request, so an unavailable pin
+    /// fails loudly instead of silently redefining the condition mid-run.
+    pub openrouter_provider_order: Vec<String>,
 }
 
 impl Config {
@@ -968,6 +990,9 @@ impl Config {
                 env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
             )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            openrouter_provider_order: parse_provider_order(
+                env("OPENROUTER_PROVIDER_ORDER").as_deref(),
+            ),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -1012,6 +1037,7 @@ impl Config {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
+            openrouter_provider_order: Vec::new(),
         }
     }
 
@@ -1227,6 +1253,26 @@ impl HookServers {
 
 fn parse_hook_servers_env(key: &str) -> HookServers {
     parse_hook_servers(env(key).as_deref())
+}
+
+/// Parse `OPENROUTER_PROVIDER_ORDER` into a `provider.order` list.
+///
+/// Comma-separated OpenRouter provider tags, in preference order — either a
+/// bare slug (`moonshotai`) or the slug/quantization form shown in
+/// `/api/v1/models/{id}/endpoints` (`gmicloud/fp8`). The quantized form is
+/// worth preferring in a benchmark: one upstream can serve the same model id at
+/// several quantizations, and fp4 versus fp8 is a different set of weights.
+///
+/// Blank entries are dropped rather than passed through, so a trailing comma or
+/// an accidentally-empty variable degrades to "no pin" instead of asking
+/// OpenRouter to route to a provider named "".
+pub fn parse_provider_order(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Pure parser exposed for unit tests. `None` (env unset) and `Some("")`
@@ -2391,6 +2437,81 @@ mod tests {
             clamp_adaptive_effort("claude-mythos-preview", ThinkingEffort::Max),
             ThinkingEffort::Max
         );
+    }
+
+    #[test]
+    fn benchmark_opus_endpoint_keeps_xhigh_through_the_anthropic_clamp() {
+        // The harness passes the Databricks *serving-endpoint name* as the model,
+        // so this prefixed string is what actually reaches the clamp. An
+        // unsupported level is clamped down with only a log warning, which for a
+        // graded sweep means the A3x cell silently running at `high` -- a null
+        // result that reads as a finding. Pinned so a change to the support table
+        // cannot quietly rewrite what that cell measured.
+        let model = strip_catalog_prefix("databricks-claude-opus-5");
+        assert_eq!(model, "claude-opus-5");
+        assert_eq!(
+            clamp_adaptive_effort(model, ThinkingEffort::XHigh),
+            ThinkingEffort::XHigh
+        );
+        // ...and xhigh is a real 4x more thinking than the medium default, which
+        // is the mechanism the A3-vs-A3x cost delta is meant to price.
+        assert_eq!(ThinkingEffort::Medium.anthropic_budget_tokens(), 8_192);
+        assert_eq!(ThinkingEffort::XHigh.anthropic_budget_tokens(), 32_768);
+    }
+
+    #[test]
+    fn benchmark_sol_endpoint_is_not_subject_to_the_anthropic_clamp() {
+        // Regression guard on a wrong assumption, kept because it is an easy one
+        // to make twice: `clamp_adaptive_effort` consults *only*
+        // `anthropic_model_supports_xhigh`, so it downgrades xhigh for every
+        // non-Anthropic model -- including sol. That is harmless solely because
+        // sol never reaches it: the clamp is called from
+        // `anthropic_thinking_config`, and sol takes the OpenAI Responses path,
+        // where `openai_effort_str` is emitted verbatim (llm.rs:1015).
+        //
+        // If the clamp ever moves onto the shared path, this pair of asserts is
+        // what turns that into a test failure instead of a silently downgraded
+        // A2x sweep.
+        let model = strip_catalog_prefix("databricks-gpt-5-6-sol");
+        assert_eq!(model, "gpt-5-6-sol");
+        assert_eq!(
+            clamp_adaptive_effort(model, ThinkingEffort::XHigh),
+            ThinkingEffort::High,
+            "the anthropic clamp does downgrade sol -- sol must not be routed through it"
+        );
+        assert_eq!(ThinkingEffort::XHigh.openai_effort_str(), "xhigh");
+        assert!(
+            openai_efforts_for_model("gpt-5-6-sol")
+                .expect("sol resolves to the gpt-5.6 family")
+                .contains(&ThinkingEffort::XHigh),
+            "the gpt-5.6 capability table must list xhigh"
+        );
+    }
+
+    #[test]
+    fn benchmark_effort_wave_endpoints_resolve_high_on_the_openai_route() {
+        // The A1h/B1h/A5h/B3h cells run direct against api.openai.com rather
+        // than through the Databricks gateway, so their endpoint strings are
+        // bare model ids with a dot -- `gpt-5.6-luna`, not
+        // `databricks-gpt-5-6-luna`. Both spellings have to land in the same
+        // capability family, and `terra` is new enough that nothing else in the
+        // tree mentions it.
+        //
+        // The failure this pins is silent: an unrecognised model falls out of
+        // the family match, `high` gets clamped, and four 89-task sweeps report
+        // a null that is plumbing rather than a finding.
+        for model in ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"] {
+            let efforts = openai_efforts_for_model(model)
+                .unwrap_or_else(|| panic!("{model} must resolve to the gpt-5.6 effort table"));
+            assert!(
+                efforts.contains(&ThinkingEffort::High),
+                "{model} must support the `high` level the effort wave pins"
+            );
+        }
+        // Dotted ids are already bare, so the catalog strip must leave them
+        // alone rather than slicing at the first `gpt-` token.
+        assert_eq!(strip_catalog_prefix("gpt-5.6-terra"), "gpt-5.6-terra");
+        assert_eq!(ThinkingEffort::High.openai_effort_str(), "high");
     }
 
     #[test]

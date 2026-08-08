@@ -1,0 +1,82 @@
+# B2 peer pair: two gemini-3.6-flash agents on one channel, one driving and one
+# navigating — tb-peer-2luna with the model swapped.
+#
+# Two comparisons hang off this manifest, and they are the reason it exists:
+#   * against tb-solo-gemini it isolates the pairing, holding the model fixed;
+#   * against tb-peer-2luna it isolates the model, holding the pairing fixed.
+# Only the second is new information. The first is the same question B1 already
+# answers for luna, asked of a model whose failure modes differ — a cheap fast
+# model may pair better or worse than a slower one, and one data point on that
+# is worth more than another luna variant.
+#
+# The driver is the orchestrator because the roster allows exactly one, and
+# because the driver is the agent the harness must wake with the task and the
+# only one permitted to publish `DONE:`. The navigator is read-only by persona,
+# not by permission.
+#
+# Route caveat, and it matters more here than for the solo: this pair runs on the
+# MLflow chat/completions gateway, where a *multi-turn* tool loop is what broke
+# before the 2026-07-29 provider fixes. Gemini requires each tool call's
+# `thoughtSignature` echoed back on replay, and two agents mean twice the replay
+# surface. See docs/08-gemini-provider-fixes.md.
+#
+# Endpoint names are exact Databricks serving-endpoint names; provider/host/key
+# resolve via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-peer-2gemini
+roster:
+  - id: driver
+    kind: orchestrator
+    role: driver
+    count: 1
+    endpoint: databricks-gemini-3-6-flash
+    model_revision: gemini-3.6-flash
+    prompt:
+      # Byte-identical to tb-peer-2luna's driver — the pairing is the constant.
+      path: personas/bench/peer-driver.md
+      sha256: 1cf4d1cbf4093dd0d9b1a6a7ccd9a875c39621d0bab3ddec7e0bb23177761149
+
+  - id: navigator
+    kind: worker
+    # Read verbatim by both personas out of the "Your team" table — peer-driver
+    # addresses `navigator` and peer-navigator addresses `driver`. Renaming
+    # either role here silently breaks the pairing: the @mention resolves to
+    # nobody, the send still reports success, and the trial stalls to timeout.
+    role: navigator
+    count: 1
+    endpoint: databricks-gemini-3-6-flash
+    model_revision: gemini-3.6-flash
+    prompt:
+      path: personas/bench/peer-navigator.md
+      sha256: dcf2ae226b5967067687060871438397125e54b8c412f69076eb2a8edd56d2c5
+
+prices:
+  # PLACEHOLDER — NOT A MEASUREMENT. Identical zeroes to tb-solo-gemini, and
+  # they have to be identical for the same reason tb-peer-2luna copies
+  # tb-solo-luna's figures: holding the rate equal is what makes the
+  # solo-versus-pair cost *ratio* sound, whatever the rate turns out to be.
+  #
+  # Token counts are measured and recorded per trial regardless, so cost is
+  # recoverable afterwards. Fill these in before quoting any dollar figure.
+  databricks-gemini-3-6-flash:
+    input_per_million_usd: 0.0
+    cached_input_per_million_usd: 0.0
+    output_per_million_usd: 0.0
+    # Caching is load-bearing for a pair in a way it is not for a solo agent:
+    # the pair's cost is driven by re-sent context, which is exactly what a
+    # prefix cache serves. Whether this route reports a cache split at all is
+    # itself a finding — read `accounting_cache_read_tokens_are_measured` off
+    # the first trial.
+    cache_read_rate: 0.0
+trial_budget:
+  # Matches every other condition exactly. A pair genuinely needs longer than a
+  # solo agent — every handoff is a round trip — but giving it a larger budget
+  # would confound the comparison, and this value does not bind anyway: Harbor
+  # enforces each task's own `[agent] timeout_sec`, scaled by the study's 3x
+  # multiplier.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition — see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

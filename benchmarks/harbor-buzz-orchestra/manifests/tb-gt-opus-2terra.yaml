@@ -1,0 +1,106 @@
+# G1ot -- goosetown personas with a Claude Opus 5 lead over one read-only terra
+# scout and one terra worker. The terra-seat analogue of G1.
+#
+# READ THE ROUTE CAVEAT BEFORE QUOTING ANY NUMBER FROM THIS CELL.
+#
+# This cell is CROSS-PROVIDER by necessity, not by choice. Opus 5 is only served
+# to us through Databricks (`databricks-claude-opus-5`); it is absent from
+# openai-live.json, and anthropic-live.json carries only Sonnet 4.6 and Haiku
+# 4.5. Terra is only served direct from OpenAI (`gpt-5.6-terra`); it is absent
+# from databricks-live.json. So there is no single endpoint config that can serve
+# both seats, and this manifest resolves against a MERGED config --
+# testbed/endpoints/mixed-opus-terra.json -- which needs BOTH DATABRICKS_TOKEN
+# and OPENAI_API_KEY exported. Neither sweep.sh nor sweep-openai.sh does that;
+# use sweep-mixed.sh.
+#
+# What that costs interpretively:
+#
+#   * G1 -> G1ot moves the SEAT MODEL and the SEAT PROVIDER together (luna on
+#     Databricks -> terra on OpenAI). It is therefore NOT the clean seat-model
+#     read that G1s -> G1st is. If you want the one-variable answer to "do
+#     stronger seats rescue the delegation team", that is G1st, not this cell.
+#   * G1st -> G1ot moves the LEAD MODEL and the LEAD PROVIDER together
+#     (sol on OpenAI -> opus 5 on Databricks), so it is not a clean lead-model
+#     read either -- unlike G0 -> G1s, which was.
+#
+# Note this is a difference of degree rather than kind: every opus-led cell in the
+# study (C3, G1, G2) is ALREADY two-route internally, because opus does not speak
+# /responses and goes to /ai-gateway/anthropic/v1/messages while its luna seats
+# take the Databricks /responses path. G1ot widens that split from two paths
+# inside one vendor to two vendors. What it adds beyond G1 is a second set of
+# rate limits and a second failure mode, not a new confound in kind.
+#
+# WHAT IT IS STILL GOOD FOR. The cost story survives the route caveat intact,
+# because cost is not a paired-difference quantity: if an Opus-5-led team with
+# the strongest available cheap seats still fails to beat solo sol (0.843) or
+# solo opus (0.851), that is worth knowing whatever the routes were, and it is
+# the last untested corner of the delegation hypothesis.
+#
+# Endpoint names resolve via testbed/endpoints/mixed-opus-terra.json.
+schema_version: "1"
+condition: tb-gt-opus-2terra
+roster:
+  - id: lead
+    kind: orchestrator
+    # See tb-gt-3luna.yaml: `lead`, `scout` and `worker` are read verbatim out of
+    # the "Your team" table by the personas. Renaming any of them breaks
+    # addressing silently -- the @mention resolves to nobody, the send still
+    # reports success, and the trial stalls to its timeout.
+    role: lead
+    count: 1
+    endpoint: databricks-claude-opus-5
+    model_revision: claude-opus-5
+    prompt:
+      # Byte-identical to the file G0, G1s, G1, G1st, G2s and G2 pin.
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+
+  - id: scout
+    kind: worker
+    role: scout
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+
+  - id: worker
+    kind: worker
+    role: worker
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+
+prices:
+  # Repriced 2026-07-30: terra 2.5/0.25/15.0 -> 2.00/0.20/12.00 (-20%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Opus 5 output is 25.0, NOT sol's 30.0 -- do not copy the sol row by reflex.
+  # See tb-solo-luna.yaml for why cache_read_rate is 0.0 (DB10).
+  databricks-claude-opus-5:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 25.0
+    cache_read_rate: 0.0
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    output_per_million_usd: 12.0
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to the solo baselines -- see tb-gt-sol-2luna.yaml.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

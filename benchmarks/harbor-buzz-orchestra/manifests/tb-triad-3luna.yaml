@@ -1,0 +1,140 @@
+# C1 — three gpt-5.6-luna agents on one channel: two peers plus an independent
+# critic. The study's headline team.
+#
+# The question this condition exists to answer: can three cheap agents talking to
+# each other match one expensive agent working alone, for less money? Against
+# tb-solo-sol it is the whole thesis; against tb-solo-luna it says what the extra
+# two agents bought; against tb-peer-2luna it isolates the marginal value of the
+# *third* agent, since B1 is this roster minus the critic and nothing else moves.
+#
+# Topology, and why this one. The driver owns the keyboard, the navigator argues
+# before decisions are made, and the critic checks only finished work — once,
+# after the navigator has already agreed. Splitting "argue" from "verify" across
+# two agents is the point: a navigator that both plans and signs off has an
+# incentive to approve its own reasoning, which is the failure this shape is
+# built to avoid.
+#
+# The driver is the orchestrator because the roster allows exactly one, and
+# because the driver is the agent the harness wakes with the task and the only
+# one permitted to publish `DONE:`.
+#
+# Read-only on the navigator and the critic is enforced by persona, not by
+# permission — all three agents get the same tools and the same filesystem. That
+# boundary is therefore a finding to check in the transcripts, not an assumption
+# to rely on. With three agents on one filesystem, a write from the wrong one is
+# the most likely way this condition fails for a reason unrelated to the models.
+#
+# Expect it to cost more per task than solo luna: three agents, and every handoff
+# re-sends context. That is the measurement. The break-even that matters is
+# against sol, not against luna — at these prices sol is 5x luna on both axes, so
+# this roster may burn up to 5x the tokens of tb-solo-sol and still win on cost.
+#
+# Endpoint names are exact Databricks serving-endpoint names; provider/host/key
+# resolve via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-triad-3luna
+roster:
+  - id: driver
+    kind: orchestrator
+    # Read verbatim out of the composed "Your team" table by both other
+    # personas: triad-navigator addresses `driver`, and triad-driver tells the
+    # critic who woke it. Renaming any role in this file silently breaks the
+    # trial — the @mention resolves to nobody, the send still reports success,
+    # and the run stalls to its timeout with no error anywhere.
+    role: driver
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      # Derived from personas/bench/peer-driver.md rather than reusing it: that
+      # file says "You and one peer" and knows nothing about a critic, so a
+      # third agent would be invisible to it. Editing it in place would have
+      # rewritten tb-peer-2luna's hash and orphaned B1's results, so the triad
+      # gets its own file and the pair keeps its own.
+      path: personas/bench/triad-driver.md
+      sha256: b0bff7a8327e52c3ae4ec962b9619b6260e9da3aa2b86188068c732382ad2799
+
+  - id: navigator
+    kind: worker
+    role: navigator
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/triad-navigator.md
+      sha256: 02e0029f25fc80f47fefa12304dff7eb11e0561f9eadcd7a34b1188f11841dc5
+
+  - id: critic
+    kind: worker
+    role: critic
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      # Byte-identical to the file tb-team-* conditions use. critic.md is
+      # already role-agnostic — it replies to "whoever asked for the review, the
+      # teammate named in the message that woke you" and never assumes a lead —
+      # so it drops into a peer topology unchanged. Keeping it identical means
+      # C1-versus-C2 varies the two peer personas and nothing else.
+      path: personas/bench/critic.md
+      sha256: 4a5c6273c2cbd2cae593ff1a46117334e0cca7bc913a51eedb5e1d39ea755743
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Operator-supplied list prices, doc 04 §7, identical to tb-solo-luna's and
+  # tb-peer-2luna's luna figures — holding them equal across all luna conditions
+  # keeps the solo/pair/triad cost *ratios* sound. The sol-versus-luna ratio is
+  # the single number the headline is most sensitive to. See tb-solo-luna.yaml
+  # for why cache_read_rate is 0.0 (DB10).
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    # Fallback only, and it should never fire on this condition. The agent reports
+    # the provider's real cache split on its usage line and the accounting path
+    # prices the measured count, recording
+    # `accounting_cache_read_tokens_are_measured: true`. Cache matters more here
+    # than in any solo condition, because a team's re-sent context is exactly what
+    # a prefix cache serves.
+    cache_read_rate: 0.0
+trial_budget:
+  # Matches tb-solo-luna, tb-solo-sol and tb-peer-2luna exactly. A triad genuinely
+  # needs longer than a solo agent — every handoff is a round trip — but granting
+  # it a larger budget would confound the comparison with the thing being
+  # measured. It does not bind anyway: Harbor enforces each task's own
+  # `[agent] timeout_sec`, which tops out at 12000s across Terminal-Bench 2.1,
+  # scaled by the study's 3x multiplier. All conditions therefore run against the
+  # task's own clock, which is the only budget they can honestly share.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition, including the solo baselines. Harbor enforces
+  # a task's declared resources as hard Docker limits, and the Buzz stack runs
+  # *inside* that container, so a 3-agent roster would otherwise fit three
+  # buzz-acp/buzz-agent/buzz-dev-mcp process groups plus the task's own work
+  # into the 1 vCPU and 2 GB most Terminal-Bench tasks ask for. A team that
+  # thrashes there has been penalised for memory pressure rather than for
+  # coordinating badly — a confound in precisely what this study measures.
+  #
+  # Raising it only for the team tiers would trade that confound for a worse
+  # one, so the solos carry it too and every cell is measured on identical
+  # hardware.
+  #
+  # 4 and 8192 are the *maxima* the dataset declares (cpus: 83x1, 3x2, 3x4;
+  # memory_mb: 68x2048, 13x4096, 8x8192), and that is not a coincidence. Harbor
+  # replaces rather than raises — environments/base.py assigns
+  # `task_env_config.cpus = override_cpus` outright — so any smaller value would
+  # quietly shrink the 8 tasks that ask for 8 GB and the 3 that ask for 4 CPUs.
+  # Every task therefore gets at least what it requested, and most get more.
+  #
+  # storage_mb is deliberately absent: all 89 tasks already declare 10240, so an
+  # override would restate the status quo and add a knob with nothing to say.
+  override_cpus: 4
+  override_memory_mb: 8192

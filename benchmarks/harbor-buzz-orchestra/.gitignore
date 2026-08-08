@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .benchmark/
 jobs/
+jobs-archive/

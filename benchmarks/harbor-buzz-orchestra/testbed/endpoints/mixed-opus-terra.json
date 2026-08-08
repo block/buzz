@@ -1,0 +1,14 @@
+{
+  "databricks-claude-opus-5": {
+    "provider": "databricks_v2",
+    "api_key_env": "DATABRICKS_TOKEN",
+    "env": {
+      "DATABRICKS_HOST": "https://block-lakehouse-staging.cloud.databricks.com"
+    }
+  },
+  "gpt-5.6-terra": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {}
+  }
+}

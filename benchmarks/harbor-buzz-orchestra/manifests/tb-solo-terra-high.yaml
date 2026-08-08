@@ -1,0 +1,82 @@
+# A5h -- solo gpt-5.6-terra at reasoning effort `high`, served direct from OpenAI.
+#
+# Terra is a third model tier for this study, which turns the price/performance
+# curve from a line into a shape. If A1 (0.545) and A2 (0.843) bracket it, where
+# terra falls says whether the tier return is roughly linear in price or whether
+# one of the two steps carries nearly all of it.
+#
+#            input   cached   output
+#   luna      0.20     0.02     1.20     (1x)
+#   terra     2.00     0.20    12.00     (10x luna, 0.4x sol)
+#   sol       5.00     0.50    30.00     (25x luna)
+#
+# WHEN THIS CELL RAN, terra's card was the exact midpoint of the other two on
+# every axis -- luna 1.00/0.10/6.00, terra 2.50/0.25/15.00, sol 5.00/0.50/30.00
+# -- and the original text here leaned on that symmetry. The 2026-07-30 drop
+# ended it: luna fell 80% and terra 20%, so the tiers are still ordered the same
+# way but the gaps are now very uneven. The measurement is unchanged; only the
+# overlay moved. Use the current numbers above for any ratio argument.
+#
+# NOTE ON THE PRICE TABLE: terra also publishes a **cache-write** rate of
+# $2.50/Mtok, i.e. 1.25x its input rate. The manifest schema has no field for
+# it and the accounting layer does not count write tokens separately, so every
+# terra dollar figure this study reports is a slight *under*-estimate. Bounded:
+# writes are the non-cached slice of input, ~23% at the 77% hit rate this fleet
+# measures, so the understatement is at most ~0.25 x 0.23 = ~6% of the input
+# component. Worth a footnote in the post, not worth a schema change mid-study.
+# This is also the first hard confirmation of doc 02 §7.5's open question about
+# whether cache writes carry a surcharge on this slate. They do.
+#
+# The effort axis for terra lives in tb-solo-terra-medium.yaml (A5m), which is
+# this file with `thinking_effort: medium` and nothing else changed. Read A5m ->
+# A5h as the effort delta and either against A1/A2 as the tier axis. See doc 02
+# §3.2.
+schema_version: "1"
+condition: tb-solo-terra-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      # Byte-identical to every other solo cell in the study.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      # Verified reaching the provider before this cell was scheduled:
+      # `gpt-5.6-terra` matches the `gpt-5.6` family token in config.rs, whose
+      # supported set includes high, and a live probe moved reasoning_tokens
+      # 73 -> 81 between medium and high. Effort is neither rejected nor
+      # silently clamped here.
+      thinking_effort: high
+prices:
+  # Repriced 2026-07-30: terra 2.5/0.25/15.0 -> 2.00/0.20/12.00 (-20%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # See the cache-write note in the header: the published $2.50/Mtok write rate
+  # has no home in this schema. The 1.25x write-to-input ratio survived the
+  # drop, so the bound stated there is unchanged even though both figures moved.
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    output_per_million_usd: 12.0
+    # Fallback only; the direct OpenAI Responses route reports the real split
+    # and the harness prefers it. See tb-solo-luna-high.yaml.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to every other cell. Terra is an unknown quantity on this
+  # benchmark and the temptation is to give it room; giving it more clock than
+  # luna or sol got would make the tier comparison meaningless.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

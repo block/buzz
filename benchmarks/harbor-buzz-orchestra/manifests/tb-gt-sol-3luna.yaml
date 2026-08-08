@@ -1,0 +1,105 @@
+# G2s -- G1s with a second read-only scout. A gpt-5.6-sol lead over two luna
+# scouts and one luna worker, single route, direct from OpenAI.
+#
+# Against tb-gt-sol-2luna this holds the lead model, the persona bytes, the
+# route, the price sheet, the clock and the container fixed and varies exactly
+# one thing: how wide the recon phase is. It is the cell that tests goosetown's
+# central claim, which the study has never had a way to evaluate --
+#
+#   "Every non-trivial task starts with researchers, not workers. Map the
+#    territory before sending the teams -- surprises are cheaper when they're on
+#    paper."   (goosetown-orchestrator/SKILL.md:97)
+#
+# -- and the reason it is testable here at all is that scouts are READ-ONLY. Two
+# writing agents in one container have to be serialised by the lead or they
+# corrupt each other's work, which is why every previous team cell in this study
+# effectively ran in series and paid a round trip for it. Two scouts cannot
+# collide, so gt-lead.md is free to wake both in the same turn (one message
+# each, several messages per turn) and get genuinely parallel recon. Deliberate
+# overlap between them costs tokens and nothing else.
+#
+# The honest null: a second scout buys nothing on Terminal-Bench because most
+# tasks are single-threaded surgery with one obvious place to look, and the study
+# pays ~1.3x the recon tokens to learn that. That is doc 02 §7.2's threat applied
+# to the recon phase, and it is why the result should be read stratified by task
+# length rather than in aggregate -- if parallel recon pays anywhere, it pays on
+# the long tail.
+#
+# Note the roster is now FOUR agents in one container, more than anything the
+# study has run. See `environment` below: 4 vCPU and 8192 MB is the dataset
+# maximum, not a comfortable margin, and container exit-137 is the thing to watch
+# if this cell behaves unlike its 3-agent sibling.
+#
+# Endpoint names resolve via testbed/endpoints/openai-live.json.
+schema_version: "1"
+condition: tb-gt-sol-3luna
+roster:
+  - id: lead
+    kind: orchestrator
+    role: lead
+    count: 1
+    endpoint: gpt-5.6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+
+  - id: scout
+    kind: worker
+    role: scout
+    # The only line that differs from tb-gt-sol-2luna. The provisioner names
+    # seats `{id}-{index}`, 1-indexed, so this yields `scout-1` and `scout-2` as
+    # two separate rows in every agent's "Your team" table -- which is what lets
+    # the lead address them individually and give each a different angle rather
+    # than a smaller slice of the same one.
+    count: 2
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+
+  - id: worker
+    kind: worker
+    role: worker
+    # Deliberately still one. Widening recon and widening implementation at the
+    # same time would make the G1s -> G2s delta unattributable, and the write
+    # side is the one that needs serialising anyway.
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Byte-identical to tb-gt-sol-2luna. Holding the rates equal is what makes the
+  # recon-width cost delta a measurement rather than an artefact of pricing.
+  gpt-5.6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    cache_read_rate: 0.0
+  gpt-5.6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml. These are the
+  # dataset's maxima (cpus 83x1/3x2/3x4; memory_mb 68x2048/13x4096/8x8192) and
+  # Harbor replaces rather than raises, so they cannot go higher without
+  # shrinking the tasks that already ask for 8 GB.
+  override_cpus: 4
+  override_memory_mb: 8192

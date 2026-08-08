@@ -24,3 +24,50 @@ llama-server needs no real key; the provisioner's per-endpoint
 
 The Databricks pilot config is the same file shape with real serving
 endpoint hosts/keys.
+
+## openai-live.json
+
+The same models served by the OpenAI API rather than the Databricks gateway.
+Exists because the Databricks bearer is a short-lived OAuth token that expires
+roughly hourly, which makes an unattended sweep impossible; a plain OpenAI key
+does not expire mid-run.
+
+Endpoint names here are literal OpenAI model ids, because the runtime sets
+`BUZZ_AGENT_MODEL` from the manifest endpoint name. No `OPENAI_COMPAT_BASE_URL`
+override: the default `https://api.openai.com/v1` is correct, and leaving it
+unset also lets `OPENAI_COMPAT_API=auto` select the Responses API, which is the
+route these reasoning models need.
+
+`scripts/benchmark.py` populates `OPENAI_COMPAT_API_KEY` from `OPENAI_API_KEY`
+when only the latter is exported, and resolves provider credentials only for
+the endpoints a given config actually names — so an OpenAI run does not require
+a working Databricks token.
+
+## databricks-live.json
+
+`gpt-5.6-sol`, `gpt-5.6-luna` and `claude-opus-5` served by the Databricks AI
+Gateway (`provider=databricks_v2`, `api_key_env=DATABRICKS_TOKEN`).
+`DATABRICKS_HOST` rides in each entry's `env` block and Harbor injects it into
+the agent container — it is not a secret and needs no host-side export.
+
+**Two gateway routes, selected per model by the provider, not by config.**
+`databricks_v2_route_for_model` in buzz-agent sends `gpt-5`-named models to the
+OpenAI `/ai-gateway/openai/v1/responses` path and `claude`-named models to
+`/ai-gateway/anthropic/v1/messages` (Opus 5 does not speak `/responses`). So
+`databricks-claude-opus-5` works through the same provider with no extra
+config — the endpoint name is all that picks the route. Verified `200` on the
+staging box with a well-formed anthropic `usage` block.
+
+`DATABRICKS_HOST` points at the **staging** workspace
+(`block-lakehouse-staging.cloud.databricks.com`), not production. On the
+buzz-oss staging benchmark runner this is the reachable one: staging's
+privatelink endpoint (`10.170.107.x`) is routable from the staging VPC both
+directly and through cloudproxy, whereas production's (`10.172.98.x`) is a
+blackhole from there. Both serve the same `gpt-5.6-luna`/`sol` endpoints. See
+`docs/06-ec2-benchmark-runbook.md` §5.5 for the reachability proof and the
+production caveat.
+
+Unlike the OAuth bearer the `openai-live.json` note warns about, the token
+here is a long-lived personal access token (`DATABRICKS_TOKEN`), so an
+unattended sweep is possible. On the runner it is fetched from the Secrets
+Manager secret `buzz-oss/staging/benchmark/databricks-token`.

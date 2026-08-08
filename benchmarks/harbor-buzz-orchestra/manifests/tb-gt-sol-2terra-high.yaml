@@ -1,0 +1,119 @@
+# G1sth -- G1st with every seat pinned to `thinking_effort: high`. Goosetown
+# personas, a gpt-5.6-sol lead over one read-only terra scout and one terra
+# worker. Single provider, single route, direct from OpenAI.
+#
+# BUILT FOR LHTB, not Terminal-Bench. Nothing in the manifest names a dataset,
+# but the reason this cell exists is docs/09-lhtb-benchmark.md: the long-horizon
+# set is where extra deliberation per turn is most plausibly worth its price,
+# and it is the one benchmark in the study where the team cells have not yet
+# been given the effort dial. Run it with the patched
+# `continue_until_timeout` (see docs/09) and `--timeout-multiplier 3.0`.
+#
+# WHAT THIS ISOLATES. Against tb-solo-sol-high.yaml -- same route, same lead
+# model, same effort, same price sheet, same clock, same container -- the only
+# thing that moves is headcount and the personas that coordinate it. That is the
+# team-vs-solo question asked at the top of the effort ramp instead of at the
+# provider default.
+#
+# EFFORT IS PINNED HERE, DELIBERATELY, AND THAT IS THE DIFFERENCE FROM
+# tb-gt-sol-2terra.yaml. That manifest carries a long comment explaining why
+# effort must stay unpinned: it belongs to the G wave, where no cell pins effort,
+# and pinning it there would confound "stronger seats" with "more thinking on the
+# seats". None of that applies to this cell. This one is not in the G wave and
+# makes no claim about seat strength; it is a two-cell high-effort LHTB pair
+# whose control (tb-solo-sol-high) pins the same value. Do NOT compare this cell
+# against tb-gt-sol-2terra or any other unpinned cell and call the delta a team
+# effect -- it would be an effort delta plus a headcount delta at once.
+#
+# All three seats are pinned, not just the lead. A lead thinking harder than the
+# seats it delegates to is a third condition, not this one; if that question
+# comes up it needs its own manifest.
+#
+# Effort support verified before this cell was scheduled: `gpt-5.6-sol` and
+# `gpt-5.6-terra` both match the `gpt-5.6` family token in config.rs, whose
+# supported set includes high. A2x already ran sol at `xhigh` and A5h/B3h ran
+# terra at `high` -- neither value is rejected nor silently clamped on this
+# route.
+#
+# Endpoint names resolve via testbed/endpoints/openai-live.json.
+schema_version: "1"
+condition: tb-gt-sol-2terra-high
+roster:
+  - id: lead
+    kind: orchestrator
+    # See tb-gt-3luna.yaml: `lead`, `scout` and `worker` are all read verbatim
+    # out of the "Your team" table by the personas. Renaming any of them breaks
+    # addressing silently -- the @mention resolves to nobody, the send still
+    # reports success, and the trial stalls to its timeout.
+    role: lead
+    count: 1
+    endpoint: gpt-5.6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      # Byte-identical to the file G0, G1s, G1, G1st, G2s and G2 pin, so the
+      # lead's instructions are not a variable anywhere in this wave.
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+    generation:
+      thinking_effort: high
+
+  - id: scout
+    kind: worker
+    role: scout
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+    generation:
+      thinking_effort: high
+
+  - id: worker
+    kind: worker
+    role: worker
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+    generation:
+      thinking_effort: high
+
+prices:
+  # Repriced 2026-07-30: terra 2.5/0.25/15.0 -> 2.00/0.20/12.00 (-20%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Both rows are load-bearing: this is a mixed-model cell, so the headline
+  # $/solved-task depends on the split between the seats as well as on the
+  # totals. Same figures every other sol and terra cell in the study carries --
+  # effort changes how many tokens get spent, not what a token costs.
+  gpt-5.6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    cache_read_rate: 0.0
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    output_per_million_usd: 12.0
+    # Fallback only; the direct OpenAI Responses route reports the real split
+    # and the harness prefers it. See tb-solo-luna-high.yaml.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to the solo baselines. A team genuinely needs longer than a solo
+  # agent -- every handoff is a round trip -- but giving it a larger budget would
+  # confound the comparison it exists to make, and it does not bind anyway:
+  # Harbor enforces each task's own `[agent] timeout_sec` scaled by 3x.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

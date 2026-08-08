@@ -1,0 +1,37 @@
+# Meli solo cell: Tyler-picked persona (buzz-benchmarking thread 74a65a09)
+# on deepseek/deepseek-v4-flash-0731 via OpenRouter.
+#
+# Byte-identical to tb-solo-deepseek-v4-flash-high.yaml except the persona:
+# Meli's production system prompt verbatim plus one appended unattended-mode
+# line (authorized by Tyler, event 36d96837). Same pinned gmicloud/fp8
+# upstream, same measured prices, same effort pin -- see that manifest for the
+# full rationale. The pair isolates one variable: the persona.
+schema_version: "1"
+condition: tb-meli-solo
+roster:
+  - id: meli
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: deepseek/deepseek-v4-flash-0731
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/meli-solo.md
+      sha256: de6330190fe22cb4b58cd5c2ca1cb7fc080e9b7f97b298c8960e08854e7a7a8b
+    generation:
+      thinking_effort: high
+prices:
+  deepseek/deepseek-v4-flash-0731:
+    # gmicloud/fp8 endpoint rates, measured by Atish (tb-solo-deepseek manifest).
+    input_per_million_usd: 0.133
+    cached_input_per_million_usd: 0.0266
+    output_per_million_usd: 0.266
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to every other TB solo cell.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

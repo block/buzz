@@ -7,7 +7,6 @@ import pytest
 def manifest_data() -> dict[str, Any]:
     digest = "a" * 64
     generation = {
-        "temperature": 0,
         "max_output_tokens": 4096,
         "context_window_tokens": 200000,
     }

@@ -1,0 +1,104 @@
+# OR3h -- LHTB team on OpenRouter: kimi-k3 lead, deepseek-v4-flash scout,
+# deepseek-v4-flash worker. All three seats at reasoning effort `high`.
+#
+# Structurally this is tb-gt-sol-luna-terra-high with open-weight models
+# substituted seat for seat: an expensive lead directing two cheap seats, one
+# read-only scout and one that edits and builds. That cell is the reason to run
+# this one -- it scored 0.695 against solo Sol's 0.591 on LHTB-46, and the
+# open question is whether the long-horizon team win survives a 22x cheaper
+# roster or was really about the specific models.
+#
+# NOTE THE ASYMMETRY WITH ITS OPENAI ANALOGUE. There, scout and worker were
+# DIFFERENT models (luna scout, terra worker), which is what let that cell
+# separate "cheap in the read-only seat" from "cheap in the editing seat".
+# Here both cheap seats are the same model, so this cell cannot make that
+# distinction -- it is the two-model analogue of tb-gt-sol-2terra-high, not of
+# tb-gt-sol-luna-terra-high. Reading a seat-placement result out of it would be
+# reading something it does not contain.
+#
+# ROSTER IDS ARE PROTOCOL, NOT LABELS. `lead`, `scout` and `worker` are read
+# verbatim out of the "Your team" table by the gt personas. Renaming any of them
+# breaks addressing silently: the @mention resolves to nobody, the send still
+# reports success, and the trial stalls to its timeout.
+#
+# BOTH UPSTREAMS ARE PINNED (openrouter-live.json): moonshotai/mxfp4 for the
+# lead, gmicloud/fp8 for both cheap seats. On a team cell the pin matters more
+# than on a solo one -- unpinned, each seat independently lands on a different
+# upstream per request, so "the composition" would not even be stable within a
+# single trial. It is also what makes prompt caching work: measured 2026-08-01,
+# pinned routes served a repeated prefix from cache on every call while the
+# unpinned route managed one in three. A team re-sends more history than a solo
+# agent does, so this cell is the one that would have been hurt worst.
+#
+# THIS RUNS UNDER THE PATCHED HARBOR. LHTB needs continue_until_timeout honored
+# (patches/apply_continue_until_timeout.py); stock harbor ignores the flag and
+# agents self-report DONE minutes into hour-long budgets. lhtb46.sh refuses to
+# start on an unpatched harbor -- do not bypass that check.
+schema_version: "1"
+condition: lhtb-or-kimi-lead-2deepseek-high
+roster:
+  - id: lead
+    kind: orchestrator
+    role: lead
+    count: 1
+    # The EXPENSIVE model in the directing seat -- 22x the input rate of the
+    # seats it directs. Whether that is worth it is the cell's question.
+    endpoint: moonshotai/kimi-k3
+    model_revision: moonshotai/kimi-k3-20260715
+    prompt:
+      # Byte-identical to the file every other gt cell pins.
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+    generation:
+      thinking_effort: high
+
+  - id: scout
+    kind: worker
+    role: scout
+    count: 1
+    endpoint: deepseek/deepseek-v4-flash-0731
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+    generation:
+      thinking_effort: high
+
+  - id: worker
+    kind: worker
+    role: worker
+    count: 1
+    endpoint: deepseek/deepseek-v4-flash-0731
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+    generation:
+      thinking_effort: high
+
+prices:
+  # The rates of the PINNED endpoints, not the model ids' headline rates. Both
+  # rows are load-bearing: the whole point of the cell is the split between an
+  # expensive lead and cheap seats, so a wrong row moves the conclusion and not
+  # just the total.
+  moonshotai/kimi-k3:
+    input_per_million_usd: 3.00
+    cached_input_per_million_usd: 0.30
+    output_per_million_usd: 15.00
+    cache_read_rate: 0.0
+  deepseek/deepseek-v4-flash-0731:
+    input_per_million_usd: 0.133
+    cached_input_per_million_usd: 0.0266
+    output_per_million_usd: 0.266
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to the LHTB cells it is meant to be read against. Does not bind
+  # on LHTB anyway -- Harbor enforces each task's own `[agent] timeout_sec`
+  # scaled by the run's --timeout-multiplier (3.0).
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition. override_cpus 4 with -n 8 is exactly 1:1 on a
+  # 32-vCPU m7a.8xlarge.
+  override_cpus: 4
+  override_memory_mb: 8192

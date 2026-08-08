@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
 """Run a problem set with a team manifest and produce leaderboard-ready results.
 
-One command wraps ``harbor run`` with only leaderboard-legal settings — no
-timeout or resource overrides are accepted or forwarded, so the resulting job
-directory passes Harbor's static validation as produced. After the run it
-writes a ``metadata.yaml`` template derived from the manifest and prints the
-exact upload/submit commands.
+One command wraps ``harbor run``. Every flag it accepts produces a submittable
+job by default; three deliberate opt-outs do not, and each has to be asked for
+by name:
+
+* ``--timeout-multiplier`` — a study can legitimately want to know what an agent
+  scores when the clock is not the constraint.
+* ``--override-cpus`` / ``--override-memory-mb`` / ``--override-storage-mb`` —
+  Harbor enforces a task's declared resources as hard limits, and when the agent
+  harness runs *inside* the task container a multi-agent roster shares them with
+  the task's own work. Refusing to raise them does not keep a comparison honest;
+  it hides the distortion in the score instead of in the configuration.
+
+Per-phase timeout knobs and ``--override-gpus`` are still never accepted:
+nothing in Terminal-Bench 2.1 asks for a GPU, so that one could only add
+capability rather than remove an artificial constraint.
+
+Harbor rejects a submission carrying any of these
+(``_check_no_job_overrides`` in ``harbor/leaderboard/static_validation.py``), so
+a job produced with them is a local measurement, not a leaderboard entry, and
+this script says so when it runs.
+After the run it writes a ``metadata.yaml`` template derived from the manifest
+and prints the exact upload/submit commands.
 
 Run inside the testbed environment so ``harbor`` and the adapter are
 importable:
@@ -45,101 +62,90 @@ AGENT_BINARIES = ("buzz-acp", "buzz-agent", "buzz-dev-mcp")
 # host-header tenant-bound, so agents must present its canonical Host).
 FORWARDER_BINARY = "relay-forwarder"
 
-PROVIDER_ORGS = {
-    "anthropic": "Anthropic",
-    "openai": "OpenAI",
-    "databricks": "Databricks",
-}
+PROVIDER_ORGS = {"anthropic": "Anthropic", "openai": "OpenAI", "databricks": "Databricks"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=__doc__.splitlines()[0],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter
     )
     problems = parser.add_mutually_exclusive_group(required=True)
     problems.add_argument(
-        "--dataset",
-        "-d",
-        help="Registry dataset (e.g. terminal-bench/terminal-bench-2-1)",
+        "--dataset", "-d", help="Registry dataset (e.g. terminal-bench/terminal-bench-2-1)"
     )
     problems.add_argument(
         "--path", "-p", type=Path, help="Local task or dataset directory"
     )
     parser.add_argument(
-        "--include-task",
-        "-i",
-        action="append",
-        default=[],
+        "--include-task", "-i", action="append", default=[],
         help="Task name to include from the dataset (glob, repeatable)",
     )
     parser.add_argument(
-        "--exclude-task",
-        "-x",
-        action="append",
-        default=[],
+        "--exclude-task", "-x", action="append", default=[],
         help="Task name to exclude from the dataset (glob, repeatable)",
     )
     parser.add_argument(
-        "--attempts",
-        "-k",
-        type=int,
-        required=True,
+        "--attempts", "-k", type=int, required=True,
         help="Runs per problem (leaderboards require 5)",
     )
+    parser.add_argument("--manifest", type=Path, required=True, help="Team manifest YAML")
     parser.add_argument(
-        "--manifest", type=Path, required=True, help="Team manifest YAML"
-    )
-    parser.add_argument(
-        "--endpoint-config",
-        type=Path,
-        required=True,
+        "--endpoint-config", type=Path, required=True,
         help="JSON mapping manifest endpoint names to providers/API keys",
     )
     parser.add_argument(
-        "--provisioner-config",
-        type=Path,
-        required=True,
+        "--provisioner-config", type=Path, required=True,
         help="JSON config for the Buzz relay/Postgres provisioner",
     )
     parser.add_argument(
-        "--buzz-bin-dir",
-        type=Path,
-        default=None,
+        "--buzz-bin-dir", type=Path, default=None,
         help="Directory with the host buzz CLI (default: repo target/release, then target/debug)",
     )
     parser.add_argument(
-        "--agent-bin-dir",
-        type=Path,
-        required=True,
+        "--agent-bin-dir", type=Path, required=True,
         help="Directory with Linux builds of buzz-acp/buzz-agent/buzz-dev-mcp "
         "to upload into each task container",
     )
     parser.add_argument(
-        "--relay-gateway",
-        default="",
+        "--relay-gateway", default="",
         help="host:port of the benchmark relay as reachable from inside the "
         "task container (e.g. host.docker.internal:3600). When set, a "
         "loopback forwarder from --agent-bin-dir bridges the canonical "
         "relay address to this gateway",
     )
+    parser.add_argument("--n-concurrent", "-n", type=int, default=4, help="Concurrent trials")
     parser.add_argument(
-        "--n-concurrent", "-n", type=int, default=4, help="Concurrent trials"
+        "--timeout-multiplier", type=float, default=None, metavar="N",
+        help="Scale every Harbor phase timeout (agent, verifier, setup, build) "
+             "by N. Anything but 1.0 makes the job unsubmittable to the "
+             "leaderboard; omit it for a submittable run.",
+    )
+    # Resource overrides: off unless asked for, and unsubmittable when used.
+    # They exist because the Buzz stack runs *inside* the task container, so a
+    # multi-agent roster shares one task's declared 1 vCPU and 2 GB with three
+    # process groups. Refusing them does not keep a study honest; it just moves
+    # the distortion somewhere it cannot be seen.
+    parser.add_argument(
+        "--override-cpus", type=int, default=None, metavar="N",
+        help="Give every task N CPUs instead of its own declared request. "
+             "Makes the job unsubmittable; omit for a submittable run.",
     )
     parser.add_argument(
-        "--jobs-dir", type=Path, default=Path("jobs"), help="Job output root"
+        "--override-memory-mb", type=int, default=None, metavar="MB",
+        help="Give every task MB of memory instead of its own declared "
+             "request. Makes the job unsubmittable; omit for a submittable run.",
     )
     parser.add_argument(
-        "--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)"
+        "--override-storage-mb", type=int, default=None, metavar="MB",
+        help="Give every task MB of storage instead of its own declared "
+             "request. Makes the job unsubmittable; omit for a submittable run.",
     )
+    parser.add_argument("--jobs-dir", type=Path, default=Path("jobs"), help="Job output root")
+    parser.add_argument("--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)")
     parser.add_argument(
-        "--upload",
-        action="store_true",
-        help="Upload to Harbor Hub when the job finishes",
+        "--upload", action="store_true", help="Upload to Harbor Hub when the job finishes"
     )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Print the harbor command and exit"
-    )
+    parser.add_argument("--dry-run", action="store_true", help="Print the harbor command and exit")
     return parser.parse_args(argv)
 
 
@@ -147,9 +153,7 @@ def find_binaries(bin_dir: Path | None) -> dict[str, Path]:
     candidates = (
         [bin_dir]
         if bin_dir is not None
-        else [
-            PACKAGE_ROOT.parents[1] / "target" / kind for kind in ("release", "debug")
-        ]
+        else [PACKAGE_ROOT.parents[1] / "target" / kind for kind in ("release", "debug")]
     )
     for candidate in candidates:
         found = {name: candidate / name for name in BINARIES}
@@ -181,22 +185,33 @@ def build_command(
     binaries: dict[str, Path],
     agent_binaries: dict[str, Path],
 ) -> list[str]:
-    """Compose the harbor invocation. Standard settings only: any timeout or
-    resource override would fail leaderboard static validation, so none are
-    accepted or forwarded."""
+    """Compose the harbor invocation.
+
+    Standard settings, plus the unsubmittable knobs when they are explicitly
+    asked for: ``--timeout-multiplier`` and the cpu/memory/storage overrides.
+    None of them is on by default, so the command this builds is
+    leaderboard-legal unless a caller opted out.
+
+    ``--override-gpus`` is still never accepted. Nothing in Terminal-Bench 2.1
+    requests a GPU, so a flag for it could only ever change what the machine can
+    do rather than remove an artificial constraint.
+    """
     command = [
-        "harbor",
-        "run",
-        "--yes",
-        "--job-name",
-        args.job_name,
-        "--jobs-dir",
-        str(args.jobs_dir),
-        "-k",
-        str(args.attempts),
-        "--n-concurrent",
-        str(args.n_concurrent),
+        "harbor", "run", "--yes",
+        "--job-name", args.job_name,
+        "--jobs-dir", str(args.jobs_dir),
+        "-k", str(args.attempts),
+        "--n-concurrent", str(args.n_concurrent),
     ]
+    if args.timeout_multiplier is not None:
+        command += ["--timeout-multiplier", str(args.timeout_multiplier)]
+    for flag, value in (
+        ("--override-cpus", args.override_cpus),
+        ("--override-memory-mb", args.override_memory_mb),
+        ("--override-storage-mb", args.override_storage_mb),
+    ):
+        if value is not None:
+            command += [flag, str(value)]
     if args.dataset:
         command += ["--dataset", args.dataset]
     else:
@@ -295,13 +310,37 @@ def main(argv: list[str] | None = None) -> int:
             f"{PACKAGE_ROOT / 'testbed'} {Path(__file__).resolve()} ..."
         )
 
-    result = subprocess.run(command, check=False)
+    result = subprocess.run(command)
     job_dir = args.jobs_dir / args.job_name
     if result.returncode != 0:
         print(f"harbor run failed (exit {result.returncode}); job dir: {job_dir}")
         return result.returncode
 
     metadata_path = write_metadata_template(args, job_dir)
+    overrides = [
+        f"{name}={value}"
+        for name, value in (
+            ("timeout_multiplier", args.timeout_multiplier),
+            ("override_cpus", args.override_cpus),
+            ("override_memory_mb", args.override_memory_mb),
+            ("override_storage_mb", args.override_storage_mb),
+        )
+        if value is not None
+    ]
+    if overrides:
+        # Said once, at the end, where the submit instructions would otherwise
+        # be: printing them for a job Harbor will refuse wastes someone's
+        # afternoon finding out why. Naming every override matters as much as
+        # naming one — a score reported without them is not comparable to a
+        # leaderboard number, and the reader cannot tell from the score alone.
+        print(
+            f"\nJob complete: {job_dir}\n"
+            f"  Ran with {', '.join(overrides)}, so Harbor's "
+            "static validation will reject this job as a leaderboard submission "
+            "(no_job_overrides). It is a local measurement — report the score "
+            "with those settings stated alongside it."
+        )
+        return 0
     print("\nLeaderboard-ready job complete.")
     print(f"  1. Review submitter details in {metadata_path}")
     print(f"  2. harbor upload {job_dir}")

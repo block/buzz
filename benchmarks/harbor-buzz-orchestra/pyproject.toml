@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Harbor custom agent for Buzz-coordinated multi-agent benchmarks"
 requires-python = ">=3.12"
 dependencies = [
+    # Trust anchors uploaded into every task container: many Terminal-Bench
+    # images ship no CA store, and buzz-agent cannot build an HTTPS client
+    # without one. See container_runtime.REMOTE_CA_BUNDLE.
+    "certifi>=2024.2.2",
     "harbor>=0.16.1,<0.18",
     "pydantic>=2.11",
     "pyyaml>=6.0",

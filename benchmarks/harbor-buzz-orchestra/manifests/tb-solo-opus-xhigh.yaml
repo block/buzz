@@ -1,0 +1,69 @@
+# A3x solo baseline: tb-solo-opus with reasoning effort raised medium -> xhigh.
+#
+# The effort axis (G2) on the frontier denominator. Everything except
+# `thinking_effort` is byte-identical to tb-solo-opus — roster, persona bytes,
+# endpoint, revision, prices, budget, clock, container resources — so the
+# A3-vs-A3x delta isolates effort, in both score and cost.
+#
+# Paired with tb-solo-sol-xhigh, this asks the question the study actually cares
+# about: what is *good enough*. Two axes, measured the same way — model tier
+# (luna -> sol -> opus) and effort (medium -> xhigh) — and the interesting
+# outcome is finding where each one stops paying. If A3x costs materially more
+# than A3 and scores the same, then "buy a bigger model" and "buy more thinking"
+# are both answers to a question most tasks were not asking.
+#
+# Effort reaches this endpoint in a different shape than it reaches sol, which
+# matters when reading the two results side by side. On the Anthropic route the
+# level selects a *thinking token budget*: medium is 8_192 and xhigh is 32_768
+# (config.rs:35), a 4x increase. On sol's Responses route it is a `reasoning.
+# effort` string and the provider decides what that spends. So A3x's token
+# growth is bounded by a number we can name and A2x's is not — do not read a
+# larger delta on one as the model "trying harder" than the other.
+#
+# xhigh is genuinely available here rather than silently clamped:
+# `databricks-claude-opus-5` strips to `claude-opus-5` (config.rs
+# `strip_catalog_prefix` slices from the first `claude-`/`gpt-` token), which
+# `anthropic_model_supports_xhigh` matches by prefix, so `clamp_adaptive_effort`
+# passes it through. Worth stating explicitly because the failure mode is
+# silent: an unsupported level clamps down to `high` with only a log warning,
+# and the cell would report a null that was really a mislabelled `high` run.
+#
+# Endpoint names are exact Databricks serving-endpoint names; they resolve to
+# provider/host/key via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-solo-opus-xhigh
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-claude-opus-5
+    model_revision: claude-opus-5
+    prompt:
+      # Byte-identical to every other solo cell.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      thinking_effort: xhigh
+prices:
+  # Identical to tb-solo-opus. Effort moves token volume, not the rate card.
+  databricks-claude-opus-5:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 25.0
+    cache_read_rate: 0.0
+trial_budget:
+  # Unchanged from tb-solo-opus — see tb-solo-sol-xhigh.yaml for why raising it
+  # for a higher-effort cell would convert a result into a budgeting decision.
+  #
+  # Watch this one: opus already produced 11 AgentTimeoutErrors in 89 trials at
+  # medium, and a 4x thinking budget can only push that up. Those trials are
+  # still scored on whatever reached disk, so they are results rather than
+  # losses — but if the count climbs sharply, "xhigh ran out of clock" is part
+  # of the finding and must be reported next to the score, not buried.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition — see tb-solo-sol.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

@@ -1,0 +1,110 @@
+# C2 — three gpt-5.6-luna agents in a hierarchy: one delegating lead and two
+# implementers. The topology control for tb-triad-3luna.
+#
+# This is the cleanest prompt-scheme experiment in the study. Against C1 it holds
+# the model, the agent count, the serving path, the price sheet and the trial
+# budget fixed and varies exactly one thing: how the three agents relate to each
+# other. Peers who argue, versus a lead who assigns. Any score or cost delta
+# between C1 and C2 is attributable to the persona bytes, which is a result the
+# multi-agent literature mostly asserts rather than measures.
+#
+# It also answers the cheaper objection to C1 directly. If C1 beats the solo
+# baselines and C2 does too, by a similar margin, then the win is headcount and
+# the peer protocol is decoration. If C1 wins and C2 does not, the protocol is
+# doing the work.
+#
+# Roster shape is deliberately the same as tb-team-sol-luna.yaml (lead +
+# 2x implementer, count: 2) so the two are comparable across the model change:
+# C2 is that condition with the expensive lead swapped for a cheap one. The lead
+# accumulates the most context in a hierarchy — it reads every report — so
+# putting a cheap model in that seat is the specific bet this condition tests.
+#
+# `count: 2` produces agent ids `worker-1` and `worker-2` (container_runtime
+# splits ids on the trailing index), and both receive the same persona bytes.
+# lead-delegate.md already handles this shape: its rule 4 assigns the task's own
+# success check to the worker that did *not* do the work, which is a free
+# verification pass that C1 pays for with a third persona.
+#
+# No critic here on purpose. Adding one would make C2 differ from C1 in both
+# topology and headcount-of-verifiers, and then neither comparison isolates
+# anything.
+#
+# Endpoint names are exact Databricks serving-endpoint names; provider/host/key
+# resolve via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-team-3luna
+roster:
+  - id: orch
+    kind: orchestrator
+    # `lead` is read verbatim by worker.md: "Your lead is the teammate whose Role
+    # column reads `lead`". Renaming it means every report @mentions nobody, the
+    # sends all report success, and the trial stalls to its timeout with no error.
+    role: lead
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      # Byte-identical to the file tb-team-sol-luna.yaml pins, so the lead's
+      # instructions are not a variable between the two team conditions.
+      path: personas/bench/lead-delegate.md
+      sha256: 0dae4944765fab10cd5b1d3adcb1ef9c789384e52060acb140ab20f9c3f4686b
+
+  - id: worker
+    kind: worker
+    role: implementer
+    count: 2
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/worker.md
+      sha256: 6c8525f48ac71ed875d3de3fc867cc1ddca885d433ad3fc0aba09b3eb2607b45
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Operator-supplied list prices, doc 04 §7, identical to every other luna
+  # condition. See tb-triad-3luna.yaml for why holding these equal keeps the
+  # cross-condition cost ratios sound, and why cache_read_rate is 0.0 (DB10).
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    # Fallback only; the agent reports the provider's measured cache split and
+    # the accounting path prices that instead, flagging which of the two it
+    # used. 0.0 keeps a fallback conservative rather than inventing a discount.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to every other condition in the comparison set. See
+  # tb-triad-3luna.yaml.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition, including the solo baselines. Harbor enforces
+  # a task's declared resources as hard Docker limits, and the Buzz stack runs
+  # *inside* that container, so a 3-agent roster would otherwise fit three
+  # buzz-acp/buzz-agent/buzz-dev-mcp process groups plus the task's own work
+  # into the 1 vCPU and 2 GB most Terminal-Bench tasks ask for. A team that
+  # thrashes there has been penalised for memory pressure rather than for
+  # coordinating badly — a confound in precisely what this study measures.
+  #
+  # Raising it only for the team tiers would trade that confound for a worse
+  # one, so the solos carry it too and every cell is measured on identical
+  # hardware.
+  #
+  # 4 and 8192 are the *maxima* the dataset declares (cpus: 83x1, 3x2, 3x4;
+  # memory_mb: 68x2048, 13x4096, 8x8192), and that is not a coincidence. Harbor
+  # replaces rather than raises — environments/base.py assigns
+  # `task_env_config.cpus = override_cpus` outright — so any smaller value would
+  # quietly shrink the 8 tasks that ask for 8 GB and the 3 that ask for 4 CPUs.
+  # Every task therefore gets at least what it requested, and most get more.
+  #
+  # storage_mb is deliberately absent: all 89 tasks already declare 10240, so an
+  # override would restate the status quo and add a knob with nothing to say.
+  override_cpus: 4
+  override_memory_mb: 8192

@@ -1,0 +1,99 @@
+# G2 -- G1 with a second read-only scout. A claude-opus-5 lead over two luna
+# scouts and one luna worker, through the Databricks AI Gateway.
+#
+# The recon-width question asked on the opus route, so that the wave's headline
+# comparison exists in both places. Against tb-gt-opus-2luna it varies exactly
+# one thing -- one scout becomes two -- with the lead model, persona bytes,
+# route, price sheet, clock and container all held.
+#
+# Why run it here as well as at G2s. If widening recon helps at all, the size of
+# the help should depend on how good the synthesiser is: a lead that can hold
+# two conflicting briefs and resolve them gets more out of a second scout than
+# one that cannot. So the interesting number is not the G1->G2 delta or the
+# G1s->G2s delta on its own, it is whether they are the same size. That is a
+# question about where orchestration quality actually lives, and it needs both
+# routes measured or it cannot be asked.
+#
+# The four cells therefore form a 2x2 -- lead model x recon width:
+#
+#                  1 scout            2 scouts
+#   sol lead       G1s (this wave)    G2s
+#   opus lead      G1                 G2
+#
+# with G0 hanging off the sol column as the cheap-lead control. Every cell in a
+# column shares its route, so the two width deltas are each clean; the row
+# comparison (sol vs opus lead) carries the route caveat that C3 has carried
+# since it was written, because opus cannot speak /responses.
+#
+# FOUR agents in one container. See `environment` -- 4 vCPU and 8192 MB is the
+# dataset maximum rather than a comfortable margin, so if this cell diverges
+# from its 3-agent sibling in a way the score cannot explain, check `free -m`
+# and container exit-137 before believing the coordination story.
+#
+# Endpoint names resolve via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-gt-opus-3luna
+roster:
+  - id: lead
+    kind: orchestrator
+    role: lead
+    count: 1
+    endpoint: databricks-claude-opus-5
+    model_revision: claude-opus-5
+    prompt:
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+
+  - id: scout
+    kind: worker
+    role: scout
+    # The only line that differs from tb-gt-opus-2luna. Seats are named
+    # `{id}-{index}`, 1-indexed, so this yields `scout-1` and `scout-2` as
+    # separate rows in the "Your team" table -- which is what lets the lead give
+    # each a different angle instead of a smaller slice of the same one.
+    count: 2
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+
+  - id: worker
+    kind: worker
+    role: worker
+    # Still one, for the same reason as G2s: widening recon and implementation
+    # together would make the delta unattributable.
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Byte-identical to tb-gt-opus-2luna and tb-team-opus-luna.
+  databricks-claude-opus-5:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 25.0
+    cache_read_rate: 0.0
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

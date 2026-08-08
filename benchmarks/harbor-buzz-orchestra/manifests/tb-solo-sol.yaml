@@ -1,0 +1,77 @@
+# A2 solo baseline: the same single-agent condition as tb-solo-luna, on
+# gpt-5.6-sol instead of gpt-5.6-luna.
+#
+# This is the one comparison in the study that isolates the model. Roster shape,
+# persona bytes, effort, budget, clock and serving stack are all identical to
+# tb-solo-luna — only the endpoint moves — so a score difference between the two
+# is attributable to the model and nothing else. Every multi-agent condition is
+# measured against these two, which is why they have to be built this way round:
+# change one thing.
+#
+# Endpoint names are exact Databricks serving-endpoint names: the runtime passes
+# the manifest endpoint name to the gateway as the model. They resolve to
+# provider/host/key via testbed/endpoints/databricks-live.json, which is
+# deployment config and deliberately outside this manifest.
+schema_version: "1"
+condition: tb-solo-sol
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-gpt-5-6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      # Byte-identical to tb-solo-luna. The persona is model-agnostic on
+      # purpose; a prompt tuned per model would make the two incomparable.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+prices:
+  # Operator-supplied list prices, doc 04 §7 (the same figures tb-team-sol-luna.yaml
+  # carries for sol). See tb-solo-luna.yaml for why cache_read_rate is 0.0 (DB10).
+  #
+  # Note sol is ~5x luna on input and ~5x on output at these rates, so the cost
+  # comparison between A1 and A2 is the number most sensitive to getting the real
+  # prices in — more so than either score.
+  databricks-gpt-5-6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    # Fallback only; the agent reports the provider's measured cache split and
+    # the accounting path prices that, recording which it used
+    # (`accounting_cache_read_tokens_are_measured`). 0.0 keeps an unmeasured run
+    # conservative rather than inventing a discount.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to tb-solo-luna, and it has to be: the trial budget is a backstop
+  # above the longest task in the dataset (12000s) at the 3x timeout multiplier,
+  # so each task's own `[agent] timeout_sec` governs instead of a flat harness
+  # deadline. A different value here would mean the two conditions ran on
+  # different clocks, and benchmark.py's check_budget_clears_clock would refuse
+  # to start if it were smaller than 12000 x 3.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition, including the solo baselines. Harbor enforces
+  # a task's declared resources as hard Docker limits, and the Buzz stack runs
+  # *inside* that container, so a 3-agent roster would otherwise fit three
+  # buzz-acp/buzz-agent/buzz-dev-mcp process groups plus the task's own work
+  # into the 1 vCPU and 2 GB most Terminal-Bench tasks ask for. A team that
+  # thrashes there has been penalised for memory pressure rather than for
+  # coordinating badly — a confound in precisely what this study measures.
+  #
+  # Raising it only for the team tiers would trade that confound for a worse
+  # one, so the solos carry it too and every cell is measured on identical
+  # hardware.
+  #
+  # 4 and 8192 are the *maxima* the dataset declares (cpus: 83x1, 3x2, 3x4;
+  # memory_mb: 68x2048, 13x4096, 8x8192), and that is not a coincidence. Harbor
+  # replaces rather than raises — environments/base.py assigns
+  # `task_env_config.cpus = override_cpus` outright — so any smaller value would
+  # quietly shrink the 8 tasks that ask for 8 GB and the 3 that ask for 4 CPUs.
+  # Every task therefore gets at least what it requested, and most get more.
+  #
+  # storage_mb is deliberately absent: all 89 tasks already declare 10240, so an
+  # override would restate the status quo and add a knob with nothing to say.
+  override_cpus: 4
+  override_memory_mb: 8192

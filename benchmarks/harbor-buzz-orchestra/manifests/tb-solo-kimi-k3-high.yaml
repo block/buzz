@@ -1,0 +1,67 @@
+# OR1h -- solo moonshotai/kimi-k3 at reasoning effort `high`, via OpenRouter.
+#
+# The first cell in the study on a route other than direct-OpenAI or Databricks,
+# and the first on open-weight models. Read it against the OpenAI solo cells for
+# a tier comparison only -- the ROUTE differs, so this is not a clean
+# model-versus-model contrast in the way A5m -> A5h is a clean effort contrast.
+# The same caveat that gated G1s versus A2 applies here and is larger.
+#
+# THE UPSTREAM IS PINNED, AND THAT IS LOAD-BEARING. `moonshotai/kimi-k3` is not
+# one deployment: OpenRouter serves it from ten upstreams spanning mxfp4/fp8/
+# unknown quantization, 912K-1048K context, and $3.00-$4.50 per Mtok input.
+# Unpinned, consecutive requests land on different ones and the cell measures a
+# mixture whose composition moves with provider load. testbed/endpoints/
+# openrouter-live.json pins `moonshotai/mxfp4` -- Moonshot's own deployment,
+# 100% uptime over the sampling window -- and buzz-agent sends it with
+# `allow_fallbacks: false`, so an unavailable upstream fails loudly instead of
+# quietly redefining the condition mid-run.
+#
+# The pin also decides whether prompt caching happens at all. Measured
+# 2026-08-01 over a fixed 21K-token prefix, three calls: unpinned returned
+# cached_tokens 0, 0, 20480; pinned to moonshotai/mxfp4 it returned 20480 every
+# time, $0.00715 against $0.06245 per call. Nearly 9x on input cost, decided by
+# routing luck. Do not remove the pin to "let OpenRouter optimise".
+#
+# EFFORT REACHES THE MODEL AS OpenRouter's `reasoning.effort`, not OpenAI's
+# `reasoning_effort` -- see apply_openrouter_mutations in llm.rs. kimi-k3
+# advertises supported_efforts ["max","high","low"] and defaults to "max", so
+# `high` here is a deliberate step DOWN from the provider default and must stay
+# pinned: leaving it unset would silently run this cell at max.
+#
+# PRICES are the moonshotai/mxfp4 endpoint's own rates, which are also the
+# headline rates for the model id. They are NOT the rates of the two premium
+# kimi endpoints ($4.50/$22.50); the pin is what makes the cheaper row correct,
+# which is another reason it cannot be dropped without restating cost.
+schema_version: "1"
+condition: tb-solo-kimi-k3-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: moonshotai/kimi-k3
+    model_revision: moonshotai/kimi-k3-20260715
+    prompt:
+      # Byte-identical to every other solo cell in the study.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      thinking_effort: high
+prices:
+  moonshotai/kimi-k3:
+    input_per_million_usd: 3.00
+    cached_input_per_million_usd: 0.30
+    output_per_million_usd: 15.00
+    # Fallback only. OpenRouter reports the split at
+    # usage.prompt_tokens_details.cached_tokens, which buzz-agent already reads
+    # (openai_chat_cached_tokens, llm.rs) -- verified live on this exact pinned
+    # route, not assumed. 0.0 keeps an unmeasured run conservative.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to every other TB solo cell.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

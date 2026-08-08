@@ -1,0 +1,128 @@
+# D1 -- gpt-5.6-sol driving, claude-opus-5 navigating. The steelman for teams.
+#
+# WHY THIS CELL EXISTS. Every multi-agent cell in the study so far has a
+# capability gradient: an expensive lead with cheap workers (C3, G1, G1s), or a
+# uniform floor (B1, C1, C2, G0). That leaves the anti-team result one easy
+# objection -- "of course coordination did not help, you paired a strong model
+# with weak ones and the weak ones dragged it down." This cell removes the
+# objection. On Terminal-Bench the two solos are statistically tied at the top
+# (A3 opus 0.851, A2 sol 0.843), so this is two near-equal strong peers with no
+# weak seat to blame. If a pair of the study's best models cannot beat either of
+# them working alone, the finding is very hard to argue with.
+#
+# It is deliberately the most favourable configuration for the team thesis that
+# this study can construct. That is the point: the result only means something
+# if the setup was trying to succeed.
+#
+# THE CONTROLS ALREADY EXIST, WHICH IS WHY IT IS ON TERMINAL-BENCH AND BOTH
+# SEATS ARE ON DATABRICKS. Against A2 (`tb-solo-sol`, databricks-gpt-5-6-sol,
+# 0.843) and A3 (`tb-solo-opus`, databricks-claude-opus-5, 0.851) this holds
+# route, effort, price sheet, clock, container and dataset fixed and varies only
+# headcount. Comparing a mixed pair against only ONE solo would conflate "added
+# an agent" with "added a better model" -- the joint-delta mistake tb-solo-luna-high
+# made, that tb-solo-luna-openai had to be built to undo, and that the G1s-vs-A2
+# headline still carries. Here there is nothing left to caveat: it is the most
+# tightly controlled cell in the study.
+#
+# The mixed-provider question was checked before writing this: a single endpoint
+# config may name entries from different providers, because benchmark.py's
+# `write_provisioner_config` resolves each entry's own `api_key_env` and each
+# entry carries its own `provider` and `env`. It is not needed here -- both
+# seats are Databricks, so `testbed/endpoints/databricks-live.json` covers them
+# -- but it means the OpenAI-routed variant is possible without a harness change.
+#
+# WHICH MODEL DRIVES, AND WHY IT IS NOT ARBITRARY. Sol drives, Opus navigates.
+# The only plausible mechanism by which a pair beats a strong solo is that a
+# second strong reader catches what the implementer misses; two implementers in
+# parallel is not what these personas do. Putting the better solo (opus, 0.851)
+# in the reviewing seat tests that mechanism directly. The reverse assignment is
+# a different experiment and would need its own cell -- do not read this one as
+# covering both.
+#
+# COST WARNING. The pair axis has run ~1.76x its solo, and these are the two
+# most expensive solos in the study ($41.75 and $61.75). Budget $85-110 and
+# ~6h. There is no cheaper version of this question.
+#
+# SCHEDULING CONSTRAINT -- this is not optional. Opus on Databricks is capped on
+# OUTPUT tokens per minute WORKSPACE-WIDE, so two boxes running opus collide
+# invisibly. The collision is differentially harmful to exactly this comparison:
+# a fatal 429 costs a team cell ~0.26 reward and costs a solo cell nothing, so
+# throttling would damage this pair while leaving A2 and A3 -- already banked --
+# untouched. That is bias pointing the wrong way. Do not start this cell while
+# G1 (`tb-gt-opus-2luna`) is running on another box.
+#
+# Endpoint names resolve via testbed/endpoints/databricks-live.json.
+schema_version: "1"
+condition: tb-peer-sol-opus
+roster:
+  - id: driver
+    kind: orchestrator
+    role: driver
+    count: 1
+    endpoint: databricks-gpt-5-6-sol
+    model_revision: databricks-gpt-5-6-sol
+    prompt:
+      # Byte-identical to B1/B1h/B3h, so this sits on the same pair axis rather
+      # than being a new persona experiment wearing a pair's clothes.
+      path: personas/bench/peer-driver.md
+      sha256: 1cf4d1cbf4093dd0d9b1a6a7ccd9a875c39621d0bab3ddec7e0bb23177761149
+
+  - id: navigator
+    kind: worker
+    # Read verbatim by both personas out of the "Your team" table -- peer-driver
+    # addresses `navigator` and peer-navigator addresses `driver`. Renaming
+    # either role here silently breaks the pairing: the @mention resolves to
+    # nobody, the send still reports success, and the trial stalls to timeout.
+    role: navigator
+    count: 1
+    endpoint: databricks-claude-opus-5
+    model_revision: databricks-claude-opus-5
+    prompt:
+      path: personas/bench/peer-navigator.md
+      sha256: dcf2ae226b5967067687060871438397125e54b8c412f69076eb2a8edd56d2c5
+
+# NO `generation` BLOCK ON EITHER SEAT, deliberately. A2 and A3 do not pin
+# `thinking_effort` either, so all three sit at the provider default and the
+# comparison is effort-matched. Pinning a level here would look tidier and would
+# add back exactly one difference against both controls. (Unset means the
+# harness omits the `reasoning` field entirely -- see
+# `responses_body_omits_reasoning_when_effort_none` in buzz-agent/src/llm.rs.)
+
+prices:
+  # Both rows copied verbatim from tb-solo-sol.yaml and tb-solo-opus.yaml. This
+  # is what makes the pair-versus-solo cost RATIO sound: the dollars move only
+  # because token volume moved, never because a rate was edited.
+  databricks-gpt-5-6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    # Fallback only; the agent reports the provider's measured cache split and
+    # the accounting path prices that, recording which it used
+    # (`accounting_cache_read_tokens_are_measured`). 0.0 keeps an unmeasured run
+    # conservative rather than inventing a discount.
+    cache_read_rate: 0.0
+  databricks-claude-opus-5:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    # Note opus is NOT a clean 5x luna on every axis the way sol is: input and
+    # cache-read are 5x (5.0 vs 1.0, 0.5 vs 0.1) but output is ~4.17x.
+    output_per_million_usd: 25.0
+    # Cache-write caveat, and it bites hardest in a team: the anthropic route
+    # reports `cache_creation_input_tokens` separately and Anthropic bills cache
+    # writes at ~1.25x input, but our accounting prices write tokens at the plain
+    # input rate (02 §7.5 residual). A pair re-sends context constantly, so write
+    # volume here is larger than in A3. Opus cost in this cell is understated by
+    # that margin -- confirm before publishing its dollar figure.
+    cache_read_rate: 0.0
+
+trial_budget:
+  # Matches A2 and A3 exactly. A pair genuinely needs longer than a solo agent --
+  # every handoff is a round trip -- but giving it a larger budget would confound
+  # the comparison, and it does not bind anyway: Harbor enforces each task's own
+  # `[agent] timeout_sec` scaled by the study's 3x multiplier.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

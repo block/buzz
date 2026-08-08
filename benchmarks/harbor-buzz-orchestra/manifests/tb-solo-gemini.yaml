@@ -1,0 +1,70 @@
+# A4 solo baseline: the same single-agent condition as tb-solo-luna, on
+# gemini-3.6-flash.
+#
+# Third model on the solo axis, and the first one that is neither OpenAI- nor
+# Anthropic-shaped. Roster shape, persona bytes, effort, budget and clock are
+# identical to tb-solo-luna and tb-solo-sol — only the endpoint moves — so a
+# score difference is attributable to the model.
+#
+# Unlike the other two, this one exercises a *third* serving route. Endpoint
+# names containing neither `gpt-5` nor `claude` fall through
+# `databricks_v2_route_for_model` to the MLflow chat/completions gateway, which
+# has its own body builder and parser (`openai_body` / `parse_openai`). Two
+# defects there made Gemini unusable until 2026-07-29 — dropped thought
+# signatures and discarded block-array text — so a run of this manifest on a
+# buzz-agent older than that fix scores near zero for reasons that have nothing
+# to do with the model. See docs/08-gemini-provider-fixes.md.
+#
+# Endpoint names are exact Databricks serving-endpoint names: the runtime passes
+# the manifest endpoint name to the gateway as the model. They resolve to
+# provider/host/key via testbed/endpoints/databricks-live.json, which is
+# deployment config and deliberately outside this manifest.
+schema_version: "1"
+condition: tb-solo-gemini
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-gemini-3-6-flash
+    model_revision: gemini-3.6-flash
+    prompt:
+      # Byte-identical to tb-solo-luna and tb-solo-sol. The persona is model- and
+      # provider-agnostic on purpose; a prompt tuned per model would make the
+      # three incomparable.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+prices:
+  # PLACEHOLDER — NOT A MEASUREMENT. Doc 04 §7 carries operator-supplied list
+  # prices for the GPT-5.6 endpoints only; there is no Gemini row, and the
+  # serving-endpoint record exposes no rate. Zeroes are deliberate: a wrong
+  # non-zero rate would produce a plausible dollar figure that silently
+  # misreports, whereas $0.00 is obviously not a cost.
+  #
+  # This does NOT affect the run. Token counts are measured per trial and
+  # recorded in the receipts either way, so cost is recoverable afterwards as
+  # tokens x rate. Fill these in before quoting any dollar figure for A4/B2.
+  databricks-gemini-3-6-flash:
+    input_per_million_usd: 0.0
+    cached_input_per_million_usd: 0.0
+    output_per_million_usd: 0.0
+    # See tb-solo-luna.yaml for why this is 0.0 (DB10): the agent reports the
+    # provider's measured cache split and the accounting path prices that,
+    # recording which it used in `accounting_cache_read_tokens_are_measured`.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to the other solo baselines, and it has to be: the trial budget is
+  # a backstop above the longest task in the dataset (12000s) at the 3x timeout
+  # multiplier, so each task's own `[agent] timeout_sec` governs instead of a
+  # flat harness deadline. A different value here would mean the conditions ran
+  # on different clocks, and benchmark.py's check_budget_clears_clock would
+  # refuse to start if it were smaller than 12000 x 3.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition — see tb-solo-luna.yaml for the full reasoning.
+  # 4 and 8192 are the maxima the dataset declares, and Harbor replaces rather
+  # than raises, so any smaller value would quietly shrink the tasks that ask
+  # for more.
+  override_cpus: 4
+  override_memory_mb: 8192

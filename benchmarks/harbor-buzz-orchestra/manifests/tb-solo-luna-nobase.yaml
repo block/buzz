@@ -1,0 +1,60 @@
+# A1 sensitivity check: the solo baseline with buzz-acp's [Base] platform
+# section suppressed.
+#
+# Byte-identical to tb-solo-luna.yaml except for include_platform_prompt. That
+# is the point — the pair isolates one variable, so any score, cost, or token
+# delta between them is attributable to the ~12KB of production-workspace
+# guidance buzz-acp prepends ahead of the pinned persona
+# (crates/buzz-acp/src/base_prompt.md).
+#
+# Why it is worth a run: that section tells agents to sweep `buzz feed get` on
+# startup, look for RESEARCH/ and PLANS/ and AGENTS.md, edit inside a git
+# worktree, and that "publishing is optional and silence is usually correct".
+# In a graded container the first three waste tool rounds and can write files
+# the grader sees, and the fourth is how a multi-agent trial stalls. Every
+# persona in personas/bench/ overrides all of it in prose. This condition is
+# what turns that override from an assertion into a measurement.
+#
+# Not a headline condition. tb-solo-luna.yaml stays the baseline, because
+# [Base] is what a real Buzz agent receives and the study is about Buzz. Run
+# this once, at the same k, and report the delta as a caveat.
+schema_version: "1"
+condition: tb-solo-luna-nobase
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    include_platform_prompt: false
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Operator-supplied list prices, doc 04 §7. See tb-solo-luna.yaml for why
+  # cache_read_rate is 0.0 (DB10).
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+trial_budget:
+  # 36000 = the dataset's longest task (12000s) at the 3x timeout multiplier the
+  # study runs with (DEFAULT_TIMEOUT_MULTIPLIER in scripts/benchmark.py). The two
+  # are one setting in two files: benchmark.py refuses to start if this is the
+  # smaller of the pair, because the harness would then cut a task short of the
+  # deadline Harbor granted it and record a timeout the agent never hit. A flat
+  # 900s did exactly that before the multiplier existed — 39 of the 89 tasks
+  # allow more than 900s, and one live trial died at 905s against a task budget
+  # of 1800s.
+  timeout_seconds: 36000
