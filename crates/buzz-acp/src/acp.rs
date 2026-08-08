@@ -513,6 +513,22 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
+        // The third-party agent runtime is model-controlled. The ACP harness
+        // retains signing authority and passes only a typed publisher
+        // capability inside the MCP server configuration during session/new.
+        // Apply these removals after every inherited/default/persona layer so
+        // no user-supplied extra_env entry can restore a signing credential.
+        for name in [
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_PUBLISHER_ENDPOINT",
+            "BUZZ_PUBLISHER_CAPABILITY",
+        ] {
+            cmd.env_remove(name);
+        }
+
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -2438,8 +2454,8 @@ mod tests {
                     value: "ws://localhost:3000".into(),
                 },
                 EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    value: "nsec1abc".into(),
+                    name: "BUZZ_PUBLISHER_CAPABILITY".into(),
+                    value: "opaque-session-capability".into(),
                 },
             ],
         };
@@ -2955,6 +2971,30 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_strips_signing_credentials_from_model_controlled_agent_runtime() {
+        for variable in [
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "NOSTR_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_PUBLISHER_ENDPOINT",
+            "BUZZ_PUBLISHER_CAPABILITY",
+        ] {
+            assert_eq!(
+                spawn_named_and_read_child_env(
+                    "credential-probe-agent",
+                    variable,
+                    &[(variable.to_string(), "must-not-cross-boundary".to_string())],
+                )
+                .await,
+                "<unset>",
+                "{variable} reached the model-controlled agent runtime"
+            );
+        }
     }
 
     #[tokio::test]

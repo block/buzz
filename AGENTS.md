@@ -165,10 +165,13 @@ check existing reply handlers for the pattern.
 
 ## Agent CLI (`buzz-cli`)
 
-`buzz` is the agent-first CLI. Auth env vars
-(`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
-by the ACP harness into managed agent subprocesses. In development, set
-`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
+`buzz` is the agent-first CLI. The ACP harness retains `BUZZ_PRIVATE_KEY`
+and `BUZZ_AUTH_TAG`. Managed MCP servers receive `BUZZ_RELAY_URL` plus an
+opaque, per-session capability for the typed `buzz_send_message` tool (channel
+sessions are bound to their channel, and invalidating a session revokes its capability);
+model-controlled runtimes and shell children must never receive the raw
+signing key. Standalone CLI development may still set `BUZZ_PRIVATE_KEY` and
+`BUZZ_RELAY_URL` manually outside the managed-agent boundary.
 
 ### Building the CLI
 

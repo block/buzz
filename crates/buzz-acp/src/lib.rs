@@ -7,6 +7,7 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod publisher;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -35,7 +36,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::PublicKey;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -1637,6 +1638,19 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    // The model-facing MCP server receives a loopback capability, never the
+    // Nostr private key. The broker retains signing authority in this harness
+    // process and accepts only typed message/reply requests.
+    let publisher_broker = if config.mcp_command.is_empty() {
+        None
+    } else {
+        Some(
+            publisher::PublisherBroker::start(relay.rest_client())
+                .await
+                .map_err(|error| anyhow::anyhow!("publisher broker start error: {error}"))?,
+        )
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -1811,6 +1825,7 @@ async fn tokio_main() -> Result<()> {
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
+        publisher_issuer: publisher_broker.as_ref().map(|broker| broker.issuer()),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -3951,27 +3966,20 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
-    fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
+    fn shared_base_prompt_teaches_typed_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
-        assert!(prompt.contains("pass real newline bytes through stdin"));
-        assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
-        assert!(prompt.contains("buzz messages send ... --content -"));
+        assert!(prompt.contains("Pass multiline message text directly"));
+        assert!(prompt.contains("`buzz_send_message.content`"));
+        assert!(!prompt.contains("BUZZ_PRIVATE_KEY"));
+        assert!(prompt.contains("Do not use the shell-based `buzz messages send` path"));
     }
 
     #[test]
-    fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
+    fn shared_base_prompt_teaches_typed_mentions_without_membership_mutation() {
         let prompt = include_str!("base_prompt.md");
-        assert!(prompt.contains("--mention <hex-or-npub>"));
-        assert!(prompt.contains("every presentation-only name that should notify"));
-        assert!(
-            prompt.contains("permits unresolved or ambiguous `@Name` text as presentation-only")
-        );
-        assert!(prompt.contains("success JSON's `mention_pubkeys`"));
-        assert!(prompt.contains("no follow-up verification command is needed"));
-        assert!(prompt.contains("stops before sending"));
-        assert!(prompt
-            .contains("add them explicitly with `buzz channels add-member` only when authorized"));
-        assert!(prompt.contains("never changes membership automatically"));
+        assert!(prompt.contains("`buzz_send_message.mentions` array"));
+        assert!(prompt.contains("Readable names are presentation"));
+        assert!(prompt.contains("never changes membership"));
     }
 }
 
@@ -3986,8 +3994,8 @@ fn default_heartbeat_prompt() -> String {
             high-priority requests addressed to you.\n\
          2. Run `buzz feed get --types mentions` to check for unanswered @mentions.\n\
          3. If you find actionable items, address them using the appropriate CLI commands\n\
-            (e.g., `buzz workflows approve --token <UUID>`, `buzz messages send`,\n\
-            `buzz messages send --reply-to <event-id>`).\n\
+            (e.g., `buzz workflows approve --token <UUID>` or `buzz_send_message`\n\
+            with the Context channel and reply event fields).\n\
          4. If there are no pending actions or mentions, end your turn immediately.\n\n\
          Do not run `buzz channels list` or `buzz messages search` unless you have a specific reason.\n\
          Do not invent work — only act on items surfaced by the feed commands."
@@ -4521,33 +4529,10 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
+            let mut env = vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            }];
             // Forward the agent's display name so dev-mcp can use it as the git
             // author name instead of the raw npub. Read from the process env
             // rather than Config: this is a pass-through of a contract owned
@@ -6228,13 +6213,15 @@ mod build_mcp_servers_tests {
             "missing BUZZ_RELAY_URL; got {names:?}"
         );
         assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+            !names.contains(&"BUZZ_PRIVATE_KEY"),
+            "raw signing key reached model-controlled MCP config: {names:?}"
         );
+        assert!(!names.contains(&"BUZZ_PUBLISHER_ENDPOINT"));
+        assert!(!names.contains(&"BUZZ_PUBLISHER_CAPABILITY"));
     }
 
     #[test]
-    fn session_new_mcp_server_forwards_buzz_auth_tag() {
+    fn session_new_mcp_server_does_not_forward_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
@@ -6244,23 +6231,9 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let auth_tag_env = server.env.iter().find(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(
-            auth_tag_env.is_some(),
-            "BUZZ_AUTH_TAG should be forwarded when set"
+            auth_tag_env.is_none(),
+            "owner attestation credential reached model-controlled MCP config"
         );
-        assert_eq!(auth_tag_env.unwrap().value, "test-attestation-tag");
-    }
-
-    #[test]
-    fn session_new_mcp_server_skips_empty_buzz_auth_tag() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("BUZZ_AUTH_TAG", "");
-        let config = test_config();
-        let servers = build_mcp_servers(&config);
-        std::env::remove_var("BUZZ_AUTH_TAG");
-
-        let server = &servers[0];
-        let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
-        assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
     }
 
     #[test]
