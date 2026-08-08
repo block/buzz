@@ -520,7 +520,7 @@ pub const KIND_JOB_REQUEST: u32 = 43001;
 pub const KIND_JOB_ACCEPTED: u32 = 43002;
 /// Progress update for an in-flight agent job.
 pub const KIND_JOB_PROGRESS: u32 = 43003;
-/// Final result of a completed agent job.
+/// Final result of a completed agent job. See `docs/nips/NIP-AJ.md`.
 pub const KIND_JOB_RESULT: u32 = 43004;
 /// A job cancellation was requested.
 pub const KIND_JOB_CANCEL: u32 = 43005;
