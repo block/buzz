@@ -76,6 +76,7 @@ export function usePulseNoteActions({
           eventId: note.id,
           emoji: "+",
           remove,
+          targetPubkey: note.pubkey,
         });
         if (currentPubkey) {
           void queryClient.invalidateQueries({

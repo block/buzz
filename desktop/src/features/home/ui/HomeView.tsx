@@ -900,6 +900,8 @@ export function HomeView({
                         emoji,
                         eventId: message.id,
                         remove,
+                        // NIP-25 `p` tag is the reacted-to event's signer.
+                        targetPubkey: message.signerPubkey,
                       });
                       if (!remove) {
                         recordThreadInteraction(

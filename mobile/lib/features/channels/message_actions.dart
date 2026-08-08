@@ -691,7 +691,9 @@ class _QuickReactionRow extends ConsumerWidget {
       // The sheet is on its way out, so the burst can't come from this tile —
       // hand it to the pill that's about to appear in the timeline.
       armReactionBurst(pageRef, message, value);
-      pageRef.read(channelActionsProvider).addReaction(message.id, value);
+      pageRef
+          .read(channelActionsProvider)
+          .addReaction(message.id, message.pubkey, value);
     }
 
     return LayoutBuilder(

@@ -651,12 +651,26 @@ export function useToggleReactionMutation() {
       eventId: string;
       emoji: string;
       remove: boolean;
+      /**
+       * Signer of the message being reacted to. Becomes the kind:7 NIP-25 `p`
+       * tag so the author's notification filter can match. Pass the timeline's
+       * `signerPubkey`, not its display author.
+       */
+      targetPubkey: string | undefined;
     }
   >({
-    mutationFn: async ({ eventId, emoji, remove }) => {
+    mutationFn: async ({ eventId, emoji, remove, targetPubkey }) => {
       if (remove) {
         await removeReaction(eventId, emoji);
         return;
+      }
+
+      // NIP-25 recommends the target author's `p` tag, so without a resolved
+      // signer we would emit a reaction no notification filter can match.
+      // Every timeline row carries a signer, so this is a guard, not a
+      // reachable UI state.
+      if (!targetPubkey) {
+        throw new Error("Cannot react: the message author is unknown.");
       }
 
       // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
@@ -666,7 +680,7 @@ export function useToggleReactionMutation() {
         emoji,
         queryClient.getQueryData<CustomEmoji[]>(customEmojiQueryKey),
       );
-      await addReaction(eventId, emoji, emojiUrl);
+      await addReaction(eventId, emoji, targetPubkey, emojiUrl);
     },
   });
 }

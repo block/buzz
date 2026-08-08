@@ -350,7 +350,7 @@ export function useChannelPaneHandlers({
 
   const handleToggleReaction = React.useCallback(
     async (
-      message: Pick<TimelineMessage, "id" | "rootId">,
+      message: Pick<TimelineMessage, "id" | "rootId" | "signerPubkey">,
       emoji: string,
       remove: boolean,
     ) => {
@@ -358,6 +358,10 @@ export function useChannelPaneHandlers({
         emoji,
         eventId: message.id,
         remove,
+        // NIP-25's `p` tag is the signer of the reacted-to event, not its
+        // displayed author — a relay-signed agent message resolves those to
+        // different pubkeys, and the protocol tag must be the signer.
+        targetPubkey: message.signerPubkey,
       });
       if (!remove) {
         recordThreadInteraction(message.rootId ?? message.id);
