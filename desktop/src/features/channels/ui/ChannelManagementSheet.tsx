@@ -124,8 +124,6 @@ export function ChannelManagementSheet({
   const deleteChannelMutation = useDeleteChannelMutation(channelId);
   const joinChannelMutation = useJoinChannelMutation(channelId);
   const leaveChannelMutation = useLeaveChannelMutation(channelId);
-  const channelIdRef = React.useRef(channelId);
-  channelIdRef.current = channelId;
 
   const detail = detailsQuery.data ?? channel;
   const members = React.useMemo(() => {
@@ -167,8 +165,6 @@ export function ChannelManagementSheet({
   );
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false);
-  const [isConvertingVisibility, setIsConvertingVisibility] =
-    React.useState(false);
   const [hasUserEditedChannelDraft, setHasUserEditedChannelDraft] =
     React.useState(false);
   const [activeView, setActiveView] = React.useState<"summary" | "canvas">(
@@ -268,6 +264,7 @@ export function ChannelManagementSheet({
     if (!next) {
       setNameDraft(resolvedChannel.name);
       setDescriptionDraft(resolvedChannel.description);
+      setIsPrivateDraft(currentVisibility === "private");
       setIsEphemeralDraft(currentTtlSeconds !== null);
       setTtlSecondsDraft(currentTtlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
       setHasUserEditedChannelDraft(false);
@@ -295,25 +292,6 @@ export function ChannelManagementSheet({
       setIsEditDialogOpen(false);
     } catch {
       // React Query stores mutation errors; keep the dialog open and render them.
-    }
-  }
-
-  async function handleConvertVisibility(visibility: "open" | "private") {
-    if (visibility === currentVisibility) {
-      return;
-    }
-    setIsConvertingVisibility(true);
-    try {
-      const updatedChannel = await updateChannelDetailsMutation.mutateAsync({
-        visibility,
-      });
-      if (channelIdRef.current === updatedChannel.id) {
-        setIsPrivateDraft(visibility === "private");
-      }
-    } catch {
-      // React Query stores mutation errors; keep the dialog open and render them.
-    } finally {
-      setIsConvertingVisibility(false);
     }
   }
 
@@ -441,7 +419,7 @@ export function ChannelManagementSheet({
             <div className="flex max-h-[85vh] flex-col">
               <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
                 <DialogTitle>
-                  Edit {currentVisibility === "private" ? "private" : "public"}{" "}
+                  Edit {nextVisibility === "private" ? "private" : "public"}{" "}
                   channel
                 </DialogTitle>
               </DialogHeader>
@@ -525,10 +503,10 @@ export function ChannelManagementSheet({
                     />
                     <ChannelPermissionsSettings
                       disabled={isSavingChannelEdits}
-                      isPending={isConvertingVisibility}
-                      onVisibilityChange={(visibility) =>
-                        void handleConvertVisibility(visibility)
-                      }
+                      onVisibilityChange={(visibility) => {
+                        setIsPrivateDraft(visibility === "private");
+                        setHasUserEditedChannelDraft(true);
+                      }}
                       testIdPrefix="channel-management"
                       visibility={isPrivateDraft ? "private" : "open"}
                     />

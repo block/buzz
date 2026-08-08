@@ -28,6 +28,13 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Spinner } from "./spinner";
 import { useNaturalVideoAspectRatio } from "./videoAspectRatio";
 import { useVideoContextMenu } from "./useVideoContextMenu";
+import { useRegisterVideoReview } from "./VideoReviewNavigation";
+import { VideoReviewPosterPreview } from "./VideoReviewPosterPreview";
+import { parseVideoReviewTimecode } from "./videoReviewTimecode";
+import {
+  VideoReviewTimecodeButton,
+  VIDEO_REVIEW_TIMECODE_ACCENT_CLASS,
+} from "./VideoReviewTimecodeButton";
 import {
   getInlinePlaybackPosition,
   getReviewPlaybackPosition,
@@ -109,16 +116,10 @@ type TimecodedComment = {
   text: string;
 };
 
-const TIMECODE_RE =
-  /^\s*\[((?:(?:\d{1,2}:)?\d{1,2}:)?\d{2}(?:\.\d{1,3})?)\]\s*/;
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
 const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
-const TIMECODE_ACCENT_CLASS =
-  "bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.15)] text-[hsl(var(--buzz-video-review-accent-foreground,var(--buzz-video-review-accent,var(--primary))))]";
-const TIMECODE_ACCENT_HOVER_CLASS =
-  "hover:bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.3)]";
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -188,40 +189,11 @@ function isPlaybackSpeedOption(speed: number): boolean {
   return PLAYBACK_SPEEDS.some((option) => option === speed);
 }
 
-function parseTimecode(value: string): number | null {
-  const parts = value.split(":").map((part) => Number(part));
-  if (parts.some((part) => !Number.isFinite(part) || part < 0)) {
-    return null;
-  }
-
-  if (parts.length === 2) {
-    return parts[0] * 60 + parts[1];
-  }
-
-  if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  }
-
-  return null;
-}
-
 function parseTimecodedComment(comment: VideoReviewComment): TimecodedComment {
-  const match = comment.body.match(TIMECODE_RE);
-  if (!match) {
-    return {
-      comment,
-      seconds: null,
-      timecode: null,
-      text: comment.body.trim(),
-    };
-  }
-
-  return {
-    comment,
-    seconds: parseTimecode(match[1]),
-    timecode: match[1],
-    text: comment.body.slice(match[0].length).trim(),
-  };
+  const parsed = parseVideoReviewTimecode(comment.body);
+  return parsed
+    ? { comment, ...parsed }
+    : { comment, seconds: null, text: comment.body.trim(), timecode: null };
 }
 
 function sortTimecodedComments(
@@ -928,20 +900,32 @@ export function VideoPlayer({
     video.muted = value <= 0;
   }, []);
 
+  const openReviewAt = React.useCallback(
+    (seconds: number) => {
+      const video = videoRef.current;
+      video?.pause();
+      const safeSeconds = Number.isFinite(seconds) ? Math.max(seconds, 0) : 0;
+      const nextSeconds =
+        duration > 0 ? Math.min(safeSeconds, duration) : safeSeconds;
+      setPendingSeekSeconds(nextSeconds);
+      setReviewCurrentTime(nextSeconds);
+      setReviewOpen(true);
+    },
+    [duration, setReviewCurrentTime, setReviewOpen],
+  );
+  useRegisterVideoReview(reviewContext, persistedReviewKey, openReviewAt);
+
   const handleOpenReview = React.useCallback(
     (event?: React.SyntheticEvent) => {
       event?.stopPropagation();
       const video = videoRef.current;
-      video?.pause();
       const startTime =
         video && Number.isFinite(video.currentTime)
           ? video.currentTime
           : currentTime;
-      setPendingSeekSeconds(startTime);
-      setReviewCurrentTime(startTime);
-      setReviewOpen(true);
+      openReviewAt(startTime);
     },
-    [currentTime, setReviewCurrentTime, setReviewOpen],
+    [currentTime, openReviewAt],
   );
 
   const handleReviewOpenChange = React.useCallback(
@@ -989,7 +973,12 @@ export function VideoPlayer({
     maxHeight: 256,
     width: inlineSurfaceWidth,
   };
-  const showControls = started && !hasError;
+  const hideInlineControls = !started || isPlaying;
+  const inlineControlsRevealClass = cn(
+    "transition-opacity duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+    hideInlineControls &&
+      "opacity-0 group-focus-within/inline-controls:opacity-100 group-hover/video:opacity-100",
+  );
 
   return (
     <>
@@ -1015,7 +1004,7 @@ export function VideoPlayer({
             poster={poster}
             preload="metadata"
             src={src}
-            onClick={showControls ? handleTogglePlay : undefined}
+            onClick={started ? handleTogglePlay : undefined}
             onDurationChange={(event) =>
               handleMediaDuration(event.currentTarget.duration)
             }
@@ -1072,16 +1061,29 @@ export function VideoPlayer({
             }}
             onWaiting={() => setIsBuffering(true)}
           />
-          {!started && !hasError ? (
+          {!hasError && !isBuffering ? (
             <button
+              aria-label={isPlaying ? "Pause video" : "Play video"}
+              className={cn(
+                "absolute inset-0 flex cursor-pointer items-center justify-center opacity-100 outline-hidden transition-opacity duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] focus-visible:ring-2 focus-visible:ring-white/60 motion-reduce:transition-none",
+                started &&
+                  isPlaying &&
+                  "opacity-0 group-hover/video:opacity-100 focus-visible:opacity-100",
+              )}
+              data-testid="video-inline-center-playback"
               type="button"
-              aria-label="Play video"
-              className="group absolute inset-0 flex cursor-pointer items-center justify-center"
               onClick={handleTogglePlay}
             >
-              <span className="relative isolate flex h-14 w-14 items-center justify-center rounded-full transition-transform duration-200 ease-out group-hover:scale-105">
+              <span
+                className="relative isolate flex h-14 w-14 items-center justify-center rounded-full"
+                data-testid="video-inline-center-icon"
+              >
                 <GlassSurface className="rounded-full" />
-                <Play className="h-6 w-6 fill-white text-white" />
+                {isPlaying ? (
+                  <Pause className="h-6 w-6 fill-white text-white" />
+                ) : (
+                  <Play className="h-6 w-6 fill-white text-white" />
+                )}
               </span>
             </button>
           ) : null}
@@ -1109,33 +1111,22 @@ export function VideoPlayer({
               </span>
             </button>
           ) : null}
-          {/* Slide (not fade) the pill out: animating opacity on an ancestor
-              of a backdrop-filter flattens the glass into a plain fill
-              mid-transition, which reads as a flicker. The video container's
-              overflow-hidden clips the slid-out pill. */}
-          {showControls ? (
+          {!hasError ? (
             <div
               className={cn(
-                "absolute inset-x-1.5 bottom-1.5 z-10 transition-transform duration-300 ease-out",
-                isPlaying &&
-                  "pointer-events-none translate-y-[150%] focus-within:pointer-events-auto focus-within:translate-y-0 group-hover/video:pointer-events-auto group-hover/video:translate-y-0",
+                "group/inline-controls absolute inset-x-1.5 bottom-1.5 z-10 isolate rounded-[10px]",
+                hideInlineControls &&
+                  "pointer-events-none focus-within:pointer-events-auto group-hover/video:pointer-events-auto",
               )}
-              data-testid="video-inline-controls"
             >
-              <div className="relative isolate flex items-center gap-1 rounded-[10px] px-1.5 py-1">
-                <GlassSurface />
-                <button
-                  aria-label={isPlaying ? "Pause video" : "Play video"}
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-primary"
-                  type="button"
-                  onClick={handleTogglePlay}
-                >
-                  {isPlaying ? (
-                    <Pause className="pointer-events-none h-4 w-4 fill-white" />
-                  ) : (
-                    <Play className="pointer-events-none h-4 w-4 fill-white" />
-                  )}
-                </button>
+              <GlassSurface className={inlineControlsRevealClass} />
+              <div
+                className={cn(
+                  "flex items-center gap-1 px-1.5 py-1",
+                  inlineControlsRevealClass,
+                )}
+                data-testid="video-inline-controls"
+              >
                 <span
                   className="shrink-0 text-2xs font-medium tabular-nums leading-none text-white"
                   data-testid="video-inline-time"
@@ -1260,6 +1251,7 @@ function VideoReviewDialog({
   const [volume, setVolume] = React.useState(1);
   const [muted, setMuted] = React.useState(false);
   const [mediaRatio, setMediaRatio] = React.useState<number | null>(null);
+  const [hasVisibleFrame, setHasVisibleFrame] = React.useState(false);
   const [videoAreaSize, setVideoAreaSize] = React.useState<{
     height: number;
     width: number;
@@ -1364,6 +1356,7 @@ function VideoReviewDialog({
   React.useEffect(() => {
     if (!open) {
       setIsComposerMounted(false);
+      setHasVisibleFrame(false);
       return;
     }
     // Two frames: one for the dialog to paint, one for the browser to
@@ -1715,7 +1708,7 @@ function VideoReviewDialog({
                     className="h-full w-full min-h-0 object-contain"
                     playsInline
                     poster={poster}
-                    preload="metadata"
+                    preload="auto"
                     src={src}
                     onClick={togglePlay}
                     onDurationChange={(event) =>
@@ -1740,6 +1733,7 @@ function VideoReviewDialog({
                         syncCurrentTime(pendingSeekSeconds);
                       }
                     }}
+                    onLoadedData={() => setHasVisibleFrame(true)}
                     onPause={(event) => {
                       syncCurrentTime(event.currentTarget.currentTime);
                       setIsPlaying(false);
@@ -1748,7 +1742,15 @@ function VideoReviewDialog({
                       syncCurrentTime(event.currentTarget.currentTime);
                       setIsPlaying(true);
                     }}
-                    onSeeked={reviewSeek.handleSeeked}
+                    onSeeked={(event) => {
+                      reviewSeek.handleSeeked();
+                      if (
+                        event.currentTarget.readyState >=
+                        HTMLMediaElement.HAVE_CURRENT_DATA
+                      ) {
+                        setHasVisibleFrame(true);
+                      }
+                    }}
                     onTimeUpdate={(event) => {
                       syncCurrentTime(event.currentTarget.currentTime);
                     }}
@@ -1756,6 +1758,10 @@ function VideoReviewDialog({
                       setVolume(event.currentTarget.volume);
                       setMuted(event.currentTarget.muted);
                     }}
+                  />
+                  <VideoReviewPosterPreview
+                    poster={poster}
+                    visible={!hasVisibleFrame}
                   />
                 </div>
                 <div className="absolute inset-x-2 bottom-2 z-20 sm:inset-x-4 sm:bottom-3">
@@ -1903,12 +1909,12 @@ function VideoReviewDialog({
 
           {showCommentsPanel ? (
             <aside
-              className="min-h-0 shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
+              className="relative z-10 min-h-0 shrink-0 overflow-hidden bg-neutral-950 transition-[width] duration-200 ease-out"
               data-testid="video-review-comments-panel"
               inert={!isPanelOpen || undefined}
               style={{ width: isPanelOpen ? 380 : 0 }}
             >
-              <div className="flex h-full w-[380px] min-h-0 flex-col border-l border-border bg-background">
+              <div className="flex h-full w-[380px] min-h-0 flex-col border-l border-border bg-neutral-950">
                 <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
                   <div className="flex min-w-0 items-center gap-2">
                     <MessageCircle className="h-4 w-4 text-muted-foreground" />
@@ -1960,7 +1966,7 @@ function VideoReviewDialog({
                       className={cn(
                         "rounded-md px-2 py-1 font-mono text-xs font-semibold transition-colors",
                         !replyTarget && postAtCurrentFrame
-                          ? TIMECODE_ACCENT_CLASS
+                          ? VIDEO_REVIEW_TIMECODE_ACCENT_CLASS
                           : "bg-muted text-muted-foreground/70",
                       )}
                       data-testid="video-review-composer-timecode"
@@ -2124,19 +2130,10 @@ function VideoReviewCommentBody({
   const text = item.text || item.comment.body;
   const timecodeButton =
     item.seconds !== null && item.timecode ? (
-      <button
-        aria-label={`Jump to ${item.timecode}`}
-        className={cn(
-          "inline-flex h-5 shrink-0 items-center rounded px-1.5 align-middle font-mono text-2xs font-semibold outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-white/60",
-          TIMECODE_ACCENT_CLASS,
-          TIMECODE_ACCENT_HOVER_CLASS,
-        )}
-        data-testid="video-review-comment-timecode"
-        type="button"
+      <VideoReviewTimecodeButton
+        timecode={item.timecode}
         onClick={() => onSeek(item.seconds ?? 0)}
-      >
-        {item.timecode}
-      </button>
+      />
     ) : null;
 
   return (

@@ -1,31 +1,24 @@
 ---
-name: 🐛 Bug Report
-about: Thank you for taking the time, please report a reproducible bug
-title: "[Bug] <Bug Title Here>"
+name: Bug report
+about: Report a reproducible bug in Buzz
 labels: bug
-assignees: add codeowner's @name here 
-
 ---
 
 **Describe the bug**
-*A clear and concise description of what the bug is.*
+A clear and concise description of what the bug is.
 
-**To Reproduce:**
-*Steps to reproduce the behavior:*
+**Steps to reproduce**
 1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+2. Click on '...'
+3. See error
 
-**Expected behavior:**
-*A clear and concise description of what you expected to happen.*
+**Expected behavior**
+What did you expect to happen?
 
-**Supporting Material**
-*If applicable, add screenshots, output log and/or other documentation to help explain your problem.*
+**Version and platform**
+Find your version at the bottom of the Settings sidebar. Write "unknown" if you can't determine it.
+- Buzz version: 
+- OS: 
 
-**Environment (please complete the following information):**
- - OS: [ex: iOS]
- - Version 
-
-**Additional context**
-Add any other context that you feel is relevant about the problem here.
+**Logs / additional context**
+Paste any relevant logs, error messages, or screenshots here.

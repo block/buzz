@@ -909,18 +909,22 @@ at agent startup.
 
 ### Desktop App Import
 
-The Buzz desktop app can import persona packs via the Import button:
+The Buzz desktop app's **Agents** page does not import persona-pack `.zip` archives or
+`.persona.md` files directly. It imports personas and teams as **snapshots** — files exported
+from an agent or team that already exists inside the app:
 
-- **My Agents → Import**: Accepts `.persona.md` files (individual personas) or `.zip` files
-  (persona packs detected by `.plugin/plugin.json`). Pack zips are resolved in a temp directory;
-  each persona is previewed and imported individually into the persona library.
-- **My Teams → Import**: Accepts `.zip` files (persona packs). The pack name becomes the team
-  name; each persona becomes a team member.
+- **Agents section → Import**: Accepts `.agent.json` or `.agent.png` (an agent snapshot).
+- **Agent teams section → Import**: Accepts `.team.json` or `.team.png` (a `buzz-team-snapshot
+  v1`). A persona-pack `.zip` is rejected outright with an error directing you to export a team
+  snapshot instead.
 
-> **Note**: The Import button parses and previews personas from the pack — it does not install the
-> pack directory itself. For full pack installation (which copies the pack to
-> `<AppDataDir>/agents/packs/<pack-id>/` with re-validation), use the `install_persona_pack`
-> Tauri command or a future "Install Pack" UI button.
+> **Persona packs and desktop snapshots are two separate, non-interchangeable formats today.**
+> This spec's pack format (portable, hand-authored, git-friendly) is validated and inspected via
+> `buzz pack validate` / `buzz pack inspect` (Section 11). A snapshot is captured *from* an
+> already-running agent or team inside the desktop app. Neither format converts into the other:
+> there is no command that turns a pack into a snapshot, or a snapshot back into pack source. To
+> get a pack's personas running inside the desktop app today, recreate them there by hand using
+> `buzz pack inspect`'s resolved config as reference.
 
 ---
 

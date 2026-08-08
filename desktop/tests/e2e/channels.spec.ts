@@ -16,6 +16,7 @@ import {
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
 // owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
@@ -27,6 +28,21 @@ const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 type MockFeedWindow = Window & {
+  __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+    channelName: string;
+    content: string;
+    createdAt?: number;
+    id?: string;
+    parentEventId?: string;
+    pubkey?: string;
+  }) => {
+    content: string;
+    created_at: number;
+    id: string;
+    kind: number;
+    pubkey: string;
+    tags: string[][];
+  };
   __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
     agentPubkey: string;
     channelId: string;
@@ -37,6 +53,7 @@ type MockFeedWindow = Window & {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
     channel_id: string | null;
     channel_name: string;
+    channel_type?: string | null;
     content: string;
     created_at: number;
     id: string;
@@ -472,8 +489,13 @@ async function expectIntroActionsShareRow(
   }
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.tags.includes(CACHED_PROFILE_LABELS_TAG)
+      ? { usersBatchDelayMs: 10_000 }
+      : undefined,
+  );
 });
 
 test("sidebar shows all channel types", async ({ page }) => {
@@ -498,6 +520,41 @@ test("sidebar shows all channel types", async ({ page }) => {
   const dmList = page.getByTestId("dm-list");
   await expect(dmList).toContainText("alice-tyler");
   await expect(dmList).toContainText("bob-tyler");
+});
+
+test("shows cached profile labels while relay profiles revalidate", {
+  tag: CACHED_PROFILE_LABELS_TAG,
+}, async ({ page }) => {
+  await page.addInitScript(
+    ({ alicePubkey }) => {
+      window.localStorage.setItem(
+        "buzz-user-labels.v1:ws://localhost:3000",
+        JSON.stringify({
+          version: 1,
+          updatedAt: Date.now(),
+          profiles: {
+            [alicePubkey]: {
+              displayName: "Cached Alice",
+              name: "alice",
+              nip05Handle: null,
+            },
+          },
+        }),
+      );
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  await expect(aliceMessage.getByTestId("message-author")).toHaveText(
+    "Cached Alice",
+    { timeout: 1_000 },
+  );
 });
 
 test("shows presence in sidebar, DM header, and member list", async ({
@@ -697,7 +754,6 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeDisabled();
   await expect(page.getByTestId("new-dm-search")).toBeDisabled();
-  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "create_managed_agent"),
@@ -705,6 +761,9 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
     .toBeGreaterThan(baselineCreateCount);
   await expect(page.getByTestId("chat-title")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toContainText("Fizz");
+  // Assert popover hidden after chat-title settles — by this point the send
+  // flow has completed and the UI has fully transitioned away from the popover.
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
 
   const sendCommands = (await readCommandLog(page)).slice(
     baselineCommands.length,
@@ -767,8 +826,11 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
 test("routes an agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
   });
   await page.goto("/");
 
@@ -822,7 +884,10 @@ test("routes an agent mention from an existing DM to the expanded conversation",
 test("routes a managed relay-agent mention from an existing DM to the expanded conversation", async ({
   page,
 }) => {
+  // Delay the expanded open_dm call so routing/navigation settles
+  // deterministically under fast CI execution.
   await installMockBridge(page, {
+    openDmDelayMs: 100,
     managedAgents: [
       {
         pubkey: DM_RELAY_AGENT_PUBKEY,
@@ -952,8 +1017,11 @@ test("does not reroute an expanded DM after the channel pane unmounts", async ({
 test("drops an expanded DM after the first message fails", async ({ page }) => {
   const retryMessage = "Retry without the agent";
   const sendError = "Mock first DM send failed.";
+  // Delay persona provisioning so the follow-up expanded-DM open/start sequence
+  // cannot collapse into the same fast CI tick before assertions observe it.
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    createManagedAgentDelayMs: 100,
     sendMessageErrors: [sendError],
   });
   await page.goto("/");
@@ -1310,8 +1378,26 @@ test("create channel template selector matches the lifecycle controls", async ({
         description: "Coordinate a new project from planning through launch.",
         channelType: "stream",
         visibility: "private",
-        canvasTemplate: null,
-        agents: { personas: [], teams: [] },
+        canvasTemplate: "# {channel.name}\n\nKickoff notes",
+        agents: {
+          personas: [
+            {
+              personaId: "planner",
+              runtime: null,
+              model: null,
+              role: null,
+              backend: null,
+            },
+          ],
+          teams: [
+            {
+              teamId: "research-team",
+              runtime: null,
+              model: null,
+              backend: null,
+            },
+          ],
+        },
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
@@ -1324,16 +1410,73 @@ test("create channel template selector matches the lifecycle controls", async ({
 
   const templateControl = page.getByTestId("create-channel-template");
   await expect(templateControl).toHaveRole("button");
-  await expect(templateControl).toHaveText("No template");
+  await expect(templateControl).toHaveText("None");
   await templateControl.click();
+  await expect(
+    page.getByRole("menuitem", { name: "Create new channel template…" }),
+  ).toBeVisible();
   await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
 
   await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Private · Canvas included · 1 agent · 1 team",
+  );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
   await expect(page.getByTestId("create-channel-permissions")).toContainText(
     "Private",
+  );
+  await page.getByTestId("create-channel-permissions").click();
+  await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Open · Canvas included · 1 agent · 1 team",
+  );
+});
+
+test("create channel exposes templates when the library is empty", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelTemplates: [] });
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const typeContainer = page.getByTestId(
+    "create-channel-channel-type-container",
+  );
+  const visibilityContainer = page.getByTestId(
+    "create-channel-permissions-container",
+  );
+  const templateContainer = page.getByTestId(
+    "create-channel-template-container",
+  );
+  await expect(templateContainer).toContainText("TemplateOptional");
+  const typeBox = await typeContainer.boundingBox();
+  const visibilityBox = await visibilityContainer.boundingBox();
+  const templateBox = await templateContainer.boundingBox();
+  expect(typeBox).not.toBeNull();
+  expect(visibilityBox).not.toBeNull();
+  expect(templateBox).not.toBeNull();
+  expect(typeBox?.y ?? 0).toBeLessThan(visibilityBox?.y ?? 0);
+  expect(visibilityBox?.y ?? 0).toBeLessThan(templateBox?.y ?? 0);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveText("None");
+  await templateControl.click();
+  await page
+    .getByRole("menuitem", { name: "Create new channel template…" })
+    .click();
+
+  await expect(
+    page.getByText("Create template", { exact: true }),
+  ).toBeVisible();
+  await page.locator("#template-name").fill("Weekly planning");
+  await page.locator("#template-description").fill("Plan the next week.");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(templateControl).toHaveText("Weekly planning");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Plan the next week.",
   );
 });
 
@@ -1725,59 +1868,80 @@ test("channel date divider keeps the date sticky while the separator rule scroll
 
   const timeline = page.getByTestId("message-timeline");
   await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
-    );
-    if (!firstGroup) {
-      throw new Error("missing first day group");
-    }
-    const groupRect = firstGroup.getBoundingClientRect();
-    const stickyTop = Number.parseFloat(
-      getComputedStyle(
-        firstGroup.querySelector<HTMLElement>(
-          '[data-testid="message-timeline-day-divider"]',
-        ) ?? firstGroup,
-      ).top,
-    );
-    element.scrollTop +=
-      groupRect.top - (element.getBoundingClientRect().top + stickyTop - 32);
+    element.scrollTop = element.scrollHeight * 0.2;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await page.waitForTimeout(50);
+
+  const [headerBox, stickyPillBox] = await Promise.all([
+    page.getByTestId("chat-header").boundingBox(),
+    page
+      .getByTestId("message-timeline-sticky-day-divider-content")
+      .locator("p")
+      .first()
+      .boundingBox(),
+  ]);
+  if (!headerBox || !stickyPillBox) {
+    throw new Error("missing channel header or sticky day divider");
+  }
+  expect(
+    Math.abs(stickyPillBox.y - (headerBox.y + headerBox.height) - 8),
+  ).toBeLessThanOrEqual(1);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("message-timeline-day-divider").last().locator("p"),
+  ).toHaveCSS("visibility", "visible");
 
   const metrics = await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
+    const pinnedDivider = element.parentElement?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider"]',
     );
-    const firstDivider = firstGroup?.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-divider"]',
+    const pinnedPill = pinnedDivider?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider-content"] p',
     );
-    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
-    if (!firstGroup || !firstDivider || !firstDividerPill) {
-      throw new Error("missing day group or divider");
+    if (!pinnedDivider || !pinnedPill) {
+      throw new Error("missing sticky day divider");
     }
 
-    const groupRect = firstGroup.getBoundingClientRect();
-    const dividerRect = firstDivider.getBoundingClientRect();
-    const groupBefore = getComputedStyle(firstGroup, "::before");
-    const dividerBefore = getComputedStyle(firstDivider, "::before");
-
     return {
-      dividerBeforeContent: dividerBefore.content,
-      dividerPillBackground: getComputedStyle(firstDividerPill).backgroundColor,
-      dividerPillShadow: getComputedStyle(firstDividerPill).boxShadow,
-      dividerPosition: getComputedStyle(firstDivider).position,
-      dividerTop: dividerRect.top,
-      dividerZIndex: getComputedStyle(firstDivider).zIndex,
-      groupBeforeContent: groupBefore.content,
-      groupBeforePosition: groupBefore.position,
-      groupTop: groupRect.top,
-      ruleTop: groupRect.top + Number.parseFloat(groupBefore.top),
+      dividerPillBackground: getComputedStyle(pinnedPill).backgroundColor,
+      dividerPillShadow: getComputedStyle(pinnedPill).boxShadow,
+      dividerZIndex: getComputedStyle(pinnedDivider).zIndex,
     };
   });
 
-  expect(metrics.dividerPosition).toBe("sticky");
   expect(Number.parseInt(metrics.dividerZIndex, 10)).toBeGreaterThan(10);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("overflow", "visible");
+
+  const dividerAlignment = await timeline.evaluate((element) => {
+    const group = [
+      ...element.querySelectorAll<HTMLElement>(
+        '[data-testid="message-timeline-day-group"]',
+      ),
+    ].find((candidate) => {
+      const pill = candidate.querySelector<HTMLElement>("p");
+      return pill && getComputedStyle(pill).visibility === "visible";
+    });
+    const pill = group?.querySelector<HTMLElement>("p");
+    if (!group || !pill) throw new Error("missing visible day divider");
+
+    const rule = getComputedStyle(group, "::before");
+    const groupBox = group.getBoundingClientRect();
+    const pillBox = pill.getBoundingClientRect();
+    return {
+      chipCenter: pillBox.top + pillBox.height / 2,
+      ruleCenter:
+        groupBox.top +
+        Number.parseFloat(rule.top) +
+        Number.parseFloat(rule.height) / 2,
+    };
+  });
+  expect(
+    Math.abs(dividerAlignment.chipCenter - dividerAlignment.ruleCenter),
+  ).toBeLessThanOrEqual(0.5);
   await expect
     .poll(async () => {
       const headerZIndex = await page
@@ -1804,15 +1968,18 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
-  await expect(composerOverlay.getByTestId("message-composer")).not.toHaveCSS(
+  await expect(composerOverlay.getByTestId("message-composer")).toHaveCSS(
     "backdrop-filter",
     "none",
   );
-  const composerActivityRow = composerOverlay.getByTestId(
-    "channel-composer-activity-row",
+  await expect(
+    composerOverlay.getByTestId("composer-dock-backdrop").locator("div"),
+  ).not.toHaveCSS("backdrop-filter", "none");
+  const composerRailMask = composerOverlay.getByTestId(
+    "composer-dock-rail-mask",
   );
-  await expect(composerActivityRow).toHaveCSS("backdrop-filter", "none");
-  await expect(composerActivityRow).not.toHaveCSS(
+  await expect(composerRailMask).toHaveCSS("backdrop-filter", "none");
+  await expect(composerRailMask).not.toHaveCSS(
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
@@ -1827,11 +1994,6 @@ test("channel date divider keeps the date sticky while the separator rule scroll
   expect(metrics.dividerPillBackground).not.toBe("rgba(0, 0, 0, 0)");
   expect(metrics.dividerPillBackground).not.toBe("transparent");
   expect(metrics.dividerPillShadow).toBe("none");
-  expect(metrics.dividerBeforeContent).toBe("none");
-  expect(metrics.groupBeforePosition).toBe("absolute");
-  expect(metrics.groupBeforeContent).not.toBe("none");
-  expect(metrics.groupTop).toBeLessThan(metrics.dividerTop - 8);
-  expect(metrics.ruleTop).toBeLessThan(metrics.dividerTop - 8);
 });
 
 test("shows and clears activity indicators for active channel agents", async ({
@@ -2296,7 +2458,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
 
   await expect(page.getByTestId("channel-random")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
@@ -2329,7 +2491,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
 
   await expect(page.getByTestId("channel-watercooler")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
 
@@ -2675,15 +2837,369 @@ async function seedHomeInboxMention(
   await page.getByTestId(`home-inbox-item-${itemId}`).click();
 }
 
-test("home inbox channel label navigates to the channel message", async ({
+test("Inbox All excludes generic channel traffic", async ({ page }) => {
+  await page.goto("/");
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";
+  });
+
+  await page.evaluate(
+    ({ channelId, currentPubkey, senderPubkey }) => {
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is not installed.");
+      const now = Math.floor(Date.now() / 1000);
+      pushFeedItem({
+        category: "activity",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "Ordinary channel traffic",
+        created_at: now,
+        id: "inbox-generic-channel-message",
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [["h", channelId]],
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "A message that needs my attention",
+        created_at: now + 1,
+        id: "inbox-personal-mention",
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await expect(
+    page.getByTestId("home-inbox-item-inbox-personal-mention"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("home-inbox-item-inbox-generic-channel-message"),
+  ).toHaveCount(0);
+});
+
+test("Inbox All never lists drafts and unread-only hides reminders", async ({
+  page,
+}) => {
+  const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
+  await page.addInitScript(
+    ({ draftStoreKey, draftStorageKey }) => {
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        draftStoreKey,
+        JSON.stringify({
+          [draftStorageKey]: {
+            channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+            content: "Finish the mixed Inbox test",
+            createdAt: timestamp,
+            pendingImeta: [],
+            selectionEnd: 30,
+            selectionStart: 30,
+            spoileredAttachmentUrls: [],
+            status: "active",
+            updatedAt: timestamp,
+          },
+        }),
+      );
+    },
+    {
+      draftStorageKey: draftKey,
+      draftStoreKey: `buzz-drafts.v2:ws://localhost:3000:${MOCK_IDENTITY_PUBKEY}`,
+    },
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";
+  });
+
+  const reminderId = "inbox-unread-only-reminder";
+  const messageId = "inbox-unread-only-message";
+  await page.evaluate(
+    async ({
+      channelId,
+      currentPubkey,
+      messageId,
+      reminderId,
+      senderPubkey,
+    }) => {
+      const now = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id: reminderId,
+          pubkey: currentPubkey,
+          created_at: now - 120,
+          kind: 30300,
+          tags: [
+            ["d", reminderId],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-general-alice",
+              channelId,
+              preview: "Due reminder in mixed Inbox",
+              authorPubkey: senderPubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is not installed.");
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "Unread message in mixed Inbox",
+        created_at: now,
+        id: messageId,
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      messageId,
+      reminderId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const messageRow = page.getByTestId(`home-inbox-item-${messageId}`);
+  const reminderRow = page.getByTestId(`home-all-reminders-${reminderId}`);
+  const draftRow = page.getByTestId(`home-all-drafts-${draftKey}`);
+  await expect(messageRow).toBeVisible();
+  await expect(reminderRow).toBeVisible();
+  // Drafts belong to the dedicated Drafts filter — never the mixed All view.
+  await expect(draftRow).toHaveCount(0);
+
+  await page.getByTestId("inbox-options-trigger").click();
+  await page.getByRole("switch", { name: "Show unread only" }).click();
+
+  await expect(messageRow).toBeVisible();
+  await expect(reminderRow).toHaveCount(0);
+  await expect(draftRow).toHaveCount(0);
+
+  // The draft is still reachable under the Drafts filter.
+  await page.keyboard.press("Escape");
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await expect(page.getByTestId("home-inbox-drafts")).toBeVisible();
+});
+
+test("Inbox merges a due reminder into its represented conversation", async ({
+  page,
+}) => {
+  const messageId = "inbox-reminder-merge-message";
+  const reminderId = "inbox-reminder-merge";
+  await seedHomeInboxMention(page, messageId);
+
+  await page.evaluate(
+    async ({
+      authorPubkey,
+      channelId,
+      messageId: targetEventId,
+      pubkey,
+      reminderId: id,
+    }) => {
+      const now = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id,
+          pubkey,
+          created_at: now - 600,
+          kind: 30300,
+          tags: [
+            ["d", id],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: targetEventId,
+              channelId,
+              preview: "Please review the home panel routing.",
+              authorPubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+    },
+    {
+      authorPubkey: TEST_IDENTITIES.alice.pubkey,
+      channelId: GENERAL_CHANNEL_ID,
+      messageId,
+      pubkey: MOCK_IDENTITY_PUBKEY,
+      reminderId,
+    },
+  );
+
+  const conversationRow = page.getByTestId(`home-inbox-item-${messageId}`);
+  await expect(conversationRow.getByText("Reminder due")).toBeVisible();
+  await expect(
+    page.getByTestId(`home-all-reminders-${reminderId}`),
+  ).toHaveCount(0);
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Mentions" }).click();
+  await expect(conversationRow.getByText("Reminder due")).toBeVisible();
+});
+
+test("Inbox All keeps its filter when opening a due reminder", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+
+  const reminderId = "inbox-stable-reminder";
+  await page.evaluate(
+    async ({ channelId, id, pubkey }) => {
+      const now = Math.floor(Date.now() / 1000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id,
+          pubkey,
+          created_at: now - 300,
+          kind: 30300,
+          tags: [
+            ["d", id],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-general-alice",
+              channelId,
+              preview: "Review the Inbox behavior",
+              authorPubkey: pubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      id: reminderId,
+      pubkey: MOCK_IDENTITY_PUBKEY,
+    },
+  );
+
+  const reminderRow = page.getByTestId(`home-all-reminders-${reminderId}`);
+  await expect(reminderRow).toBeVisible();
+  await reminderRow.click();
+
+  await expect(page.getByTestId("inbox-filter-trigger")).toContainText("All");
+  await expect(page.getByTestId("home-reminder-detail")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+});
+
+test("Inbox reminder rows and detail identify DM context", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+
+  const reminderId = "inbox-dm-reminder";
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  await page.evaluate(
+    async ({ authorPubkey, channelId, currentPubkey, reminderId }) => {
+      const now = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id: reminderId,
+          pubkey: currentPubkey,
+          created_at: now - 300,
+          kind: 30300,
+          tags: [
+            ["d", reminderId],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-dm-alice",
+              channelId,
+              preview: "Follow up with Alice",
+              authorPubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+    },
+    {
+      authorPubkey: TEST_IDENTITIES.alice.pubkey,
+      channelId: dmChannelId,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      reminderId,
+    },
+  );
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Reminders" }).click();
+  const reminderRow = page.getByTestId(`home-reminder-item-${reminderId}`);
+  await expect(
+    reminderRow.getByText("DM with alice-tyler", { exact: true }),
+  ).toBeVisible();
+  await reminderRow.getByRole("button").click();
+
+  const detail = page.getByTestId("home-reminder-detail");
+  await expect(
+    detail.getByText("DM with alice-tyler", { exact: true }),
+  ).toBeVisible();
+  await expect(detail.getByText("#alice-tyler", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
+test("Inbox detail title and source action navigate to the conversation", async ({
   page,
 }) => {
   await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
 
-  await page
-    .getByTestId("home-inbox-detail")
-    .getByRole("button", { exact: true, name: "general" })
-    .click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("Message in #general");
+  await expect(
+    detail.getByRole("button", { name: "Open in channel" }),
+  ).toBeVisible();
+  await detail.getByTestId("home-inbox-context-title").click();
 
   await expect(page).toHaveURL(
     new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
@@ -2704,10 +3220,10 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
     ["p", TEST_IDENTITIES.tyler.pubkey],
   ]);
 
-  await page
-    .getByTestId("home-inbox-detail")
-    .getByRole("button", { exact: true, name: "general" })
-    .click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("Thread in #general");
+  await expect(detail.getByTestId("message-unread-divider")).toBeVisible();
+  await detail.getByRole("button", { name: "Open full thread" }).click();
 
   await expect(page).toHaveURL(
     new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
@@ -2716,6 +3232,236 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
   await expect(page).toHaveURL(new RegExp(`threadRootId=${rootEventId}`));
   await expect(page.getByTestId("message-timeline")).toBeVisible();
   await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("Inbox filter changes preserve valid detail and directly select a replacement", async ({
+  page,
+}) => {
+  const threadItemId = "inbox-filter-thread";
+  const actionItemId = "inbox-filter-action";
+  await seedHomeInboxMention(page, threadItemId, [
+    ["e", "inbox-filter-root", "", "root"],
+    ["e", "inbox-filter-parent", "", "reply"],
+    ["p", TEST_IDENTITIES.tyler.pubkey],
+  ]);
+
+  await page.evaluate(
+    ({ actionId, channelId, senderPubkey }) => {
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is not installed.");
+      pushFeedItem({
+        category: "needs_action",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "Approve the replacement selection",
+        created_at: Math.floor(Date.now() / 1_000) + 120,
+        id: actionId,
+        kind: 46010,
+        pubkey: senderPubkey,
+        tags: [["h", channelId]],
+      });
+    },
+    {
+      actionId: actionItemId,
+      channelId: GENERAL_CHANNEL_ID,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Threads" }).click();
+  await expect(
+    page.getByTestId(`home-inbox-item-${threadItemId}`),
+  ).toHaveAttribute("aria-current", "true");
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(
+    "Please review the home panel routing.",
+  );
+
+  await expect(
+    page.getByRole("menuitemradio", { name: "Threads" }),
+  ).toHaveCount(0);
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Needs action" }).click();
+  await expect(
+    page.getByTestId(`home-inbox-item-${actionItemId}`),
+  ).toHaveAttribute("aria-current", "true");
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(
+    "Approve the replacement selection",
+  );
+});
+
+test("Inbox keeps the unread boundary for replies from multiple agents", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  const replyIds = [
+    "inbox-agent-reply-first",
+    "inbox-agent-reply-second",
+    "inbox-agent-reply-third",
+  ];
+  await page.evaluate(
+    ({ agentPubkeys, channelId, currentPubkey, ids }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      const createdAt = Math.floor(Date.now() / 1000) + 60;
+      const root = emitMessage({
+        channelName: "general",
+        content: "Agent collaboration thread",
+        createdAt: createdAt - 10,
+        id: "inbox-agent-thread-root",
+        pubkey: currentPubkey,
+      });
+      const contents = [
+        "First unread agent reply",
+        "Second unread agent reply",
+        "Third unread agent reply",
+      ];
+
+      contents.forEach((content, index) => {
+        const event = emitMessage({
+          channelName: "general",
+          content,
+          createdAt: createdAt + index,
+          id: ids[index],
+          parentEventId: root.id,
+          pubkey: agentPubkeys[index % agentPubkeys.length],
+        });
+        pushFeedItem({
+          category: "activity",
+          channel_id: channelId,
+          channel_name: "general",
+          channel_type: "stream",
+          content: event.content,
+          created_at: event.created_at,
+          id: event.id,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          tags: event.tags,
+        });
+      });
+    },
+    {
+      agentPubkeys: [
+        TEST_IDENTITIES.alice.pubkey,
+        TEST_IDENTITIES.charlie.pubkey,
+      ],
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      ids: replyIds,
+    },
+  );
+
+  const firstUnreadRow = page.getByTestId(`home-inbox-item-${replyIds[0]}`);
+  await expect(firstUnreadRow).toBeVisible();
+  await firstUnreadRow.click();
+
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail).toContainText("Agent collaboration thread");
+  await expect(detail).toContainText("First unread agent reply");
+  await expect(detail).toContainText("Second unread agent reply");
+  await expect(detail).toContainText("Third unread agent reply");
+  await expect(detail.getByTestId("message-unread-divider")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-selected-message")).toContainText(
+    "First unread agent reply",
+  );
+});
+
+test("home inbox groups consecutive DMs and opens the full conversation", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const dmIds = ["inbox-dm-first", "inbox-dm-second", "inbox-dm-third"];
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({ channelId, createdAt, ids, senderPubkey }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      ["First unread DM", "Second unread DM", "Third unread DM"].forEach(
+        (content, index) => {
+          const event = emitMessage({
+            channelName: "alice-tyler",
+            content,
+            createdAt: createdAt + index,
+            id: ids[index],
+            pubkey: senderPubkey,
+          });
+          pushFeedItem({
+            category: "activity",
+            channel_id: channelId,
+            channel_name: "alice-tyler",
+            channel_type: null,
+            content: event.content,
+            created_at: event.created_at,
+            id: event.id,
+            kind: event.kind,
+            pubkey: event.pubkey,
+            tags: event.tags,
+          });
+        },
+      );
+    },
+    {
+      channelId: dmChannelId,
+      createdAt: Math.floor(Date.now() / 1000),
+      ids: dmIds,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const firstDmRow = page.getByTestId(`home-inbox-item-${dmIds[0]}`);
+  await expect(firstDmRow).toBeVisible();
+  await expect(page.getByTestId(`home-inbox-item-${dmIds[1]}`)).toHaveCount(0);
+  await expect(page.getByTestId(`home-inbox-item-${dmIds[2]}`)).toHaveCount(0);
+  await expect(firstDmRow.getByTestId("home-inbox-unread-count")).toHaveText(
+    "3 unread",
+  );
+
+  await firstDmRow.click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("DM with alice");
+  await expect(detail).toContainText("First unread DM");
+  await expect(detail).toContainText("Second unread DM");
+  await expect(detail).toContainText("Third unread DM");
+  await expect(page.getByTestId("home-inbox-selected-message")).toContainText(
+    "First unread DM",
+  );
+  const unreadBoundary = page.getByTestId("message-unread-divider");
+  await expect(unreadBoundary).toBeVisible();
+  await expect(unreadBoundary).toContainText("New");
+  await expect(
+    detail.getByRole("button", { name: "Open conversation" }),
+  ).toBeVisible();
 });
 
 test("home inbox manage affordance opens management without leaving home", async ({
@@ -2764,6 +3510,84 @@ test("home inbox manage affordance opens management without leaving home", async
   }
   expect(narrowSheetBox.width).toBeGreaterThanOrEqual(narrowHomeBox.width - 1);
   await expect(page).not.toHaveURL(/#\/channels\//);
+});
+
+test("members sidebar virtualizes large channel rosters", async ({ page }) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  const pubkeys = Array.from({ length: 500 }, (_, index) =>
+    (index + 1).toString(16).padStart(64, "0"),
+  );
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys,
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  const memberList = page.getByTestId("members-sidebar-people");
+  const memberRows = memberList.locator('[data-testid^="sidebar-member-"]');
+  await expect(memberRows.first()).toBeVisible();
+  expect(await memberRows.count()).toBeLessThan(50);
+
+  const virtualizedList = memberList.locator(".overflow-y-auto");
+  await virtualizedList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(
+    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+  ).toBeVisible();
+});
+
+test("members sidebar can invite relay-authorized agents", async ({ page }) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+});
+
+test("members sidebar hides relay agents that are not authorized", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
 });
 
 test("members sidebar can invite and remove managed agents", async ({
@@ -3068,7 +3892,7 @@ test("channel header actions show tooltips", async ({ page }) => {
   }
 });
 
-test("members sidebar collapses same-persona managed agents", async ({
+test("members sidebar retains distinct same-persona managed agents", async ({
   page,
 }) => {
   const inChannelAgentPubkey =
@@ -3118,11 +3942,11 @@ test("members sidebar collapses same-persona managed agents", async ({
   ).toHaveCount(0);
   await expect(
     page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
-  ).toHaveCount(0);
-  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
+  ).toBeVisible();
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
-test("private-channel members can add people and managed agents without admin", async ({
+test("private-channel members cannot add people without owner/admin", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -3136,14 +3960,51 @@ test("private-channel members can add people and managed agents without admin", 
   });
   await page.goto("/");
   // secret-projects is a private (non-DM) channel where the current user is a
-  // plain member, not owner/admin. They should still be able to add members
-  // and bots — only granting elevated roles is reserved for owners/admins.
+  // plain member. The relay rejects their kind:9000, so the affordance is
+  // withheld and the reason shown instead of failing after the fact.
   await openMembersSidebar(page, "secret-projects");
 
-  // The invite card is shown to any member, not just owners/admins.
+  await expect(page.getByTestId("members-sidebar-add-denied")).toBeVisible();
+  // The field stays, but only as a filter over existing members.
+  await expect(
+    page.getByTestId("channel-management-search-users"),
+  ).toHaveAttribute("placeholder", "Search people and agents");
+
+  await page.getByTestId("channel-management-search-users").fill("char");
+  await expect(page.getByText("Not in this channel")).toHaveCount(0);
+  await expect(
+    page.getByTestId(
+      `channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toHaveCount(0);
+});
+
+test("open-channel members can add people and managed agents without admin", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  // random is open and the current user is a plain member there, so the
+  // owner/admin requirement must not leak outside private channels.
+  await openMembersSidebar(page, "random");
+
+  // The invite card is shown to any member of an open channel, not just
+  // owners/admins.
   await expect(
     page.getByTestId("channel-management-search-users"),
   ).toBeVisible();
+  await expect(page.getByTestId("members-sidebar-add-denied")).toHaveCount(0);
   await page.getByTestId("channel-management-search-users").fill("char");
   await page
     .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)

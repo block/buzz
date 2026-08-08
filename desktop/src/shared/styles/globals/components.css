@@ -10,6 +10,8 @@
     --buzz-huddle-drawer-radius: 24px;
     --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
+    /* Keep the drawer surface behind the lifted app so the dark background
+     * remains visible through its rounded lower corners. */
     background: hsl(var(--buzz-huddle-drawer-surface));
   }
 
@@ -56,6 +58,32 @@
 
   .buzz-huddle-app-surface-open::after {
     opacity: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop {
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    bottom: 0;
+    height: calc(
+      var(--buzz-huddle-drawer-height) +
+      var(--buzz-huddle-drawer-radius)
+    );
+    left: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    transition: opacity 260ms var(--buzz-huddle-drawer-ease);
+    z-index: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop-open {
+    opacity: 1;
+  }
+
+  /* The dedicated companion keeps room for the controls without making the
+   * transcript look like a raised card. */
+  .buzz-huddle-app-surface-room-open {
+    bottom: var(--buzz-huddle-drawer-height);
   }
 
   .buzz-huddle-drawer {
@@ -141,6 +169,45 @@
     width: 0.25rem;
   }
 
+  .buzz-huddle-speaking-avatar {
+    isolation: isolate;
+  }
+
+  .buzz-huddle-speaking-avatar::after {
+    border: 2px solid hsl(142 71% 45%);
+    border-radius: inherit;
+    content: "";
+    inset: -2px;
+    opacity: var(--buzz-huddle-speaker-opacity, 0);
+    pointer-events: none;
+    position: absolute;
+    transform: scale(var(--buzz-huddle-speaker-scale, 1.02));
+    transition:
+      opacity 80ms linear,
+      transform 90ms cubic-bezier(0.2, 0, 0, 1);
+    will-change: opacity, transform;
+    z-index: 1;
+  }
+
+  @keyframes buzz-huddle-participant-tile-enter {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  .buzz-huddle-participant-tile {
+    animation: buzz-huddle-participant-tile-enter 180ms
+      cubic-bezier(0.23, 1, 0.32, 1) both;
+    transform-origin: center;
+    will-change: opacity, transform;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .buzz-side-panel-enter {
       animation: none;
@@ -151,8 +218,27 @@
       transition: none;
     }
 
+    .buzz-huddle-drawer-backdrop {
+      transition: none;
+    }
+
     .buzz-huddle-mic-meter-bar {
       transition: none;
+    }
+
+    .buzz-huddle-speaking-avatar {
+      isolation: auto;
+    }
+
+    .buzz-huddle-speaking-avatar::after {
+      transform: scale(1.04);
+      transition: none;
+      will-change: auto;
+    }
+
+    .buzz-huddle-participant-tile {
+      animation: none;
+      will-change: auto;
     }
   }
 
@@ -239,6 +325,54 @@
     --buzz-onboarding-avatar-action-fg: 240 240 205;
     --buzz-onboarding-avatar-control-fg: 113 113 6;
     --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
+  }
+
+  /*
+   * Backup options and password backup intentionally leave the bright
+   * onboarding world for a dark security-focused subview. Keep these semantic
+   * overrides on a reusable class as well as the shell so portaled
+   * popovers/dialogs can opt into the same treatment.
+   */
+  .buzz-onboarding-security-theme {
+    color-scheme: dark;
+    --buzz-onboarding-shell-bottom: #082b49;
+    --buzz-onboarding-cta-label: #f5f5f5;
+    --background: 222 45% 4%;
+    --foreground: 0 0% 96%;
+    --card: 220 14% 11%;
+    --card-foreground: 0 0% 96%;
+    --popover: 220 14% 9%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 0 0% 16%;
+    --primary-foreground: 0 0% 96%;
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 96%;
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 72%;
+    --accent: 0 0% 16%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 0 84% 70%;
+    --destructive-foreground: 0 0% 4%;
+    --border: 0 0% 22%;
+    --input: 0 0% 22%;
+    --ring: 0 0% 84%;
+  }
+
+  .buzz-onboarding-neutral-theme.buzz-startup-shell.buzz-onboarding-security-theme {
+    background-color: #010103;
+    background-image:
+      radial-gradient(circle, rgb(143 211 255 / 0.11) 1px, transparent 1px),
+      radial-gradient(
+        ellipse at 50% 58%,
+        rgb(28 112 196 / 0.24) 0%,
+        rgb(18 76 138 / 0.1) 38%,
+        transparent 66%
+      ),
+      linear-gradient(to bottom, #010103 0%, #040914 46%, #082b49 100%);
+    background-size:
+      24px 24px,
+      auto,
+      auto;
   }
 
   .buzz-onboarding-key-text {
@@ -376,10 +510,13 @@
     animation-name: buzz-onboarding-line-slide-backward;
   }
 
+  .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-down"],
   .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-up"] {
     overflow: visible;
   }
 
+  .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-down"]
+    > .buzz-onboarding-transition-content,
   .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-up"]
     > .buzz-onboarding-transition-content {
     /* `backwards` (not `both`): the reveal ends on an identity transform, so
@@ -387,10 +524,21 @@
        that establishes a containing block and traps `position: fixed`
        descendants (the bottom-docked onboarding footer). Reverting to no
        transform at rest looks identical and frees fixed positioning. */
-    animation: buzz-onboarding-mask-reveal-up 760ms
-      cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    animation-duration: 760ms;
+    animation-fill-mode: backwards;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
     animation-delay: var(--buzz-onboarding-transition-delay, 0ms);
     transform-origin: 50% 70%;
+  }
+
+  .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-down"]
+    > .buzz-onboarding-transition-content {
+    animation-name: buzz-onboarding-mask-reveal-down;
+  }
+
+  .buzz-onboarding-transition-line[data-onboarding-effect="mask-reveal-up"]
+    > .buzz-onboarding-transition-content {
+    animation-name: buzz-onboarding-mask-reveal-up;
   }
 
   .buzz-onboarding-name-placeholder-caret {
@@ -529,6 +677,25 @@
       filter: blur(8px);
       opacity: 0;
       transform: translate3d(0, 30px, 0) scale(0.985);
+    }
+
+    56% {
+      filter: blur(2px);
+      opacity: 0.86;
+    }
+
+    to {
+      filter: blur(0);
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  @keyframes buzz-onboarding-mask-reveal-down {
+    from {
+      filter: blur(8px);
+      opacity: 0;
+      transform: translate3d(0, -30px, 0) scale(0.985);
     }
 
     56% {

@@ -271,7 +271,7 @@ test("team sharing uses the people picker and gates memory before sending", asyn
       `team-share-recipient-option-${TEST_IDENTITIES.charlie.pubkey}`,
     )
     .click();
-  await shareDialog.getByTestId("team-share-recipient-access").click();
+  await shareDialog.getByTestId("team-share-share-level").click();
   await page.getByRole("menuitemradio", { name: "Team + core memory" }).click();
   await shareDialog.getByTestId("team-share-send").click();
 
@@ -311,6 +311,73 @@ test("team sharing uses the people picker and gates memory before sending", asyn
   expect(sendPayload?.content).not.toContain("![image](");
 });
 
+test("team share level carries memories onto the link path too", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+        status: "running",
+      },
+    ],
+    agentMemory: createMockAgentMemoryListing(),
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Engineering team actions").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  const shareDialog = page.getByTestId("team-share-dialog");
+  await expect(shareDialog).toBeVisible();
+
+  // No recipient selected — the copy-link path alone must still honour the
+  // shared selector and gate plaintext memories behind the confirmation.
+  await shareDialog.getByTestId("team-share-share-level").click();
+  await page.getByRole("menuitemradio", { name: "Team + core memory" }).click();
+  await expect(
+    shareDialog.getByTestId("team-share-memory-warning"),
+  ).toBeVisible();
+  await shareDialog.getByTestId("team-share-copy-link").click();
+
+  const memoryConfirmation = page.getByTestId("team-share-memory-confirmation");
+  await expect(memoryConfirmation).toBeVisible();
+  await expect(memoryConfirmation).toContainText("plaintext core memory");
+  await expect(memoryConfirmation).toContainText(
+    "Anyone with the link can view it.",
+  );
+  const encodeLevelsBeforeConfirmation = (await readCommandLog(page))
+    .filter((entry) => entry.command === "encode_team_snapshot_for_send")
+    .map(
+      (entry) =>
+        (entry.payload as { memoryLevel?: string } | undefined)?.memoryLevel,
+    );
+  expect(encodeLevelsBeforeConfirmation).toEqual([]);
+
+  await memoryConfirmation.getByTestId("team-share-memory-confirm").click();
+  await expect(shareDialog.getByTestId("team-share-copy-link")).toContainText(
+    "Copied",
+  );
+  expect(
+    (await readCommandLog(page)).filter(
+      (entry) =>
+        entry.command === "encode_team_snapshot_for_send" &&
+        (entry.payload as { memoryLevel?: string } | undefined)?.memoryLevel ===
+          "core",
+    ),
+  ).toHaveLength(1);
+});
+
 test("team sharing keeps link copy and export in the shared surface", async ({
   page,
 }) => {
@@ -343,7 +410,7 @@ test("team sharing keeps link copy and export in the shared surface", async ({
   await menu.getByRole("menuitem", { name: "Share" }).click();
 
   const shareDialog = page.getByTestId("team-share-dialog");
-  await expect(shareDialog.getByTestId("team-share-link-access")).toHaveText(
+  await expect(shareDialog.getByTestId("team-share-share-level")).toHaveText(
     "Team only",
   );
   const exportTeamRow = shareDialog.getByTestId("team-share-export");
@@ -351,7 +418,7 @@ test("team sharing keeps link copy and export in the shared surface", async ({
   const recipientSearch = shareDialog.getByTestId(
     "team-share-recipient-search",
   );
-  const linkAccess = shareDialog.getByTestId("team-share-link-access");
+  const shareLevel = shareDialog.getByTestId("team-share-share-level");
   const closeButton = shareDialog.getByRole("button", { name: "Close" });
   await waitForAnimations(page);
   await expect(
@@ -363,7 +430,7 @@ test("team sharing keeps link copy and export in the shared surface", async ({
   await expect(copyLinkButton).toContainText("Copying…");
   await expect(copyLinkButton).toHaveCSS("opacity", "1");
   await expect(recipientSearch).toBeEnabled();
-  await expect(linkAccess).toBeEnabled();
+  await expect(shareLevel).toBeEnabled();
   await expect(closeButton).toBeDisabled();
   await expect(exportTeamRow).toBeDisabled();
   await expect(exportTeamRow).toHaveCSS("opacity", "1");

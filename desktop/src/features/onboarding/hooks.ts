@@ -82,14 +82,15 @@ export async function initializeStarterChannels(
     let starterChannels: Awaited<
       ReturnType<typeof ensureStarterChannels>
     > | null = null;
-    let starterChannelsError: unknown = null;
     try {
       starterChannels = await ensureStarterChannels({
         ensureStarterChannels: ensureStarterChannelsCommand,
         getChannels,
       });
     } catch (error) {
-      starterChannelsError = error;
+      // Public starter channels are optional. Owners may have deliberately
+      // deleted their deterministic starter channels; that must not strand a
+      // new member after the required private Welcome channel succeeds.
       console.warn("Failed to initialize public starter channels.", error);
     }
 
@@ -145,16 +146,6 @@ export async function initializeStarterChannels(
       notifyWelcomeChannelReady(welcomeChannel.id);
     }
     const focusChannelId = focus ? welcomeChannel.id : undefined;
-    if (starterChannelsError) {
-      return {
-        ok: false,
-        focusChannelId,
-        reason:
-          starterChannelsError instanceof Error
-            ? starterChannelsError.message
-            : "Failed to set up starter channels",
-      };
-    }
     return { ok: true, focusChannelId };
   } catch (error) {
     console.warn("Failed to initialize starter channels.", error);

@@ -220,6 +220,67 @@ pub(crate) fn configure_no_window(command: &mut std::process::Command) {
     let _ = command;
 }
 
+/// Copy `source_bytes` to `path` owner-only, exactly once.
+///
+/// For the pre-migration backups taken by the migrations in `crate::migration` before they
+/// rewrite `managed-agents.json`. That store carries plaintext agent nsecs
+/// whenever the keyring is unreachable (`SECURITY.md`), so the backup must be
+/// owner-only from the initial open — `fs::write` then `set_permissions` leaves
+/// exactly the umask window that [`atomic_write_json_restricted`] sets the mode
+/// on the handle to close.
+///
+/// `create_new` also subsumes the create-if-absent check: `AlreadyExists` is the
+/// idempotent success case, so a re-run after a partial failure cannot replace a
+/// pristine backup with a half-migrated snapshot, and there is no exists-then-
+/// write window between the two. `Ok(false)` means a backup was already there
+/// and was left untouched. Every other error propagates, so a caller that fails
+/// to back up never proceeds to the live write.
+///
+/// Non-Unix platforms get `create_new` alone.
+///
+/// [`atomic_write_json_restricted`]: crate::managed_agents::atomic_write_json_restricted
+pub(crate) fn create_restricted_backup_once(
+    path: &std::path::Path,
+    source_bytes: &[u8],
+) -> Result<bool, String> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(format!("create {}: {e}", path.display())),
+    };
+    file.write_all(source_bytes)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Derive the sibling backup path for a store, resolving symlinks first.
+///
+/// Dev worktrees symlink `agents/managed-agents.json` into the shared canonical
+/// dev data dir (`sync_shared_agent_data`). [`atomic_write_json_restricted`]
+/// canonicalizes before writing, so without the same resolution here the sole
+/// recovery copy would land beside the symlink while the data it protects lives
+/// elsewhere. Falls back to the given path when `canonicalize` fails — the store
+/// may legitimately not exist yet.
+///
+/// [`atomic_write_json_restricted`]: crate::managed_agents::atomic_write_json_restricted
+pub(crate) fn resolved_backup_path(
+    store_path: &std::path::Path,
+    backup_name: &str,
+) -> std::path::PathBuf {
+    std::fs::canonicalize(store_path)
+        .unwrap_or_else(|_| store_path.to_path_buf())
+        .with_file_name(backup_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::slugify;

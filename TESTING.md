@@ -277,7 +277,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
-| `BUZZ_REQUIRE_MEDIA_GET_AUTH`   | `false`                     | When true, `GET`/`HEAD /media/*` require Blossom kind 24242 `t=get` auth plus relay membership. |
+| `BUZZ_DRAIN_JITTER_MS`          | `0` (off)                   | Per-connection upper bound, in ms, for the random delay before each live WebSocket gets its `1012 Service Restart` close on graceful shutdown. `0` closes every socket at once (the previous behavior). A positive value spreads closes uniformly over `[1, value]` ms to avoid a reconnect thundering herd on rolling deploys. Values above `20000` are capped to `20000` (`MAX_DRAIN_JITTER_MS`) to leave close-frame delivery headroom under the relay's 30s hard-drain timeout. Empty or whitespace-only is treated as unset (off); a non-integer fails startup loudly. |
 | `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |

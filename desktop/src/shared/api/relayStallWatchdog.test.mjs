@@ -44,7 +44,7 @@ test("does not send probes while watching for stalls", async () => {
   await sleep(45);
   wd.stop();
   // The passive watchdog has no send callback by construction. This test is a
-  // regression guard for the WARP bug: liveness checks must not write to a
+  // regression guard for the half-open-socket bug: liveness checks must not write to a
   // socket already suspected of being half-open.
   assert.equal(typeof wd.recordInbound, "function");
 });
