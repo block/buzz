@@ -100,11 +100,13 @@ function MessageComposerImpl({
     syncContentRefFromEditorRef,
   } = useComposerContentState();
   const [previewContent, setPreviewContent] = React.useState("");
-  const deferredPreviewContent = React.useDeferredValue(previewContent);
   const {
     previewList: composerLinkPreviews,
     getReadyTags: getReadyLinkPreviewTags,
-  } = useComposerLinkPreviews(deferredPreviewContent);
+    hasPendingSnapshots: hasPendingLinkPreviewSnapshots,
+    // Ref lets the submit guard block Enter/form/auto-submit until snapshots settle.
+    hasPendingSnapshotsRef: hasPendingLinkPreviewSnapshotsRef,
+  } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
@@ -198,6 +200,8 @@ function MessageComposerImpl({
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
+  // Sync lock: taken before any async send so rapid Enter can't double-submit.
+  const isSubmitLockedRef = React.useRef(false);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
@@ -562,7 +566,9 @@ function MessageComposerImpl({
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
       isSendingRef.current ||
+      isSubmitLockedRef.current ||
       isUploadingRef.current ||
+      hasPendingLinkPreviewSnapshotsRef.current ||
       mentionSendFlow.isPreparingMentionSend
     ) {
       return;
@@ -574,6 +580,7 @@ function MessageComposerImpl({
     ) {
       return;
     }
+    isSubmitLockedRef.current = true;
     onPreparingMentionSendChange?.(true);
     persistentMentionHydration.beginSubmit();
     try {
@@ -594,6 +601,7 @@ function MessageComposerImpl({
         audienceRevision: audienceScope ? persistentAudience.revision : null,
       });
     } finally {
+      isSubmitLockedRef.current = false;
       persistentMentionHydration.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
@@ -604,6 +612,7 @@ function MessageComposerImpl({
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
     getReadyLinkPreviewTags,
+    hasPendingLinkPreviewSnapshotsRef,
     media.clearQueuedAttachments,
     media.pendingImetaRef,
     media.queuedAttachmentsRef,
@@ -802,23 +811,14 @@ function MessageComposerImpl({
     });
   }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
   // ── Send button state ───────────────────────────────────────────────
-  const sendDisabled = React.useMemo(
-    () =>
-      composerDisabled ||
-      media.isUploading ||
-      mentionSendFlow.isPreparingMentionSend ||
-      (isContentEmpty &&
-        media.pendingImeta.length === 0 &&
-        media.queuedAttachments.length === 0),
-    [
-      composerDisabled,
-      media.isUploading,
-      mentionSendFlow.isPreparingMentionSend,
-      isContentEmpty,
-      media.pendingImeta.length,
-      media.queuedAttachments.length,
-    ],
-  );
+  const sendDisabled =
+    composerDisabled ||
+    media.isUploading ||
+    hasPendingLinkPreviewSnapshots ||
+    mentionSendFlow.isPreparingMentionSend ||
+    (isContentEmpty &&
+      media.pendingImeta.length === 0 &&
+      media.queuedAttachments.length === 0);
   const handleCaptureSelection = React.useCallback(() => {}, []);
 
   const handlePaperclipClick = React.useCallback(() => {
