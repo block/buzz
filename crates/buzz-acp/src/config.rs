@@ -159,6 +159,34 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+/// One-line operator warning for a permission mode that silently denies the
+/// agent's own reply path. Returns `None` for modes that don't.
+///
+/// `dontAsk` is the default, and it is applied with `session/set_config_option`
+/// after session creation, so it overrides whatever the agent's own
+/// configuration established. The resulting failure is invisible from the
+/// outside: the denial happens *inside* the agent, so no
+/// `session/request_permission` ever reaches this harness and there is nothing
+/// for it to log. An agent stays connected and subscribed, consumes a full
+/// turn, and publishes nothing — because the bundled `buzz` CLI it is prompted
+/// to reply with is itself an approval-gated tool call.
+///
+/// Stating it once at startup costs one line and saves operators from
+/// diagnosing an empty channel as a relay or delivery problem.
+///
+/// Kept as a free function over the mode so the text is unit-testable without
+/// constructing a full [`Config`].
+pub fn unattended_denial_warning(mode: PermissionMode) -> Option<&'static str> {
+    matches!(mode, PermissionMode::DontAsk).then_some(
+        "permission_mode=dontAsk — approval-gated tool calls are denied inside the agent, \
+         including the bundled `buzz` CLI agents use to publish replies, so an agent may \
+         consume a full turn and post nothing. This is applied after session creation and \
+         overrides the agent's own permissions configuration. To leave that configuration in \
+         charge, set --permission-mode (BUZZ_ACP_PERMISSION_MODE) to `default`; unattended \
+         permission requests that reach the harness are still rejected either way.",
+    )
+}
+
 /// CLI args for `buzz-acp models` — query available models from an agent.
 ///
 /// This is a standalone `Parser` (not a subcommand variant) because the
@@ -428,7 +456,20 @@ pub struct CliArgs {
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
     /// Defaults to `dontAsk`, which rejects operations that need interactive
-    /// approval because Buzz does not expose a human permission prompt.
+    /// approval because Buzz does not expose a human permission prompt. Note
+    /// that this is applied with `session/set_config_option` *after* the
+    /// session is created, so it overrides any `permissions.defaultMode` or
+    /// `permissions.allow` rules the agent's own configuration established
+    /// (e.g. Claude Code's `settings.json`). Under `dontAsk` that includes the
+    /// bundled `buzz` CLI, which is how agents publish their replies — an
+    /// agent can receive a mention, do the work, and then be denied the send.
+    ///
+    /// Select `default` to leave the agent's own configuration in charge: the
+    /// harness sends no `set_config_option` at all in that mode. This is the
+    /// supported way to run an agent that pre-authorizes its own tools, and it
+    /// does not weaken the harness guarantee — any `session/request_permission`
+    /// that reaches buzz-acp is still rejected, because there is no human to
+    /// ask.
     #[arg(
         long,
         env = "BUZZ_ACP_PERMISSION_MODE",
@@ -2274,6 +2315,37 @@ channels = "ALL"
         assert!(!PermissionMode::AcceptEdits.is_default());
         assert!(!PermissionMode::DontAsk.is_default());
         assert!(!PermissionMode::Plan.is_default());
+    }
+
+    #[test]
+    /// Only `dontAsk` denies the agent's reply path, so only `dontAsk` warns.
+    /// A warning on every mode would be noise operators learn to skip.
+    fn test_unattended_denial_warning_only_for_dont_ask() {
+        assert!(unattended_denial_warning(PermissionMode::DontAsk).is_some());
+        assert!(unattended_denial_warning(PermissionMode::Default).is_none());
+        assert!(unattended_denial_warning(PermissionMode::AcceptEdits).is_none());
+        assert!(unattended_denial_warning(PermissionMode::Plan).is_none());
+    }
+
+    #[test]
+    /// The warning is only useful if it names the way out. Pin both the escape
+    /// hatch and the guarantee it does not weaken, so a future edit that drops
+    /// either one fails here instead of shipping a dead-end warning.
+    fn test_unattended_denial_warning_names_the_escape_hatch() {
+        let warning = unattended_denial_warning(PermissionMode::DontAsk)
+            .expect("dontAsk must produce a warning");
+        assert!(
+            warning.contains("BUZZ_ACP_PERMISSION_MODE"),
+            "warning must name the env var operators can set, got: {warning}"
+        );
+        assert!(
+            warning.contains("`default`"),
+            "warning must name the mode that defers to the agent's config, got: {warning}"
+        );
+        assert!(
+            warning.contains("still rejected"),
+            "warning must state the harness guarantee is unchanged, got: {warning}"
+        );
     }
 
     #[test]

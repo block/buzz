@@ -1578,6 +1578,13 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    // The dontAsk denial happens inside the agent, so it never surfaces as a
+    // harness log line. Say it once here rather than leave an empty channel as
+    // the only symptom.
+    if let Some(warning) = crate::config::unattended_denial_warning(config.permission_mode) {
+        tracing::warn!("buzz-acp: {warning}");
+    }
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
