@@ -38,6 +38,10 @@ pub struct TriggerContext {
     /// Event ID of the triggering message (hex string).
     pub message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
+    ///
+    /// Top-level JSON object keys only. Nested objects are stored as JSON
+    /// strings; templates can address nested values with dotted paths such as
+    /// `{{trigger.data.item.title}}`.
     pub webhook_fields: HashMap<String, String>,
 }
 
@@ -122,6 +126,12 @@ pub fn resolve_template(
     Ok(result)
 }
 
+/// Maximum number of dotted segments when walking a nested webhook JSON value.
+///
+/// Caps pathological paths against oversized webhook bodies (e.g. Rollbar
+/// occurrence metadata) without requiring eager flattening of the whole tree.
+const MAX_WEBHOOK_NEST_DEPTH: usize = 16;
+
 /// Resolve a single variable path to its string value.
 fn resolve_variable(
     path: &str,
@@ -129,7 +139,10 @@ fn resolve_variable(
     step_outputs: &HashMap<String, JsonValue>,
 ) -> Option<String> {
     if let Some(field) = path.strip_prefix("trigger.") {
-        return trigger_ctx.get_field(field).map(|s| s.to_owned());
+        if let Some(s) = trigger_ctx.get_field(field) {
+            return Some(s.to_owned());
+        }
+        return resolve_nested_webhook_field(trigger_ctx, field);
     }
 
     // Pattern: `steps.STEP_ID.output.FIELD`
@@ -148,6 +161,36 @@ fn resolve_variable(
     }
 
     None
+}
+
+/// Walk a JSON-encoded top-level webhook field via a dotted path.
+///
+/// Webhook bodies store nested objects as JSON strings (e.g. `data` →
+/// `{"item":{"title":"…"}}`). A template like `{{trigger.data.item.title}}`
+/// first misses the exact key `data.item.title`, then this helper parses the
+/// `data` blob and navigates `item` → `title`.
+///
+/// Only object keys are walked; arrays and scalars stop the walk. Depth is
+/// capped at [`MAX_WEBHOOK_NEST_DEPTH`].
+fn resolve_nested_webhook_field(trigger_ctx: &TriggerContext, path: &str) -> Option<String> {
+    let (root, rest) = path.split_once('.')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let depth = rest.split('.').count();
+    if depth > MAX_WEBHOOK_NEST_DEPTH {
+        return None;
+    }
+
+    let root_raw = trigger_ctx.webhook_fields.get(root)?;
+    let mut current: JsonValue = serde_json::from_str(root_raw).ok()?;
+    for key in rest.split('.') {
+        current = match &current {
+            JsonValue::Object(map) => map.get(key)?.clone(),
+            _ => return None,
+        };
+    }
+    Some(json_to_string(&current))
 }
 
 /// Navigate a JSON value by a single key and return it as a string.
@@ -1325,6 +1368,60 @@ mod tests {
             .insert("service".to_owned(), "api-gateway".to_owned());
         let out = resolve_template("Service: {{trigger.service}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "Service: api-gateway");
+    }
+
+    #[test]
+    fn resolve_nested_webhook_json_field() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields.insert(
+            "event_name".to_owned(),
+            "new_item".to_owned(),
+        );
+        ctx.webhook_fields.insert(
+            "data".to_owned(),
+            json!({
+                "url": "https://rollbar.com/acct/app/items/40",
+                "item": {
+                    "title": "ValueError: Test",
+                    "environment": "production",
+                    "total_occurrences": 3,
+                    "last_occurrence": { "level": "error" }
+                }
+            })
+            .to_string(),
+        );
+
+        let out = resolve_template(
+            "{{trigger.event_name}}|{{trigger.data.item.title}}|{{trigger.data.item.environment}}|{{trigger.data.item.last_occurrence.level}}|{{trigger.data.url}}|{{trigger.data.item.total_occurrences}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "new_item|ValueError: Test|production|error|https://rollbar.com/acct/app/items/40|3"
+        );
+    }
+
+    #[test]
+    fn resolve_nested_webhook_missing_path_left_literal() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields
+            .insert("data".to_owned(), json!({ "item": { "title": "x" } }).to_string());
+        let out = resolve_template("{{trigger.data.item.missing}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "{{trigger.data.item.missing}}");
+    }
+
+    #[test]
+    fn resolve_nested_webhook_prefers_exact_key_over_json_walk() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields
+            .insert("data".to_owned(), json!({ "item": { "title": "nested" } }).to_string());
+        ctx.webhook_fields
+            .insert("data.item.title".to_owned(), "exact".to_owned());
+        let out =
+            resolve_template("{{trigger.data.item.title}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "exact");
     }
 
     #[tokio::test]
