@@ -3,6 +3,10 @@ import * as React from "react";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { cn } from "@/shared/lib/cn";
 import {
+  type ListVirtualizer,
+  VirtualizedList,
+} from "@/shared/ui/VirtualizedList";
+import {
   POPOVER_CUSTOM_ENTER_MOTION_CLASS,
   POPOVER_SHADOW_STYLE,
   POPOVER_SURFACE_CLASS,
@@ -21,14 +25,20 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
   onSelect,
   position = "above",
 }: EmojiAutocompleteProps) {
-  const listRef = React.useRef<HTMLDivElement>(null);
+  const listVirtualizerRef = React.useRef<ListVirtualizer | null>(null);
 
   React.useEffect(() => {
-    const activeItem = listRef.current?.children[selectedIndex] as
-      | HTMLElement
-      | undefined;
-    activeItem?.scrollIntoView({ block: "nearest" });
+    listVirtualizerRef.current?.scrollToIndex(selectedIndex, {
+      align: "auto",
+    });
   }, [selectedIndex]);
+
+  const handleVirtualizer = React.useCallback(
+    (virtualizer: ListVirtualizer) => {
+      listVirtualizerRef.current = virtualizer;
+    },
+    [],
+  );
 
   if (suggestions.length === 0) {
     return null;
@@ -43,47 +53,55 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
     >
       <div
         className={cn(
-          "max-h-48 overflow-y-auto rounded-xl p-1",
+          "rounded-xl p-1",
           POPOVER_CUSTOM_ENTER_MOTION_CLASS,
           position === "below"
             ? "origin-top slide-in-from-top-1"
             : "origin-bottom slide-in-from-bottom-1",
           POPOVER_SURFACE_CLASS,
         )}
-        ref={listRef}
+        data-testid="emoji-autocomplete"
         style={POPOVER_SHADOW_STYLE}
       >
-        {suggestions.map((suggestion, index) => (
-          <button
-            className={cn(
-              "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
-              index === selectedIndex
-                ? "bg-accent text-accent-foreground"
-                : "text-popover-foreground hover:bg-accent/50",
-            )}
-            key={suggestion.id}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onSelect(suggestion);
-            }}
-            tabIndex={-1}
-            type="button"
-          >
-            {suggestion.url ? (
-              <img
-                alt={`:${suggestion.id}:`}
-                src={suggestion.url}
-                className="h-5 w-5 object-contain"
-                draggable={false}
-              />
-            ) : (
-              <span className="text-lg leading-none">{suggestion.native}</span>
-            )}
-            <span className="truncate text-muted-foreground">
-              :{suggestion.id}:
-            </span>
-          </button>
-        ))}
+        <VirtualizedList
+          className="max-h-48"
+          estimateSize={36}
+          getItemKey={(suggestion) => suggestion.id}
+          items={suggestions}
+          onVirtualizer={handleVirtualizer}
+          renderItem={(suggestion, index) => (
+            <button
+              className={cn(
+                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                index === selectedIndex
+                  ? "bg-accent text-accent-foreground"
+                  : "text-popover-foreground hover:bg-accent/50",
+              )}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                onSelect(suggestion);
+              }}
+              tabIndex={-1}
+              type="button"
+            >
+              {suggestion.url ? (
+                <img
+                  alt={`:${suggestion.id}:`}
+                  src={suggestion.url}
+                  className="h-5 w-5 object-contain"
+                  draggable={false}
+                />
+              ) : (
+                <span className="text-lg leading-none">
+                  {suggestion.native}
+                </span>
+              )}
+              <span className="truncate text-muted-foreground">
+                :{suggestion.id}:
+              </span>
+            </button>
+          )}
+        />
       </div>
     </div>
   );

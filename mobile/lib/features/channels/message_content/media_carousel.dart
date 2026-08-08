@@ -141,7 +141,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
               fontWeight: FontWeight.w400,
             ),
           ),
-          const SizedBox(height: Grid.half),
+          const SizedBox(height: Grid.half + Grid.quarter),
           LayoutBuilder(
             builder: (context, constraints) {
               final contentWidth = constraints.hasBoundedWidth
@@ -152,12 +152,16 @@ class _MessageImageCarousel extends HookConsumerWidget {
               final leadingExtent = leadingOverflow;
               final isLeftToRight =
                   Directionality.of(context) == TextDirection.ltr;
+              final itemTrailingPaddings = [
+                for (var index = 0; index < items.length; index++)
+                  index == items.length - 1 ? Grid.gutter : Grid.half,
+              ];
               final previewDecodeWidths = [
                 for (var index = 0; index < items.length; index++)
                   math.max(
                     1.0,
                     carouselWidth * controller.viewportFraction -
-                        (index == items.length - 1 ? 0 : Grid.half),
+                        itemTrailingPaddings[index],
                   ),
               ];
               final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
@@ -190,6 +194,10 @@ class _MessageImageCarousel extends HookConsumerWidget {
                 height: _messageMediaCarouselHeight,
                 child: PageView.builder(
                   controller: controller,
+                  allowImplicitScrolling: true,
+                  // Keep the first image aligned with the message body, but
+                  // allow later pages to paint through the avatar gutter as
+                  // the row scrolls.
                   clipBehavior: Clip.none,
                   padEnds: false,
                   itemCount: items.length,
@@ -197,8 +205,9 @@ class _MessageImageCarousel extends HookConsumerWidget {
                   itemBuilder: (context, index) {
                     final item = items[index];
                     return Padding(
+                      key: ValueKey('message-media-carousel-page:${item.url}'),
                       padding: EdgeInsetsDirectional.only(
-                        end: index == items.length - 1 ? 0 : Grid.half,
+                        end: itemTrailingPaddings[index],
                       ),
                       child: Semantics(
                         button: true,

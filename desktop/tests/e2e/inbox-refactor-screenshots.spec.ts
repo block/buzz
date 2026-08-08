@@ -174,7 +174,7 @@ test.describe("inbox refactor screenshots", () => {
     await page.screenshot({ path: `${SHOTS}/01-current-filters.png` });
   });
 
-  test("02 — Inbox label, bell icon, and overflow controls", async ({
+  test("02 — Inbox label, inbox icon, and overflow controls", async ({
     page,
   }) => {
     await installMockBridge(page, { mode: "mock" });
@@ -185,11 +185,13 @@ test.describe("inbox refactor screenshots", () => {
     });
 
     // The sidebar must be in frame — the label is the point of this shot.
-    await expect(
-      page
-        .getByTestId("sidebar-primary-menu")
-        .getByRole("button", { name: "Inbox", exact: true }),
-    ).toBeVisible();
+    const inboxButton = page
+      .getByTestId("sidebar-primary-menu")
+      .getByRole("button", { name: "Inbox", exact: true });
+    await expect(inboxButton).toBeVisible();
+    // Inbox is a destination, not a notification tray, so it carries the inbox
+    // glyph rather than a bell. Asserted because nothing else pins the icon.
+    await expect(inboxButton.locator("svg.lucide-inbox")).toHaveCount(1);
 
     await page.getByTestId("inbox-options-trigger").click();
     await expect(page.getByText("Show unread only")).toBeVisible();

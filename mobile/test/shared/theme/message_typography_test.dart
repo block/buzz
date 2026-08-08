@@ -130,6 +130,13 @@ void main() {
       lineHeight: 17,
       letterSpacing: 0,
     );
+    expectStyle(
+      filterChipTextStyle,
+      fontSize: 15,
+      fontWeight: FontWeight.w400,
+      lineHeight: 15,
+      letterSpacing: 0,
+    );
   });
 
   test('message and activity avatars use their surface sizes', () {

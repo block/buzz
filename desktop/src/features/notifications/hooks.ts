@@ -209,6 +209,29 @@ export function useNotificationSettings(pubkey?: string) {
     void refreshPermission();
   }, [normalizedPubkey]);
 
+  React.useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshPermission();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (
+      settings.desktopEnabled &&
+      (permission === "denied" || permission === "unsupported")
+    ) {
+      setSettings((current) => ({ ...current, desktopEnabled: false }));
+    }
+  }, [permission, settings.desktopEnabled]);
+
   const setDesktopEnabled = React.useCallback(async (enabled: boolean) => {
     if (!enabled) {
       setErrorMessage(null);
@@ -352,6 +375,7 @@ export function useHomeFeedNotificationState(
   pubkey: string | undefined,
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
+  desktopNotificationsEnabled: boolean,
   isHomeActive: boolean,
   // NIP-RS read marker lookup, shared with the sidebar via AppShell. When
   // provided, channel-backed feed items are treated as read iff their
@@ -377,15 +401,18 @@ export function useHomeFeedNotificationState(
   // has not been advanced by opening Home.
   getMessageReadAt: (messageId: string) => number | null = () => null,
   channels: ReadonlyArray<Pick<Channel, "id" | "name" | "channelType">> = [],
+  silentChannelIds?: ReadonlySet<string>,
 ) {
   useFeedDesktopNotifications(
     feed,
     pubkey,
     settings,
     setDesktopEnabled,
+    desktopNotificationsEnabled,
     profiles,
     mutedChannelIds,
     channels,
+    silentChannelIds,
   );
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>

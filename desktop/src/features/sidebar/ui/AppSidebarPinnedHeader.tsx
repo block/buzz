@@ -1,4 +1,4 @@
-import { Activity, Bell, Bot, FolderGit2, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -98,13 +98,22 @@ export function AppSidebarPrimaryMenu({
       <SidebarMenu className="pb-2">
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             isActive={selectedView === "home"}
             onClick={onSelectHome}
             tooltip="Inbox"
             type="button"
           >
-            <Bell className="h-4 w-4" />
-            <SidebarMenuLabel>Inbox</SidebarMenuLabel>
+            <Inbox
+              className={
+                selectedView !== "home" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "home" ? "opacity-80" : undefined}
+            >
+              Inbox
+            </SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
             <SidebarMenuBadge
@@ -145,14 +154,23 @@ export function AppSidebarPrimaryMenu({
         </FeatureGate>
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             data-testid="open-agents-view"
             isActive={selectedView === "agents"}
             onClick={onSelectAgents}
             tooltip="Agents"
             type="button"
           >
-            <Bot className="h-4 w-4" />
-            <SidebarMenuLabel>Agents</SidebarMenuLabel>
+            <Bot
+              className={
+                selectedView !== "agents" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "agents" ? "opacity-80" : undefined}
+            >
+              Agents
+            </SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

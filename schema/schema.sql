@@ -54,6 +54,9 @@ CREATE TABLE communities (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host            VARCHAR(255) NOT NULL,
     signing_key     BYTEA,
+    -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
+    -- Added by migration 0003; kept here so desired-state applies match.
+    icon            TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
     CONSTRAINT chk_communities_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
@@ -109,6 +112,12 @@ CREATE INDEX idx_channels_community_visibility ON channels (community_id, visibi
 CREATE INDEX idx_channels_created_by ON channels (community_id, created_by);
 CREATE INDEX idx_channels_ttl_expiry ON channels (ttl_deadline)
     WHERE ttl_seconds IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL;
+-- Tenant-independent channel-id → community lookups (Db::communities_of_channels,
+-- Db::community_of_channel) carry no community_id predicate, so no
+-- community_id-leading index can serve them. Covering + partial: index-only scan.
+-- Not UNIQUE — the same channel id may exist under more than one community.
+CREATE INDEX idx_channels_id_live ON channels (id) INCLUDE (community_id)
+    WHERE deleted_at IS NULL;
 
 -- channels.community_id is immutable: a channel can never be re-tenanted.
 -- (Conformance: "Migration lint forbids channel re-tenanting except through an
@@ -530,7 +539,7 @@ CREATE TABLE reactions (
     event_created_at    TIMESTAMPTZ NOT NULL,
     event_id            BYTEA NOT NULL,
     pubkey              BYTEA NOT NULL,
-    emoji               VARCHAR(64) NOT NULL,
+    emoji               VARCHAR(66) NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     removed_at          TIMESTAMPTZ,
     reaction_event_id   BYTEA,
@@ -1051,3 +1060,23 @@ INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('push_gateway_endpoint_quotas', 'public gateway endpoint abuse ceilings span relay communities'),
     ('push_gateway_delivery_auth_replays', 'public gateway signed-event replay admission spans relay communities'),
     ('push_gateway_delivery_request_replays', 'public gateway stable request-id admission spans relay communities');
+
+-- ── Replica heartbeat (read-replica freshness fence) ─────────────────────────
+-- Portable read-side freshness observation for the replica fence (see
+-- crates/buzz-db/src/replica_fence.rs and migrations/0026). Exactly one row;
+-- the single-row token UPDATE is the serialization point that makes tokens
+-- globally commit-ordered across relay pods. `epoch` detects token resets
+-- (restore/re-seed) so a stale retained token can never masquerade as fresh
+-- coverage. Deployment-global by design: describes replication topology,
+-- never tenant data.
+
+CREATE TABLE replica_heartbeat (
+    id    smallint PRIMARY KEY CHECK (id = 1),
+    epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
+    token bigint   NOT NULL DEFAULT 0
+);
+
+INSERT INTO replica_heartbeat (id) VALUES (1);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');

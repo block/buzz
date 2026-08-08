@@ -160,6 +160,30 @@ void main() {
     _testPrefs = await SharedPreferences.getInstance();
   });
 
+  test('cancels a captured forum delivery after the community changes', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://first.example');
+    final delivery = ForumEventDelivery.capture(container);
+
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://second.example');
+
+    expect(
+      delivery.createPost(channelId: _channelId, content: 'Queued post'),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('active community changed'),
+        ),
+      ),
+    );
+  });
+
   group('ForumPostCard', () {
     testWidgets('renders author name and content', (tester) async {
       await tester.pumpWidget(

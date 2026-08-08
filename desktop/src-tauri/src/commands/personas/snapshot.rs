@@ -142,7 +142,7 @@ pub(crate) fn validate_snapshot_encode_size(bytes_len: usize, is_png: bool) -> R
 }
 
 /// Parse a `memory_level` string to `MemoryLevel`.
-fn parse_memory_level(s: &str) -> Result<MemoryLevel, String> {
+pub(crate) fn parse_memory_level(s: &str) -> Result<MemoryLevel, String> {
     match s {
         "none" | "" => Ok(MemoryLevel::None),
         "core" => Ok(MemoryLevel::Core),
@@ -153,6 +153,32 @@ fn parse_memory_level(s: &str) -> Result<MemoryLevel, String> {
     }
 }
 
+/// Flatten an owner-decrypted memory listing into manifest entries for
+/// `memory_level`: `Core` takes the core entry only; `Everything` appends all
+/// `mem/*` entries after it. Pure so both the export and card-mint paths share
+/// (and tests can pin) the level → entries selection.
+pub(crate) fn memory_entries_from_listing(
+    listing: crate::commands::engrams::AgentMemoryListing,
+    memory_level: MemoryLevel,
+) -> Vec<AgentSnapshotMemoryEntry> {
+    let mut entries = Vec::new();
+    if let Some(core) = listing.core {
+        entries.push(AgentSnapshotMemoryEntry {
+            slug: core.slug,
+            body: core.body,
+        });
+    }
+    if memory_level == MemoryLevel::Everything {
+        for mem in listing.memories {
+            entries.push(AgentSnapshotMemoryEntry {
+                slug: mem.slug,
+                body: mem.body,
+            });
+        }
+    }
+    entries
+}
+
 /// Parse a `format` string to a PNG flag.
 fn parse_format_is_png(s: &str) -> Result<bool, String> {
     match s {
@@ -161,6 +187,33 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
         other => Err(format!(
             "Invalid format: {other:?} (expected 'json' or 'png')"
         )),
+    }
+}
+
+fn materialize_portable_runtime_defaults(
+    record: &mut ManagedAgentRecord,
+    global: &crate::managed_agents::GlobalAgentConfig,
+) {
+    if record
+        .model
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.model = global.model.clone();
+    }
+    if record
+        .provider
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.provider = global.provider.clone();
+    }
+    if record
+        .runtime
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        record.runtime = global.preferred_runtime.clone();
     }
 }
 
@@ -196,6 +249,13 @@ pub(crate) async fn materialize_snapshot_bytes(
         let definitions = load_agent_definitions(&app)?;
         let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
             .map(|(r, is_def)| (r.clone(), is_def))?;
+        let mut def_record = def_record;
+        // A snapshot is a verbatim portable copy of the effective runtime,
+        // provider, and model configuration, not a pointer to the sender's
+        // machine-wide defaults. This does not translate or substitute values
+        // for a different recipient setup.
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        materialize_portable_runtime_defaults(&mut def_record, &global);
 
         let memory_pubkey = if memory_level != MemoryLevel::None {
             let mpk = memory_source_pubkey.as_deref().unwrap_or("");
@@ -233,22 +293,7 @@ pub(crate) async fn materialize_snapshot_bytes(
     // ── Fetch memory ─────────────────────────────────────────────────────────
     let memory_entries: Vec<AgentSnapshotMemoryEntry> = if let Some(pubkey) = memory_pubkey {
         let listing = get_agent_memory(pubkey, app.clone(), state).await?;
-        let mut entries = Vec::new();
-        if let Some(core) = listing.core {
-            entries.push(AgentSnapshotMemoryEntry {
-                slug: core.slug,
-                body: core.body,
-            });
-        }
-        if memory_level == MemoryLevel::Everything {
-            for mem in listing.memories {
-                entries.push(AgentSnapshotMemoryEntry {
-                    slug: mem.slug,
-                    body: mem.body,
-                });
-            }
-        }
-        entries
+        memory_entries_from_listing(listing, memory_level)
     } else {
         Vec::new()
     };
@@ -401,6 +446,8 @@ pub async fn encode_agent_snapshot_for_send(
 }
 
 #[cfg(test)]
+mod fidelity_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
@@ -432,6 +479,7 @@ mod png_body_tests {
             version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
             definition: crate::managed_agents::agent_snapshot::AgentSnapshotDefinition {
                 name: "Agent".to_string(),
+                source_is_builtin: false,
                 system_prompt: None,
                 runtime: None,
                 model: None,

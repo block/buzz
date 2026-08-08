@@ -15,6 +15,30 @@
 use crate::channel::MemberRole;
 use std::fmt;
 
+/// Machine-readable token prefixing the push-policy denial for a kind:30617
+/// announcement with no `buzz-channel` binding.
+///
+/// This is a **declared cross-component contract**, not a log string. Known
+/// consumers switch on it:
+/// - relay `api/git/policy.rs` — produces [`GIT_NO_CHANNEL_BINDING_BODY`]
+/// - desktop `src-tauri/commands/project_git_workflow.rs` — merge-failure
+///   classifier maps it to a structured `no_channel_binding` error code
+/// - desktop `src/features/projects/lib/projectBranchErrors.ts` — dialog
+///   copy matcher (TS re-types the literal; its test pins the value)
+pub const GIT_NO_CHANNEL_BINDING_TOKEN: &str = "no_channel_binding";
+
+/// Full push-policy denial body for an unbound repository.
+///
+/// Format: `<token>: <legacy phrase>`. The trailing prose deliberately
+/// repeats the token's meaning because desktops already in the field match
+/// the exact phrase `no channel binding` (spaces, not underscores — the
+/// token alone would NOT satisfy that matcher). Do not "fix" the redundancy:
+/// removing the phrase silently breaks every shipped desktop, and removing
+/// the token breaks the structured consumers above. A relay-side test pins
+/// both matchers.
+pub const GIT_NO_CHANNEL_BINDING_BODY: &str =
+    "no_channel_binding: repository has no channel binding";
+
 /// Maximum number of `buzz-protect` tags per repo.
 pub const MAX_PROTECTION_RULES: usize = 50;
 /// Maximum character length of a ref pattern.

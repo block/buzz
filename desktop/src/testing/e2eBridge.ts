@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { emit, listen } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { decode } from "nostr-tools/nip19";
+import { decode, npubEncode, nsecEncode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 import {
@@ -10,6 +11,8 @@ import {
 } from "./e2eBridgeCustomHarnesses.ts";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
+import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
@@ -40,6 +43,8 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_PERSONA,
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -57,6 +62,10 @@ import type {
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  isValidLinkPreviewSnapshotCanonicalUrl,
+  parseLinkPreviewSnapshots,
+} from "@/shared/lib/linkPreviewSnapshot";
 
 type TestIdentity = {
   privateKey: string;
@@ -70,7 +79,7 @@ type MockCommandAvailability = {
   resolvedPath?: string | null;
 };
 
-type MockManagedAgentSeed = {
+export type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
@@ -84,9 +93,12 @@ type MockManagedAgentSeed = {
   lastError?: string | null;
   lastErrorCode?: number | null;
   needsRestart?: boolean;
+  restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  /** Per-agent env vars seeded into the mock store. */
+  envVars?: Record<string, string>;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -112,13 +124,17 @@ type MockPersonaSeed = {
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
+  shared?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
   runtime?: string | null;
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -138,9 +154,34 @@ type MockSearchProfileSeed = {
   isAgent?: boolean;
 };
 
+type MockHuddleMemberSeed = {
+  pubkey: string;
+  role: "owner" | "admin" | "member" | "guest" | "bot";
+};
+
+type MockHuddleSeed = {
+  parentChannelId: string;
+  ephemeralChannelId: string;
+  huddleThreadEventId?: string | null;
+  phase?: "creating" | "connected" | "active";
+  members: MockHuddleMemberSeed[];
+  transcriptionEnabled?: boolean;
+  ttsEnabled?: boolean;
+  isCreator?: boolean;
+};
+
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Tauri window label exposed to the app. Defaults to the main window. */
+    windowLabel?: string;
+    ttsSettings?: {
+      version: number;
+      agentTextToSpeech: boolean;
+      voicePreferences: string[];
+    };
+    /** Native picker boundary result for Pocket voice import tests. */
+    pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
@@ -186,6 +227,8 @@ type E2eConfig = {
     /** Catalog responses for successive discovery calls. The final response repeats. */
     acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
     acpRuntimesDelayMs?: number;
+    /** When true, the catalog discovery call throws — simulates a failed query. */
+    acpRuntimesError?: boolean;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
@@ -198,6 +241,8 @@ type E2eConfig = {
     acpRuntimesCatalogAfterConnect?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
     installAcpRuntimeDelayMs?: number;
+    /** Live output lines the mocked install emits before it settles. */
+    installAcpRuntimeOutputLines?: string[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
      *  Call N returns results[N]; when exhausted the last entry repeats.
@@ -220,12 +265,32 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    /** Result returned by the mocked `add_agent_to_huddle` command. */
+    addAgentToHuddleResult?: {
+      ephemeral_added: boolean;
+      parent_added: boolean;
+      parent_error: string | null;
+    };
+    /** When set, the mocked `add_agent_to_huddle` command throws. */
+    addAgentToHuddleError?: string;
+    /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
+    huddleStateReadDelayMs?: number;
+    /** Delay companion creation to expose the newly-started huddle handoff state. */
+    openHuddleWindowDelayMs?: number;
+    /** Delay the native start result after membership arrives in the channel list. */
+    startHuddleReturnDelayMs?: number;
     /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
      *  (`list/start/stop/restart_managed_agent_runtime`). */
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     personas?: MockPersonaSeed[];
+    /** Community catalog replaceable-event heads returned by relay queries. */
+    personaCatalogEvents?: RelayEvent[];
+    /** Outcomes for successive explicit persona share publications. */
+    personaSharePublicationStatuses?: Array<"published" | "queued">;
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    /** Native-like huddle state seeded from authoritative role-bearing membership. */
+    huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     addChannelMembersDelayMs?: number;
@@ -253,6 +318,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Hold mock send live echoes until the E2E release seam is invoked. */
+    deferSendMessageLiveEcho?: boolean;
     /** Close the first channel-window live REQ; its retry is accepted. */
     closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
@@ -268,8 +335,36 @@ type E2eConfig = {
     channelWindowDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
+    /** Override whether get_profile reports a real kind:0 event. */
+    profileHasEvent?: boolean;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
+    linkPreviewMetadata?: {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null;
+    linkPreviewMetadataByHref?: Record<
+      string,
+      {
+        title: string;
+        siteName: string | null;
+        description: string | null;
+        imageDataUrl: string | null;
+        imageDomain: string | null;
+        imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+        imageRetryAfterMs?: number | null;
+        faviconDataUrl?: string | null;
+      } | null
+    >;
+    linkPreviewMetadataDelayMs?: number;
+    /** Simulates native cold-cache startup work before the async response. */
+    linkPreviewMetadataStartBlockMs?: number;
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -310,6 +405,8 @@ type E2eConfig = {
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     uploadDelayMs?: number;
+    /** Exercise the production composer path that queues files until send. */
+    deferredComposerUploads?: boolean;
     /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
      *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
     encodeDelayMs?: number;
@@ -339,20 +436,6 @@ type E2eConfig = {
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
-    observerArchiveDefaultEnabled?: boolean;
-    /**
-     * Delay (ms) applied to `observer_archive_default_enabled` so E2E tests
-     * can observe the pending-reconciliation state (toggle disabled, no
-     * archive-manager `list_save_subscriptions` call) before the policy
-     * resolves. 0/undefined = instant.
-     */
-    observerArchiveDefaultEnabledDelayMs?: number;
-    /**
-     * When set, `observer_archive_default_enabled` throws with this message
-     * instead of resolving — drives the fail-closed `.catch()` path in
-     * `useObserverArchiveReconciliation` / `LocalArchiveSettingsCard`.
-     */
-    observerArchiveDefaultEnabledError?: string;
     agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
@@ -391,6 +474,8 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** Explicit owner-only agent-access capability; independent of baked defaults. */
+    ownerOnlyAccessBuild?: boolean;
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
@@ -403,9 +488,19 @@ type E2eConfig = {
      *  initial render gating around build defaults. 0/undefined = instant. */
     bakedBuildEnvDelayMs?: number;
     /** Delay (ms) applied to `set_global_agent_config` so tests can observe
-     *  autosave behaviour while a request is in flight. 0/undefined = instant.
-     *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
+     *  pending save behaviour. 0/undefined = instant. Alias of
+     *  `globalConfigSaveDelayMs` (kept for onboarding specs). */
     setGlobalAgentConfigDelayMs?: number;
+    /** Sequenced save failures. A string rejects that call; null succeeds. */
+    setGlobalAgentConfigErrors?: (string | null)[];
+    /** Errors returned by successive backup verification attempts. Null succeeds. */
+    backupVerificationErrors?: (string | null)[];
+    /** Public identities returned by successive successful backup verifications. */
+    backupVerificationPubkeys?: string[];
+    /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+    backupEncryptionDelayMs?: number;
+    /** Native paths returned by successive backup saves. */
+    backupSavePaths?: Array<string | null>;
     /**
      * When set, `get_nsec` throws with this message instead of returning the
      * mock nsec string. Use `nsecErrors` for sequenced failure/success.
@@ -454,6 +549,11 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    // Backend provider mocks for the create-agent "Run on" section. See
+    // tests/helpers/bridge.ts:MockBridgeOptions for semantics.
+    backendProviders?: Array<{ id: string; binaryPath: string }>;
+    backendProviderProbeResult?: Record<string, unknown>;
+    backendProviderProbeDelayMs?: number;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -749,6 +849,7 @@ type RawManagedAgent = {
   last_error: string | null;
   last_error_code: number | null;
   needs_restart?: boolean;
+  restart_diff?: Array<{ field: string; change: unknown }>;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -809,7 +910,9 @@ type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
+  shared: boolean;
   source_team?: string | null;
+  catalog_source?: { owner_pubkey: string; persona_id: string } | null;
   env_vars?: Record<string, string>;
   respond_to?: string | null;
   respond_to_allowlist?: string[];
@@ -902,8 +1005,8 @@ function createMockRelayMembershipEvent(): RelayEvent {
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
  * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
  * custom-emoji.spec.ts (claimed by BOTH members with different URLs, so the
- * palette must collapse it to one deterministic winner); `:narf:` proves a
- * second member's distinct emoji unions in.
+ * palette must collapse it to one deterministic winner); `:narf:` and
+ * `:bufo_joy:` prove a second member's distinct emoji unions in.
  */
 function createMockCustomEmojiSetEvents(): RelayEvent[] {
   return [
@@ -930,6 +1033,7 @@ function createMockCustomEmojiSetEvents(): RelayEvent[] {
         // member B claims :buzz: with a DIFFERENT url — unionCustomEmoji must
         // collapse it to one deterministic winner, never expose two URLs.
         ["emoji", "buzz", "https://example.com/e2e/buzz-b.png"],
+        ["emoji", "bufo_joy", "https://example.com/e2e/bufo-joy.png"],
       ],
       "b".repeat(64),
     ),
@@ -988,6 +1092,21 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Release mock send events that were stored but withheld from live subscribers. */
+    __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
+      id: string;
+      phase: string;
+    }) => Promise<void>;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__?: (input: {
+      id: string;
+      sent: number;
+      total: number;
+    }) => Promise<void>;
+    __BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?: (payload: {
+      pubkey: string | null;
+      level: number;
+    }) => Promise<void>;
     __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
@@ -1006,6 +1125,8 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
       createdAt?: number;
+      /** Marks this test-only message as locally pending. */
+      pending?: boolean;
       /** 64-hex id required for the event to be a valid reaction target. */
       id?: string;
     }) => RelayEvent;
@@ -1030,6 +1151,14 @@ declare global {
       command: string,
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
+    __BUZZ_E2E_EMIT_TAURI_EVENT__?: (
+      event: string,
+      payload: unknown,
+    ) => Promise<void>;
+    __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
+      members: MockHuddleMemberSeed[];
+      transcriptionEnabled: boolean;
+    }) => Promise<void>;
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
     __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
@@ -1042,8 +1171,33 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Project-scoped events accepted by the mock relay. */
+    __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
+      content: string;
+      kind: number;
+      tags: string[][];
+    }>;
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Makes the mock relay reject project announcements as an unknown kind. */
+    __BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__?: boolean;
+    /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
+    __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
+    /**
+     * Extra project events appended to the mock store on first access.
+     * Use to seed standalone repositories (kind 30617) or other project-scoped
+     * events before a test interaction, without mutating the fixed seed data.
+     * Events must be complete RelayEvent shapes; id is a required field so that
+     * id-keyed queries (e.g. lost-ACK recovery) can match them.
+     */
+    __BUZZ_E2E_EXTRA_PROJECT_EVENTS__?: Array<{
+      id: string;
+      kind: number;
+      pubkey: string;
+      created_at: number;
+      content: string;
+      tags: string[][];
+    }>;
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -1081,9 +1235,23 @@ declare global {
     };
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
+    /** Queue deterministic mock AUTH outcomes, consumed in order. */
+    __BUZZ_E2E_QUEUE_AUTH_RESPONSES__?: (
+      responses: Array<{ success: boolean; message: string }>,
+    ) => void;
+    /** Inject CLOSED into every active mock live subscription. */
+    __BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__?: (reason: string) => number;
+    /** Queue CLOSED responses for channel history REQs. */
+    __BUZZ_E2E_QUEUE_CHANNEL_HISTORY_CLOSES__?: (reasons: string[]) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__?: (
+      unavailable: boolean,
+    ) => void;
+    __BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => number[];
+    __BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__?: (seconds: number) => void;
+    __BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__?: () => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -1181,6 +1349,12 @@ declare global {
     /** Count of `get_event` invocations for the current defer-target ID since
      *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
     __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
+    /** Hold the next channel read until released. */
+    __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+    /** Disarm the latch and release the held channel read, if any. */
+    __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
+    /** Number of channel reads currently held by the seam. */
+    __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
   }
 }
 
@@ -1228,6 +1402,8 @@ const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
 // REACTION_TARGET_EVENT_ID.
 const SYSTEM_REACTION_TARGET_EVENT_ID = "e".repeat(64);
 const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
+/** Stands in for `tauri.conf.json`'s version, which no mock IPC call can read. */
+const MOCK_APP_VERSION = "0.0.0-e2e";
 const DEFAULT_MOCK_IDENTITY = {
   pubkey: "deadbeef".repeat(8),
   display_name: "npub1mock...",
@@ -1282,6 +1458,8 @@ type DeferredGetEvent = {
   run: () => Promise<string>;
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
+let deferNextChannelsRead = false;
+let deferredChannelsReadResolve: (() => void) | null = null;
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -1503,6 +1681,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_error: agent.last_error,
     last_error_code: agent.last_error_code,
     needs_restart: agent.needs_restart ?? false,
+    restart_diff: agent.restart_diff ? [...agent.restart_diff] : [],
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
@@ -2008,6 +2187,24 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   const now = new Date().toISOString();
   const status = seed.status ?? "stopped";
 
+  // Resolve agent_command and agent_args from the well-known default catalog
+  // so the fixture mirrors real wire shape. Hardcoding ["acp"] for all runtimes
+  // is incorrect: buzz-agent ships with no default args.
+  const DEFAULT_RUNTIME_COMMAND: Record<
+    string,
+    { command: string; args: string[] }
+  > = {
+    goose: { command: "goose", args: ["acp"] },
+    "buzz-agent": { command: "buzz-agent", args: [] },
+    claude: { command: "claude", args: [] },
+    codex: { command: "codex", args: [] },
+  };
+  const catalogEntry = seed.runtime
+    ? DEFAULT_RUNTIME_COMMAND[seed.runtime]
+    : undefined;
+  const agentCommand = catalogEntry?.command ?? seed.runtime ?? "goose";
+  const agentArgs = catalogEntry?.args ?? ["acp"];
+
   return {
     pubkey: seed.pubkey,
     name: seed.name,
@@ -2017,8 +2214,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
-    agent_command: "goose",
-    agent_args: ["acp"],
+    agent_command: agentCommand,
+    agent_args: agentArgs,
     mcp_command: "",
     turn_timeout_seconds: 320,
     idle_timeout_seconds: null,
@@ -2027,7 +2224,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     system_prompt: null,
     avatar_url: seed.avatarUrl ?? null,
     model: null,
-    env_vars: {},
+    env_vars: { ...(seed.envVars ?? {}) },
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
     created_at: now,
@@ -2038,6 +2235,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_error: seed.lastError ?? null,
     last_error_code: seed.lastErrorCode ?? null,
     needs_restart: seed.needsRestart ?? false,
+    restart_diff: seed.restartDiff ?? [],
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
@@ -2171,6 +2369,7 @@ function resetMockPersonas(config?: E2eConfig) {
     name_pool: [],
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
+    shared: false,
     source_team: null,
     created_at: now,
     updated_at: now,
@@ -2186,12 +2385,18 @@ function resetMockPersonas(config?: E2eConfig) {
       model: persona.model ?? null,
       provider: persona.provider ?? null,
       name_pool: persona.namePool ?? [],
+      respond_to: persona.respondTo ?? null,
+      respond_to_allowlist:
+        persona.respondTo === "allowlist"
+          ? [...(persona.respondToAllowlist ?? [])]
+          : [],
       is_builtin: false,
       is_active: persona.isActive ?? true,
+      shared: persona.shared ?? false,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
       created_at: now,
-      updated_at: now,
+      updated_at: persona.updatedAt ?? now,
     });
   }
 }
@@ -2784,10 +2989,19 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const deferredSendMessageLiveEchoes: Array<{
+  channelId: string;
+  event: RelayEvent;
+}> = [];
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
+const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
+const mockChannelHistoryCloses: string[] = [];
+let mockWebsocketUnavailable = false;
+const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
@@ -2800,8 +3014,8 @@ let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 // mutated by `create_save_subscription` / `delete_save_subscription` /
 // `merge_save_subscription_kinds` / `remove_save_subscription_kind` exactly
 // as the real SQLite-backed Rust commands would (see `archive/store.rs`).
-// This lets E2E specs drive the fresh-internal-repair path (start from `[]`,
-// reconcile, observe a kind-24200 row appear) and OSS toggle ON/OFF, neither
+// This lets E2E specs drive the default-on seeding path (start from `[]`,
+// reconcile, observe a kind-24200 row appear) and toggle ON/OFF, neither
 // of which an immutable seed can represent.
 type MockSaveSubscriptionRow = {
   scope_type: string;
@@ -2814,6 +3028,16 @@ function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
     ...s,
   }));
+}
+
+function resetMockPersonaCatalogEvents(config: E2eConfig | undefined) {
+  mockPersonaEvents.length = 0;
+  for (const event of config?.mock?.personaCatalogEvents ?? []) {
+    mockPersonaEvents.push({
+      ...event,
+      tags: event.tags.map((tag) => [...tag]),
+    });
+  }
 }
 
 // Mesh-compute mock state — TEST-ONLY.
@@ -2852,15 +3076,15 @@ const ZERO_SERVING_USAGE: MockServingUsage = {
 const mockMeshState: {
   admitted: boolean;
   models: Array<{ id: string; name: string | null }>;
+  activeModel: { id: string; name: string | null } | null;
   denyReason: string;
   nodeState: "off" | "running";
   nodeMode: "serve" | "client" | null;
   servingUsage: MockServingUsage;
 } = {
   admitted: true,
-  models: [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ],
+  models: [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }],
+  activeModel: null,
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
@@ -2869,9 +3093,8 @@ const mockMeshState: {
 
 function resetMockMesh() {
   mockMeshState.admitted = true;
-  mockMeshState.models = [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
-  ];
+  mockMeshState.models = [{ id: "Gemma-4-E4B-it-Q4_K_M", name: "Gemma 4 E4B" }];
+  mockMeshState.activeModel = null;
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
@@ -2879,8 +3102,167 @@ function resetMockMesh() {
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
-// Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
-const tauriEventListeners = new Map<string, Set<() => void>>();
+
+type MockHuddleState = {
+  phase: "creating" | "connected" | "active";
+  parent_channel_id: string;
+  ephemeral_channel_id: string;
+  huddle_thread_event_id: string | null;
+  participants: string[];
+  agent_pubkeys: string[];
+  agent_voice_settings: Record<string, { enabled: boolean; voice_key: string }>;
+  tts_enabled: boolean;
+  transcription_enabled: boolean;
+  is_creator: boolean;
+  voice_input_mode: "push_to_talk" | "voice_activity";
+};
+
+type PersistedMockHuddle = {
+  members: MockHuddleMemberSeed[];
+  state: MockHuddleState;
+};
+
+const MOCK_HUDDLE_STORAGE_KEY = "buzz.e2e.mock-huddle.v1";
+let mockHuddle: PersistedMockHuddle | null = null;
+
+function persistMockHuddle() {
+  if (mockHuddle) {
+    window.sessionStorage.setItem(
+      MOCK_HUDDLE_STORAGE_KEY,
+      JSON.stringify(mockHuddle),
+    );
+  }
+}
+
+async function emitMockHuddleState() {
+  if (!mockHuddle) return;
+  await emit("huddle-state-changed", structuredClone(mockHuddle.state));
+}
+
+const MOCK_POCKET_VOICE_KEYS = [
+  "pocket:anna",
+  "pocket:vera",
+  "pocket:fantine",
+  "pocket:charles",
+  "pocket:paul",
+  "pocket:eponine",
+  "pocket:azelma",
+  "pocket:george",
+  "pocket:mary",
+  "pocket:jane",
+  "pocket:michael",
+  "pocket:eve",
+];
+
+function refreshMockHuddleMembership(config?: E2eConfig | null) {
+  if (!mockHuddle) return;
+  mockHuddle.state.agent_pubkeys = mockHuddle.members
+    .filter((member) => member.role === "bot")
+    .map((member) => member.pubkey);
+  mockHuddle.state.participants = mockHuddle.members.map(
+    (member) => member.pubkey,
+  );
+  mockHuddle.state.agent_voice_settings ??= {};
+  const agentSet = new Set(mockHuddle.state.agent_pubkeys);
+  for (const pubkey of Object.keys(mockHuddle.state.agent_voice_settings)) {
+    if (!agentSet.has(pubkey)) {
+      delete mockHuddle.state.agent_voice_settings[pubkey];
+    }
+  }
+  const defaultVoice =
+    config?.mock?.ttsSettings?.voicePreferences.find((key) =>
+      key.startsWith("pocket:"),
+    ) ?? "pocket:mary";
+  const used = new Set(
+    Object.values(mockHuddle.state.agent_voice_settings).map(
+      (settings) => settings.voice_key,
+    ),
+  );
+  mockHuddle.state.agent_pubkeys.forEach((pubkey, index) => {
+    if (mockHuddle?.state.agent_voice_settings[pubkey]) return;
+    const voiceKey =
+      index === 0 && !used.has(defaultVoice)
+        ? defaultVoice
+        : (MOCK_POCKET_VOICE_KEYS.find(
+            (key) => key !== defaultVoice && !used.has(key),
+          ) ?? defaultVoice);
+    used.add(voiceKey);
+    if (mockHuddle) {
+      mockHuddle.state.agent_voice_settings[pubkey] = {
+        enabled: true,
+        voice_key: voiceKey,
+      };
+    }
+  });
+}
+
+function initializeMockHuddle(
+  seed: MockHuddleSeed | undefined,
+  config?: E2eConfig,
+) {
+  mockHuddle = null;
+  if (!seed) {
+    window.sessionStorage.removeItem(MOCK_HUDDLE_STORAGE_KEY);
+    return;
+  }
+
+  const persisted = window.sessionStorage.getItem(MOCK_HUDDLE_STORAGE_KEY);
+  if (persisted) {
+    try {
+      mockHuddle = JSON.parse(persisted) as PersistedMockHuddle;
+    } catch {
+      window.sessionStorage.removeItem(MOCK_HUDDLE_STORAGE_KEY);
+    }
+  }
+
+  if (!mockHuddle) {
+    mockHuddle = {
+      members: structuredClone(seed.members),
+      state: {
+        phase: seed.phase ?? "active",
+        parent_channel_id: seed.parentChannelId,
+        ephemeral_channel_id: seed.ephemeralChannelId,
+        huddle_thread_event_id: seed.huddleThreadEventId ?? null,
+        participants: [],
+        agent_pubkeys: [],
+        agent_voice_settings: {},
+        tts_enabled: seed.ttsEnabled ?? false,
+        transcription_enabled: seed.transcriptionEnabled ?? false,
+        is_creator: seed.isCreator ?? true,
+        voice_input_mode: "push_to_talk",
+      },
+    };
+  }
+  if (!mockChannels.some((channel) => channel.id === seed.ephemeralChannelId)) {
+    const owner = createCurrentMember(config, "owner");
+    mockChannels.push(
+      createMockChannel({
+        id: seed.ephemeralChannelId,
+        name: "huddle",
+        channel_type: "stream",
+        visibility: "private",
+        description: "",
+        topic: null,
+        purpose: null,
+        last_message_at: null,
+        archived_at: null,
+        created_by: owner.pubkey,
+        topic_set_by: null,
+        topic_set_at: null,
+        purpose_set_by: null,
+        purpose_set_at: null,
+        topic_required: false,
+        max_members: null,
+        nip29_group_id: null,
+        ttl_seconds: 3_600,
+        created_minutes_ago: 0,
+        members: [owner],
+      }),
+    );
+  }
+  refreshMockHuddleMembership(config);
+  persistMockHuddle();
+}
 const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
@@ -3845,7 +4227,26 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
   }
 }
 
+function emitOrDeferMockSendMessageLiveEcho(
+  channelId: string,
+  event: RelayEvent,
+  config: E2eConfig | undefined,
+) {
+  if (config?.mock?.deferSendMessageLiveEcho) {
+    deferredSendMessageLiveEchoes.push({ channelId, event });
+    return;
+  }
+  emitMockLiveEvent(channelId, event);
+}
+
 function emitMockGlobalEvent(event: RelayEvent) {
+  if (
+    event.kind === KIND_PERSONA &&
+    event.pubkey.toLowerCase() !== MOCK_IDENTITY_PUBKEY.toLowerCase() &&
+    !personaHasExactSharedTag(event)
+  ) {
+    return;
+  }
   for (const socket of mockSockets.values()) {
     for (const [subId, subscription] of socket.subscriptions) {
       if (subscription.kinds && !subscription.kinds.includes(event.kind)) {
@@ -3977,6 +4378,7 @@ function emitMockChannelMessage(
   mentionPubkeys?: string[],
   extraTags?: string[][],
   createdAt?: number,
+  pending?: boolean,
   id?: string,
 ) {
   const eventKind = kind ?? 9;
@@ -3995,6 +4397,7 @@ function emitMockChannelMessage(
       createdAt,
       id,
     );
+    if (pending) event.pending = true;
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -4027,8 +4430,18 @@ function emitMockChannelMessage(
     createdAt,
     id,
   );
+  if (pending) event.pending = true;
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
+  const rootEvent = history.find((candidate) => candidate.id === rootEventId);
+  if (rootEvent && mockHuddle?.state.ephemeral_channel_id === channelId) {
+    const summary = buildMockChannelThreadSummary(
+      channelId,
+      rootEvent,
+      getMockMessageStore(channelId),
+    );
+    if (summary) emitMockLiveEvent(channelId, summary);
+  }
   return event;
 }
 
@@ -4862,6 +5275,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "buzz",
     description:
       "Relay, desktop, and mobile clients for the Buzz community platform.",
+    cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${MOCK_IDENTITY_PUBKEY}/buzz`,
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -4870,6 +5284,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "relay-tools",
     name: "relay-tools",
     description: "Operator tooling and admin CLI for relay deployments.",
+    cloneUrl: "https://github.com/block/relay-tools.git",
     owner: ALICE_PUBKEY,
     contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
     activityLevel: 2,
@@ -4878,6 +5293,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "design-system",
     name: "design-system",
     description: "Shared UI tokens, typography ramps, and component library.",
+    cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${BOB_PUBKEY}/design-system`,
     owner: BOB_PUBKEY,
     contributors: [ALICE_PUBKEY],
     activityLevel: 1,
@@ -4896,6 +5312,7 @@ const MOCK_PROJECT_SUBJECTS = [
 ];
 
 const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -4974,7 +5391,8 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["clone", `https://relay.example.com/git/${owner}/${seed.dtag}`],
+          ["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+          ["clone", seed.cloneUrl],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         owner,
@@ -5039,10 +5457,7 @@ function buildMockProjectEvents(): RelayEvent[] {
             ? [
                 ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
                 ["branch-name", `feature/mock-${dayOffset}-${index}`],
-                [
-                  "clone",
-                  `https://relay.example.com/git/${owner}/${seed.dtag}`,
-                ],
+                ["clone", seed.cloneUrl],
               ]
             : []),
         ];
@@ -5052,11 +5467,39 @@ function buildMockProjectEvents(): RelayEvent[] {
     }
   }
 
+  const projectOwner =
+    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+  events.push(
+    createMockEvent(
+      KIND_PROJECT_ANNOUNCEMENT,
+      "",
+      [
+        ["d", "buzz"],
+        ["name", "buzz"],
+        ["description", "The complete Buzz community platform."],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+      ],
+      projectOwner,
+      now,
+      "project-buzz".padEnd(64, "0"),
+    ),
+  );
+
   return events;
 }
 
 function getMockProjectEventStore(): RelayEvent[] {
-  mockProjectEventStore ??= buildMockProjectEvents();
+  if (!mockProjectEventStore) {
+    mockProjectEventStore = buildMockProjectEvents();
+    // Append any extra events injected by the test via addInitScript before
+    // the app boots. This lets a test seed standalone repositories or other
+    // project-scoped events without modifying the fixed seed data.
+    const extras = window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__;
+    if (extras && extras.length > 0) {
+      mockProjectEventStore.push(...(extras as RelayEvent[]));
+    }
+  }
   return mockProjectEventStore;
 }
 
@@ -5068,19 +5511,23 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
   return (
-    hasRepoAddressTag &&
+    (event.kind === KIND_REPO_ANNOUNCEMENT || hasRepoAddressTag) &&
     (event.kind === 1 || MOCK_PROJECT_KINDS.has(event.kind))
   );
 }
 
 function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
   const authors = filter.authors?.map((author) => author.toLowerCase());
+  const idsSet =
+    filter.ids && filter.ids.length > 0 ? new Set(filter.ids) : null;
   return getMockProjectEventStore()
     .filter((event) => {
       if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
       if (authors && !authors.includes(event.pubkey.toLowerCase())) {
         return false;
       }
+      // Filter by event ids when present — required for lost-ACK recovery queries.
+      if (idsSet && !idsSet.has(event.id)) return false;
       if (
         filter["#d"] &&
         !event.tags.some(
@@ -5340,6 +5787,13 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
 async function handleGetProfile(config: E2eConfig | undefined) {
   const identity = getIdentity(config);
+  const forcedHasProfileEvent = config?.mock?.profileHasEvent;
+  if (forcedHasProfileEvent !== undefined) {
+    return {
+      ...cloneProfile(ensureMockProfile(config)),
+      has_profile_event: forcedHasProfileEvent,
+    };
+  }
   if (!identity) {
     const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
     if (profileReadDelayMs > 0) {
@@ -6974,6 +7428,28 @@ function withMockRuntimeConfigMetadata(
           : runtime.id === "goose"
             ? "GOOSE_THINKING_EFFORT"
             : null,
+    max_tokens_env_var:
+      "max_tokens_env_var" in runtime
+        ? runtime.max_tokens_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_OUTPUT_TOKENS"
+          : runtime.id === "goose"
+            ? "GOOSE_MAX_TOKENS"
+            : null,
+    context_limit_env_var:
+      "context_limit_env_var" in runtime
+        ? runtime.context_limit_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_CONTEXT_TOKENS"
+          : runtime.id === "goose"
+            ? "GOOSE_CONTEXT_LIMIT"
+            : null,
+    max_rounds_env_var:
+      "max_rounds_env_var" in runtime
+        ? runtime.max_rounds_env_var
+        : runtime.id === "buzz-agent"
+          ? "BUZZ_AGENT_MAX_ROUNDS"
+          : null,
   };
 }
 
@@ -6989,6 +7465,10 @@ async function handleDiscoverAcpRuntimes(
     await new Promise<void>((resolve) => {
       window.setTimeout(resolve, delayMs);
     });
+  }
+
+  if (config?.mock?.acpRuntimesError) {
+    throw new Error("Mocked catalog discovery failure");
   }
 
   const afterInstallSequence =
@@ -7148,6 +7628,7 @@ let installCallCount = 0;
 /** Per-runtime call counters for `installAcpRuntimeByRuntime` sequences. */
 const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
+let setGlobalAgentConfigCallCount = 0;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
   provider: string | null;
@@ -7157,9 +7638,77 @@ let mockGlobalAgentConfig: {
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
+let backupVerificationCallCount = 0;
+let backupSaveCallCount = 0;
+
+const MOCK_NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+const MOCK_BACKUP_PASSPHRASE = "mock horse battery staple lake orbit";
+const MOCK_PASSPHRASE_WORDS = [
+  "mock",
+  "horse",
+  "battery",
+  "staple",
+  "lake",
+  "orbit",
+  "cedar",
+  "plume",
+  "raven",
+  "tundra",
+];
+
+// Per-page explicit catalog publication outcomes.
+let personaSharePublicationCallCount = 0;
 
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
+
+// Live-output sequence for the install currently being replayed. The backend
+// counter is per run (`InstallReporter::for_run` starts a fresh one), so this
+// restarts too — a bridge that stayed monotonic across installs would hide a UI
+// that carried a stale sequence number into the next run and rejected all of it.
+let installOutputSeq = 0;
+
+/**
+ * Replay the live output the Rust reporter emits while an install runs: a clear
+ * signal, then one line per entry. `seq` is install-wide and monotonic, matching
+ * the backend contract the UI's ordering depends on.
+ *
+ * The clear and the first line emit synchronously with the install invocation,
+ * exactly as the backend does — the command is invoked from the click handler,
+ * so those events land before React has committed the pending install state.
+ * Delaying them would let a listener that mounts on that state still catch them,
+ * hiding the very race the UI has to survive.
+ *
+ * Later lines are spaced so each is observable rather than collapsing into one
+ * frame with the next.
+ */
+const INSTALL_OUTPUT_REPLAY_GAP_MS = 1000;
+
+async function replayInstallOutput(
+  runtimeId: string,
+  lines: string[],
+): Promise<void> {
+  installOutputSeq = 0;
+  // The leading null is the clear signal the backend sends when an attempt
+  // starts, so this replays a whole attempt rather than only its output.
+  const events: (string | null)[] = [null, ...lines];
+  for (const [index, line] of events.entries()) {
+    // Index 0 and 1 are the clear and the first line: no gap before either.
+    if (index > 1) {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, INSTALL_OUTPUT_REPLAY_GAP_MS),
+      );
+    }
+    // `emit` reaches listeners registered through the real `listen` API, which
+    // is what the UI hook uses; mockIPC's shouldMockEvents wires the two.
+    await emit("acp-install-output", {
+      runtime_id: runtimeId,
+      seq: installOutputSeq++,
+      line,
+    });
+  }
+}
 
 async function handleInstallAcpRuntime(
   args: {
@@ -7168,6 +7717,10 @@ async function handleInstallAcpRuntime(
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
   const runtimeId = args.runtimeId ?? "";
+  const outputLines = config?.mock?.installAcpRuntimeOutputLines;
+  if (outputLines && outputLines.length > 0) {
+    await replayInstallOutput(runtimeId, outputLines);
+  }
   const perRuntime = config?.mock?.installAcpRuntimeByRuntime?.[runtimeId];
 
   if (perRuntime) {
@@ -7224,6 +7777,7 @@ async function handleInstallAcpRuntime(
     ],
     restarted_count: 0,
     failed_restart_count: 0,
+    log_path: null,
   };
 }
 
@@ -7351,6 +7905,7 @@ async function handleCreatePersona(args: {
     provider?: string;
     envVars?: Record<string, string>;
     behavior?: PersonaBehaviorInput;
+    catalogSource?: { ownerPubkey: string; personaId: string };
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -7364,49 +7919,78 @@ async function handleCreatePersona(args: {
     provider: args.input.provider?.trim() || null,
     is_builtin: false,
     is_active: true,
+    shared: false,
     source_team: null,
+    // Mirrors `CatalogSource::normalized`: the coordinate a catalog copy keeps
+    // so the catalog can tell an already-added foreign entry from a new one.
+    catalog_source: args.input.catalogSource
+      ? {
+          owner_pubkey: args.input.catalogSource.ownerPubkey
+            .trim()
+            .toLowerCase(),
+          persona_id: args.input.catalogSource.personaId.trim(),
+        }
+      : null,
     env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
   };
   applyMockPersonaBehavior(persona, args.input.behavior);
   mockPersonas.push(persona);
+  upsertMockPersonaEvent(persona);
   return { ...persona };
 }
 
+type MockUpdatePersonaInput = {
+  id: string;
+  displayName: string;
+  avatarUrl?: string;
+  systemPrompt: string;
+  runtime?: string;
+  model?: string;
+  provider?: string;
+  envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
+};
+
 async function handleUpdatePersona(args: {
-  input: {
-    id: string;
-    displayName: string;
-    avatarUrl?: string;
-    systemPrompt: string;
-    runtime?: string;
-    model?: string;
-    provider?: string;
-    envVars?: Record<string, string>;
-    behavior?: PersonaBehaviorInput;
-  };
+  input: MockUpdatePersonaInput;
 }): Promise<RawPersona> {
-  const persona = mockPersonas.find(
-    (candidate) => candidate.id === args.input.id,
-  );
+  return { ...(await applyMockPersonaUpdate(args.input)) };
+}
+
+/**
+ * Save an edit to the mock persona store, exactly like `update_persona_with`,
+ * and return the live record so a caller can publish it.
+ *
+ * Deliberately does NOT publish a catalog event: the real `update_persona`
+ * only enqueues a pending head for the out-of-band flush loop, so nothing has
+ * reached the relay by the time the command returns. Publishing here would
+ * make a UI that never calls `update_persona_and_publish` look like it kept
+ * the "Save and publish" promise.
+ */
+async function applyMockPersonaUpdate(
+  input: MockUpdatePersonaInput,
+): Promise<RawPersona> {
+  const persona = mockPersonas.find((candidate) => candidate.id === input.id);
   if (!persona) {
-    throw new Error(`agent ${args.input.id} not found`);
+    throw new Error(`agent ${input.id} not found`);
   }
-  persona.display_name = args.input.displayName.trim();
-  persona.avatar_url = args.input.avatarUrl?.trim() || null;
-  persona.system_prompt = args.input.systemPrompt.trim();
-  persona.runtime = args.input.runtime?.trim() || null;
-  persona.model = args.input.model?.trim() || null;
-  persona.provider = args.input.provider?.trim() || null;
-  if (args.input.envVars !== undefined) {
+  persona.display_name = input.displayName.trim();
+  persona.avatar_url = input.avatarUrl?.trim() || null;
+  persona.system_prompt = input.systemPrompt.trim();
+  persona.runtime = input.runtime?.trim() || null;
+  persona.model = input.model?.trim() || null;
+  persona.provider = input.provider?.trim() || null;
+  if (input.envVars !== undefined) {
     // Absent = preserve; present = replace entirely (matches Rust handler).
-    persona.env_vars = { ...args.input.envVars };
+    persona.env_vars = { ...input.envVars };
   }
-  applyMockPersonaBehavior(persona, args.input.behavior);
+  applyMockPersonaBehavior(persona, input.behavior);
   persona.updated_at = new Date().toISOString();
 
-  return { ...persona };
+  await emit("agents-data-changed");
+  return persona;
 }
 
 async function handleDeletePersona(args: { id: string }): Promise<void> {
@@ -7468,15 +8052,118 @@ async function handleSetPersonaActive(args: {
   return { ...persona };
 }
 
+function personaHasExactSharedTag(event: RelayEvent): boolean {
+  const tags = event.tags.filter((tag) => tag[0] === "shared");
+  return tags.length === 1 && tags[0]?.length === 2 && tags[0]?.[1] === "true";
+}
+
+function upsertMockPersonaRelayEvent(event: RelayEvent): void {
+  const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (!sourceId) return;
+  const existingIndex = mockPersonaEvents.findIndex(
+    (candidate) =>
+      candidate.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+      candidate.tags.some((tag) => tag[0] === "d" && tag[1] === sourceId),
+  );
+  if (existingIndex >= 0) {
+    mockPersonaEvents.splice(existingIndex, 1);
+  }
+  mockPersonaEvents.push(event);
+}
+
+function upsertMockPersonaEvent(persona: RawPersona): void {
+  const event: RelayEvent = {
+    id: mockEventId(),
+    pubkey: MOCK_IDENTITY_PUBKEY,
+    created_at: Math.floor(Date.now() / 1_000),
+    kind: KIND_PERSONA,
+    tags: [["d", persona.id], ...(persona.shared ? [["shared", "true"]] : [])],
+    content: JSON.stringify({
+      display_name: persona.display_name,
+      system_prompt: persona.system_prompt,
+      avatar_url: persona.avatar_url,
+      runtime: persona.runtime ?? null,
+      model: persona.model ?? null,
+      provider: persona.provider ?? null,
+      name_pool: persona.name_pool ?? [],
+      respond_to: persona.respond_to ?? null,
+      respond_to_allowlist: persona.respond_to_allowlist ?? [],
+      parallelism: persona.parallelism ?? null,
+    }),
+    sig: "0".repeat(128),
+  };
+  upsertMockPersonaRelayEvent(event);
+  emitMockGlobalEvent(event);
+}
+
+type MockPersonaPublicationResult = {
+  persona: RawPersona;
+  publicationStatus: "published" | "queued";
+  relayMessage?: string;
+};
+
+/**
+ * Publish a persona's catalog head and report the relay outcome, like
+ * `publish_prepared_persona`. A `queued` outcome must NOT make the event
+ * visible to catalog readers — that is the whole distinction the UI reports.
+ */
+function publishMockPersonaHead(
+  persona: RawPersona,
+  config: E2eConfig | undefined,
+): MockPersonaPublicationResult {
+  const publicationStatus =
+    config?.mock?.personaSharePublicationStatuses?.[
+      personaSharePublicationCallCount++
+    ] ?? "published";
+  if (publicationStatus === "published") {
+    upsertMockPersonaEvent(persona);
+  }
+  return {
+    persona: { ...persona },
+    publicationStatus,
+    ...(publicationStatus === "queued"
+      ? { relayMessage: "relay unreachable: could not connect to relay" }
+      : {}),
+  };
+}
+
+async function handleSetPersonaShared(
+  args: {
+    id: string;
+    shared: boolean;
+  },
+  config?: E2eConfig,
+): Promise<MockPersonaPublicationResult> {
+  const persona = mockPersonas.find((candidate) => candidate.id === args.id);
+  if (!persona) {
+    throw new Error(`agent ${args.id} not found`);
+  }
+  if (persona.is_builtin) {
+    throw new Error("Built-in agents cannot be shared to the catalog.");
+  }
+  persona.shared = args.shared;
+  persona.updated_at = new Date().toISOString();
+  return publishMockPersonaHead(persona, config);
+}
+
+/** Mirrors `update_persona_and_publish`: save the edit, then await the relay. */
+async function handleUpdatePersonaAndPublish(
+  args: { input: MockUpdatePersonaInput },
+  config?: E2eConfig,
+): Promise<MockPersonaPublicationResult> {
+  return publishMockPersonaHead(
+    await applyMockPersonaUpdate(args.input),
+    config,
+  );
+}
+
 function ensureMockPersonaIsActive(personaId: string) {
   const persona = mockPersonas.find((candidate) => candidate.id === personaId);
   if (!persona) {
     throw new Error(`agent ${personaId} not found`);
   }
   if (!persona.is_active) {
-    throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
-    );
+    throw new Error(`${persona.display_name} is not in My Agents.`);
   }
 }
 
@@ -7681,8 +8368,10 @@ async function handleCreateManagedAgent(
     args.input.respondTo !== undefined
       ? (args.input.respondToAllowlist ?? [])
       : (linkedPersona?.respond_to_allowlist ?? []);
-  const mintParallelism =
-    args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
+  const mintParallelism = resolveAgentParallelism(
+    args.input.parallelism,
+    linkedPersona?.parallelism,
+  );
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null
@@ -8235,6 +8924,53 @@ async function resolveMockUploadDescriptors(
   ];
 }
 
+async function resolveMockUploadDescriptorForBytes(
+  args: { data: number[] | Uint8Array; filename?: string | null },
+  config: E2eConfig | undefined,
+): Promise<RawBlobDescriptor> {
+  const configured = config?.mock?.uploadDescriptors;
+  if (configured !== undefined) {
+    const descriptors = await resolveMockUploadDescriptors(config);
+    const descriptor = descriptors[0];
+    if (!descriptor) throw new Error("mock upload returned no descriptor");
+    return descriptor;
+  }
+
+  const bytes = Uint8Array.from(args.data);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const sha256 = Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+  const filename = args.filename ?? "upload.bin";
+  const normalizedFilename = filename.toLowerCase();
+  const isAgentJson = normalizedFilename.endsWith(".agent.json");
+  const extension = isAgentJson
+    ? "json"
+    : normalizedFilename.endsWith(".png")
+      ? "png"
+      : normalizedFilename.endsWith(".jpg") ||
+          normalizedFilename.endsWith(".jpeg")
+        ? "jpg"
+        : normalizedFilename.endsWith(".gif")
+          ? "gif"
+          : normalizedFilename.endsWith(".webp")
+            ? "webp"
+            : "bin";
+  const type = isAgentJson
+    ? "application/json"
+    : extension === "bin"
+      ? "application/octet-stream"
+      : `image/${extension === "jpg" ? "jpeg" : extension}`;
+  return {
+    url: `${getRelayHttpUrl(config)}/media/${sha256}.${extension}`,
+    sha256,
+    size: bytes.length,
+    type,
+    uploaded: Math.floor(Date.now() / 1000),
+    filename,
+  };
+}
+
 async function handleSendChannelMessage(
   args: {
     channelId: string;
@@ -8244,6 +8980,9 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionTags?: string[][] | null;
+    linkPreviewTags?: string[][] | null;
+    suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8263,8 +9002,47 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
-  // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  // Reference-only mentions are already part of the outbound event. Preserve
+  // them in the mock event too so local echoes match the complete sent tag set.
+  const mentionTags = args.mentionTags ?? [];
+  // Sender-authored link preview snapshots are independently validated by the
+  // real command and echoed on the stored event. Preserve them in the mock so
+  // E2E recipient rendering exercises the same authored-snapshot path.
+  const linkPreviewTags = args.linkPreviewTags ?? [];
+  if (linkPreviewTags.length > 0) {
+    const suppression = linkPreviewTags.some(
+      (tag) =>
+        tag.length === 2 && tag[0] === "link-preview" && tag[1] === "none",
+    );
+    const snapshots = linkPreviewTags.filter(
+      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
+    );
+    const validSnapshots = parseLinkPreviewSnapshots(
+      snapshots,
+      args.content,
+      new URL(getRelayHttpUrl(config)).origin,
+    );
+    if (
+      (suppression && linkPreviewTags.length !== 1) ||
+      (!suppression &&
+        (snapshots.length !== linkPreviewTags.length ||
+          validSnapshots.length !== snapshots.length ||
+          snapshots.some(
+            (tag) => !isValidLinkPreviewSnapshotCanonicalUrl(tag[3] ?? ""),
+          )))
+    ) {
+      throw new Error("invalid link-preview snapshot tag");
+    }
+  }
+  // All independently validated kinds end up on the stored event's tag set,
+  // just like the real relay.
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionTags,
+    ...linkPreviewTags,
+    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
+  ];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -8280,7 +9058,7 @@ async function handleSendChannelMessage(
         ...extraTags,
       ]);
       recordMockMessage(args.channelId, event);
-      emitMockLiveEvent(args.channelId, event);
+      emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
       return {
         event_id: event.id,
@@ -8343,7 +9121,7 @@ async function handleSendChannelMessage(
     };
 
     recordMockMessage(args.channelId, event);
-    emitMockLiveEvent(args.channelId, event);
+    emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
     return {
       event_id: event.id,
@@ -8454,19 +9232,33 @@ async function handleSendManagedAgentChannelMessage(
 
 /**
  * Mock the `delete_message` Tauri command. Removes the event from the
- * in-memory mock store so the query-cache invalidation in
- * `useDeleteMessageMutation.onSuccess` (which filters by eventId) finds
- * nothing to keep, and the row disappears from the timeline.
+ * in-memory mock store and records the kind:5 structural event used by Inbox
+ * refreshes. Do not emit it live: mock target IDs may fail the production
+ * 64-hex deletion filter, letting a live merge restore the flattened row.
  */
-function handleDeleteMessage(args: {
-  channelId: string;
-  eventId: string;
-}): void {
+function handleDeleteMessage(
+  args: {
+    channelId: string;
+    eventId: string;
+  },
+  config: E2eConfig | undefined,
+): void {
   const history = mockMessages.get(args.channelId);
   if (history) {
     const index = history.findIndex((ev) => ev.id === args.eventId);
     if (index !== -1) history.splice(index, 1);
   }
+
+  const deletion = createMockEvent(
+    KIND_DELETION,
+    "",
+    [
+      ["e", args.eventId],
+      ["h", args.channelId],
+    ],
+    getMockMemberPubkey(config),
+  );
+  recordMockMessage(args.channelId, deletion);
 }
 
 /**
@@ -8713,6 +9505,7 @@ async function resolveGetEvent(
 }
 
 async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
+  relayWebsocketConnectAttemptStarts.push(Date.now());
   const wsId = nextSocketId++;
   const ws = new WebSocket(args.url ?? DEFAULT_RELAY_WS_URL);
   const handler = resolveHandler(args.onMessage);
@@ -8741,6 +9534,10 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  relayWebsocketConnectAttemptStarts.push(Date.now());
+  if (mockWebsocketUnavailable) {
+    throw new Error("mock relay unavailable");
+  }
   const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
   if (connectError) {
     throw new Error(connectError);
@@ -8824,7 +9621,16 @@ function sendToMockSocket(args: {
 
   if (type === "AUTH") {
     const event = rest[0] as RelayEvent;
-    sendWsText(socket.handler, ["OK", event.id, true, ""]);
+    const response = mockAuthResponses.shift() ?? {
+      success: true,
+      message: "",
+    };
+    sendWsText(socket.handler, [
+      "OK",
+      event.id,
+      response.success,
+      response.message,
+    ]);
     return;
   }
 
@@ -8930,6 +9736,25 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.includes(KIND_PERSONA)) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      const sourceIds = filter["#d"];
+      for (const event of mockPersonaEvents) {
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        if (
+          event.pubkey.toLowerCase() !== MOCK_IDENTITY_PUBKEY.toLowerCase() &&
+          !personaHasExactSharedTag(event)
+        ) {
+          continue;
+        }
+        const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+        if (sourceIds && (!sourceId || !sourceIds.includes(sourceId))) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag (PR/issue discussions, approvals, review requests).
     if (
@@ -8956,6 +9781,13 @@ function sendToMockSocket(args: {
     }
 
     const channelId = filter["#h"]?.[0];
+    if (channelId && subId.startsWith("history-")) {
+      const closeReason = mockChannelHistoryCloses.shift();
+      if (closeReason) {
+        sendWsText(socket.handler, ["CLOSED", subId, closeReason]);
+        return;
+      }
+    }
     if (!channelId) {
       // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
       // channel tag — serve them across all channel stores like the relay.
@@ -8994,6 +9826,11 @@ function sendToMockSocket(args: {
   if (type === "EVENT") {
     const event = rest[0] as RelayEvent;
 
+    if (event.kind === 28936) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if ([9030, 9031, 9032].includes(event.kind)) {
       const accepted = updateMockRelayMembershipFromAdminEvent(event);
       sendWsText(socket.handler, [
@@ -9027,6 +9864,36 @@ function sendToMockSocket(args: {
         if (idx >= 0) mockReminderEvents.splice(idx, 1);
       }
       mockReminderEvents.push(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (event.kind === KIND_PERSONA) {
+      const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+      if (!sourceId) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: persona event missing d tag.",
+        ]);
+        return;
+      }
+      const sharedTags = event.tags.filter((tag) => tag[0] === "shared");
+      if (
+        sharedTags.length > 1 ||
+        (sharedTags.length === 1 && !personaHasExactSharedTag(event))
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          'invalid: shared tag must be exactly ["shared","true"].',
+        ]);
+        return;
+      }
+      upsertMockPersonaRelayEvent(event);
+      emitMockGlobalEvent(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -9071,6 +9938,18 @@ function sendToMockSocket(args: {
         ]);
         return;
       }
+      if (
+        event.kind === KIND_PROJECT_ANNOUNCEMENT &&
+        window.__BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "restricted: unknown event kind",
+        ]);
+        return;
+      }
       const rejectionIndex =
         window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(event.kind) ??
         -1;
@@ -9088,6 +9967,30 @@ function sendToMockSocket(args: {
         return;
       }
       getMockProjectEventStore().push(event);
+      const acceptedProjectEvents =
+        window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
+      acceptedProjectEvents.push({
+        content: event.content,
+        kind: event.kind,
+        tags: event.tags,
+      });
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = acceptedProjectEvents;
+      const failedAckIndex =
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (failedAckIndex >= 0) {
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.splice(
+          failedAckIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock lost project acknowledgement",
+        ]);
+        return;
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -9137,6 +10040,11 @@ export function maybeInstallE2eTauriMocks() {
   }
 
   mockClosedChannelLiveSubscription = false;
+  mockWebsocketUnavailable = false;
+  mockAuthResponses.length = 0;
+  mockChannelHistoryCloses.length = 0;
+  relayWebsocketConnectAttemptStarts.length = 0;
+  deferredSendMessageLiveEchoes.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -9149,15 +10057,41 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
+  resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
-  mockWindows("main");
+  if (config.mock?.windowLabel) {
+    (window as Window & { isTauri?: boolean }).isTauri = true;
+  }
+  mockWindows(config.mock?.windowLabel ?? "main");
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
+    emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__ = async (input) => {
+    await emit("media-upload-phase", input);
+  };
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__ = async (input) => {
+    await emit("media-upload-progress", input);
+  };
+  window.__BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__ = async ({
+    members,
+    transcriptionEnabled,
+  }) => {
+    if (!mockHuddle) {
+      throw new Error("No mock huddle is configured.");
+    }
+    mockHuddle.members = structuredClone(members);
+    mockHuddle.state.transcription_enabled = transcriptionEnabled;
+    refreshMockHuddleMembership(config);
+    persistMockHuddle();
+    await emitMockHuddleState();
+  };
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,
     content,
@@ -9167,6 +10101,7 @@ export function maybeInstallE2eTauriMocks() {
     mentionPubkeys,
     extraTags,
     createdAt,
+    pending,
     id,
   }) => {
     const channel = mockChannels.find(
@@ -9185,6 +10120,7 @@ export function maybeInstallE2eTauriMocks() {
       mentionPubkeys,
       extraTags,
       createdAt,
+      pending,
       id,
     );
   };
@@ -9281,6 +10217,23 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
   window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
   deferredGetEventQueue = [];
+  deferNextChannelsRead = false;
+  deferredChannelsReadResolve = null;
+  window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
+  window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
+    if (deferredChannelsReadResolve) {
+      throw new Error("a channel read is already deferred");
+    }
+    deferNextChannelsRead = true;
+  };
+  window.__BUZZ_E2E_RELEASE_CHANNELS_READ__ = () => {
+    deferNextChannelsRead = false;
+    const resolve = deferredChannelsReadResolve;
+    deferredChannelsReadResolve = null;
+    window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
+    resolve?.();
+    return resolve ? 1 : 0;
+  };
   window.__BUZZ_E2E_RELEASE_GET_EVENT__ = () => {
     const queued = deferredGetEventQueue.splice(0);
     for (const entry of queued) {
@@ -9330,6 +10283,23 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ = () =>
     relayClient.getConnectionState();
+  window.__BUZZ_E2E_QUEUE_AUTH_RESPONSES__ = (responses) => {
+    mockAuthResponses.push(...responses);
+  };
+  window.__BUZZ_E2E_QUEUE_CHANNEL_HISTORY_CLOSES__ = (reasons) => {
+    mockChannelHistoryCloses.push(...reasons);
+  };
+  window.__BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__ = (reason) => {
+    let closed = 0;
+    for (const socket of mockSockets.values()) {
+      for (const subId of [...socket.subscriptions.keys()]) {
+        sendWsText(socket.handler, ["CLOSED", subId, reason]);
+        socket.subscriptions.delete(subId);
+        closed += 1;
+      }
+    }
+    return closed;
+  };
 
   window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
     mockReminderEvents.length = 0;
@@ -9356,6 +10326,26 @@ export function maybeInstallE2eTauriMocks() {
       sendWsClose(socket.handler, 1012, "relay restarting");
     }
     return sockets.length;
+  };
+  window.__BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__ = (unavailable) => {
+    mockWebsocketUnavailable = unavailable;
+    if (unavailable) relayWebsocketConnectAttemptStarts.length = 0;
+  };
+  window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => [
+    ...relayWebsocketConnectAttemptStarts,
+  ];
+  window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__ = (seconds) => {
+    activateRateLimit(seconds);
+  };
+  window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => {
+    relayWebsocketConnectAttemptStarts.length = 0;
+  };
+  window.__BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__ = () => {
+    const queued = deferredSendMessageLiveEchoes.splice(0);
+    for (const { channelId, event } of queued) {
+      emitMockLiveEvent(channelId, event);
+    }
+    return queued.length;
   };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
@@ -9396,27 +10386,58 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
   };
+  const meshModelName = (modelId: string) => {
+    const basename = modelId.split("/").at(-1) ?? modelId;
+    return basename
+      .replace(/-(?:Instruct|GGUF)(?:-|:|$).*/, "")
+      .replace(/:.*/, "")
+      .replaceAll("-", " ");
+  };
   const meshNodeStatus = (
     state: "off" | "running",
     mode: "serve" | "client" | null,
-  ) => ({
-    state,
-    mode,
-    health: { status: "ok" as const, reason: null },
-    apiBaseUrl: state === "running" ? "http://127.0.0.1:9337/v1" : null,
-    consoleUrl: null,
-    modelId: mockMeshState.models[0]?.id ?? null,
-    modelName: mockMeshState.models[0]?.name ?? null,
-    inviteToken: state === "running" ? "mock-endpoint-addr" : null,
-    endpointId: state === "running" ? "mock-endpoint-id" : null,
-    deviceId: state === "running" ? "mock-endpoint-id" : null,
-    deviceName: state === "running" ? "Mock desktop" : null,
-  });
-  const handleMockCommand = async (command: string, payload: unknown) => {
+  ) => {
+    const model = mockMeshState.activeModel ?? mockMeshState.models[0] ?? null;
+    return {
+      state,
+      mode,
+      health: { status: "ok" as const, reason: null },
+      apiBaseUrl: state === "running" ? "http://127.0.0.1:9337/v1" : null,
+      consoleUrl: null,
+      modelId: model?.id ?? null,
+      modelName: model?.name ?? null,
+      inviteToken: state === "running" ? "mock-endpoint-addr" : null,
+      endpointId: state === "running" ? "mock-endpoint-id" : null,
+      deviceId: state === "running" ? "mock-endpoint-id" : null,
+      deviceName: state === "running" ? "Mock desktop" : null,
+    };
+  };
+  let mockImportedVoices: Array<{
+    key: string;
+    displayName: string;
+    backend: string;
+    backendName: string;
+    availability: "installed";
+    fallbackKey: string;
+    referenceFile: string;
+    provenance: {
+      source: string;
+      contentHash: string;
+      license: null;
+      sourceUrl: null;
+    };
+  }> = [];
+  const handleMockCommand = async (
+    command: string,
+    payload: unknown,
+  ): Promise<unknown> => {
     const activeConfig = getConfig();
     const identity = getActiveIdentity(activeConfig);
     window.__BUZZ_E2E_COMMANDS__?.push(command);
     const loggedPayload = (() => {
+      if (payload instanceof Uint8Array) {
+        return { rawByteLength: payload.byteLength };
+      }
       try {
         return JSON.parse(JSON.stringify(payload ?? null));
       } catch {
@@ -9430,6 +10451,493 @@ export function maybeInstallE2eTauriMocks() {
     window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
+      case "get_huddle_state": {
+        const snapshot = mockHuddle ? structuredClone(mockHuddle.state) : null;
+        const delayMs = activeConfig?.mock?.huddleStateReadDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        return snapshot;
+      }
+      case "get_voice_input_mode":
+        return mockHuddle?.state.voice_input_mode ?? "push_to_talk";
+      case "set_voice_input_mode": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const mode = (payload as { mode?: unknown }).mode;
+        if (mode !== "push_to_talk" && mode !== "voice_activity") {
+          throw new Error("Missing voice input mode.");
+        }
+        mockHuddle.state.voice_input_mode = mode;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return null;
+      }
+      case "set_huddle_manual_mic_unmuted":
+        return null;
+      case "get_huddle_agent_pubkeys":
+        if (!mockHuddle) return [];
+        return [...mockHuddle.state.agent_pubkeys];
+      case "start_huddle": {
+        const request = payload as {
+          parentChannelId: string;
+          memberPubkeys?: string[];
+          channelName?: string;
+        };
+        const ephemeralChannelId = crypto.randomUUID();
+        const selfPubkey = identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey;
+        const owner = createCurrentMember(activeConfig, "owner");
+        mockHuddle = {
+          members: [
+            { pubkey: selfPubkey, role: "owner" },
+            ...(request.memberPubkeys ?? []).map((pubkey) => ({
+              pubkey,
+              role: "bot" as const,
+            })),
+          ],
+          state: {
+            phase: "creating",
+            parent_channel_id: request.parentChannelId,
+            ephemeral_channel_id: ephemeralChannelId,
+            huddle_thread_event_id: null,
+            participants: [],
+            agent_pubkeys: [],
+            agent_voice_settings: {},
+            tts_enabled: false,
+            transcription_enabled: false,
+            is_creator: true,
+            voice_input_mode: "push_to_talk",
+          },
+        };
+        refreshMockHuddleMembership(activeConfig);
+        persistMockHuddle();
+        await emitMockHuddleState();
+        mockChannels.push(
+          createMockChannel({
+            id: ephemeralChannelId,
+            name: request.channelName ?? "huddle",
+            channel_type: "stream",
+            visibility: "private",
+            description: "",
+            topic: null,
+            purpose: null,
+            last_message_at: null,
+            archived_at: null,
+            created_by: owner.pubkey,
+            topic_set_by: null,
+            topic_set_at: null,
+            purpose_set_by: null,
+            purpose_set_at: null,
+            topic_required: false,
+            max_members: null,
+            nip29_group_id: null,
+            ttl_seconds: 3_600,
+            created_minutes_ago: 0,
+            members: [owner],
+          }),
+        );
+        emitMockGlobalEvent(
+          createMockEvent(
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            "",
+            [
+              ["h", ephemeralChannelId],
+              ["p", selfPubkey],
+            ],
+            selfPubkey,
+          ),
+        );
+        if ((activeConfig?.mock?.startHuddleReturnDelayMs ?? 0) > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              activeConfig?.mock?.startHuddleReturnDelayMs ?? 0,
+            ),
+          );
+        }
+        if (mockHuddle) {
+          mockHuddle.state.phase = "connected";
+          persistMockHuddle();
+          await emitMockHuddleState();
+        }
+        return { ephemeral_channel_id: ephemeralChannelId };
+      }
+      case "confirm_huddle_active":
+        if (mockHuddle) {
+          mockHuddle.state.phase = "active";
+          persistMockHuddle();
+          await emitMockHuddleState();
+        }
+        return null;
+      case "open_huddle_window":
+        if ((activeConfig?.mock?.openHuddleWindowDelayMs ?? 0) > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              activeConfig?.mock?.openHuddleWindowDelayMs ?? 0,
+            ),
+          );
+        }
+        return null;
+      case "close_huddle_companion":
+        await emit("huddle-companion-returned", null);
+        return null;
+      case "leave_huddle":
+      case "end_huddle":
+        mockHuddle = null;
+        window.sessionStorage.removeItem(MOCK_HUDDLE_STORAGE_KEY);
+        // Deliberately leave the unarchived backing channel in the mock list.
+        // This models relay/cache propagation lag and proves the UI removes it
+        // at the local huddle lifecycle boundary rather than waiting for data.
+        await emit("huddle-state-changed", {
+          phase: "idle",
+          parent_channel_id: null,
+          ephemeral_channel_id: null,
+          huddle_thread_event_id: null,
+          participants: [],
+          agent_pubkeys: [],
+          agent_voice_settings: {},
+          tts_enabled: false,
+          transcription_enabled: false,
+          is_creator: false,
+          voice_input_mode: "push_to_talk",
+        });
+        return null;
+      case "set_huddle_transcription_enabled":
+        if (!mockHuddle) {
+          throw new Error("No active mock huddle.");
+        }
+        mockHuddle.state.transcription_enabled = Boolean(
+          (payload as { enabled?: boolean }).enabled,
+        );
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return null;
+      case "ensure_huddle_agent_voice_settings":
+        refreshMockHuddleMembership(activeConfig);
+        persistMockHuddle();
+        return structuredClone(mockHuddle?.state.agent_voice_settings ?? {});
+      case "set_huddle_agent_tts_enabled": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const request = payload as { agentPubkey?: string; enabled?: boolean };
+        if (!request.agentPubkey || typeof request.enabled !== "boolean") {
+          throw new Error("Missing agent text-to-speech setting.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        const settings =
+          mockHuddle.state.agent_voice_settings[request.agentPubkey];
+        if (!settings) throw new Error("Agent is not in the active huddle.");
+        settings.enabled = request.enabled;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return structuredClone(settings);
+      }
+      case "set_huddle_agent_voice": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const request = payload as { agentPubkey?: string; voiceKey?: string };
+        if (!request.agentPubkey || !request.voiceKey) {
+          throw new Error("Missing agent voice setting.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        const settings =
+          mockHuddle.state.agent_voice_settings[request.agentPubkey];
+        if (!settings) throw new Error("Agent is not in the active huddle.");
+        settings.voice_key = request.voiceKey;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return structuredClone(settings);
+      }
+      case "sync_agents_to_active_huddle": {
+        const request = payload as {
+          channelId?: string;
+          agentPubkeys?: string[];
+        };
+        if (
+          !mockHuddle ||
+          !request.channelId ||
+          (request.channelId !== mockHuddle.state.parent_channel_id &&
+            request.channelId !== mockHuddle.state.ephemeral_channel_id)
+        ) {
+          return { matched_active_huddle: false, added: [] };
+        }
+
+        const existingAgents = new Set(
+          mockHuddle.members
+            .filter((member) => member.role === "bot")
+            .map((member) => member.pubkey),
+        );
+        const added: string[] = [];
+        for (const pubkey of request.agentPubkeys ?? []) {
+          if (!pubkey || existingAgents.has(pubkey)) continue;
+          existingAgents.add(pubkey);
+          added.push(pubkey);
+          mockHuddle.members.push({ pubkey, role: "bot" });
+        }
+        refreshMockHuddleMembership(activeConfig);
+        persistMockHuddle();
+        if (added.length > 0) {
+          await emitMockHuddleState();
+        }
+        return { matched_active_huddle: true, added };
+      }
+      case "add_agent_to_huddle": {
+        const error = activeConfig?.mock?.addAgentToHuddleError;
+        if (error) {
+          throw new Error(error);
+        }
+        const result = activeConfig?.mock?.addAgentToHuddleResult;
+        if (!result) {
+          throw new Error("No mock add-agent result configured.");
+        }
+        return structuredClone(result);
+      }
+      case "remove_agent_from_huddle": {
+        const agentPubkey = (payload as { agentPubkey?: string })?.agentPubkey;
+        if (!mockHuddle || !agentPubkey) {
+          throw new Error("No active huddle agent to remove.");
+        }
+        const initialCount = mockHuddle.members.length;
+        mockHuddle.members = mockHuddle.members.filter(
+          (member) => member.role !== "bot" || member.pubkey !== agentPubkey,
+        );
+        if (mockHuddle.members.length === initialCount) {
+          throw new Error("Agent is not in this huddle.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return;
+      }
+      case "get_model_status":
+        return { stt: "ready", tts: "ready" };
+      case "get_tts_settings":
+        return (
+          activeConfig?.mock?.ttsSettings ?? {
+            version: 1,
+            agentTextToSpeech: true,
+            voicePreferences: ["pocket:mary"],
+          }
+        );
+      case "list_voice_registry":
+        return [
+          ...[
+            [
+              "anna",
+              "Anna",
+              "anna.wav",
+              "p228_023_enhanced.wav",
+              "0a6de25cf12bf1540beb85979f306a92be81fecc051c547c5395e7e5237a3856",
+            ],
+            [
+              "vera",
+              "Vera",
+              "vera.wav",
+              "p229_023_enhanced.wav",
+              "309cf91a895830f15842b398f69a4962cb1f7e0bfab10e25dd27838e826c204b",
+            ],
+            [
+              "fantine",
+              "Fantine",
+              "fantine.wav",
+              "p244_023_enhanced.wav",
+              "5f07d4e2a3f20a15572aae885156b43ef3fc12ef3812996fd135680d9956448b",
+            ],
+            [
+              "charles",
+              "Charles",
+              "charles.wav",
+              "p254_023_enhanced.wav",
+              "6b681a429198f16e378d53bccb08d06939da7b00144a7696111d4f8f76be7756",
+            ],
+            [
+              "paul",
+              "Paul",
+              "paul.wav",
+              "p259_023_enhanced.wav",
+              "7aba504fe0b3b16478b69ed27ce6007e3cb42b0c1915b5f1c6a6024ae37d679b",
+            ],
+            [
+              "eponine",
+              "Eponine",
+              "eponine.wav",
+              "p262_023_enhanced.wav",
+              "a13c27fb47627b05223691a0ef2974358a18c886e6c2f9d2762ff1d02c20926b",
+            ],
+            [
+              "azelma",
+              "Azelma",
+              "azelma.wav",
+              "p303_023_enhanced.wav",
+              "60e3d26cdf2efdec5df712152c839928f4d5522821e6554ae11fd96c57ab1026",
+            ],
+            [
+              "george",
+              "George",
+              "george.wav",
+              "p315_023_enhanced.wav",
+              "29a41f93bf5236e5b21501091d7774c255d5f3d4e62fa4f9fdf0a92a793c84ae",
+            ],
+            [
+              "mary",
+              "Mary",
+              "reference_sample.wav",
+              "p333_023_enhanced.wav",
+              "a35b0468382218e9f37a9a7494d1e4b74deaf18d7ced22265b4e325bb55c183f",
+            ],
+            [
+              "jane",
+              "Jane",
+              "jane.wav",
+              "p339_023_enhanced.wav",
+              "2f12e7f155eb3118f55425394f1b049e5b1b67bdc9b3932c8ba4521420aeb84a",
+            ],
+            [
+              "michael",
+              "Michael",
+              "michael.wav",
+              "p360_023_enhanced.wav",
+              "b6743e9195e5e3fd34fe9d1633ae93f7ffab787b249e45f6467d7d6f7a6ee6ad",
+            ],
+            [
+              "eve",
+              "Eve",
+              "eve.wav",
+              "p361_023_enhanced.wav",
+              "396e7cbd066b0f3fb6d67fa26e7904076958239d736d4390f15b5fe88feb14cd",
+            ],
+          ].map(
+            ([id, displayName, referenceFile, upstreamFile, contentHash]) => ({
+              key: `pocket:${id}`,
+              displayName,
+              backend: "pocket",
+              backendName: "Pocket TTS",
+              availability: "bundled",
+              fallbackKey: id === "mary" ? null : "pocket:mary",
+              referenceFile,
+              provenance: {
+                source: "bundled",
+                contentHash,
+                license: "CC-BY-4.0",
+                sourceUrl: `https://huggingface.co/kyutai/tts-voices/blob/323332d33f997de8394f24a193e1a76df720e01a/vctk/${upstreamFile}`,
+              },
+            }),
+          ),
+          ...mockImportedVoices,
+        ];
+      case "set_tts_enabled": {
+        const enabled = (payload as { enabled?: boolean })?.enabled;
+        if (typeof enabled !== "boolean")
+          throw new Error("Missing text-to-speech enabled state");
+        const settings = {
+          version: 1,
+          agentTextToSpeech: enabled,
+          voicePreferences: activeConfig?.mock?.ttsSettings
+            ?.voicePreferences ?? ["pocket:mary"],
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return settings;
+      }
+      case "interrupt_huddle_speech":
+        return;
+      case "set_pocket_voice": {
+        const voiceKey = (payload as { voiceKey?: string })?.voiceKey;
+        if (!voiceKey) throw new Error("Missing Pocket voice key");
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          voicePreferences: ["pocket:mary"],
+        };
+        const firstPocketIndex = current.voicePreferences.findIndex((key) =>
+          key.startsWith("pocket:"),
+        );
+        const preferences = current.voicePreferences.filter(
+          (key) => !key.startsWith("pocket:"),
+        );
+        preferences.splice(
+          firstPocketIndex < 0 ? preferences.length : firstPocketIndex,
+          0,
+          voiceKey,
+        );
+        const settings = { ...current, voicePreferences: preferences };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return settings;
+      }
+      case "preview_pocket_voice":
+        return null;
+      case "import_pocket_voice": {
+        const importResult =
+          activeConfig?.mock?.pocketVoiceImportResult ?? "success";
+        if (importResult === "cancel") return null;
+        if (importResult === "invalid") {
+          throw new Error("Voice WAV must contain PCM or 32-bit float audio");
+        }
+        const contentHash = "1".repeat(64);
+        const imported = {
+          key: `pocket:imported:${contentHash}`,
+          displayName: "My voice",
+          backend: "pocket",
+          backendName: "Pocket TTS",
+          availability: "installed" as const,
+          fallbackKey: "pocket:mary",
+          referenceFile: `${contentHash}.wav`,
+          provenance: {
+            source: "local import",
+            contentHash,
+            license: null,
+            sourceUrl: null,
+          },
+        };
+        mockImportedVoices = [imported];
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          voicePreferences: ["pocket:mary"],
+        };
+        const settings = {
+          ...current,
+          voicePreferences: [imported.key],
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return {
+          settings,
+          registry: await handleMockCommand("list_voice_registry", null),
+        };
+      }
+      case "delete_pocket_voice": {
+        const voiceKey = (payload as { voiceKey?: string })?.voiceKey;
+        if (!voiceKey?.startsWith("pocket:imported:"))
+          throw new Error("Missing imported Pocket voice key");
+        mockImportedVoices = mockImportedVoices.filter(
+          (voice) => voice.key !== voiceKey,
+        );
+        const current = activeConfig?.mock?.ttsSettings ?? {
+          version: 1,
+          agentTextToSpeech: true,
+          voicePreferences: ["pocket:mary"],
+        };
+        const settings = {
+          ...current,
+          voicePreferences: current.voicePreferences.includes(voiceKey)
+            ? ["pocket:mary"]
+            : current.voicePreferences,
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.ttsSettings = settings;
+        }
+        return {
+          settings,
+          registry: await handleMockCommand("list_voice_registry", null),
+        };
+      }
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {
@@ -9488,16 +10996,40 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_model_catalog":
+        return {
+          gpuName: "Mock Apple GPU",
+          vramDisplay: "32 GB",
+          vramGb: 32,
+          recommended: "Gemma-4-E4B-it-Q4_K_M",
+          entries: [
+            {
+              name: "Gemma-4-E4B-it-Q4_K_M",
+              size: "3.5GB",
+              sizeGb: 3.5,
+              description: "Buzz-curated local agent model",
+              fit: "comfortable",
+              installed: true,
+              recommended: true,
+              curated: true,
+            },
+          ],
+        };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":
         return mockMeshState.servingUsage;
       case "mesh_start_node": {
         const req = (
-          payload as { request?: { mode?: "serve" | "client" } } | null
+          payload as {
+            request?: { mode?: "serve" | "client"; modelId?: string };
+          } | null
         )?.request;
         mockMeshState.nodeState = "running";
         mockMeshState.nodeMode = req?.mode ?? "serve";
+        mockMeshState.activeModel = req?.modelId
+          ? { id: req.modelId, name: meshModelName(req.modelId) }
+          : (mockMeshState.models[0] ?? null);
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       }
       case "mesh_stop_node":
@@ -9511,6 +11043,7 @@ export function maybeInstallE2eTauriMocks() {
         }
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
+        mockMeshState.activeModel = null;
         return meshNodeStatus("off", null);
       case "get_identity": {
         const isLost =
@@ -9563,6 +11096,60 @@ export function maybeInstallE2eTauriMocks() {
         // harness there is nothing to wipe; resolving is enough — specs
         // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
         return;
+      case "generate_backup_passphrase": {
+        const request = payload as {
+          words?: number;
+          separator?: string;
+        } | null;
+        const wordCount = Math.min(Math.max(request?.words ?? 3, 3), 10);
+        return MOCK_PASSPHRASE_WORDS.slice(0, wordCount).join(
+          request?.separator ?? " ",
+        );
+      }
+      case "create_ncryptsec_backup": {
+        const delayMs = activeConfig?.mock?.backupEncryptionDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        return MOCK_NCRYPTSEC;
+      }
+      case "save_ncryptsec_copy": {
+        const paths = activeConfig?.mock?.backupSavePaths ?? [
+          "/tmp/buzz-identity.ncryptsec",
+        ];
+        const index = Math.min(backupSaveCallCount, paths.length - 1);
+        backupSaveCallCount += 1;
+        return paths[index];
+      }
+      case "verify_ncryptsec_backup": {
+        const request = payload as { password?: string } | null;
+        const configuredErrors = activeConfig?.mock?.backupVerificationErrors;
+        const hasConfiguredResult = Boolean(
+          activeConfig?.mock?.backupVerificationPubkeys,
+        );
+        const errors = configuredErrors ?? [
+          hasConfiguredResult || request?.password === MOCK_BACKUP_PASSPHRASE
+            ? null
+            : "wrong backup password or damaged key backup",
+        ];
+        const index = Math.min(backupVerificationCallCount, errors.length - 1);
+        const error = errors[index];
+        if (error) {
+          backupVerificationCallCount += 1;
+          throw new Error(error);
+        }
+        const pubkeys = activeConfig?.mock?.backupVerificationPubkeys ?? [
+          identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
+        ];
+        const pubkey = pubkeys[Math.min(index, pubkeys.length - 1)];
+        backupVerificationCallCount += 1;
+        return {
+          pubkey,
+          npub: npubEncode(pubkey),
+          matchesCurrentIdentity:
+            pubkey === (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey),
+        };
+      }
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
@@ -9595,12 +11182,26 @@ export function maybeInstallE2eTauriMocks() {
           locked: false,
         };
       }
-      case "import_identity":
+      case "import_identity": {
+        const request = payload as { nsec?: string; password?: string } | null;
+        const input = request?.nsec ?? "";
+        if (input.trim().startsWith("ncryptsec1")) {
+          if (
+            input.trim() !== MOCK_NCRYPTSEC ||
+            request?.password !== MOCK_BACKUP_PASSPHRASE
+          ) {
+            throw new Error("Wrong backup password or damaged key backup.");
+          }
+          mockIdentityLostCleared = true;
+          mockIdentityLockedCleared = true;
+          return importMockIdentity(
+            nsecEncode(hexToBytes(DEFAULT_REAL_IDENTITY.privateKey)),
+          );
+        }
         mockIdentityLostCleared = true;
         mockIdentityLockedCleared = true;
-        return importMockIdentity(
-          (payload as { nsec?: string } | null)?.nsec ?? "",
-        );
+        return importMockIdentity(input);
+      }
       case "validate_repos_dir":
         // The browser harness has no host filesystem to validate. Treat the
         // seeded empty/default path as valid so Add Community can continue to
@@ -9608,6 +11209,26 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
+      case "fetch_link_preview_metadata": {
+        const startBlockMs =
+          activeConfig?.mock?.linkPreviewMetadataStartBlockMs ?? 0;
+        if (startBlockMs > 0) {
+          const stopAt = performance.now() + startBlockMs;
+          while (performance.now() < stopAt) {
+            // Deliberately block to model uncached native command startup.
+          }
+        }
+        const delayMs = activeConfig?.mock?.linkPreviewMetadataDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        const href = (payload as { href?: string }).href;
+        const metadataByHref = activeConfig?.mock?.linkPreviewMetadataByHref;
+        if (href && metadataByHref && Object.hasOwn(metadataByHref, href)) {
+          return metadataByHref[href];
+        }
+        return activeConfig?.mock?.linkPreviewMetadata ?? null;
+      }
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -9617,6 +11238,12 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "update_tray_agent_activity":
+      case "clear_tray_agent_activity":
+      case "requeue_tray_actions":
+        return null;
+      case "take_tray_actions":
+        return [];
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":
@@ -10195,16 +11822,41 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "discover_backend_providers":
-        return [];
-      case "probe_backend_provider":
-        return { ok: false, error: "mock: no providers available" };
+        return activeConfig?.mock?.backendProviders ?? [];
+      case "probe_backend_provider": {
+        const probeDelayMs =
+          activeConfig?.mock?.backendProviderProbeDelayMs ?? 0;
+        if (probeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, probeDelayMs),
+          );
+        }
+        return (
+          activeConfig?.mock?.backendProviderProbeResult ?? {
+            ok: false,
+            error: "mock: no providers available",
+          }
+        );
+      }
       case "discover_managed_agent_prereqs":
         return handleDiscoverManagedAgentPrereqs(
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
           activeConfig,
         );
-      case "get_channels":
-        return handleGetChannels(activeConfig);
+      case "get_channels": {
+        // Claim the one-shot before starting the read, then hold only that
+        // invocation's completion. Later reads pass through and cannot join it.
+        const deferred = deferNextChannelsRead;
+        deferNextChannelsRead = false;
+        const channels = handleGetChannels(activeConfig);
+        if (deferred) {
+          await new Promise<void>((resolve) => {
+            deferredChannelsReadResolve = resolve;
+            window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 1;
+          });
+        }
+        return channels;
+      }
       case "get_feed":
         return handleGetFeed(
           (payload as Parameters<typeof handleGetFeed>[0]) ?? {},
@@ -10221,6 +11873,11 @@ export function maybeInstallE2eTauriMocks() {
       case "update_persona":
         return handleUpdatePersona(
           payload as Parameters<typeof handleUpdatePersona>[0],
+        );
+      case "update_persona_and_publish":
+        return handleUpdatePersonaAndPublish(
+          payload as Parameters<typeof handleUpdatePersonaAndPublish>[0],
+          activeConfig,
         );
       case "delete_persona":
         return handleDeletePersona(
@@ -10245,11 +11902,16 @@ export function maybeInstallE2eTauriMocks() {
             };
             const now = new Date().toISOString();
             const existing = mockPersonas.find((p) => p.id === dTag);
+            const shared = nostrEvent.tags.some(
+              (tag) =>
+                tag.length === 2 && tag[0] === "shared" && tag[1] === "true",
+            );
             if (existing) {
               existing.display_name =
                 content.display_name ?? existing.display_name;
               existing.system_prompt =
                 content.system_prompt ?? existing.system_prompt;
+              existing.shared = shared;
               existing.updated_at = now;
             } else {
               mockPersonas.push({
@@ -10259,6 +11921,7 @@ export function maybeInstallE2eTauriMocks() {
                 system_prompt: content.system_prompt ?? "",
                 is_builtin: false,
                 is_active: true,
+                shared,
                 env_vars: {},
                 created_at: now,
                 updated_at: now,
@@ -10276,14 +11939,17 @@ export function maybeInstallE2eTauriMocks() {
           }
         }
         // Mirror the real Rust backend: emit "agents-data-changed" after reconcile.
-        for (const cb of tauriEventListeners.get("agents-data-changed") ?? []) {
-          cb();
-        }
+        await emit("agents-data-changed");
         return undefined;
       }
       case "set_persona_active":
         return handleSetPersonaActive(
           payload as Parameters<typeof handleSetPersonaActive>[0],
+        );
+      case "set_persona_shared":
+        return handleSetPersonaShared(
+          payload as Parameters<typeof handleSetPersonaShared>[0],
+          activeConfig,
         );
       case "list_teams":
         return handleListTeams();
@@ -10300,6 +11966,50 @@ export function maybeInstallE2eTauriMocks() {
           created_at: template.createdAt,
           updated_at: template.updatedAt,
         }));
+      case "create_channel_template": {
+        const { input } = payload as {
+          input: {
+            name: string;
+            description?: string;
+            channelType?: "stream" | "forum";
+            visibility?: "open" | "private";
+            canvasTemplate?: string;
+            agents?: ChannelTemplate["agents"];
+          };
+        };
+        const timestamp = new Date().toISOString();
+        const created: ChannelTemplate = {
+          id: `template-${Date.now()}`,
+          name: input.name,
+          description: input.description ?? null,
+          channelType: input.channelType ?? "stream",
+          visibility: input.visibility ?? "open",
+          canvasTemplate: input.canvasTemplate ?? null,
+          agents: input.agents ?? { personas: [], teams: [] },
+          isBuiltin: false,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        if (activeConfig) {
+          activeConfig.mock ??= {};
+          activeConfig.mock.channelTemplates = [
+            ...(activeConfig.mock.channelTemplates ?? []),
+            created,
+          ];
+        }
+        return {
+          id: created.id,
+          name: created.name,
+          description: created.description,
+          channel_type: created.channelType,
+          visibility: created.visibility,
+          canvas_template: created.canvasTemplate,
+          agents: created.agents,
+          is_builtin: created.isBuiltin,
+          created_at: created.createdAt,
+          updated_at: created.updatedAt,
+        };
+      }
       case "create_team":
         return handleCreateTeam(
           payload as Parameters<typeof handleCreateTeam>[0],
@@ -10331,8 +12041,8 @@ export function maybeInstallE2eTauriMocks() {
         // Specs assert invocation via __BUZZ_E2E_COMMANDS__.
         return true;
       case "encode_agent_snapshot_for_send": {
-        // Return a minimal PNG-shaped payload so the send flow can proceed
-        // through upload_media_bytes without a real Rust encode step.
+        // Return the requested wire format so both message sharing (PNG) and
+        // community catalog publication (JSON) exercise their real branches.
         // Optional encodeDelayMs lets specs observe the "preparing" phase before
         // the upload begins.
         const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
@@ -10340,6 +12050,46 @@ export function maybeInstallE2eTauriMocks() {
           await new Promise((resolve) =>
             window.setTimeout(resolve, encodeDelayMs),
           );
+        }
+        const input = payload as {
+          id: string;
+          memoryLevel: "none" | "core" | "everything";
+          format: "json" | "png";
+        };
+        if (input.format === "json") {
+          const persona = mockPersonas.find(
+            (candidate) => candidate.id === input.id,
+          );
+          const snapshot = {
+            format: "buzz-agent-snapshot",
+            version: 1,
+            definition: {
+              name: persona?.display_name ?? "E2E Agent",
+              sourceIsBuiltIn: persona?.is_builtin ?? false,
+              systemPrompt: persona?.system_prompt ?? "",
+              runtime: persona?.runtime ?? null,
+              model: persona?.model ?? null,
+              provider: persona?.provider ?? null,
+              respondTo: persona?.respond_to ?? null,
+              respondToAllowlist: persona?.respond_to_allowlist ?? [],
+              namePool: persona?.name_pool ?? [],
+            },
+            profile: {
+              displayName: persona?.display_name ?? "E2E Agent",
+              avatarUrl: persona?.avatar_url ?? null,
+            },
+            memory: {
+              level: input.memoryLevel,
+              entries: [],
+            },
+          };
+          const fileBytes = Array.from(
+            new TextEncoder().encode(JSON.stringify(snapshot)),
+          );
+          return {
+            fileBytes,
+            fileName: "e2e-agent.agent.json",
+          };
         }
         return {
           fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
@@ -10350,12 +12100,18 @@ export function maybeInstallE2eTauriMocks() {
         // Return a minimal preview — no writes performed.
         return {
           displayName: "Imported Agent",
+          isBuiltIn: true,
+          model: "claude-opus-4-5",
+          runtime: "goose",
           systemPrompt: null,
           avatarUrl: null,
           memoryLevel: "none",
           memoryEntryCount: 0,
           hasSourceAllowlist: false,
           sourceAllowlistCount: 0,
+          sourceAllowlist: [],
+          manifestJson: "{}",
+          locked: false,
         };
       }
       case "confirm_agent_snapshot_import": {
@@ -10652,7 +12408,16 @@ export function maybeInstallE2eTauriMocks() {
           }
         );
       }
+      case "get_global_agent_config_set_call_count":
+        return setGlobalAgentConfigCallCount;
       case "set_global_agent_config": {
+        setGlobalAgentConfigCallCount += 1;
+        const saveErrors = activeConfig?.mock?.setGlobalAgentConfigErrors;
+        const saveError =
+          saveErrors?.[
+            Math.min(setGlobalAgentConfigCallCount - 1, saveErrors.length - 1)
+          ];
+        if (saveError) throw new Error(saveError);
         // Echo back the submitted config as the saved value (mirrors the
         // backend's strip-on-write pass in tests where all values are already
         // non-empty). The invoke payload wraps it as { config }.
@@ -10698,6 +12463,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_baked_build_env_keys":
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
+      case "agent_access_owner_only":
+        return config?.mock?.ownerOnlyAccessBuild ?? false;
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
@@ -10837,11 +12604,12 @@ export function maybeInstallE2eTauriMocks() {
       case "delete_message":
         handleDeleteMessage(
           payload as Parameters<typeof handleDeleteMessage>[0],
+          activeConfig,
         );
         return null;
       case "edit_message":
         return handleEditMessage(
-          payload as Parameters<typeof handleEditMessage>[0],
+          (payload as { input: Parameters<typeof handleEditMessage>[0] }).input,
           activeConfig,
         );
       case "add_reaction":
@@ -10861,7 +12629,17 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
       case "upload_media_bytes":
-        return (await resolveMockUploadDescriptors(activeConfig))[0];
+        return resolveMockUploadDescriptorForBytes(
+          payload as { data: number[]; filename?: string | null },
+          activeConfig,
+        );
+      case "upload_media_bytes_raw":
+        return resolveMockUploadDescriptorForBytes(
+          {
+            data: payload as Uint8Array,
+          },
+          activeConfig,
+        );
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In
@@ -10896,15 +12674,26 @@ export function maybeInstallE2eTauriMocks() {
       case "download_image":
       case "save_png_data_url":
       case "download_file":
+      case "save_agent_card":
         // The save dialog can't run headlessly; report a successful save so the
         // FileCard / image-menu click handlers resolve. Specs assert the
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
+      case "card_mint_key_status":
+        // Cards: pretend a key is configured in global defaults so the mint
+        // form renders and the key-status row is shown.
+        return "global";
+      case "list_agent_cards":
+        // Cards archive starts empty in E2E; specs exercising the gallery
+        // can extend this with a seeded config knob when needed.
+        return [];
       case "copy_image_to_clipboard":
         return;
       case "copy_text_to_clipboard":
         await navigator.clipboard.writeText((payload as { text: string }).text);
         return;
+      case "read_clipboard_text":
+        return navigator.clipboard.readText();
       case "get_event":
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],
@@ -11074,9 +12863,6 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:webview|set_webview_zoom":
         window.__BUZZ_E2E_WEBVIEW_ZOOM__ = (payload as { value: number }).value;
         return;
-      case "plugin:event|listen":
-        // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
-        return Math.floor(Math.random() * 1_000_000);
       case "start_pairing": {
         const delayMs = activeConfig?.mock?.pairingStartDelayMs ?? 0;
         if (delayMs > 0) {
@@ -11084,8 +12870,19 @@ export function maybeInstallE2eTauriMocks() {
         }
         return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
       }
+      case "start_identity_recovery_pairing": {
+        const delayMs = activeConfig?.mock?.pairingStartDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        return `nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1&mode=recover`;
+      }
       case "cancel_pairing":
       case "confirm_pairing_sas":
+        return null;
+      case "complete_identity_recovery_pairing":
+        mockIdentityLostCleared = true;
+        await emit("pairing-complete", {});
         return null;
       // ── NIP-IA identity archival ────────────────────────────────────────
       // These mocks drive the archive-button gate matrix in
@@ -11134,7 +12931,7 @@ export function maybeInstallE2eTauriMocks() {
       // install); create/merge/delete/remove mutate it with the same
       // union / delete-row-when-empty semantics as the real Rust commands
       // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
-      // so specs can drive fresh-internal-repair and toggle ON/OFF flows.
+      // so specs can drive default-on seeding and toggle ON/OFF flows.
       case "list_save_subscriptions": {
         const win = window as unknown as Record<string, unknown>;
         if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
@@ -11192,24 +12989,17 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
-      case "observer_archive_default_enabled": {
-        const delayMs =
-          activeConfig?.mock?.observerArchiveDefaultEnabledDelayMs;
-        if (delayMs && delayMs > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-        }
-        const error = activeConfig?.mock?.observerArchiveDefaultEnabledError;
-        if (error) {
-          throw new Error(error);
-        }
-        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
-      }
       case "agent_metric_archive_default_enabled":
-        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
         return null;
       case "plugin:window|is_fullscreen":
         return false;
+      // Settings reads the app version through the app plugin. Without this the
+      // bridge throws an unhandled page error on every Settings render, which
+      // shows up as noise in unrelated specs.
+      case "plugin:app|version":
+        return MOCK_APP_VERSION;
       case "merge_save_subscription_kinds": {
         // Mirrors `merge_owner_p_kinds`: union `kind` into the owner_p row's
         // kinds, creating the row if it doesn't exist yet.
@@ -11260,27 +13050,24 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
+  window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
+    emit(event, payload);
   mockIPC(handleMockCommand, { shouldMockEvents: true });
-
-  // Wire up __TAURI_INTERNALS__.listen so tests can subscribe to backend-emitted
-  // events (e.g. "agents-data-changed"). mockIPC already ensures __TAURI_INTERNALS__
-  // exists; we just add the listen property without clobbering invoke.
-  (
-    window as unknown as {
+  const tauriInternals = (
+    window as typeof window & {
       __TAURI_INTERNALS__: {
-        listen?: (event: string, cb: () => void) => Promise<() => void>;
+        listen?: (
+          event: string,
+          callback: () => void,
+        ) => Promise<() => Promise<void>>;
       };
     }
-  ).__TAURI_INTERNALS__.listen = async (event: string, cb: () => void) => {
-    let listeners = tauriEventListeners.get(event);
-    if (!listeners) {
-      listeners = new Set();
-      tauriEventListeners.set(event, listeners);
-    }
-    listeners.add(cb);
-    return () => {
-      tauriEventListeners.get(event)?.delete(cb);
-    };
+  ).__TAURI_INTERNALS__;
+  // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
+  // so their listeners observe the same events emitted by application test seams.
+  tauriInternals.listen = async (event, callback) => {
+    const unlisten = await listen(event, () => callback());
+    return async () => unlisten();
   };
 
   installed = true;

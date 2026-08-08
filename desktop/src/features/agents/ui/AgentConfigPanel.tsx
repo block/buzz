@@ -137,6 +137,8 @@ function provenanceSentence(
       return "From ACP session";
     case "globalDefault":
       return "Inherited from global defaults";
+    case "harnessDefault":
+      return "Inherited from harness definition";
   }
 }
 

@@ -37,8 +37,19 @@ def test_defaults_are_leaderboard_eligible():
 
 def test_selectors_pass_through():
     args = benchmark.parse_args(
-        ["--path", "/tmp/task", "-i", "cobol*", "-x", "flaky*", "-k", "1",
-         "--job-name", "smoke", "--dry-run"]
+        [
+            "--path",
+            "/tmp/task",
+            "-i",
+            "cobol*",
+            "-x",
+            "flaky*",
+            "-k",
+            "1",
+            "--job-name",
+            "smoke",
+            "--dry-run",
+        ]
     )
     argv = benchmark.leaderboard_argv(args, Path("p.json"), Path("b"))
     assert argv[argv.index("--path") + 1] == "/tmp/task"
@@ -59,11 +70,15 @@ def test_state_is_generated_once_and_reused(state_dir):
     assert "user_pubkey" not in stored  # derived, never persisted
 
 
-def test_provisioner_config_pins_user_and_keeps_channels(state_dir, tmp_path, monkeypatch):
+def test_provisioner_config_pins_user_and_keeps_channels(
+    state_dir, tmp_path, monkeypatch
+):
     monkeypatch.setenv("FAKE_KEY_ENV", "sk-test")
     endpoints = tmp_path / "endpoints.json"
     endpoints.write_text(
-        json.dumps({"model-a": {"provider": "anthropic", "api_key_env": "FAKE_KEY_ENV"}})
+        json.dumps(
+            {"model-a": {"provider": "anthropic", "api_key_env": "FAKE_KEY_ENV"}}
+        )
     )
     state = benchmark.load_state()
     path = benchmark.write_provisioner_config(state, endpoints)
@@ -78,7 +93,9 @@ def test_provisioner_config_pins_user_and_keeps_channels(state_dir, tmp_path, mo
     assert config["relay_http_url"].startswith("http://localhost:")
 
 
-def test_provisioner_config_missing_api_key_is_explicit(state_dir, tmp_path, monkeypatch):
+def test_provisioner_config_missing_api_key_is_explicit(
+    state_dir, tmp_path, monkeypatch
+):
     monkeypatch.delenv("MISSING_KEY_ENV", raising=False)
     endpoints = tmp_path / "endpoints.json"
     endpoints.write_text(
@@ -91,9 +108,7 @@ def test_provisioner_config_missing_api_key_is_explicit(state_dir, tmp_path, mon
 def test_env_file_wires_owner_and_ports(state_dir):
     state = benchmark.load_state()
     env_path = benchmark.write_env_file(state)
-    env = dict(
-        line.split("=", 1) for line in env_path.read_text().splitlines() if line
-    )
+    env = dict(line.split("=", 1) for line in env_path.read_text().splitlines() if line)
     assert env["RELAY_OWNER_PUBKEY"] == state["owner_pubkey"]
     assert env["BUZZ_HTTP_PORT"] == str(benchmark.RELAY_HTTP_PORT)
     assert env["BUZZ_PG_HOST_PORT"] == str(benchmark.PG_HOST_PORT)

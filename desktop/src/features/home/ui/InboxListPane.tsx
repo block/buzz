@@ -1,11 +1,4 @@
-import {
-  Bell,
-  Clock,
-  Ellipsis,
-  ExternalLink,
-  FileText,
-  MailOpen,
-} from "lucide-react";
+import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -18,7 +11,6 @@ import { buildInboxListRows } from "@/features/home/lib/inboxListRows";
 import { InboxFilterMenu } from "@/features/home/ui/InboxFilterMenu";
 import {
   DraftsPanel,
-  getDraftPreview,
   type DraftViewItem,
 } from "@/features/messages/ui/DraftsPanel";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -130,7 +122,6 @@ function formatReminderStatus(notBefore: number | undefined) {
 
 function PersonalItemRow({
   id,
-  kind,
   location,
   onClick,
   preview,
@@ -138,16 +129,12 @@ function PersonalItemRow({
   status,
 }: {
   id: string;
-  kind: "drafts" | "reminders";
   location: InboxTypeLabel | null;
   onClick: () => void;
   preview: string;
   selected: boolean;
   status: string;
 }) {
-  const isDraft = kind === "drafts";
-  const Icon = isDraft ? FileText : Bell;
-
   return (
     <button
       aria-current={selected ? "true" : undefined}
@@ -155,16 +142,16 @@ function PersonalItemRow({
         "flex w-full items-center gap-3 border-b border-border/45 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-hidden",
         selected && "bg-muted/40",
       )}
-      data-testid={`home-all-${kind}-${id}`}
+      data-testid={`home-all-reminders-${id}`}
       onClick={onClick}
       type="button"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <Icon className="h-4 w-4" />
+        <Bell className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-semibold text-foreground">
-          {isDraft ? "Draft" : "Reminder"}
+          Reminder
         </span>
         {location ? (
           <InboxLabel
@@ -246,7 +233,6 @@ export function InboxListPane({
   const inboxRows = React.useMemo(
     () =>
       buildInboxListRows({
-        drafts: unreadOnly || !isMixedInboxView ? [] : draftItems,
         items,
         reminders: unreadOnly
           ? []
@@ -254,7 +240,7 @@ export function InboxListPane({
               isDue(reminder, Math.floor(Date.now() / 1_000)),
             ),
       }),
-    [draftItems, isMixedInboxView, items, reminders, unreadOnly],
+    [items, reminders, unreadOnly],
   );
   const visibleInboxRows = React.useMemo(
     () =>
@@ -632,57 +618,30 @@ export function InboxListPane({
                   return renderItem(row.item, row.dueReminder);
                 }
 
-                if (row.kind === "reminder") {
-                  const source = reminderSources.get(row.reminder.id);
-                  return (
-                    <PersonalItemRow
-                      id={row.reminder.id}
-                      kind="reminders"
-                      location={
-                        source?.channel
-                          ? source.channel.channelType === "dm"
-                            ? {
-                                text: `In DM with ${source.channelLabel}`,
-                                channelLabel: null,
-                              }
-                            : { text: "In", channelLabel: source.channelLabel }
-                          : null
-                      }
-                      onClick={() => {
-                        onSelectReminder(row.reminder.id);
-                      }}
-                      preview={
-                        row.reminder.content.target?.preview ||
-                        row.reminder.content.note ||
-                        "Reminder"
-                      }
-                      selected={selectedReminderId === row.reminder.id}
-                      status={formatReminderStatus(row.reminder.notBefore)}
-                    />
-                  );
-                }
-
-                const { entry, source } = row.item;
+                const source = reminderSources.get(row.reminder.id);
                 return (
                   <PersonalItemRow
-                    id={entry.key}
-                    kind="drafts"
+                    id={row.reminder.id}
                     location={
-                      source.channel
+                      source?.channel
                         ? source.channel.channelType === "dm"
                           ? {
-                              text: `In DM with ${source.label}`,
+                              text: `In DM with ${source.channelLabel}`,
                               channelLabel: null,
                             }
-                          : { text: "In", channelLabel: source.label }
+                          : { text: "In", channelLabel: source.channelLabel }
                         : null
                     }
                     onClick={() => {
-                      onSelectDraft(entry.key);
+                      onSelectReminder(row.reminder.id);
                     }}
-                    preview={getDraftPreview(entry.draft)}
-                    selected={selectedDraftKey === entry.key}
-                    status="Draft saved"
+                    preview={
+                      row.reminder.content.target?.preview ||
+                      row.reminder.content.note ||
+                      "Reminder"
+                    }
+                    selected={selectedReminderId === row.reminder.id}
+                    status={formatReminderStatus(row.reminder.notBefore)}
                   />
                 );
               }}
