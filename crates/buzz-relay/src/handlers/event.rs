@@ -600,6 +600,47 @@ async fn enqueue_event_created_audit(
     }
 }
 
+/// Enqueue an [`AuditAction::EventDeleted`] entry for a NIP-09 deletion.
+///
+/// Mirrors [`enqueue_event_created_audit`] (same bounded channel, same
+/// propensity to propagate backpressure rather than silently drop entries,
+/// same no-op when `audit_tx` is `None`). The `actor_pubkey_hex` here is the
+/// pubkey that *signed* the NIP-09 kind:5 event — i.e. the human/user asking
+/// for the delete — not the relay key and not the (now-tombstoned) target
+/// event's author. `deletion_path` distinguishes which NIP-09 path fired so
+/// the audit log reflects operator intent: `"e_tag"` for the standard
+/// `["e", <id>]` soft-delete, `"a_tag"` for the addressable-coordinate
+/// variant.
+pub(super) async fn enqueue_event_deleted_audit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    actor_pubkey_hex: &str,
+    target_event_id_hex: &str,
+    channel_id: Option<uuid::Uuid>,
+    event_kind_u32: Option<u32>,
+    deletion_path: &'static str,
+) {
+    let Some(audit_tx) = &state.audit_tx else {
+        return;
+    };
+    let detail = serde_json::json!({
+        "event_kind": event_kind_u32,
+        "channel_id": channel_id.map(|c| c.to_string()),
+        "deletion_path": deletion_path,
+    });
+    let audit_entry = buzz_audit::NewAuditEntry {
+        community_id: tenant.community(),
+        action: buzz_audit::AuditAction::EventDeleted,
+        actor_pubkey: hex::decode(actor_pubkey_hex).ok(),
+        object_id: Some(target_event_id_hex.to_owned()),
+        detail,
+    };
+    if let Err(e) = audit_tx.send(audit_entry).await {
+        error!(target_event_id = %target_event_id_hex, "Audit channel closed — entry lost: {e}");
+        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    }
+}
+
 /// Handle an EVENT message from a WebSocket connection.
 ///
 /// Extracts auth from the WS connection, dispatches ephemeral events locally,

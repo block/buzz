@@ -16,7 +16,7 @@ use buzz_core::kind::{
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
-use super::event::dispatch_persistent_event;
+use super::event::{dispatch_persistent_event, enqueue_event_deleted_audit};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
@@ -1731,6 +1731,19 @@ async fn handle_delete_event_side_effect(
         return Ok(()); // No-op: skip system message to avoid false audit records.
     }
 
+    // Best-effort domain audit; failure must never break the deletion flow.
+    // The actor is the NIP-29 kind-9005 moderation signer (`event.pubkey`).
+    enqueue_event_deleted_audit(
+        tenant,
+        state,
+        &hex::encode(event.pubkey.to_bytes()),
+        &hex::encode(&target_id),
+        Some(channel_id),
+        None, // kind of the deleted event is not known to this handler
+        "moderation_e_tag",
+    )
+    .await;
+
     // Thread counters were decremented in the same transaction — push a fresh
     // relay-signed 39005 so live badge counts also count *down*.
     if let Some(root_id) = root_id {
@@ -2191,6 +2204,20 @@ async fn handle_a_tag_deletion(
                     d_tag = d_tag,
                     "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
                 );
+
+                // Best-effort domain audit. Actor is the NIP-09 signer. Object id
+                // is the coordinate (<kind>:<pubkey>:<d_tag>) — stable across a
+                // replace and resolvable by the operator to the deleted row.
+                enqueue_event_deleted_audit(
+                    tenant,
+                    state,
+                    &hex::encode(event.pubkey.to_bytes()),
+                    &format!("{kind_i32}:{pubkey_hex}:{d_tag}"),
+                    None,
+                    Some(k),
+                    "a_tag",
+                )
+                .await;
             } else {
                 tracing::debug!(
                     kind = k,
@@ -2261,6 +2288,20 @@ async fn handle_standard_deletion_event(
         if !deleted {
             continue;
         }
+
+        // Best-effort domain audit; failure must never break the deletion flow.
+        // The actor is the NIP-09 kind:5 signer (`event.pubkey`). The target
+        // event's own kind/channel travel in the detail for post-hoc queryability.
+        enqueue_event_deleted_audit(
+            tenant,
+            state,
+            &hex::encode(event.pubkey.to_bytes()),
+            &hex::encode(&target_id),
+            target_event.channel_id,
+            Some(u32::from(target_event.event.kind.as_u16())),
+            "e_tag",
+        )
+        .await;
 
         // Thread counters were decremented in the same transaction — push a
         // fresh relay-signed 39005 so live badge counts also count *down*.
