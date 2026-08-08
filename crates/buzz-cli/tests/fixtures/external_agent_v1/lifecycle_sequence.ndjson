@@ -1,0 +1,3 @@
+{"schema_version":1,"type":"lifecycle","state":"connected"}
+{"schema_version":1,"type":"lifecycle","state":"eose"}
+{"schema_version":1,"type":"lifecycle","state":"closed","message":"subscription closed: relay shutdown"}

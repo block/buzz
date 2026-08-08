@@ -8,6 +8,7 @@ use crate::client::{
     extract_d_tag, extract_p_tags, extract_tag_value, normalize_write_response,
     print_create_response, BuzzClient,
 };
+use crate::commands::agent_profile;
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::error::CliError;
@@ -1001,16 +1002,16 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
-/// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
+/// Set the channel addition policy on the signing identity's kind:10100
+/// (agent profile) event.
+///
+/// Kind:10100 is replaceable, so this is a read-modify-write through
+/// [`agent_profile::apply_profile_update`] rather than a bare publish. Writing
+/// a document containing only `channel_add_policy` would replace the author's
+/// whole profile and drop their display name, type, capabilities, and status —
+/// see the `agent_profile` module docs for the full failure mode.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
-    match policy {
-        "anyone" | "owner_only" | "nobody" => {}
-        _ => {
-            return Err(CliError::Usage(format!(
-                "--policy must be 'anyone', 'owner_only', or 'nobody' (got: {policy})"
-            )))
-        }
-    }
+    agent_profile::validate_add_policy(policy)?;
 
     // Check if this policy is allowed by the deployment.
     // NOTE: This gate covers only the `buzz channels set-add-policy` CLI path.
@@ -1032,16 +1033,11 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
-    use nostr::{EventBuilder, Kind};
-    let builder = EventBuilder::new(
-        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
-        &content,
-    )
-    .tags([]);
-    let event = client.sign_event(builder)?;
-
-    let resp = client.submit_event(event).await?;
+    let update = agent_profile::ProfileUpdate {
+        channel_add_policy: Some(policy.to_string()),
+        ..Default::default()
+    };
+    let resp = agent_profile::apply_profile_update(client, &update).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
