@@ -48,6 +48,21 @@ services:
     networks:
       - buzz-net
 
+  # Optional stateless NIP-AB transport for pairing a device that is not yet a
+  # relay member. The host port is loopback-only; a TLS reverse proxy must
+  # expose only /pair. Enable explicitly with `--profile pairing`.
+  pairing-relay:
+    profiles: ["pairing"]
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "127.0.0.1:${BUZZ_PAIR_RELAY_PORT:-5000}:5000"
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
   postgres:
     image: postgres:17-alpine
     environment:
