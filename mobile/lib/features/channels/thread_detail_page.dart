@@ -24,6 +24,7 @@ import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
 import '../profile/user_profile_sheet.dart';
+import 'initial_thread_tail_settle.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
@@ -118,10 +119,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final didJumpToInitialMessage = useRef(false);
     final followsThreadTail = useRef(false);
+    final userOptedOutOfTailFollow = useRef(false);
     final pendingTailAlignment = useRef<double?>(null);
     final tailRealignmentQueued = useRef(false);
-
-    // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
 
@@ -137,7 +137,9 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     useEffect(() {
       void onPositionsChanged() {
-        if (threadTailIsVisible()) followsThreadTail.value = true;
+        if (!userOptedOutOfTailFollow.value && threadTailIsVisible()) {
+          followsThreadTail.value = true;
+        }
       }
 
       itemPositionsListener.itemPositions.addListener(onPositionsChanged);
@@ -162,9 +164,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (targetIndex == null || didJumpToInitialMessage.value) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        // The provisional route snapshot can make the linked reply look like
-        // the tail. This authoritative deep-link jump intentionally leaves
-        // the user at an older item, so it must opt out of follow-tail first.
         followsThreadTail.value = false;
         pendingTailAlignment.value = null;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
@@ -178,15 +177,22 @@ class ThreadDetailPage extends HookConsumerWidget {
     // while the last item is on screen, scroll it into view. If the user has
     // scrolled up to read, leave them where they are.
     final hasFetchedReplies = fetchedReplies != null;
-    final didEstablishInitialReplies = useRef(hasFetchedReplies);
+    final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
     final previousReplyCount = useRef(replies.length);
     useEffect(() {
-      // The first authoritative query result is hydration, not a live arrival.
-      // Establish the baseline without moving the user away from the head.
       if (!hasFetchedReplies) return null;
-      if (!didEstablishInitialReplies.value) {
-        didEstablishInitialReplies.value = true;
+      if (!initialTailSettle.isComplete) {
         previousReplyCount.value = replies.length;
+        initialTailSettle.schedule(
+          context: context,
+          controller: itemScrollController,
+          positionsListener: itemPositionsListener,
+          targetIndex: initialMessageId == null && replies.isNotEmpty
+              ? indexForReply(replies.length - 1)
+              : null,
+          hiddenBottomFraction:
+              composerDockHeight.value / MediaQuery.sizeOf(context).height,
+        );
         return null;
       }
 
@@ -195,15 +201,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (replies.length <= previous) return null;
       final positions = itemPositionsListener.itemPositions.value;
       final lastIndex = indexForReply(replies.length - 1);
-      // Positions still describe the list as it was *before* these replies, so
-      // compare against the old tail. Measuring against the new one only reads
-      // as "at the tail" when exactly one reply arrived.
       final previousLastIndex = previous == 0
           ? headIndex
           : indexForReply(previous - 1);
-      final wasAtTail =
-          positions.isEmpty ||
-          positions.any((position) => position.index >= previousLastIndex);
+      final wasAtTail = positions.any(
+        (position) => position.index == previousLastIndex,
+      );
       final localPubkey = currentPubkey?.toLowerCase();
       final hasNewLocalReply =
           localPubkey != null &&
@@ -265,7 +268,9 @@ class ThreadDetailPage extends HookConsumerWidget {
       final heightDelta = height - previousHeight;
       if (heightDelta.abs() < 0.5) return;
 
-      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
+      final shouldFollowTail =
+          !userOptedOutOfTailFollow.value &&
+          (followsThreadTail.value || threadTailIsVisible());
       if (shouldFollowTail) followsThreadTail.value = true;
       composerDockHeight.value = height;
       if (heightDelta <= 0 || !shouldFollowTail) {
@@ -298,7 +303,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     // keyboard appears. Re-align after that latter layout pass too, but only
     // while the user was already following the thread tail.
     void realignThreadTailAfterMetricsChange() {
-      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
+      final shouldFollowTail =
+          !userOptedOutOfTailFollow.value &&
+          (followsThreadTail.value || threadTailIsVisible());
       if (!shouldFollowTail || tailRealignmentQueued.value) return;
       followsThreadTail.value = true;
       tailRealignmentQueued.value = true;
@@ -350,6 +357,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               Expanded(
                 child: KeyboardDismissOnDrag(
                   onUserScrollStart: () {
+                    userOptedOutOfTailFollow.value = true;
                     followsThreadTail.value = false;
                     pendingTailAlignment.value = null;
                   },

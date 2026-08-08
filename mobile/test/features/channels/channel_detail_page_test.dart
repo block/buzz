@@ -4085,8 +4085,82 @@ void main() {
       );
     });
 
+    testWidgets('short initial thread hydration remains top-anchored', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        _textMsg(
+          id: 'reply-1',
+          pubkey: 'bob',
+          content: 'First reply',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+        _textMsg(
+          id: 'reply-2',
+          pubkey: 'bob',
+          content: 'Second reply',
+          createdAt: 1101,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+      ];
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final headFinder = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final initialHeadY = tester.getTopLeft(headFinder).dy;
+
+      completer.complete(replies);
+      await tester.pumpAndSettle();
+
+      expect(headFinder, findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-2')),
+        findsOneWidget,
+      );
+      expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+    });
+
     testWidgets(
-      'initial thread hydration keeps the head visible instead of following the tail',
+      'initial thread hydration settles on the latest reply after pagination',
       (tester) async {
         final rootEvent = _textMsg(
           id: 'thread-root',
@@ -4107,10 +4181,12 @@ void main() {
             ),
         ];
         final completer = Completer<List<NostrEvent>>();
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
 
         await tester.pumpWidget(
           _buildTestable(
             messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
             pendingThreadReplies: {'thread-root': completer.future},
             users: const {
               'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
@@ -4140,15 +4216,133 @@ void main() {
         );
 
         completer.complete(replies);
+        await tester.pump();
+        final latestLiveReply = _textMsg(
+          id: 'reply-live',
+          pubkey: 'bob',
+          content: List.filled(10, 'Tall live reply').join('\n'),
+          createdAt: 1200,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+        messagesNotifier.setMessages([rootEvent, latestLiveReply]);
         await tester.pumpAndSettle();
 
         expect(
           find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-live')),
           findsOneWidget,
         );
+        final listRect = tester.getRect(
+          find.byKey(const ValueKey('thread-message-list')),
+        );
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-live'),
+        );
+        final latestRect = tester.getRect(latestReply);
+        final composerTop = tester
+            .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+            .dy;
+        expect(latestRect.bottom, lessThanOrEqualTo(composerTop));
+        expect(latestRect.bottom, greaterThan(listRect.center.dy));
+      },
+    );
+
+    testWidgets(
+      'dragging away from the settled tail opts out of keyboard realignment',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        for (var i = 0; i < 4; i++) {
+          await tester.drag(list, const Offset(0, 100));
+          await tester.pumpAndSettle();
+        }
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-29')),
           findsNothing,
+        );
+        final visibleBeforeResize = tester
+            .widgetList<Widget>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget.key is ValueKey<String> &&
+                    (widget.key! as ValueKey<String>).value.startsWith(
+                      'thread-message-group-',
+                    ),
+              ),
+            )
+            .map((widget) => widget.key)
+            .toSet();
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widgetList<Widget>(
+                find.byWidgetPredicate(
+                  (widget) => visibleBeforeResize.contains(widget.key),
+                ),
+              )
+              .map((widget) => widget.key),
+          isNotEmpty,
         );
       },
     );
