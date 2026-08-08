@@ -77,7 +77,9 @@ fn reconcile_inbound_persona_event_blocking(
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
-    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
     use nostr::JsonUtil;
 
     let state = app.state::<AppState>();
@@ -96,8 +98,15 @@ fn reconcile_inbound_persona_event_blocking(
         return reconcile_inbound_tombstone(&event, &arrival_relay_url, &app, &state);
     }
 
-    if !matches!(kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
+    if !matches!(
+        kind,
+        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT
+    ) {
         return Ok(());
+    }
+
+    if kind == KIND_PRIVATE_MANAGED_AGENT {
+        return reconcile_inbound_private_managed_agent(&event, &arrival_relay_url, &app, &state);
     }
 
     // The d-tag identifies the record within its kind. Persona derives it from
@@ -182,6 +191,80 @@ fn reconcile_inbound_persona_event_blocking(
     Ok(())
 }
 
+fn apply_inbound_private_managed_agent_event(
+    event: &nostr::Event,
+    owner_keys: &nostr::Keys,
+    conn: &rusqlite::Connection,
+    overlay: &mut crate::managed_agents::private_config_overlay::PrivateConfigOverlay,
+) -> Result<crate::managed_agents::retention::InboundOutcome, String> {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigPatch,
+        retention::{retain_inbound_event, InboundOutcome, RetainedEvent},
+    };
+    use buzz_core_pkg::{kind::KIND_PRIVATE_MANAGED_AGENT, private_managed_agent};
+    use nostr::JsonUtil;
+
+    // The codec verifies signature/owner, decrypts, validates the nsec binding,
+    // and rejects malformed portable config before any local state changes.
+    let (_, payload) = private_managed_agent::validate_and_decrypt(event, owner_keys)
+        .map_err(|error| format!("invalid private managed-agent event: {error}"))?;
+    let d_tag = payload.agent_pubkey.clone();
+    // Constructing the Desktop patch validates backend-specific fields without
+    // mutating the live overlay or retained head.
+    let patch = PrivateConfigPatch::from_payload(payload)?;
+    let outcome = retain_inbound_event(
+        conn,
+        &RetainedEvent {
+            kind: KIND_PRIVATE_MANAGED_AGENT,
+            pubkey: event.pubkey.to_hex(),
+            d_tag,
+            content: event.content.clone(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: false,
+        },
+    )?;
+    if outcome == InboundOutcome::Applied {
+        overlay.insert_patch(patch);
+    }
+    Ok(outcome)
+}
+
+fn reconcile_inbound_private_managed_agent(
+    event: &nostr::Event,
+    arrival_relay_url: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::retention::{open_retention_db, InboundOutcome};
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let Some(scope) =
+        crate::managed_agents::retention::arrival_retention_scope(app, state, arrival_relay_url)?
+    else {
+        return Ok(());
+    };
+
+    let mut overlay = state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let conn = open_retention_db(&scope.db_path)?;
+    let outcome =
+        apply_inbound_private_managed_agent_event(event, &scope.owner_keys, &conn, &mut overlay)?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(());
+    }
+
+    drop(overlay);
+    try_regenerate_nest(app);
+    let _ = app.emit("agents-data-changed", ());
+    Ok(())
+}
+
 /// Parse an inbound wire event and enforce the signature gate. Everything
 /// downstream trusts `event.pubkey` (ownership routing, tombstone scoping,
 /// behavioral-quad application), so a forged pubkey must die here — the
@@ -244,13 +327,18 @@ fn reconcile_inbound_tombstone(
         },
         save_managed_agents, save_teams,
     };
-    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{
+        KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRIVATE_MANAGED_AGENT, KIND_TEAM,
+    };
     use nostr::JsonUtil;
 
     let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
         return Ok(()); // no routable coordinate — nothing to delete
     };
-    if !matches!(target_kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
+    if !matches!(
+        target_kind,
+        KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT
+    ) {
         return Ok(()); // deletion for a kind we don't track locally
     }
 
@@ -299,7 +387,12 @@ fn reconcile_inbound_tombstone(
             teams.retain(|record| record.id != target_d_tag);
             save_teams(app, &teams)?;
         }
-        KIND_MANAGED_AGENT => {
+        KIND_MANAGED_AGENT | KIND_PRIVATE_MANAGED_AGENT => {
+            state
+                .private_managed_agent_overlay
+                .lock()
+                .map_err(|error| error.to_string())?
+                .remove(&target_d_tag);
             let mut agents = load_managed_agents(app)?;
             agents.retain(|record| record.pubkey != target_d_tag);
             save_managed_agents(app, &agents)?;

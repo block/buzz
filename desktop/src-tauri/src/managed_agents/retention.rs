@@ -432,6 +432,43 @@ pub fn has_retained_personas(conn: &Connection, pubkey: &str) -> Result<bool, St
     .map_err(|e| format!("failed to check retained personas: {e}"))
 }
 
+/// Load every retained event at a given kind for one owner pubkey. Used by the
+/// boot-time overlay hydration: the inbound path only populates the in-memory
+/// overlay when an event is strictly newer than the retained row, so after a
+/// restart the re-delivered backfill dedupes to `Skipped` and the overlay would
+/// otherwise stay empty for the whole session.
+pub fn get_retained_events_of_kind(
+    conn: &Connection,
+    kind: u32,
+    pubkey: &str,
+) -> Result<Vec<RetainedEvent>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, pubkey, d_tag, content, created_at, raw_event, pending_sync
+             FROM persona_events
+             WHERE kind = ?1 AND pubkey = ?2
+             ORDER BY d_tag",
+        )
+        .map_err(|e| format!("failed to prepare retained-kind query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![kind, pubkey], |row| {
+            Ok(RetainedEvent {
+                kind: row.get(0)?,
+                pubkey: row.get(1)?,
+                d_tag: row.get(2)?,
+                content: row.get(3)?,
+                created_at: row.get(4)?,
+                raw_event: row.get(5)?,
+                pending_sync: row.get::<_, i32>(6)? != 0,
+            })
+        })
+        .map_err(|e| format!("failed to query retained events by kind: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read retained event row: {e}"))
+}
+
 /// Look up a single retained event by its coordinate.
 pub fn get_retained_event(
     conn: &Connection,

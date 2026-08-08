@@ -2,6 +2,7 @@
 //! Extracted from the parent module to keep it under the file-size cap.
 
 use super::*;
+use nostr::{JsonUtil, ToBech32};
 use std::collections::BTreeMap;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
@@ -154,6 +155,185 @@ fn no_local_match_inserts_inbound_reusing_d_tag_as_id() {
 // ── Managed-agent (30177) inbound ────────────────────────────────────────
 
 const AGENT_PUBKEY: &str = "agentpubkeyhex0000000000000000000000000000000000000000000000000000";
+
+fn private_agent_payload(
+    owner_keys: &nostr::Keys,
+    agent_keys: &nostr::Keys,
+    name: &str,
+    parallelism: u32,
+) -> buzz_core_pkg::private_managed_agent::Payload {
+    use buzz_core_pkg::private_managed_agent::{
+        Payload, PrivateConfig, PrivateIdentity, FORMAT, VERSION,
+    };
+
+    Payload {
+        format: FORMAT.into(),
+        version: VERSION,
+        agent_pubkey: agent_keys.public_key().to_hex(),
+        owner_pubkey: owner_keys.public_key().to_hex(),
+        generation: 1,
+        previous_event_id: None,
+        updated_at: "2026-08-06T00:00:00Z".into(),
+        identity: PrivateIdentity {
+            private_key_nsec: agent_keys.secret_key().to_bech32().unwrap(),
+            auth_tag: None,
+        },
+        config: PrivateConfig {
+            relay_url: "wss://relay.example".into(),
+            name: name.into(),
+            persona_id: None,
+            runtime: Some("goose".into()),
+            model: None,
+            provider: None,
+            system_prompt: Some("relay prompt".into()),
+            parallelism: Some(parallelism),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            agent_command_override: None,
+            agent_args: vec![],
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            env_vars: BTreeMap::new(),
+            backend: serde_json::json!({"type":"local"}),
+            backend_agent_id: None,
+            team_id: None,
+            persona_name_in_team: None,
+            relay_mesh: None,
+            extra: serde_json::Map::new(),
+        },
+        extensions: BTreeMap::new(),
+        extra: serde_json::Map::new(),
+    }
+}
+
+#[test]
+fn private_agent_inbound_rejects_before_retain_and_stale_event_preserves_overlay() {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigOverlay,
+        retention::{get_retained_event, open_retention_db, InboundOutcome},
+    };
+    use buzz_core_pkg::{kind::KIND_PRIVATE_MANAGED_AGENT, private_managed_agent};
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+    let pubkey = agent_keys.public_key().to_hex();
+    let mut overlay = PrivateConfigOverlay::default();
+
+    let valid = private_agent_payload(&owner_keys, &agent_keys, "new", 4);
+    let newer_event = private_managed_agent::build_event(&owner_keys, &valid, 20).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&newer_event, &owner_keys, &conn, &mut overlay,)
+            .unwrap(),
+        InboundOutcome::Applied
+    );
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+
+    let mut malformed = private_agent_payload(&owner_keys, &agent_keys, "malformed", 4);
+    malformed.generation = 2;
+    malformed.previous_event_id = Some(newer_event.id.to_hex());
+    malformed.config.backend = serde_json::json!({"type":"provider"});
+    let malformed_event = private_managed_agent::build_event(&owner_keys, &malformed, 30).unwrap();
+    assert!(apply_inbound_private_managed_agent_event(
+        &malformed_event,
+        &owner_keys,
+        &conn,
+        &mut overlay,
+    )
+    .is_err());
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+    let retained = get_retained_event(
+        &conn,
+        KIND_PRIVATE_MANAGED_AGENT,
+        &owner_keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(retained.raw_event, newer_event.as_json());
+
+    let stale = private_agent_payload(&owner_keys, &agent_keys, "stale", 2);
+    let stale_event = private_managed_agent::build_event(&owner_keys, &stale, 10).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&stale_event, &owner_keys, &conn, &mut overlay,)
+            .unwrap(),
+        InboundOutcome::Skipped
+    );
+    assert_eq!(overlay.resolved_records(&[])[0].name, "new");
+}
+
+/// SAMI PROBE: the retention DB survives a restart but the overlay does not.
+/// On the next launch the backfill re-delivers the SAME event, which resolves
+/// to `Skipped` against the retained row — so `insert_patch` never runs and the
+/// overlay stays empty for the whole session.
+#[test]
+fn sami_probe_overlay_does_not_rehydrate_after_restart() {
+    use crate::managed_agents::{
+        private_config_overlay::PrivateConfigOverlay,
+        retention::{open_retention_db, InboundOutcome},
+    };
+    use buzz_core_pkg::private_managed_agent;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("retention.db");
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+
+    let payload = private_agent_payload(&owner_keys, &agent_keys, "relay name", 4);
+    let event = private_managed_agent::build_event(&owner_keys, &payload, 20).unwrap();
+
+    // ── Session 1: event arrives, overlay hydrates. ──
+    {
+        let conn = open_retention_db(&db_path).unwrap();
+        let mut overlay = PrivateConfigOverlay::default();
+        assert_eq!(
+            apply_inbound_private_managed_agent_event(&event, &owner_keys, &conn, &mut overlay)
+                .unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            overlay.resolved_records(&[]).len(),
+            1,
+            "control: overlay hydrates on first arrival"
+        );
+    }
+
+    // ── Session 2: same DB file, fresh in-memory overlay (app restart). ──
+    let conn = open_retention_db(&db_path).unwrap();
+    let mut overlay = PrivateConfigOverlay::default();
+    let outcome =
+        apply_inbound_private_managed_agent_event(&event, &owner_keys, &conn, &mut overlay)
+            .unwrap();
+    assert_eq!(
+        outcome,
+        InboundOutcome::Skipped,
+        "re-delivered event is deduped against the retained row"
+    );
+    assert!(
+        overlay.resolved_records(&[]).is_empty(),
+        "DEFECT: overlay is empty after restart — relay config silently unavailable"
+    );
+
+    // ── Positive control: the probe CAN observe hydration in session 2. ──
+    // A strictly-newer event is the only thing that repopulates the overlay.
+    let mut newer = private_agent_payload(&owner_keys, &agent_keys, "newer name", 4);
+    newer.generation = 2;
+    newer.previous_event_id = Some(event.id.to_hex());
+    let newer_event = private_managed_agent::build_event(&owner_keys, &newer, 30).unwrap();
+    assert_eq!(
+        apply_inbound_private_managed_agent_event(&newer_event, &owner_keys, &conn, &mut overlay)
+            .unwrap(),
+        InboundOutcome::Applied
+    );
+    assert_eq!(
+        overlay.resolved_records(&[])[0].name,
+        "newer name",
+        "positive control: this harness observes hydration when it happens"
+    );
+}
 
 /// A local managed agent carrying every device-local secret that an inbound
 /// event must NEVER be able to overwrite.
@@ -672,4 +852,53 @@ fn inbound_gate_accepts_validly_signed_event() {
         .unwrap();
     let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
     assert_eq!(parsed.pubkey, keys.public_key());
+}
+
+/// Item-0 FIX verification: after a "restart" (same retention db, fresh
+/// overlay), `hydrate_from_retention` repopulates the overlay from the durable
+/// rows — so the resolve sites see relay config instead of stale disk.
+#[test]
+fn sami_fix_overlay_rehydrates_from_retention_after_restart() {
+    use crate::managed_agents::{
+        private_config_overlay::{hydrate_from_retention, PrivateConfigOverlay},
+        retention::open_retention_db,
+    };
+    use buzz_core_pkg::private_managed_agent;
+    use tempfile::TempDir;
+
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("retention.db");
+    let owner_keys = nostr::Keys::generate();
+    let agent_keys = nostr::Keys::generate();
+
+    let payload = private_agent_payload(&owner_keys, &agent_keys, "relay name", 4);
+    let event = private_managed_agent::build_event(&owner_keys, &payload, 20).unwrap();
+
+    // Session 1: the event lands and is retained durably.
+    {
+        let conn = open_retention_db(&db_path).unwrap();
+        let mut overlay = PrivateConfigOverlay::default();
+        apply_inbound_private_managed_agent_event(&event, &owner_keys, &conn, &mut overlay)
+            .unwrap();
+    }
+
+    // Session 2 (restart): hydrate straight from the retained rows — no
+    // inbound event required.
+    let conn = open_retention_db(&db_path).unwrap();
+    let overlay = hydrate_from_retention(&conn, &owner_keys).unwrap();
+    let resolved = overlay.resolved_records(&[]);
+    assert_eq!(resolved.len(), 1, "FIX: overlay rehydrates from retention");
+    assert_eq!(resolved[0].name, "relay name");
+    assert_eq!(resolved[0].parallelism, 4);
+
+    // NEGATIVE CONTROL: a different owner's keys must hydrate NOTHING — proves
+    // the query is scoped by owner pubkey and not just returning every row.
+    let stranger = nostr::Keys::generate();
+    assert!(
+        hydrate_from_retention(&conn, &stranger)
+            .unwrap()
+            .resolved_records(&[])
+            .is_empty(),
+        "control: hydration is owner-scoped"
+    );
 }

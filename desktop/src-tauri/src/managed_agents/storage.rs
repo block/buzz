@@ -302,7 +302,7 @@ pub(crate) fn backup_invalid_store(path: &Path) {
 ///   writes clean JSON and plaintext stops lingering on disk; if still
 ///   unreachable, leave it inline. This makes the strip deterministic on the
 ///   next reachable boot rather than waiting for a non-deterministic save.
-fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
+pub(crate) fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };

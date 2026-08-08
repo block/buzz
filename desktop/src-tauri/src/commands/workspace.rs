@@ -164,6 +164,18 @@ pub async fn apply_workspace(
         };
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
+        // Serialize the scope transition with inbound private-config handling.
+        // Inbound holds this lock from scope resolution through overlay insert,
+        // so a patch decrypted for the old workspace cannot land after this clear.
+        let _managed_agents_store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        state
+            .private_managed_agent_overlay
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clear();
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);
@@ -176,6 +188,7 @@ pub async fn apply_workspace(
             let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
             *keys_guard = keys;
         }
+        drop(_managed_agents_store_guard);
 
         // Keep the backend-side reconcile guard aligned with the frontend
         // experiment before launch-time restore can spawn any agents. Missing

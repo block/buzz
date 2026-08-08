@@ -35,28 +35,27 @@ pub struct AppState {
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
+    /// Set during backend setup when managed agents are eligible for launch restore.
+    /// `apply_workspace` consumes it after installing the workspace relay and
+    /// identity, so agents never start against the fallback relay.
     pub managed_agent_restore_pending: AtomicBool,
-    /// Whether desktop may repair managed-agent kind:0 profiles from its local
-    /// records. Disabled by the agent-managed profiles experiment so an agent's
-    /// own profile updates are not overwritten on start or restore.
+    /// Whether desktop may repair managed-agent kind:0 profiles from local records.
+    /// Disabled by the experiment so agent profile updates survive start/restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
-    /// Shared shutdown signal checked by launch-time agent restoration.
+    /// Shared shutdown signal for launch-time agent restoration.
     pub shutdown_started: AtomicBool,
     /// Serializes every managed-runtime transition that changes the protected
     /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
     /// Never perform network I/O while holding this lock.
     pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
+    pub(crate) private_managed_agent_overlay:
+        Mutex<crate::managed_agents::private_config_overlay::PrivateConfigOverlay>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
-    /// Tauri app handle — stored after setup so huddle commands can emit
-    /// `huddle-state-changed` events without needing the handle threaded
-    /// through every call site.
+    /// Tauri handle for emitting huddle events.
     ///
     /// Set once during `setup()` in `lib.rs`; never cleared.
     pub app_handle: Mutex<Option<AppHandle>>,
@@ -213,6 +212,7 @@ pub fn build_app_state() -> AppState {
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
+        private_managed_agent_overlay: Mutex::new(Default::default()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),

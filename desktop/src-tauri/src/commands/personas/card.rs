@@ -29,8 +29,8 @@ use tauri::{AppHandle, State};
 
 use super::super::export_util::save_bytes_with_dialog;
 use super::snapshot::{
-    memory_entries_from_listing, parse_memory_level, resolve_from_lists,
-    validate_snapshot_encode_size,
+    load_effective_managed_agents, memory_entries_from_listing, parse_memory_level,
+    resolve_from_lists, validate_snapshot_encode_size,
 };
 use crate::{
     app_state::AppState,
@@ -43,8 +43,8 @@ use crate::{
         agent_snapshot_envelope::{
             decrypt_envelope, encode_locked_snapshot_png, parse_chunk_payload, ChunkPayload,
         },
-        load_agent_definitions, load_global_agent_config, load_managed_agents, load_personas,
-        save_global_agent_config, validate_global_config,
+        load_agent_definitions, load_global_agent_config, load_personas, save_global_agent_config,
+        validate_global_config,
     },
 };
 
@@ -493,7 +493,7 @@ pub fn card_mint_key_status(
         .lock()
         .map_err(|e| e.to_string())?;
 
-    let instances = load_managed_agents(&app)?;
+    let instances = load_effective_managed_agents(&app, &state)?;
     let definitions = load_agent_definitions(&app)?;
     let (record, _) = resolve_from_lists(&id, &instances, &definitions)?;
 
@@ -549,7 +549,7 @@ pub async fn mint_agent_card(
             .lock()
             .map_err(|e| e.to_string())?;
 
-        let instances = load_managed_agents(&app)?;
+        let instances = load_effective_managed_agents(&app, &state)?;
         let definitions = load_agent_definitions(&app)?;
         let (record, is_definition) =
             resolve_from_lists(&id, &instances, &definitions).map(|(r, d)| (r.clone(), d))?;
