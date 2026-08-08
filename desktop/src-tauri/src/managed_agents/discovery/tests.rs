@@ -222,8 +222,7 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
+/// Minimal record for `record_agent_command` tests.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -283,6 +282,7 @@ fn record_with(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        permission_policy: None,
     }
 }
 

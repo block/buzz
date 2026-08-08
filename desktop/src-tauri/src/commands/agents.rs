@@ -868,7 +868,6 @@ pub async fn create_managed_agent(
             model: effective_model.clone(),
             provider: effective_provider.clone(),
             persona_source_version: snapshot_source_version,
-            // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
             } else {
@@ -913,6 +912,7 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            permission_policy: None, // inherits global default or built-in `ask`
         };
 
         records.push(record);

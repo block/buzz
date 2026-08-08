@@ -70,6 +70,14 @@ pub struct GlobalAgentConfig {
     /// Preferred ACP runtime for definitions without an explicit runtime.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+    /// Fleet-wide permission policy default. `None` = use the built-in
+    /// desktop default (`ask`). Per-agent `permission_policy` takes precedence.
+    ///
+    /// Semantics match the per-agent field: `ask` shows the Allow/Deny card,
+    /// `allow` auto-approves the unique `allow_once` option (explicit opt-in
+    /// only), `reject` auto-denies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<crate::managed_agents::permission_policy::PermissionPolicy>,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

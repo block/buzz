@@ -46,6 +46,10 @@ pub(crate) fn resolve_deploy_model_provider(
 /// `descriptor.env` is the authoritative six-layer environment. Policy values
 /// are deliberately separate because providers apply them below that layered
 /// environment, preserving the local spawn's power-user override semantics.
+///
+/// `effective_permission_policy` is the already-resolved per-agent → global →
+/// built-in policy. Pass it from the caller so that this function does not need
+/// the global config; tests can pass `None` to get the built-in default.
 pub(super) fn build_launch_block(
     record: &ManagedAgentRecord,
     descriptor: &crate::managed_agents::readiness::EffectiveHarnessDescriptor,
@@ -53,6 +57,7 @@ pub(super) fn build_launch_block(
     effective_prompt: Option<&str>,
     effective_model: Option<&str>,
     owner_pubkey: &str,
+    effective_permission_policy: Option<crate::managed_agents::permission_policy::PermissionPolicy>,
 ) -> serde_json::Value {
     use crate::managed_agents::{
         known_acp_runtime, resolve_session_title, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
@@ -99,6 +104,20 @@ pub(super) fn build_launch_block(
         crate::managed_agents::spawn_snapshot::effective_team_instructions(record, teams)
     {
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
+    }
+
+    // Permission policy: use the caller-resolved value (per-agent → global →
+    // built-in), falling back to the built-in default if the caller did not
+    // provide one. Tests pass `None`; production callers pass the result of
+    // `resolve_effective_permission_policy(record, global_config)`.
+    {
+        let policy = effective_permission_policy.unwrap_or_else(
+            crate::managed_agents::permission_policy::PermissionPolicy::desktop_default,
+        );
+        policy_env.insert(
+            "BUZZ_ACP_PERMISSION_POLICY".into(),
+            policy.as_str().to_string(),
+        );
     }
 
     serde_json::json!({
@@ -149,6 +168,10 @@ pub(super) fn build_deploy_payload(
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
             .map_err(|error| crate::managed_agents::user_facing_harness_error(&error))?;
     let owner_pubkey = super::workspace_owner_hex(state)?;
+    let (effective_policy, _) =
+        crate::managed_agents::permission_policy::resolve_effective_permission_policy(
+            record, &global,
+        );
     let launch = build_launch_block(
         record,
         &descriptor,
@@ -156,6 +179,7 @@ pub(super) fn build_deploy_payload(
         effective.system_prompt.value.as_deref(),
         effective.model.value.as_deref(),
         &owner_pubkey,
+        Some(effective_policy),
     );
 
     let effective_parallelism =
@@ -267,6 +291,7 @@ mod tests {
             Some("prompt"),
             Some("model"),
             "owner-hex",
+            None,
         );
 
         assert_eq!(launch["command"], "goose");
@@ -305,7 +330,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
 
         assert_eq!(
             launch["policy_env"]["BUZZ_ACP_AGENTS"],
@@ -327,7 +352,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
 
         assert_eq!(
             launch["policy_env"]["BUZZ_ACP_AGENTS"], "8",
@@ -357,7 +382,7 @@ mod tests {
         };
         let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -402,7 +427,7 @@ mod tests {
             env: BTreeMap::new(),
         };
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -448,7 +473,7 @@ mod tests {
         };
         let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
 
-        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
         let effective_parallelism =
             crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
         let payload = deploy_payload_json(
@@ -473,6 +498,83 @@ mod tests {
         assert_eq!(
             payload["parallelism"], cap,
             "legacy top-level parallelism must match launch.policy_env — both must be {cap}"
+        );
+    }
+
+    /// `build_launch_block` with an explicit `allow` policy injects `allow`.
+    #[test]
+    fn launch_block_explicit_allow_policy_injected() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            None,
+            "owner-hex",
+            Some(crate::managed_agents::permission_policy::PermissionPolicy::Allow),
+        );
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "allow",
+            "explicit allow policy must be injected into policy_env"
+        );
+    }
+
+    /// `build_launch_block` with `None` (test callers / no global) falls back to
+    /// the built-in desktop default (`ask`).
+    #[test]
+    fn launch_block_none_policy_falls_back_to_built_in_ask() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex", None);
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "ask",
+            "None effective_permission_policy must fall back to built-in ask"
+        );
+    }
+
+    /// Production deploy path: global `allow` override is respected when the
+    /// record has no per-agent policy, matching the local-spawn resolver.
+    #[test]
+    fn launch_block_global_allow_policy_used_when_record_has_none() {
+        let mut record = record();
+        record.permission_policy = None;
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let global = crate::managed_agents::global_config::GlobalAgentConfig {
+            permission_policy: Some(
+                crate::managed_agents::permission_policy::PermissionPolicy::Allow,
+            ),
+            ..Default::default()
+        };
+        let (effective_policy, _) =
+            crate::managed_agents::permission_policy::resolve_effective_permission_policy(
+                &record, &global,
+            );
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            None,
+            "owner-hex",
+            Some(effective_policy),
+        );
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_PERMISSION_POLICY"], "allow",
+            "global allow policy must be injected when record has no per-agent policy"
         );
     }
 }

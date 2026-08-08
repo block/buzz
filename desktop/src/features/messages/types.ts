@@ -24,6 +24,13 @@ export type TimelineMessage = {
    * user that cryptographically signed the event.
    */
   signerPubkey?: string;
+  /**
+   * Signer pubkey of the most recent authorized kind-40003 edit, normalized to
+   * lowercase hex. Present only when an edit exists. Used by the
+   * `PermissionRequestCard` to enforce edit authenticity: only edits signed by
+   * the original agent may resolve the card.
+   */
+  editSignerPubkey?: string;
   author: string;
   /** True when the displayed author is known to be an agent. */
   isAgent?: boolean;

@@ -262,7 +262,12 @@ export function formatTimelineMessages(
   // the original (`h`, `p` mentions, etc.) stay untouched.
   const editsByTargetId = new Map<
     string,
-    { content: string; tags: string[][]; createdAt: number }
+    {
+      content: string;
+      tags: string[][];
+      createdAt: number;
+      signerPubkey: string;
+    }
   >();
   for (const event of events) {
     if (
@@ -293,6 +298,7 @@ export function formatTimelineMessages(
         content: event.content,
         tags: event.tags,
         createdAt: event.created_at,
+        signerPubkey: normalizePubkey(event.pubkey),
       });
     }
   }
@@ -504,6 +510,7 @@ export function formatTimelineMessages(
           : undefined,
       time: formatTime(event.created_at),
       body: edit ? edit.content : event.content,
+      editSignerPubkey: edit?.signerPubkey,
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),

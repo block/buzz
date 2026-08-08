@@ -123,7 +123,7 @@ use buzz_core::kind::{
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
@@ -514,6 +514,22 @@ const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
 const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
 
+/// Outcome of a relay-acknowledged event publish.
+///
+/// Delivered to the caller through the oneshot sender registered by
+/// `PublishEventAcked`. The background task resolves the waiter exactly once
+/// per event ID — either on `OK`, on socket failure, or on disconnect.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum AckOutcome {
+    /// Relay accepted the event (`OK accepted=true`).
+    Accepted,
+    /// Relay rejected the event (`OK accepted=false`).
+    Rejected { message: String },
+    /// Connection was lost before an `OK` arrived — delivery is uncertain.
+    Uncertain,
+}
+
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
     /// Subscribe to a channel (sends a NIP-01 REQ) with the given filter.
@@ -534,6 +550,20 @@ enum RelayCommand {
     SubscribeObserverControls,
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
+    /// Publish a signed event to the relay and wait for relay `OK`.
+    ///
+    /// The ack sender is resolved exactly once:
+    /// - `AckOutcome::Accepted` on `OK accepted=true`
+    /// - `AckOutcome::Rejected` on `OK accepted=false`
+    /// - `AckOutcome::Uncertain` on socket failure or disconnect
+    ///
+    /// The waiter is registered in `BgState::ack_waiters` keyed by event ID
+    /// **before** the EVENT frame is sent — this is required by the spec.
+    #[allow(dead_code)]
+    PublishEventAcked {
+        event: Box<Event>,
+        ack_tx: oneshot::Sender<AckOutcome>,
+    },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
 }
@@ -568,7 +598,9 @@ pub struct HarnessRelay {
     bg_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Cloneable publisher handle for signed events on the relay background socket.
+/// Thin handle for publishing signed events from outside the relay background task.
+///
+/// Cheaply cloneable — the underlying `mpsc::Sender` is reference-counted.
 #[derive(Clone)]
 pub struct RelayEventPublisher {
     cmd_tx: mpsc::Sender<RelayCommand>,
@@ -585,24 +617,154 @@ impl RelayEventPublisher {
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
+    /// Publish a signed event and await the relay's `OK` acknowledgement.
+    ///
+    /// Returns the [`AckOutcome`] once the background task resolves the waiter
+    /// (on `OK`, socket failure, or disconnect). The waiter is registered by
+    /// the background task **before** the EVENT frame is sent, satisfying the
+    /// registration-before-send contract.
+    ///
+    /// # Errors
+    /// Returns `RelayError::ConnectionClosed` if the command channel is closed
+    /// (background task has exited).
+    #[allow(dead_code)]
+    pub async fn publish_event_acked(&self, event: Event) -> Result<AckOutcome, RelayError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RelayCommand::PublishEventAcked {
+                event: Box::new(event),
+                ack_tx,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?;
+        // If the background task exits without resolving the waiter, treat as uncertain.
+        Ok(ack_rx.await.unwrap_or(AckOutcome::Uncertain))
+    }
+
+    /// Register an ACK waiter for a signed event and return the receiver
+    /// **without** awaiting the outcome.
+    ///
+    /// The background task sends the EVENT frame and resolves the waiter
+    /// exactly once (accepted, rejected, or uncertain). The caller owns the
+    /// returned [`oneshot::Receiver`] and must poll or await it — typically
+    /// in a `tokio::select!` arm alongside other loop futures.
+    ///
+    /// Registration-before-send is guaranteed: the background task inserts the
+    /// waiter into `ack_waiters` before writing the EVENT frame.
+    ///
+    /// # Errors
+    /// Returns `RelayError::ConnectionClosed` if the command channel is closed.
+    pub async fn register_publish_ack(
+        &self,
+        event: Event,
+    ) -> Result<oneshot::Receiver<AckOutcome>, RelayError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RelayCommand::PublishEventAcked {
+                event: Box::new(event),
+                ack_tx,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?;
+        Ok(ack_rx)
+    }
+
     /// Test-only publisher pair: published events are forwarded to the
     /// returned receiver instead of a live relay socket.
     #[cfg(test)]
+    #[allow(clippy::collapsible_match)]
     pub(crate) fn test_pair() -> (Self, mpsc::Receiver<Event>) {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(64);
         let (event_tx, event_rx) = mpsc::channel(64);
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let RelayCommand::PublishEvent { event } = cmd {
-                    if event_tx.send(*event).await.is_err() {
-                        break;
+                match cmd {
+                    RelayCommand::PublishEvent { event } => {
+                        if event_tx.send(*event).await.is_err() {
+                            break;
+                        }
                     }
+                    RelayCommand::PublishEventAcked { event, ack_tx } => {
+                        let _ = event_tx.send(*event).await;
+                        let _ = ack_tx.send(AckOutcome::Accepted);
+                    }
+                    _ => {}
                 }
             }
         });
         (Self { cmd_tx }, event_rx)
     }
-}
+
+    /// Test publisher that rejects every `PublishEventAcked` command with
+    /// `AckOutcome::Rejected`. Used to test the rejected-ACK deny path.
+    #[cfg(test)]
+    #[allow(clippy::collapsible_match)]
+    pub(crate) fn test_pair_rejecting() -> (Self, mpsc::Receiver<Event>) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(64);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    RelayCommand::PublishEvent { event } => {
+                        if event_tx.send(*event).await.is_err() {
+                            break;
+                        }
+                    }
+                    RelayCommand::PublishEventAcked { event, ack_tx } => {
+                        let _ = event_tx.send(*event).await;
+                        let _ = ack_tx.send(AckOutcome::Rejected {
+                            message: "rate-limited".to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (Self { cmd_tx }, event_rx)
+    }
+
+    /// Test publisher that never sends an ACK for `PublishEventAcked` commands
+    /// (simulates a relay that accepts the command but never responds with OK).
+    /// Used to test the timeout path.
+    #[cfg(test)]
+    #[allow(clippy::collapsible_match)]
+    pub(crate) fn test_pair_silent() -> (Self, mpsc::Receiver<Event>) {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(64);
+        let (event_tx, event_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    RelayCommand::PublishEvent { event } => {
+                        if event_tx.send(*event).await.is_err() {
+                            break;
+                        }
+                    }
+                    RelayCommand::PublishEventAcked { event, ack_tx: _ } => {
+                        // Intentionally drop ack_tx without sending — simulates
+                        // a relay that never confirms the event.
+                        let _ = event_tx.send(*event).await;
+                        // ack_tx is dropped here → ack_rx.await returns Err(RecvError) → Uncertain
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (Self { cmd_tx }, event_rx)
+    }
+
+    /// Test publisher whose command channel is dead on arrival (receiver dropped
+    /// before the first send). Any [`RelayCommand`] sent through this publisher
+    /// returns `Err(SendError)`, which the production code maps to
+    /// [`RelayError::ConnectionClosed`] — the same error path as a real socket failure.
+    ///
+    /// Used by `sentinel_ack_socket_failure_denies_synchronously_map_empty`.
+    #[cfg(test)]
+    pub(crate) fn test_pair_dead() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(1);
+        drop(cmd_rx); // close the channel immediately
+        Self { cmd_tx }
+    }
+} // end impl RelayEventPublisher
 
 impl HarnessRelay {
     /// Connect to relay and authenticate via NIP-42.
@@ -1062,6 +1224,11 @@ struct BgState {
     /// Frames evicted from the bounded pending/in-flight observer buffers since
     /// summary log. Makes overflow loss visible instead of silent.
     gated_observer_dropped: u64,
+    /// Pending `OK` acknowledgement waiters for `PublishEventAcked` commands.
+    ///
+    /// Keyed by event ID (hex). Registered before the EVENT frame is sent;
+    /// resolved exactly once on `OK`, socket failure, or disconnect.
+    ack_waiters: HashMap<String, oneshot::Sender<AckOutcome>>,
     /// Channels whose REQ failed during `resubscribe_after_reconnect`.
     ///
     /// A single failed channel REQ is parked here instead of aborting the whole
@@ -1097,6 +1264,7 @@ impl BgState {
             gated_observer_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
+            ack_waiters: HashMap::new(),
             resubscribe_retry: HashSet::new(),
             backoff_step: 0,
         }
@@ -1225,6 +1393,18 @@ impl BgState {
         }
     }
 
+    /// Drain all pending `OK` acknowledgement waiters with `Uncertain`.
+    ///
+    /// Called on disconnect/reconnect so callers are not left waiting
+    /// indefinitely. A dropped sender (receiver already gone) is silently
+    /// discarded.
+    fn drain_ack_waiters_uncertain(&mut self) {
+        for (event_id, ack_tx) in self.ack_waiters.drain() {
+            debug!("ack waiter for event {event_id} drained as uncertain (disconnect)");
+            let _ = ack_tx.send(AckOutcome::Uncertain);
+        }
+    }
+
     fn track_observer_in_flight(&mut self, event: Box<Event>) {
         if self.observer_in_flight.len() >= GATED_OBSERVER_QUEUE_CAP {
             self.observer_in_flight.pop_front();
@@ -1304,6 +1484,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         }
         // Already reconnecting — redundant.
         RelayCommand::Reconnect => {}
+        // Acked publish while disconnected: the socket is gone so the event
+        // cannot be sent; resolve the waiter as uncertain immediately.
+        RelayCommand::PublishEventAcked { ack_tx, .. } => {
+            let _ = ack_tx.send(AckOutcome::Uncertain);
+        }
         // Callers MUST handle Shutdown before calling this function.
         RelayCommand::Shutdown => {
             debug_assert!(
@@ -1328,6 +1513,11 @@ fn retain_failed_command_intent(state: &mut BgState, cmd: RelayCommand) {
             state.park_gated_observer_frame(event);
         }
         RelayCommand::PublishEvent { .. } => {}
+        // Acked publish arrived while disconnected — resolve the waiter as
+        // uncertain immediately so the caller is not left waiting.
+        RelayCommand::PublishEventAcked { ack_tx, .. } => {
+            let _ = ack_tx.send(AckOutcome::Uncertain);
+        }
         cmd => apply_command_to_state(state, cmd),
     }
 }
@@ -1530,6 +1720,23 @@ async fn execute_connected_command(
             }
             debug!("startup watermark set to {ts}");
             true
+        }
+        RelayCommand::PublishEventAcked { event, ack_tx } => {
+            // Register the waiter BEFORE sending the EVENT frame — if the relay
+            // sends OK before our next select! tick, the waiter must already be
+            // present or the resolution is lost.
+            let event_id = event.id.to_hex();
+            state.ack_waiters.insert(event_id.clone(), ack_tx);
+            if send_publish_event_frame(ws, &event).await {
+                true
+            } else {
+                // Send failed — drain the waiter we just registered so the
+                // caller is not left waiting indefinitely.
+                if let Some(ack_tx) = state.ack_waiters.remove(&event_id) {
+                    let _ = ack_tx.send(AckOutcome::Uncertain);
+                }
+                false
+            }
         }
         // Control-flow commands — callers handle these before dispatching.
         RelayCommand::Shutdown | RelayCommand::Reconnect => {
@@ -2377,6 +2584,17 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
+                    // Resolve any ack waiter registered by PublishEventAcked.
+                    if let Some(ack_tx) = state.ack_waiters.remove(&event_id) {
+                        let outcome = if accepted {
+                            AckOutcome::Accepted
+                        } else {
+                            AckOutcome::Rejected {
+                                message: message.clone(),
+                            }
+                        };
+                        let _ = ack_tx.send(outcome);
+                    }
                     state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
@@ -2918,6 +3136,9 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    // Any pending ack waiters cannot be resolved on this socket — drain them
+    // as uncertain so callers are not left blocked across the reconnect.
+    state.drain_ack_waiters_uncertain();
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -3048,6 +3269,9 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    // Any pending ack waiters cannot be resolved on this socket — drain them
+    // as uncertain so callers are not left blocked across the reconnect.
+    state.drain_ack_waiters_uncertain();
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.

@@ -744,6 +744,9 @@ fn summary_fixture(
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
+        permission_policy: crate::managed_agents::permission_policy::PermissionPolicy::Ask,
+        permission_policy_source:
+            crate::managed_agents::permission_policy::PermissionPolicySource::BuiltIn,
     }
 }
 
