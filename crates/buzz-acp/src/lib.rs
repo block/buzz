@@ -3,6 +3,7 @@
 mod acp;
 mod config;
 mod engram_fetch;
+mod event_sink;
 mod filter;
 mod observer;
 mod pool;
@@ -1563,6 +1564,14 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let event_sink = match config.event_sink_socket.clone() {
+        Some(path) => Some(event_sink::EventSink::new(
+            path,
+            config.relay_url.clone(),
+            Duration::from_millis(config.event_sink_timeout_ms),
+        )?),
+        None => None,
+    };
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -2470,6 +2479,22 @@ async fn tokio_main() -> Result<()> {
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
+                                }
+                            }
+
+                            if let Some(sink) = &event_sink {
+                                if let Err(error) = sink
+                                    .deliver(
+                                        buzz_event.channel_id,
+                                        buzz_event.raw_event_json.as_bytes(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        channel_id = %buzz_event.channel_id,
+                                        socket = %sink.socket_path().display(),
+                                        "local event sink delivery failed: {error}"
+                                    );
                                 }
                             }
 
@@ -6206,6 +6231,8 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            event_sink_socket: None,
+            event_sink_timeout_ms: 250,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
@@ -6428,6 +6455,8 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            event_sink_socket: None,
+            event_sink_timeout_ms: 250,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
