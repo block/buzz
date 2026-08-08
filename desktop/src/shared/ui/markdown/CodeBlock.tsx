@@ -16,6 +16,7 @@ import { Button } from "@/shared/ui/button";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
+import { MermaidDiagram } from "./MermaidDiagram";
 import { getReactNodeText } from "./utils";
 
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
@@ -64,13 +65,24 @@ function getCodeBlockText(children: React.ReactNode) {
   return getReactNodeText(children).replace(/\n$/, "");
 }
 
-export function MarkdownCodeBlock({
-  children,
-  language,
-}: {
+type MarkdownCodeBlockProps = {
   children?: React.ReactNode;
   language?: string;
-}) {
+};
+
+export function MarkdownCodeBlock(props: MarkdownCodeBlockProps) {
+  const fallback = <SourceCodeBlock {...props} />;
+  return props.language?.toLowerCase() === "mermaid" ? (
+    <MermaidDiagram
+      fallback={fallback}
+      source={getCodeBlockText(props.children)}
+    />
+  ) : (
+    fallback
+  );
+}
+
+function SourceCodeBlock({ children, language }: MarkdownCodeBlockProps) {
   const [isCopying, setIsCopying] = React.useState(false);
   const codeBlockRef = React.useRef<HTMLPreElement | null>(null);
   const code = React.useMemo(() => getCodeBlockText(children), [children]);
