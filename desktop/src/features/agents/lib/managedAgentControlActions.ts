@@ -119,6 +119,16 @@ export async function stopManagedAgentWithRules({
   agent: ManagedAgent;
   stopManagedAgent: StopManagedAgent;
 } & ManagedAgentChannelContext): Promise<ManagedAgentActionResult> {
+  if (
+    agent.backend.type === "provider" &&
+    agent.backend.id === "hermes"
+  ) {
+    // Native Hermes is supervised on its host; use the provider's SSH stop
+    // operation instead of ACP's !shutdown message contract.
+    await stopManagedAgent(agent.pubkey);
+    return {};
+  }
+
   if (agent.backend.type === "provider") {
     const channelId = resolveManagedAgentChannelId(agent, {
       channels,
@@ -154,7 +164,19 @@ export async function deleteManagedAgentWithRules({
   deleteManagedAgent: DeleteManagedAgent;
   skipRemoteDeleteConfirm?: boolean;
 } & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
-  if (agent.backend.type === "provider" && agent.backendAgentId) {
+  if (
+    agent.backend.type === "provider" &&
+    agent.backend.id === "hermes"
+  ) {
+    if (!skipRemoteDeleteConfirm) {
+      const confirmed = window.confirm(
+        "Delete this Hermes Desktop record? Remote cleanup occurs only when no other managed record shares its lifecycle scope.",
+      );
+      if (!confirmed) {
+        return { cancelled: true };
+      }
+    }
+  } else if (agent.backend.type === "provider" && agent.backendAgentId) {
     const presence = presenceLookup?.[normalizePubkey(agent.pubkey)];
     const channelId = resolveManagedAgentChannelId(agent, {
       channels,

@@ -12,6 +12,10 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import {
+  managedAgentRuntimeLabel,
+  runtimeLabel,
+} from "@/features/agents/lib/managedAgentRuntimeLabel";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -22,17 +26,6 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
 
 export type ProfileField = {
   copyValue?: string;
@@ -112,7 +105,14 @@ export function useProfileFieldBuckets({
 }) {
   return React.useMemo(() => {
     const metadataFields = [
-      ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
+      ...buildPublicFields({
+        managedAgent,
+        pubkey,
+        profile,
+        relayAgent,
+        isBot,
+        persona,
+      }),
       ...(ownerDisplayName || isOwner === true
         ? buildOwnerFields({
             includeOperationalFields: isOwner === true,
@@ -152,12 +152,14 @@ export function useProfileFieldBuckets({
 
 export function buildPublicFields({
   isBot,
+  managedAgent,
   persona,
   profile,
   pubkey,
   relayAgent,
 }: {
   isBot: boolean;
+  managedAgent?: ManagedAgent;
   persona?: AgentPersona;
   profile: Profile | undefined;
   pubkey: string | null;
@@ -184,10 +186,13 @@ export function buildPublicFields({
     });
   }
 
-  if (isBot && relayAgent?.agentType) {
+  if (isBot && (managedAgent || relayAgent?.agentType)) {
+    const agentType = managedAgent
+      ? managedAgentRuntimeLabel(managedAgent)
+      : runtimeLabel(relayAgent?.agentType);
     fields.push({
-      copyValue: relayAgent.agentType,
-      displayValue: runtimeLabel(relayAgent.agentType),
+      copyValue: managedAgent?.agentCommand || relayAgent?.agentType || undefined,
+      displayValue: agentType,
       icon: Cpu,
       label: "Agent type",
       testId: "user-profile-agent-type",
@@ -294,10 +299,14 @@ export function buildOwnerFields({
     return fields;
   }
 
-  if (managedAgent?.agentCommand) {
+  if (managedAgent) {
     fields.push({
-      copyValue: managedAgent.agentCommand,
-      displayValue: runtimeLabel(managedAgent.agentCommand),
+      copyValue:
+        managedAgent.agentCommand ||
+        (managedAgent.backend.type === "provider"
+          ? managedAgent.backend.id
+          : undefined),
+      displayValue: managedAgentRuntimeLabel(managedAgent),
       icon: Terminal,
       label: "Runtime",
       testId: "user-profile-runtime",

@@ -6,10 +6,12 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_cleanup,
+        provider_deploy, provider_stop,
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config,
+        hermes_provider_lifecycle_scope, hermes_provider_scope_owner, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
         DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
@@ -23,6 +25,33 @@ use crate::{
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
+}
+
+fn hermes_provider_scope_is_in_use(
+    records: &[ManagedAgentRecord],
+    backend: &BackendKind,
+) -> bool {
+    let Some(scope) = hermes_provider_lifecycle_scope(backend) else {
+        return false;
+    };
+    records
+        .iter()
+        .filter_map(|record| hermes_provider_lifecycle_scope(&record.backend))
+        .any(|other_scope| other_scope == scope)
+}
+
+fn hermes_provider_scope_has_other(records: &[ManagedAgentRecord], pubkey: &str) -> bool {
+    let Some(target) = records.iter().find(|record| record.pubkey == pubkey) else {
+        return false;
+    };
+    let Some(scope) = hermes_provider_lifecycle_scope(&target.backend) else {
+        return false;
+    };
+    records
+        .iter()
+        .filter(|record| record.pubkey != pubkey)
+        .filter_map(|record| hermes_provider_lifecycle_scope(&record.backend))
+        .any(|other_scope| other_scope == scope)
 }
 
 /// Retain a freshly authored managed-agent event in the local store, flagged
@@ -631,6 +660,11 @@ pub async fn create_managed_agent(
         }
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
+        if hermes_provider_scope_is_in_use(&records, &input.backend) {
+            return Err(
+                "a managed identity already owns this Hermes host/profile/unit scope".to_string(),
+            );
+        }
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
         }
@@ -701,6 +735,13 @@ pub async fn create_managed_agent(
         // (extremely unlikely but safe to check).
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
+        }
+        // Re-check under the mutation lock so concurrent creates cannot both
+        // pass the earlier preflight and claim one Hermes lifecycle scope.
+        if hermes_provider_scope_is_in_use(&records, &input.backend) {
+            return Err(
+                "a managed identity already owns this Hermes host/profile/unit scope".to_string(),
+            );
         }
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
@@ -1239,18 +1280,47 @@ pub async fn stop_managed_agent(
             state.clear_agent_session_caches(pubkey);
         }
 
+        let backend = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .map(|record| record.backend.clone())
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        if let Some(owner) = hermes_provider_scope_owner(&records, &pubkey) {
+            if owner != pubkey {
+                return Err(format!(
+                    "this Hermes host/profile/unit scope is owned by managed identity {owner}"
+                ));
+            }
+        }
+
         {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
-            // Remote agents are stopped via !shutdown @mention from the frontend,
-            // not via this backend command. Reject the call.
-            if record.backend != BackendKind::Local {
-                return Err(
-                    "remote agents are stopped via !shutdown message, not this command".to_string(),
-                );
+            match backend {
+                BackendKind::Local => {
+                    // Pair-scoped: stops only the active workspace's pair; delete and
+                    // the config-restart flows still drain every pair.
+                    stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
+                }
+                BackendKind::Provider { id, config } => {
+                    if id != "hermes" {
+                        return Err(
+                            "remote agents are stopped via !shutdown message, not this command"
+                                .to_string(),
+                        );
+                    }
+                    let binary = resolve_provider_binary(&id)?;
+                    if let Err(error) = provider_stop(&binary, &config) {
+                        record.last_error = Some(error.clone());
+                        record.updated_at = now_iso();
+                        save_managed_agents(&app, &records)?;
+                        return Err(error);
+                    }
+                    record.backend_agent_id = None;
+                    record.last_stopped_at = Some(now_iso());
+                    record.last_error = None;
+                    record.updated_at = now_iso();
+                }
             }
-            // Pair-scoped: stops only the active workspace's pair; delete and
-            // the config-restart flows still drain every pair.
-            stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
         }
         save_managed_agents(&app, &records)?;
         let record = records
@@ -1321,8 +1391,55 @@ pub async fn delete_managed_agent(
                 }
             }
 
-            if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+            let hermes_owner = hermes_provider_scope_owner(&records, &pubkey);
+            let hermes_scope_has_other = hermes_provider_scope_has_other(&records, &pubkey);
+            if hermes_owner.as_deref() == Some(pubkey.as_str()) && hermes_scope_has_other {
+                return Err(
+                    "delete duplicate Hermes managed records for this host/profile/unit before deleting the lifecycle owner"
+                        .to_string(),
+                );
+            }
+            let cleanup_target = {
+                let record = records
+                    .iter_mut()
+                    .find(|record| record.pubkey == pubkey)
+                    .ok_or_else(|| format!("agent {pubkey} not found"))?;
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
+                if let BackendKind::Provider { id, config } = &record.backend {
+                    if id == "hermes"
+                        && hermes_owner.as_deref() == Some(pubkey.as_str())
+                        && !hermes_scope_has_other
+                    {
+                        Some((resolve_provider_binary(id)?, config.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((binary, config)) = cleanup_target {
+                {
+                    let record = records
+                        .iter_mut()
+                        .find(|record| record.pubkey == pubkey)
+                        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+                    record.last_error = Some("remote Hermes cleanup pending".to_string());
+                    record.updated_at = now_iso();
+                }
+                save_managed_agents(&app, &records)?;
+                if let Err(error) = provider_cleanup(&binary, &config) {
+                    {
+                        let record = records
+                            .iter_mut()
+                            .find(|record| record.pubkey == pubkey)
+                            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+                        record.last_error = Some(error.clone());
+                        record.updated_at = now_iso();
+                    }
+                    save_managed_agents(&app, &records)?;
+                    return Err(error);
+                }
             }
             state.clear_agent_session_caches(&pubkey);
             let initial_len = records.len();
