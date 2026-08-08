@@ -607,8 +607,21 @@ where
         Err(_) => return Ok(()),
     };
 
+    // The relay's NIP-42 AUTH expects the bare WS origin (scheme://host[:port]),
+    // not the full connection URL. The legacy /pair fallback connects to
+    // wss://<host>/pair but must sign the AUTH event against wss://<host>, or
+    // the relay rejects it with "relay url mismatch" and closes the
+    // connection within its 5s auth window. Strip the path before signing;
+    // for path-less URLs (the modern pairing_relay_url path) this is a no-op.
+    let parsed =
+        url::Url::parse(relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+    let bare_origin = match (parsed.host_str(), parsed.port()) {
+        (Some(host), Some(port)) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        (Some(host), None) => format!("{}://{}", parsed.scheme(), host),
+        _ => relay_url.to_string(),
+    };
     let relay_url_parsed =
-        nostr::RelayUrl::parse(relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+        nostr::RelayUrl::parse(&bare_origin).map_err(|e| format!("invalid relay URL: {e}"))?;
     let auth_json = {
         let guard = session.lock().await;
         let s = guard.as_ref().ok_or("session gone during auth")?;
