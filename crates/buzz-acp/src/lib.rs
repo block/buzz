@@ -2690,6 +2690,7 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    Some((&presence_publisher, &presence_keys)),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3357,7 +3358,9 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    message.contains("Re-authenticate")
+        || message.contains("API Error: 401")
+        || message.contains("Authentication required")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -3396,6 +3399,7 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    presence: Option<(&relay::RelayEventPublisher, &nostr::Keys)>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -3495,6 +3499,31 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                // Auth tokens don't self-repair between heartbeats, and without this the
+                // presence heartbeat keeps publishing "online" while every subsequent
+                // mention dead-letters — the UI keeps showing the agent as available during
+                // a guaranteed outage. Flip presence to offline (best-effort, non-blocking)
+                // so the UI reflects the real state instead. Mirrors the shutdown flip.
+                if let Some((publisher, keys)) = presence {
+                    if config.presence_enabled {
+                        let publisher = publisher.clone();
+                        let keys = keys.clone();
+                        tokio::spawn(async move {
+                            match tokio::time::timeout(
+                                Duration::from_secs(2),
+                                publish_presence(&publisher, &keys, "offline"),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => tracing::info!("presence set to offline after auth dead-letter"),
+                                Ok(Err(e)) => {
+                                    tracing::warn!("failed to set offline presence after auth dead-letter: {e}")
+                                }
+                                Err(_) => tracing::warn!("auth dead-letter offline presence timed out"),
+                            }
+                        });
+                    }
+                }
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -6529,6 +6558,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
         );
 
         let turn_errors: Vec<_> = observer
@@ -6694,6 +6724,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -6782,6 +6813,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -6889,6 +6921,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
             );
             (
                 queue.pending_channels(),
@@ -6979,6 +7012,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7072,6 +7106,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7187,6 +7222,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7320,6 +7356,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
         );
 
         // No batch to merge — the queue has nothing pending for any channel.
@@ -7400,6 +7437,23 @@ mod error_outcome_emission_tests {
         assert!(
             is_auth_error(&e),
             "API Error: 401 variant must be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_matches_authentication_required_message() {
+        // Reporter-observed subprocess message (claude-agent-acp 0.63.0, buzz
+        // #3831): expired subscription credential surfaces as a bare
+        // "Authentication required" with code -32000. Without this variant the
+        // immediate dead-letter + re-auth notice never fires and every mention
+        // burns ~10 retries before dead-lettering.
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Authentication required".to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "Authentication required variant must be classified as auth error"
         );
     }
 
@@ -7502,6 +7556,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -7585,6 +7640,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         );
