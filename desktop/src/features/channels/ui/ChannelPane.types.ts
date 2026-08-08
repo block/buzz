@@ -107,6 +107,11 @@ export type ChannelPaneProps = {
     mediaTags?: string[][],
     channelId?: string | null,
   ) => Promise<void>;
+  onSendToChannel: (
+    message: TimelineMessage,
+    threadRoot: TimelineMessage,
+    channelId: string,
+  ) => Promise<void>;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
     content: string,

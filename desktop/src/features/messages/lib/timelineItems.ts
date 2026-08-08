@@ -15,6 +15,7 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
+  startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
@@ -250,6 +251,7 @@ export function buildTimelineItems(
     // that same standalone state until the send acknowledgement arrives.
     const isContinuation =
       !message.pending &&
+      !startsNewMessageGroup(message) &&
       previousGroupEntry !== null &&
       !previousGroupEntry.message.pending &&
       hasSameMessageAuthor(previousGroupEntry.message, message) &&

@@ -8982,6 +8982,7 @@ async function handleSendChannelMessage(
     emojiTags?: string[][] | null;
     mentionTags?: string[][] | null;
     linkPreviewTags?: string[][] | null;
+    sentFromThreadTag?: string[] | null;
     suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
@@ -9041,6 +9042,7 @@ async function handleSendChannelMessage(
     ...emojiTags,
     ...mentionTags,
     ...linkPreviewTags,
+    ...(args.sentFromThreadTag ? [args.sentFromThreadTag] : []),
     ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
   ];
   const identity = getIdentity(config);

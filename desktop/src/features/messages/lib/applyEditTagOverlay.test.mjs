@@ -104,6 +104,26 @@ test("edit's non-imeta tags are dropped (only imeta wins)", () => {
   assert.equal(out.filter((t) => t[0] === "imeta").length, 1);
 });
 
+test("edit overlays newly added mention tags without replacing original routing", () => {
+  const original = [
+    ["h", "uuid"],
+    ["p", "original-mention"],
+  ];
+  const edit = [
+    ["h", "uuid"],
+    ["e", "x"],
+    ["p", "added-mention"],
+  ];
+
+  assert.deepEqual(
+    applyEditTagOverlay(original, edit).filter((tag) => tag[0] === "p"),
+    [
+      ["p", "original-mention"],
+      ["p", "added-mention"],
+    ],
+  );
+});
+
 const EMOJI = (shortcode, url) => ["emoji", shortcode, url];
 
 test("edit replaces the original's emoji tags with the edit's set", () => {

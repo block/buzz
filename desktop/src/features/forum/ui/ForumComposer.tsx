@@ -114,6 +114,7 @@ export function ForumComposer({
     editable: !disabled,
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
+    messageLinkChannels: channelLinks.channels,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),

@@ -12,6 +12,9 @@
 /**
  * Merge the original event's tags with an edit's tags so that:
  *   - `imeta` tags come exclusively from the edit (full new attachment set);
+ *   - newly added `p` mention tags from the edit join the original set. The
+ *     original tags remain available for rendering old clients, while callers
+ *     that need the edited body's effective recipients can filter by text;
  *   - `emoji` (NIP-30 custom-emoji) tags come from the edit *when the edit
  *     supplies any* — the edited body may add or remove custom emoji, so a
  *     supplied set rebuilds the shortcode→url map. But when the edit supplies
@@ -22,9 +25,8 @@
  *     `:shortcode:` that the original rendered fine. Preserving on empty is
  *     strictly safe: an orphaned emoji tag whose shortcode is no longer in the
  *     body resolves nothing, so it can't cause a stale render.
- *   - all other tag kinds (`h`, `e`, `p` mentions, etc.) come exclusively
- *     from the original — the edit can't rewrite channel membership,
- *     thread refs, or mention targets.
+ *   - all other tag kinds (`h`, `e`, etc.) come exclusively from the original
+ *     so the edit can't rewrite channel membership or thread references.
  *
  * When `editTags` is undefined, returns `originalTags` unchanged.
  */
@@ -38,6 +40,8 @@ export function applyEditTagOverlay(originalTags, editTags) {
       ? (t) => t[0] !== "imeta" && t[0] !== "emoji"
       : (t) => t[0] !== "imeta";
   const baseFromOriginal = originalTags.filter(droppedFromOriginal);
-  const overlaidFromEdit = editTags.filter((t) => t[0] === "imeta");
+  const overlaidFromEdit = editTags.filter(
+    (t) => t[0] === "imeta" || t[0] === "p",
+  );
   return [...baseFromOriginal, ...overlaidFromEdit, ...editEmoji];
 }

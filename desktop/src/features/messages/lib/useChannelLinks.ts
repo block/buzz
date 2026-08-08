@@ -184,6 +184,7 @@ export function useChannelLinks() {
   );
 
   return {
+    channels,
     channelQuery,
     channelSelectedIndex,
     channelSuggestions,

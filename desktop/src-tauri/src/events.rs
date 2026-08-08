@@ -11,6 +11,12 @@
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
+
+mod message_tags;
+
+use message_tags::{
+    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
+};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -72,56 +78,6 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
         }
     }
     Ok(tags)
-}
-
-fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
-    }
-    Ok(())
-}
-
-/// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
-/// to prevent injection of arbitrary tags (e.g., forged "h", "e", or "p" tags).
-fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mt in media_tags {
-        if mt.first().map(String::as_str) != Some("imeta") {
-            return Err(format!(
-                "media tags must use 'imeta' prefix (got {:?})",
-                mt.first()
-            ));
-        }
-        let parts: Vec<&str> = mt.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid imeta tag: {e}"))?);
-    }
-    Ok(())
-}
-
-/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
-/// any tag whose first element is not "emoji" so this path can't be used to
-/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
-fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for et in emoji_tags {
-        if et.first().map(String::as_str) != Some("emoji") {
-            return Err(format!(
-                "emoji tags must use 'emoji' prefix (got {:?})",
-                et.first()
-            ));
-        }
-        let parts: Vec<&str> = et.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
-    }
-    Ok(())
 }
 
 /// Validate a hex pubkey is exactly 64 hex characters.
@@ -302,6 +258,7 @@ pub fn build_message(
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
     link_preview_tags: &[Vec<String>],
+    sent_from_thread_tag: Option<&[String]>,
     relay_base: &str,
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
@@ -313,6 +270,7 @@ pub fn build_message(
         custom_emoji_tags,
         mention_ref_tags,
         link_preview_tags,
+        sent_from_thread_tag,
         relay_base,
         &[],
     )
@@ -333,9 +291,13 @@ pub fn build_message_with_client_tags(
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
     link_preview_tags: &[Vec<String>],
+    sent_from_thread_tag: Option<&[String]>,
     relay_base: &str,
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
+    if sent_from_thread_tag.is_some() && thread_ref.is_some() {
+        return Err("sent-from-thread provenance requires a top-level message".into());
+    }
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
@@ -346,25 +308,9 @@ pub fn build_message_with_client_tags(
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
+    append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
-}
-
-fn append_client_tags(client_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for client_tag in client_tags {
-        if client_tag.first().map(String::as_str) != Some("client") {
-            return Err(format!(
-                "client tags must use 'client' prefix (got {:?})",
-                client_tag.first()
-            ));
-        }
-        if client_tag.len() < 2 {
-            return Err("client tag missing marker".into());
-        }
-        let parts: Vec<&str> = client_tag.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid client tag: {e}"))?);
-    }
-    Ok(())
 }
 
 /// Kind 45001 — forum post.

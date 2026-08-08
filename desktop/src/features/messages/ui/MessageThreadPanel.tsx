@@ -98,6 +98,11 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
       threadHeadId: string | null;
     } | null,
   ) => Promise<void>;
+  onSendToChannel?: (
+    message: TimelineMessage,
+    threadRoot: TimelineMessage,
+    channelId: string,
+  ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -219,6 +224,7 @@ export function MessageThreadPanel({
   onScrollTargetSettled,
   onSelectReplyTarget,
   onSend,
+  onSendToChannel,
   onToggleReaction,
   onUnfollowThread,
   profiles,
@@ -522,7 +528,6 @@ export function MessageThreadPanel({
     "padding",
     settleAtBottomAfterLayout,
   );
-
   const knownAgentPubkeys = useKnownAgentPubkeys();
   const initialAgentPubkeys = React.useMemo(() => {
     if (
@@ -546,11 +551,14 @@ export function MessageThreadPanel({
         knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
     );
   }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
-
   if (!threadHead) {
     return null;
   }
-
+  const sendToChannel =
+    onSendToChannel && channelId
+      ? (message: TimelineMessage) =>
+          onSendToChannel(message, threadHead, channelId)
+      : undefined;
   const threadScrollRegion = (
     <AuxiliaryPanelBody
       className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
@@ -581,6 +589,7 @@ export function MessageThreadPanel({
               <MessageRow
                 actionBarPlacement="inside"
                 channelId={channelId}
+                currentPubkey={currentPubkey}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                 isFollowingThread={isFollowingThread}
@@ -612,6 +621,7 @@ export function MessageThreadPanel({
                 }
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}
+                onSendToChannel={sendToChannel}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={
                   onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
@@ -713,6 +723,7 @@ export function MessageThreadPanel({
                       {showUnreadDivider ? <UnreadDivider /> : null}
                       <MessageRow
                         channelId={channelId}
+                        currentPubkey={currentPubkey}
                         collapseDepthGuideActions={collapseDepthGuideActions}
                         collapseDescendantsLabel="Collapse replies"
                         connectDescendants={
@@ -777,6 +788,7 @@ export function MessageThreadPanel({
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
+                        onSendToChannel={sendToChannel}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}

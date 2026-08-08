@@ -29,6 +29,7 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
+  startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
@@ -614,6 +615,7 @@ function InboxMessageDetailPane({
               const previousMessage = displayMessages[index - 1];
               const isContinuation =
                 !isAfterSeparator &&
+                !startsNewMessageGroup(message) &&
                 hasSameMessageAuthor(
                   { pubkey: previousMessage?.authorPubkey },
                   { pubkey: message.authorPubkey },

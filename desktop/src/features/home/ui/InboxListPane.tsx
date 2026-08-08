@@ -82,13 +82,14 @@ function InboxLabel({
     <div
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
-        "mt-0 flex min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
+        "mt-0 flex min-h-[var(--inline-chip-min-height)] min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
         isActionRequired && !isDone
           ? "font-medium text-amber-600/80 dark:text-amber-300/80"
           : isDone
             ? "font-normal text-muted-foreground/70"
             : "font-medium text-muted-foreground/80",
       )}
+      data-inbox-type-label=""
     >
       <span className="shrink-0">{label.text}</span>
       {label.channelLabel ? (

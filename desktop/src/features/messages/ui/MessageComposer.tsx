@@ -161,7 +161,6 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
-  // Restore/persist drafts at a key boundary; the hook handles StrictMode.
   useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
@@ -249,6 +248,7 @@ function MessageComposerImpl({
     mentionNames: mentions.knownNames,
     agentMentionNames: mentions.agentKnownNames,
     channelNames: channelLinks.knownChannelNames,
+    messageLinkChannels: channelLinks.channels,
     customEmoji,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {

@@ -305,6 +305,36 @@ test("buildTimelineItems: pending messages remain standalone until acknowledged"
   );
 });
 
+test("buildTimelineItems: sent-from-thread messages start a fresh author group", () => {
+  const entries = [
+    entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
+    entry({
+      id: "b",
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+      tags: [["buzz:sent-from-thread", "root-event", "Root summary"]],
+    }),
+    entry({
+      id: "c",
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 3),
+    }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, false, true],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [false, true, false],
+  );
+});
+
 test("buildTimelineItems: same-author messages past the window start a new group", () => {
   const author = "author-a";
   const entries = [
