@@ -885,6 +885,30 @@ jobs:
       - name: Build Android debug APK
         run: just mobile-build-android
 
+  mobile-ios:
+    name: Mobile iOS
+    runs-on: macos-15
+    timeout-minutes: 35
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Install dependencies
+        run: cd mobile && flutter pub get
+      - name: Analyze
+        run: cd mobile && flutter analyze
+      - name: Test
+        run: cd mobile && flutter test
+      - name: Build unsigned iOS app
+        run: cd mobile && flutter build ios --debug --no-codesign
+
   security:
     name: Security
     runs-on: ubuntu-latest

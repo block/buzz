@@ -45,6 +45,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Buzz needs camera access so you can take photos to attach to messages and scan QR codes for device pairing.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Buzz needs microphone access so you can speak in Huddles.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Buzz uses speech recognition to turn your Huddle questions into messages for participating bots.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Buzz needs photo library access so you can attach images to messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
