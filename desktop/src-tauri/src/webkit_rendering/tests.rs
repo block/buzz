@@ -109,6 +109,71 @@ fn test_a_plain_non_nvidia_launch_changes_nothing() {
 }
 
 #[test]
+fn test_cosmic_on_wayland_disables_the_dmabuf_renderer() {
+    // #4305: Pop!_OS / COSMIC Wayland — the dmabuf renderer loses sync with
+    // the compositor and the UI freezes while logic continues.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[
+        ("XDG_CURRENT_DESKTOP", "COSMIC"),
+        ("WAYLAND_DISPLAY", "wayland-0"),
+    ]);
+    let plan = plan(NO_ARGS, &env, drm.path());
+
+    assert_eq!(
+        applied(&plan),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+    let Plan::Apply { why, .. } = &plan else {
+        unreachable!()
+    };
+    assert!(why.contains("COSMIC Wayland"), "{why}");
+}
+
+#[test]
+fn test_pop_cosmic_on_wayland_is_also_a_hit() {
+    // Pop!_OS reports XDG_CURRENT_DESKTOP as "pop:COSMIC" — a substring match
+    // keeps the signal tight while still catching the pre-release name.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[
+        ("XDG_CURRENT_DESKTOP", "pop:COSMIC"),
+        ("WAYLAND_DISPLAY", "wayland-0"),
+    ]);
+
+    assert_eq!(
+        applied(&plan(NO_ARGS, &env, drm.path())),
+        Some(&["WEBKIT_DISABLE_DMABUF_RENDERER"][..])
+    );
+}
+
+#[test]
+fn test_cosmic_x11_does_not_trigger_the_workaround() {
+    // COSMIC's X11 fallback path does not hit the Wayland frame-sync bug, so
+    // the signal must require Wayland to be active rather than just COSMIC
+    // being the desktop.
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[("XDG_CURRENT_DESKTOP", "COSMIC")]);
+
+    assert!(matches!(
+        plan(NO_ARGS, &env, drm.path()),
+        Plan::Leave { .. }
+    ));
+}
+
+#[test]
+fn test_gnome_wayland_is_not_confused_for_cosmic() {
+    let drm = drm(&["0x8086"]);
+    let env = env_from(&[
+        ("XDG_CURRENT_DESKTOP", "GNOME"),
+        ("WAYLAND_DISPLAY", "wayland-0"),
+    ]);
+
+    assert!(matches!(
+        plan(NO_ARGS, &env, drm.path()),
+        Plan::Leave { .. }
+    ));
+}
+
+#[test]
 fn test_an_unreadable_drm_tree_is_not_treated_as_a_hit() {
     // Containers and hardened kernels can hide `/sys/class/drm` entirely. The
     // workaround costs real rendering performance, so absent evidence is not

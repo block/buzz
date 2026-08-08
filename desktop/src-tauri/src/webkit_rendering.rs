@@ -16,9 +16,11 @@
 //! no second chance later in the same process. This module therefore decides
 //! from cheap preflight signals instead of reacting to a crash:
 //!
-//! * an NVIDIA GPU, the driver family behind most upstream reports; and
+//! * an NVIDIA GPU, the driver family behind most upstream reports;
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
-//!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
+//!   and the dmabuf renderer buys nothing on that XWayland path (#2338); and
+//! * COSMIC-on-Wayland, where the dmabuf frame sync with the compositor
+//!   silently freezes the UI while event handling keeps running (#4305).
 //!
 //! `--safe-rendering` is the manual escape hatch for a machine neither signal
 //! recognises; it also disables accelerated compositing, for that launch only.
@@ -168,6 +170,7 @@ fn plan(
     let signals = [
         (nvidia_gpu(drm_root), "NVIDIA GPU"),
         (env("APPIMAGE").is_some(), "AppImage"),
+        (cosmic_wayland(env), "COSMIC Wayland"),
     ];
     let hits: Vec<&str> = signals
         .iter()
@@ -176,13 +179,27 @@ fn plan(
 
     match hits.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: "no NVIDIA GPU, not an AppImage, not COSMIC Wayland".to_string(),
         },
         false => Plan::Apply {
             vars: &HEURISTIC,
             why: hits.join(", "),
         },
     }
+}
+
+/// Whether this launch is on COSMIC under Wayland. Pop!_OS / COSMIC has a
+/// known WebKitGTK dmabuf-frame sync failure (#4305) — frames render but are
+/// not presented to the compositor, freezing the UI while logic continues in
+/// the background. `XDG_CURRENT_DESKTOP` is the documented COSMIC detection
+/// signal (typically "COSMIC" or "pop:COSMIC"); `WAYLAND_DISPLAY` confirms
+/// Wayland rather than the X11 fallback session.
+fn cosmic_wayland(env: EnvLookup<'_>) -> bool {
+    let desktop_is_cosmic = env("XDG_CURRENT_DESKTOP")
+        .map(|value| value.to_string_lossy().to_uppercase().contains("COSMIC"))
+        .unwrap_or(false);
+    let wayland_active = env("WAYLAND_DISPLAY").is_some();
+    desktop_is_cosmic && wayland_active
 }
 
 /// Owned variables the environment already carries, keyed by name.
