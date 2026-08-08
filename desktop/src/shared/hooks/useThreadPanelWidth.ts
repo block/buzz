@@ -5,7 +5,7 @@ import {
   clampAuxiliaryPanelWidth,
 } from "@/shared/layout/AuxiliaryPanel";
 
-const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
+const THREAD_PANEL_WIDTH_STORAGE_KEY = "buzz.desktop.thread-panel-width";
 
 function getViewportWidth(): number {
   return typeof window === "undefined" ? 0 : window.innerWidth;
@@ -23,26 +23,49 @@ function clampThreadPanelWidth(width: number): number {
   return clampAuxiliaryPanelWidth(width, getViewportWidth());
 }
 
+function readStoredThreadPanelWidth(): string | null {
+  try {
+    const fromLocal = window.localStorage.getItem(THREAD_PANEL_WIDTH_STORAGE_KEY);
+    if (fromLocal != null) {
+      return fromLocal;
+    }
+
+    // One-time migrate: older builds kept this width in sessionStorage only.
+    const fromSession = window.sessionStorage.getItem(
+      THREAD_PANEL_WIDTH_STORAGE_KEY,
+    );
+    if (fromSession != null) {
+      try {
+        window.localStorage.setItem(THREAD_PANEL_WIDTH_STORAGE_KEY, fromSession);
+        window.sessionStorage.removeItem(THREAD_PANEL_WIDTH_STORAGE_KEY);
+      } catch {
+        // Keep reading the session value even if migration write fails.
+      }
+      return fromSession;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getInitialThreadPanelWidth(): number {
   if (typeof window === "undefined") {
     return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
   }
 
-  try {
-    const raw = window.sessionStorage.getItem(THREAD_PANEL_WIDTH_SESSION_KEY);
-    if (!raw) {
-      return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
-    }
-
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) {
-      return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
-    }
-
-    return clampThreadPanelWidth(parsed);
-  } catch {
+  const raw = readStoredThreadPanelWidth();
+  if (!raw) {
     return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
   }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
+  }
+
+  return clampThreadPanelWidth(parsed);
 }
 
 export function useThreadPanelWidth(availableWidthPx?: number) {
@@ -60,8 +83,8 @@ export function useThreadPanelWidth(availableWidthPx?: number) {
     }
 
     try {
-      window.sessionStorage.setItem(
-        THREAD_PANEL_WIDTH_SESSION_KEY,
+      window.localStorage.setItem(
+        THREAD_PANEL_WIDTH_STORAGE_KEY,
         String(widthPx),
       );
     } catch {
