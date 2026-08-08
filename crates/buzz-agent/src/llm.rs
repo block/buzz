@@ -2735,6 +2735,7 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             prefer_mesh_for_auto: false,
             hints_enabled: true,
+            skills_allowlist: std::collections::HashSet::new(),
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,

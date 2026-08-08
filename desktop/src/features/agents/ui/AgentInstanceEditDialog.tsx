@@ -66,6 +66,12 @@ import {
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import {
+  BUZZ_AGENT_SKILLS_ENV,
+  envValueToSkillNames,
+  SkillSelectionPanel,
+  skillNamesToEnvValue,
+} from "./SkillSelectionPanel";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
@@ -161,6 +167,25 @@ export function AgentInstanceEditDialog({
     agent.respondToAllowlist,
   );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
+
+  // Enabled skills are stored in the per-agent `BUZZ_AGENT_SKILLS` env var,
+  // which the runtime already layers into the spawned agent's environment.
+  const enabledSkillNames = React.useMemo(
+    () => envValueToSkillNames(envVars[BUZZ_AGENT_SKILLS_ENV]),
+    [envVars],
+  );
+  const handleSkillsChange = React.useCallback((names: string[]) => {
+    setEnvVars((prev) => {
+      const next = { ...prev };
+      const envValue = skillNamesToEnvValue(names);
+      if (envValue.length === 0) {
+        delete next[BUZZ_AGENT_SKILLS_ENV];
+      } else {
+        next[BUZZ_AGENT_SKILLS_ENV] = envValue;
+      }
+      return next;
+    });
+  }, []);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
@@ -1212,6 +1237,12 @@ export function AgentInstanceEditDialog({
                 ) : null}
               </AnimatePresence>
             </div>
+
+            {/* Skill selection — bottom of the runtime tab */}
+            <SkillSelectionPanel
+              value={enabledSkillNames}
+              onChange={handleSkillsChange}
+            />
 
             {/* Error */}
             {updateMutation.error instanceof Error ? (

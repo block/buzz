@@ -363,7 +363,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
     }
     let (hints_text, skills) = if app.cfg.hints_enabled {
-        hints::build_hints_section(std::path::Path::new(&p.cwd))
+        hints::build_hints_section(
+            std::path::Path::new(&p.cwd),
+            Some(&app.cfg.skills_allowlist),
+        )
     } else {
         (String::new(), Vec::new())
     };

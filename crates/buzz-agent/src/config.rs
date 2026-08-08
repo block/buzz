@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -840,6 +841,13 @@ pub struct Config {
     /// existing `auto` semantics.
     pub prefer_mesh_for_auto: bool,
     pub hints_enabled: bool,
+    /// Per-agent skill allowlist. When non-empty, only these skill names are
+    /// offered via the built-in `load_skill` tool (and advertised in the
+    /// "Available Skills" hint section). An empty set — the default — disables
+    /// all skills, so every agent starts with zero skills and skills are only
+    /// available once the operator explicitly enables them for that agent.
+    /// Set via `BUZZ_AGENT_SKILLS` (comma- or space-separated skill names).
+    pub skills_allowlist: HashSet<String>,
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
@@ -963,6 +971,7 @@ impl Config {
             require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
+            skills_allowlist: parse_skills_allowlist(env("BUZZ_AGENT_SKILLS").as_deref()),
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
             thinking_summary: parse_thinking_summary(
                 env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
@@ -1009,6 +1018,7 @@ impl Config {
             require_reply: false,
             hook_servers: HookServers::None,
             hints_enabled: false,
+            skills_allowlist: HashSet::new(),
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
@@ -1105,6 +1115,22 @@ fn env(k: &str) -> Option<String> {
 
 fn env_or(k: &str, d: &str) -> String {
     env(k).unwrap_or_else(|| d.into())
+}
+
+/// Parse the per-agent skill allowlist from `BUZZ_AGENT_SKILLS`. Splits on
+/// commas and whitespace and drops empties; names match the skill `name`
+/// frontmatter exactly (discovery is case-sensitive). Unset/empty → an empty
+/// set, which disables all skills for that agent (the default: agents start
+/// with zero skills).
+fn parse_skills_allowlist(v: Option<&str>) -> HashSet<String> {
+    v.map(|raw| {
+        raw.split(|c: char| c == ',' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn req(k: &str) -> Result<String, String> {
