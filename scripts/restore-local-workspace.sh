@@ -281,8 +281,7 @@ local_workspace_run_bounded \
     --volume "${credentials_file}:/run/minio-credentials:ro" \
     --volume "${backup_dir}/minio:/backup:ro" \
     minio-init -eu -c '
-      user="$(sed -n "1p" /run/minio-credentials)"
-      password="$(sed -n "2p" /run/minio-credentials)"
+      { IFS= read -r user; IFS= read -r password; } < /run/minio-credentials
       mc alias set destination http://minio:9000 "$user" "$password" >/dev/null
       mc mb --ignore-existing destination/buzz-media >/dev/null
       mc mirror --overwrite --remove /backup destination/buzz-media >/dev/null

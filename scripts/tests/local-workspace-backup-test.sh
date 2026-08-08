@@ -358,6 +358,16 @@ chmod 600 "$BUZZ_COMMAND_BRIEF_STORE_PATH"
 [[ -x "$backup_script" ]] || fail "backup script exists and is executable"
 [[ -x "$restore_script" ]] || fail "restore script exists and is executable"
 
+assert_contains "$backup_script" '{ IFS= read -r user; IFS= read -r password; }' \
+  "backup reads MinIO credentials with POSIX shell builtins"
+assert_contains "$restore_script" '{ IFS= read -r user; IFS= read -r password; }' \
+  "restore reads MinIO credentials with POSIX shell builtins"
+if grep -Fq 'sed -n "1p" /run/minio-credentials' \
+  "$backup_script" "$restore_script"; then
+  fail "MinIO helpers must not depend on sed in the minimal mc image"
+fi
+printf 'ok - MinIO credential helpers avoid optional image utilities\n'
+
 assert_fails "backup rejects a relative target" "$backup_script" relative/path
 assert_fails "backup rejects a repository-contained target" \
   "$backup_script" "$repo_root/test-results/local-backup"
