@@ -133,13 +133,13 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 9 | KIND_STREAM_MESSAGE | Chat message in a Stream channel (NIP-29 group chat) |
 | 40002 | KIND_STREAM_MESSAGE_V2 | Stream message v2 format |
 | 40003 | KIND_STREAM_MESSAGE_EDIT | Edit of a stream message |
-| 43001 | KIND_JOB_REQUEST | Agent job request |
+| 43001–43006 | KIND_JOB_* | Agent job events; the optional, zero-I/O MotifOS projection codec is documented in [NIP-AJ](docs/nips/NIP-AJ.md) and is not wired to relay ingress. |
 | 45001 | KIND_FORUM_POST | Forum thread root |
 | 45003 | KIND_FORUM_COMMENT | Forum thread reply |
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
 
-`buzz-core` defines each event kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (127 kinds at the time of writing); `crates/buzz-core/src/kind.rs` is the source of truth for the current list. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
+`buzz-core` defines each event kind as a `pub const u32` and exports the full registry as `ALL_KINDS: &[u32]` (130 kinds at the time of writing); `crates/buzz-core/src/kind.rs` is the source of truth for the current list. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
 Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.rs` and imported by `buzz-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `buzz-core/src/kind.rs`.
 
@@ -343,7 +343,7 @@ pub struct StoredEvent {
     verified: bool,          // private — use is_verified()
 }
 
-pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
+pub const ALL_KINDS: &[u32]  // 130 entries (KIND_AUTH excluded — never stored)
 ```
 
 **Key functions:**
@@ -353,6 +353,7 @@ pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
 | `filters_match(filters, event)` | OR across filters, AND within each filter. Includes NIP-01 prefix matching on event IDs. |
 | `verify_event(event)` | Schnorr signature + SHA-256 ID check. CPU-bound — callers use `spawn_blocking`. |
 | `is_private_ip(ip)` | SSRF protection: IPv4 unspecified/loopback/private/link-local/CGNAT/benchmarking/broadcast + IPv6 loopback/ULA/link-local/multicast/documentation + IPv4-mapped IPv6. |
+| `agent_job::decode` / `agent_job::encode` | Strict, bounded validation for opt-in NIP-AJ projection content. Pure codec only; does not authorize or launch work. |
 
 **Does NOT:** store events, make network calls, spawn tasks, or depend on any async runtime.
 

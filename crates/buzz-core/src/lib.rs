@@ -7,6 +7,9 @@
 
 /// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
 pub mod agent_turn_metric;
+
+/// Strict MotifOS agent-job projection codec for kinds 43001 through 43006.
+pub mod agent_job;
 /// Channel and membership enums shared across crates.
 pub mod channel;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
