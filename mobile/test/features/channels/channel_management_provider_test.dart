@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -11,6 +13,65 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  group('channel canvas live subscription', () {
+    test(
+      'uses the exact canvas filter, streams events, and unsubscribes',
+      () async {
+        final session = _CanvasLiveRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+
+        final events = <NostrEvent>[];
+        final subscription = container.listen(
+          channelCanvasLiveProvider('channel-id'),
+          (_, next) {
+            if (next.value case final event?) events.add(event);
+          },
+        );
+        await container.pump();
+
+        expect(session.filters, hasLength(1));
+        expect(session.filters.single.toJson(), {
+          'kinds': [40100],
+          '#h': ['channel-id'],
+          'limit': 1,
+        });
+
+        session.emit(_canvasEvent('remote-canvas'));
+        await container.pump();
+        expect(events.map((event) => event.id), ['remote-canvas']);
+
+        subscription.close();
+        await container.pump();
+        expect(session.unsubscribeCount, 1);
+      },
+    );
+
+    test('late subscription completion is cleaned up after disposal', () async {
+      final session = _CanvasLiveRelaySession(delaySubscribe: true);
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+
+      final subscription = container.listen(
+        channelCanvasLiveProvider('channel-id'),
+        (_, _) {},
+      );
+      await container.pump();
+      subscription.close();
+      await container.pump();
+
+      session.releaseSubscribe();
+      await Future<void>.delayed(Duration.zero);
+      expect(session.unsubscribeCount, 1);
+    });
+  });
+
   test('extracts unique relay members from current and legacy tags', () {
     final pubkeys = relayMemberPubkeysFromEvents([
       NostrEvent(
@@ -333,6 +394,56 @@ void main() {
       expect(session.searchQueryCount, 2);
     });
   });
+}
+
+NostrEvent _canvasEvent(String id) => NostrEvent(
+  id: id,
+  pubkey: 'agent',
+  createdAt: 1700000000,
+  kind: 40100,
+  tags: const [
+    ['h', 'channel-id'],
+  ],
+  content: 'remote canvas',
+  sig: 'sig',
+);
+
+class _CanvasLiveRelaySession extends RelaySessionNotifier {
+  _CanvasLiveRelaySession({this.delaySubscribe = false});
+
+  final bool delaySubscribe;
+  final filters = <NostrFilter>[];
+  final listeners = <void Function(NostrEvent)>[];
+  final subscribeGate = Completer<void>();
+  int unsubscribeCount = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async {
+    filters.add(filter);
+    listeners.add(onEvent);
+    if (delaySubscribe) await subscribeGate.future;
+    return () {
+      unsubscribeCount++;
+      listeners.remove(onEvent);
+    };
+  }
+
+  void emit(NostrEvent event) {
+    for (final listener in List.of(listeners)) {
+      listener(event);
+    }
+  }
+
+  void releaseSubscribe() {
+    if (!subscribeGate.isCompleted) subscribeGate.complete();
+  }
 }
 
 /// Fake [RelaySessionNotifier] that serves canned kind:0 profile events from

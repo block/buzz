@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import {
   useArchiveChannelMutation,
   useCanvasQuery,
+  useCanvasLiveUpdates,
   useChannelDetailsQuery,
   useChannelMembersQuery,
   useDeleteChannelMutation,
@@ -117,7 +118,9 @@ export function ChannelManagementSheet({
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
-  const canvasQuery = useCanvasQuery(channelId, channelId !== null && open);
+  const canvasEnabled = channelId !== null && open;
+  const canvasQuery = useCanvasQuery(channelId, canvasEnabled);
+  useCanvasLiveUpdates(channelId, canvasEnabled);
   const updateChannelDetailsMutation = useUpdateChannelMutation(channelId);
   const archiveChannelMutation = useArchiveChannelMutation(channelId);
   const unarchiveChannelMutation = useUnarchiveChannelMutation(channelId);

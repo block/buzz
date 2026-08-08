@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import 'channel.dart';
@@ -16,6 +17,15 @@ class ManageChannelSheet extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen<AsyncValue<NostrEvent>>(channelCanvasLiveProvider(channel.id), (
+      previous,
+      next,
+    ) {
+      final event = next.value;
+      if (event != null && event.id != previous?.value?.id) {
+        ref.invalidate(channelCanvasProvider(channel.id));
+      }
+    });
     final canvasAsync = ref.watch(channelCanvasProvider(channel.id));
     final isEditingCanvas = useState(false);
     final isSavingCanvas = useState(false);

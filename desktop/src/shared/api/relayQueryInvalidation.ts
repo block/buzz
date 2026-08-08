@@ -1,3 +1,5 @@
+import { KIND_CANVAS } from "@/shared/constants/kinds";
+
 const RELAY_QUERY_ROOTS = new Set<string>([
   "archivedIdentities",
   "channel-canvas",
@@ -81,4 +83,27 @@ export function isRelayDependentQueryKey(queryKey: readonly unknown[]) {
 
 export function isRelayDependentQuery(query: { queryKey: readonly unknown[] }) {
   return isRelayDependentQueryKey(query.queryKey);
+}
+
+type RelayInvalidationEvent = {
+  kind: number;
+  tags: string[][];
+};
+
+/**
+ * Maps a live relay event to the exact relay-backed queries it makes stale.
+ *
+ * This keeps event-driven refreshes on the same query-invalidation boundary
+ * used by reconnect recovery. Unknown kinds and malformed channel tags are
+ * ignored instead of triggering broad cache invalidation.
+ */
+export function relayEventInvalidationQueryKeys(
+  event: RelayInvalidationEvent,
+): ReadonlyArray<readonly unknown[]> {
+  if (event.kind !== KIND_CANVAS) {
+    return [];
+  }
+
+  const channelId = event.tags.find((tag) => tag[0] === "h")?.[1]?.trim();
+  return channelId ? [["channel-canvas", channelId]] : [];
 }

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildChannelAuxDeletionFilter,
   buildChannelAuxFilter,
+  buildChannelCanvasLiveFilter,
   buildChannelReactionAuxFilter,
   buildChannelStructuralAuxFilter,
   buildHuddleTtsLiveFilter,
@@ -21,6 +22,14 @@ test("huddle TTS filter includes a bounded startup replay for both message kinds
     "#h": [CHANNEL],
     since: 1_725_100_000,
     limit: 50,
+  });
+});
+
+test("canvas live filter is channel-scoped and replays only the latest canvas", () => {
+  assert.deepEqual(buildChannelCanvasLiveFilter(CHANNEL), {
+    kinds: [40100],
+    "#h": [CHANNEL],
+    limit: 1,
   });
 });
 
