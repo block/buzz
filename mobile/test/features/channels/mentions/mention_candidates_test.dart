@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/identity_archive/archived_identities_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 
 final userPubkey = 'a' * 64;
@@ -279,6 +280,71 @@ void main() {
 
       expect(candidates, hasLength(1));
       expect(candidates.single.isMember, isTrue);
+    });
+
+    test('archived identities are excluded from every candidate source', () {
+      final archivedAgent = '9' * 64;
+      final candidates = buildMentionCandidates(
+        members: [
+          member(memberPubkey),
+          member(archivedAgent, role: 'bot'),
+        ],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agentPubkey,
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: {'chan-1'},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        searchResults: [
+          UserProfile(pubkey: archivedAgent, displayName: 'Old Bot'),
+        ],
+        currentPubkey: userPubkey,
+        archivedPubkeys: {archivedAgent},
+      );
+
+      expect(candidates.map((c) => c.pubkey), [memberPubkey, agentPubkey]);
+    });
+
+    test('current user stays mentionable even when archived on the relay', () {
+      final candidates = buildMentionCandidates(
+        members: [member(userPubkey)],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        currentPubkey: userPubkey,
+        archivedPubkeys: {userPubkey},
+      );
+
+      expect(candidates.map((c) => c.pubkey), contains(userPubkey));
+    });
+  });
+
+  group('isArchivedForDiscovery', () {
+    test('returns false while archived set is empty', () {
+      expect(
+        isArchivedForDiscovery(
+          pubkey: agentPubkey,
+          archivedPubkeys: const {},
+          currentPubkey: userPubkey,
+        ),
+        isFalse,
+      );
+    });
+
+    test('never archives the current user', () {
+      expect(
+        isArchivedForDiscovery(
+          pubkey: userPubkey,
+          archivedPubkeys: {userPubkey},
+          currentPubkey: userPubkey,
+        ),
+        isFalse,
+      );
     });
   });
 }

@@ -40,6 +40,9 @@ abstract final class EventKind {
   static const huddleParticipantLeft = 48102;
   static const huddleEnded = 48103;
 
+  /// NIP-IA relay archive snapshot (`kind:13535`).
+  static const archivedIdentitiesList = 13535;
+
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
     streamMessage, // 9

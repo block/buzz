@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/identity_archive/archived_identities_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
@@ -233,15 +234,59 @@ void main() {
       sig: 'sig',
     );
 
-    ProviderContainer buildContainer(_DirectoryFakeRelaySession session) {
+    ProviderContainer buildContainer(
+      _DirectoryFakeRelaySession session, {
+      Set<String> archivedPubkeys = const {},
+    }) {
       return ProviderContainer(
         retry: (_, _) => null,
         overrides: [
           relaySessionProvider.overrideWith(() => session),
           myPubkeyProvider.overrideWithValue('me'),
+          archivedIdentitiesProvider.overrideWith(
+            (ref) async => archivedPubkeys,
+          ),
         ],
       );
     }
+
+    test('browse directory excludes archived identities', () async {
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [
+          profile('active-agent', 'Active Agent'),
+          profile('archived-agent', 'Archived Agent'),
+        ],
+      );
+      final container = buildContainer(
+        session,
+        archivedPubkeys: const {'archived-agent'},
+      );
+      addTearDown(container.dispose);
+
+      final users = await container.read(relayDirectoryUsersProvider.future);
+
+      expect(users.map((user) => user.pubkey), ['active-agent']);
+    });
+
+    test('search directory excludes archived identities', () async {
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [
+          profile('active-agent', 'Active Agent'),
+          profile('archived-agent', 'Archived Agent'),
+        ],
+      );
+      final container = buildContainer(
+        session,
+        archivedPubkeys: const {'archived-agent'},
+      );
+      addTearDown(container.dispose);
+
+      final users = await container.read(
+        relayDirectorySearchProvider('agent').future,
+      );
+
+      expect(users.map((user) => user.pubkey), ['active-agent']);
+    });
 
     test('browse directory refetches when the relay config changes', () async {
       final session = _DirectoryFakeRelaySession(
