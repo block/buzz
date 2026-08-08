@@ -26,7 +26,7 @@ pub enum RuntimeKind {
 }
 
 /// A single MCP server entry in the unified model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Server name (the map key in the runtime's native config).
     pub name: String,
@@ -35,19 +35,44 @@ pub struct McpServerConfig {
     pub command: String,
 
     /// Arguments passed to `command`.
-    #[serde(default)]
     pub args: Vec<String>,
 
     /// Environment variables passed to the server process. May contain
     /// secrets — never log or persist values directly; use [`Self::redacted`]
     /// for display.
-    #[serde(default)]
     pub env: BTreeMap<String, String>,
 
     /// Whether the server is enabled. `None` means the native config did
     /// not specify it (treat as enabled).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("arg_count", &self.args.len())
+            .field("env_names", &self.env.keys().collect::<Vec<_>>())
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// Secret-free view of one native MCP server for inventory and display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpServerInventoryEntry {
+    /// Server name from the native runtime configuration.
+    pub name: String,
+    /// Executable configured for the server.
+    pub command: String,
+    /// Number of configured arguments. Argument values may contain secrets and are omitted.
+    pub arg_count: usize,
+    /// Environment variable names expected by the server. Values are omitted.
+    pub env_names: Vec<String>,
+    /// Whether the native runtime enables this server.
+    pub enabled: bool,
 }
 
 impl McpServerConfig {
@@ -57,23 +82,20 @@ impl McpServerConfig {
         self.enabled.unwrap_or(true)
     }
 
-    /// A copy with every `env` value replaced by a mask, safe to display or
-    /// log. Keys are preserved so operators can still see which variables a
-    /// server expects.
-    pub fn redacted(&self) -> Self {
-        Self {
-            env: self
-                .env
-                .keys()
-                .map(|k| (k.clone(), "<redacted>".to_string()))
-                .collect(),
-            ..self.clone()
+    /// Return a secret-free inventory view safe to display or serialize.
+    pub fn redacted(&self) -> McpServerInventoryEntry {
+        McpServerInventoryEntry {
+            name: self.name.clone(),
+            command: self.command.clone(),
+            arg_count: self.args.len(),
+            env_names: self.env.keys().cloned().collect(),
+            enabled: self.is_enabled(),
         }
     }
 }
 
 /// The MCP configuration of one runtime, in unified form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeMcpConfig {
     /// Which runtime this configuration was read from.
     pub runtime: RuntimeKind,
@@ -82,10 +104,27 @@ pub struct RuntimeMcpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+/// Secret-free native MCP inventory for one runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeMcpInventory {
+    /// Runtime that supplied this inventory.
+    pub runtime: RuntimeKind,
+    /// Native MCP servers with arguments and environment values omitted.
+    pub servers: Vec<McpServerInventoryEntry>,
+}
+
 impl RuntimeMcpConfig {
     /// Servers that are currently active (see [`McpServerConfig::is_enabled`]).
     pub fn enabled_servers(&self) -> impl Iterator<Item = &McpServerConfig> {
         self.servers.iter().filter(|s| s.is_enabled())
+    }
+
+    /// Return a secret-free inventory view safe to display or serialize.
+    pub fn redacted(&self) -> RuntimeMcpInventory {
+        RuntimeMcpInventory {
+            runtime: self.runtime,
+            servers: self.servers.iter().map(McpServerConfig::redacted).collect(),
+        }
     }
 
     /// Validate the configuration, returning all issues found.
@@ -159,20 +198,31 @@ mod tests {
     }
 
     #[test]
-    fn redacted_masks_env_values_but_keeps_keys() {
+    fn redacted_inventory_omits_argument_and_env_values() {
         let mut s = server("a", "npx", None);
+        s.args.push("argument-secret".to_string());
         s.env
             .insert("API_TOKEN".to_string(), "secret-value".to_string());
         let r = s.redacted();
-        assert_eq!(
-            r.env.get("API_TOKEN").map(String::as_str),
-            Some("<redacted>")
-        );
-        // Original is untouched.
-        assert_eq!(
-            s.env.get("API_TOKEN").map(String::as_str),
-            Some("secret-value")
-        );
+        assert_eq!(r.arg_count, 1);
+        assert_eq!(r.env_names, vec!["API_TOKEN"]);
+        let serialized = serde_json::to_string(&r).unwrap();
+        assert!(!serialized.contains("argument-secret"));
+        assert!(!serialized.contains("secret-value"));
+        assert!(serialized.contains("API_TOKEN"));
+    }
+
+    #[test]
+    fn debug_output_omits_argument_and_env_values() {
+        let mut s = server("a", "npx", None);
+        s.args.push("argument-secret".to_string());
+        s.env
+            .insert("API_TOKEN".to_string(), "secret-value".to_string());
+
+        let debug = format!("{s:?}");
+        assert!(!debug.contains("argument-secret"));
+        assert!(!debug.contains("secret-value"));
+        assert!(debug.contains("API_TOKEN"));
     }
 
     #[test]

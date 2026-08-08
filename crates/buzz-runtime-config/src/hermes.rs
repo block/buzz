@@ -32,12 +32,13 @@ pub fn default_config_path() -> Option<PathBuf> {
 
 /// Read and validate MCP servers from a Hermes `config.yaml`.
 pub fn read_mcp_config(path: &Path) -> Result<RuntimeMcpConfig, ConfigError> {
-    let content = std::fs::read_to_string(path)?;
+    let content = crate::read_config(path)?;
     parse_mcp_config(&content)
 }
 
 /// Parse and validate MCP servers from Hermes `config.yaml` content.
 pub fn parse_mcp_config(content: &str) -> Result<RuntimeMcpConfig, ConfigError> {
+    crate::validate_config_size(content.len())?;
     let raw: RawHermesConfig = serde_yaml::from_str(content)?;
     let mut servers: Vec<McpServerConfig> = raw
         .mcp_servers
@@ -183,5 +184,26 @@ mcp_servers:
         let cfg = read_mcp_config(&path).unwrap();
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].name, "t");
+    }
+
+    #[test]
+    fn oversized_config_is_rejected_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            vec![b'x'; crate::RUNTIME_CONFIG_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        let err = read_mcp_config(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::TooLarge { .. }));
+    }
+
+    #[test]
+    fn oversized_in_memory_config_is_rejected_before_parsing() {
+        let content = "x".repeat(crate::RUNTIME_CONFIG_MAX_BYTES as usize + 1);
+        let err = parse_mcp_config(&content).unwrap_err();
+        assert!(matches!(err, ConfigError::TooLarge { .. }));
     }
 }

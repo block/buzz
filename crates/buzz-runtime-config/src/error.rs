@@ -12,6 +12,12 @@ pub enum ConfigError {
     #[error("failed to parse JSON: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("config file exceeds the {limit} byte limit")]
+    TooLarge {
+        /// Maximum config size accepted by the adapter.
+        limit: u64,
+    },
+
     #[error("invalid configuration: {0}")]
     Validation(String),
 }
