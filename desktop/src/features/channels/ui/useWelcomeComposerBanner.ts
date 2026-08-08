@@ -8,11 +8,17 @@ import {
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 
+let welcomeComposerBannerCompleted = false;
+
+export function resetWelcomeComposerBannerState(): void {
+  welcomeComposerBannerCompleted = false;
+}
+
 /**
  * Manages the Welcome-channel composer hint banner's state machine.
  *
- * Tracks which channels have been completed within the session so the banner
- * stays hidden on re-entry. Exposes three transitions:
+ * Tracks completion for the active community session so the single Welcome
+ * banner stays hidden on re-entry. Exposes three transitions:
  * - `completeBanner`: agent-mention path — plays the "Nice work." success
  *   animation before auto-dismissing.
  * - `dismissBanner`: manual X-button path — immediately begins the slide-down
@@ -26,7 +32,6 @@ export function useWelcomeComposerBanner(
   completeBanner: () => void;
   dismissBanner: () => void;
 } {
-  const completedChannelIdsRef = React.useRef(new Set<string>());
   const dismissTimerRef = React.useRef<number | null>(null);
   const hideTimerRef = React.useRef<number | null>(null);
   const [bannerState, setBannerState] =
@@ -50,7 +55,7 @@ export function useWelcomeComposerBanner(
     if (
       activeChannelId &&
       isActiveWelcomeChannel &&
-      completedChannelIdsRef.current.has(activeChannelId)
+      welcomeComposerBannerCompleted
     ) {
       setBannerState("hidden");
       return;
@@ -75,7 +80,7 @@ export function useWelcomeComposerBanner(
     }
 
     clearTimers();
-    completedChannelIdsRef.current.add(activeChannelId);
+    welcomeComposerBannerCompleted = true;
     setBannerState("complete");
     dismissTimerRef.current = window.setTimeout(() => {
       setBannerState("dismissing");
@@ -90,7 +95,7 @@ export function useWelcomeComposerBanner(
     }
 
     clearTimers();
-    completedChannelIdsRef.current.add(activeChannelId);
+    welcomeComposerBannerCompleted = true;
     setBannerState("dismissing");
     scheduleHide();
   }, [activeChannelId, clearTimers, isActiveWelcomeChannel, scheduleHide]);
