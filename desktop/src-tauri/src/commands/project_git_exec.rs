@@ -186,8 +186,18 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
 ///
 /// Git for Windows invokes helpers via MinGW bash, which treats `\` as
 /// escapes. Forward slashes work on every platform git supports.
+///
+/// Git runs `credential.helper` through a shell, so a path with spaces
+/// (e.g. `C:\Users\Jane Doe\…`) gets tokenized and never invoked. Wrap
+/// in single quotes when the path contains a space. A leading `!` (shell
+/// escape) must not be re-wrapped; a leading `>` snorkel is harmless.
 fn credential_helper_config_value(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.contains(' ') && !s.starts_with('!') {
+        format!("'{s}'")
+    } else {
+        s
+    }
 }
 
 fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
@@ -405,6 +415,25 @@ mod tests {
         assert_eq!(
             credential_helper_config_value(&path),
             "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_quotes_spaced_path() {
+        let path = std::path::PathBuf::from("/opt/Buzz Tools/bin/git-credential-nostr");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "'/opt/Buzz Tools/bin/git-credential-nostr'",
+        );
+    }
+
+    #[test]
+    fn credential_helper_config_value_shell_snippet_not_rewrapped() {
+        // `!` prefix = arbitrary shell snippet per git-config docs. Leave alone.
+        let path = std::path::PathBuf::from("!f() { echo token; }; f");
+        assert_eq!(
+            credential_helper_config_value(&path),
+            "!f() { echo token; }; f",
         );
     }
 
