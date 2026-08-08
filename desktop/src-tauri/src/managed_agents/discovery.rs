@@ -445,6 +445,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        "kimi" => Some(vec!["acp".to_string()]),
         _ => None,
     }
 }
@@ -454,6 +455,20 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         .into_iter()
         .map(|arg| arg.trim().to_string())
         .filter(|arg| !arg.is_empty())
+        .map(|arg| {
+            // Canonicalize a stray `--acp`/`-acp` flag form to the bare `acp`
+            // subcommand. Subcommand-style harnesses (kimi, omp, opencode,
+            // devin, cursor-agent, goose…) reject the flag form outright
+            // ("unknown option '--acp'"), and earlier releases persisted
+            // `--acp` into harness definitions and instance args. The flag
+            // form is never meaningful input for a flag-style CLI, so this is
+            // a pure repair with no behaviour change for flag-style agents.
+            if arg.eq_ignore_ascii_case("--acp") || arg.eq_ignore_ascii_case("-acp") {
+                "acp".to_string()
+            } else {
+                arg
+            }
+        })
         .collect::<Vec<_>>();
 
     let Some(default_args) = default_agent_args(command) else {
