@@ -87,6 +87,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { ReplyMentionSettingsCard } from "./ReplyMentionSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
@@ -933,20 +934,25 @@ export function renderSettingsSection(
       );
     case "notifications":
       return (
-        <NotificationSettingsCard
-          isUpdatingDesktopNotifications={props.isUpdatingDesktopNotifications}
-          notificationErrorMessage={props.notificationErrorMessage}
-          notificationPermission={props.notificationPermission}
-          notificationSettings={props.notificationSettings}
-          onSetDesktopNotificationsEnabled={
-            props.onSetDesktopNotificationsEnabled
-          }
-          onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
-          onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
-          onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
-          onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
-          onSetSoundForSlot={props.onSetSoundForSlot}
-        />
+        <div className="space-y-12">
+          <NotificationSettingsCard
+            isUpdatingDesktopNotifications={
+              props.isUpdatingDesktopNotifications
+            }
+            notificationErrorMessage={props.notificationErrorMessage}
+            notificationPermission={props.notificationPermission}
+            notificationSettings={props.notificationSettings}
+            onSetDesktopNotificationsEnabled={
+              props.onSetDesktopNotificationsEnabled
+            }
+            onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
+            onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
+            onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
+            onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
+            onSetSoundForSlot={props.onSetSoundForSlot}
+          />
+          <ReplyMentionSettingsCard currentPubkey={props.currentPubkey} />
+        </div>
       );
     case "voice":
       return <VoiceSettingsCard />;
