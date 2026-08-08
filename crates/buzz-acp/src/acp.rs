@@ -2359,6 +2359,66 @@ mod tests {
         assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
     }
 
+    /// Exercise the production prompt read loop rather than duplicating its
+    /// option-selection logic. In the default adapter mode, the adapter asks
+    /// for each permission and Buzz must answer that exact request before the
+    /// prompt can complete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_loop_answers_allow_once_permission_on_wire() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-default-mode-permission-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let script = format!(
+            "read -r _prompt; \
+             printf '%s\\n' '{request}'; \
+             read -r decision; \
+             printf '%s' \"$decision\" > \"$1\"; \
+             printf '%s\\n' '{result}'; \
+             sleep 1",
+            request = r#"{"jsonrpc":"2.0","id":"permission-7","method":"session/request_permission","params":{"options":[{"optionId":"deny-1","name":"Deny","kind":"reject_once"},{"optionId":"grant-7","name":"Allow once","kind":"allow_once"}]}}"#,
+            result = r#"{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}"#,
+        );
+        let mut client = AcpClient::spawn(
+            "bash",
+            &[
+                "-c".into(),
+                script,
+                "buzz-acp-permission-test".into(),
+                capture.to_string_lossy().into_owned(),
+            ],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn permission test adapter");
+
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                "session-1",
+                "reply",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("permission response should let the prompt complete");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let written = std::fs::read_to_string(&capture).expect("captured permission response");
+        let response: serde_json::Value =
+            serde_json::from_str(&written).expect("permission response is valid JSON");
+        assert_eq!(response["id"].as_str(), Some("permission-7"));
+        assert_eq!(response["result"]["outcome"]["outcome"], "selected");
+        assert_eq!(
+            response["result"]["outcome"]["optionId"].as_str(),
+            Some("grant-7")
+        );
+
+        client.shutdown().await;
+        std::fs::remove_file(capture).expect("remove permission capture");
+    }
+
     #[test]
     fn request_has_id_field() {
         let id: u64 = 42;
