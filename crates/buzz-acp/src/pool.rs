@@ -564,6 +564,11 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Opt-in compatibility fallback for ACP adapters that return assistant
+    /// text but do not call `buzz messages send` themselves. Disabled by
+    /// default to preserve the normal CLI-publish contract and avoid duplicate
+    /// messages from agents that already publish through Buzz.
+    pub auto_publish_responses: bool,
 }
 
 impl AgentPool {
@@ -2110,6 +2115,8 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        let response = agent.acp.take_turn_response();
+                        maybe_publish_auto_response(&ctx, &source, batch.as_ref(), response).await;
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2138,6 +2145,9 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            let response = agent.acp.take_turn_response();
+            maybe_publish_auto_response(&ctx, &source, batch.as_ref(), response).await;
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3863,6 +3873,100 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
     }
+}
+
+/// Build a signed kind:9 reply for the ACP-output compatibility fallback.
+///
+/// A top-level trigger becomes the root of a new thread; an existing thread
+/// keeps its root and replies to the latest parent. The caller controls whether
+/// this fallback is enabled, so the default agent/CLI publish contract remains
+/// unchanged.
+fn build_auto_response_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    content: &str,
+) -> Result<nostr::Event, String> {
+    let parsed = crate::queue::parse_thread_tags(triggering_event);
+    let thread_ref = match (parsed.root_event_id, parsed.parent_event_id) {
+        (Some(root), parent) => {
+            let root_event_id = nostr::EventId::from_hex(&root)
+                .map_err(|e| format!("invalid thread root event ID: {e}"))?;
+            let parent_event_id = parent
+                .as_deref()
+                .and_then(|id| nostr::EventId::from_hex(id).ok())
+                .unwrap_or(root_event_id);
+            Some(buzz_sdk::ThreadRef {
+                root_event_id,
+                parent_event_id,
+            })
+        }
+        (None, None) => Some(buzz_sdk::ThreadRef {
+            root_event_id: triggering_event.id,
+            parent_event_id: triggering_event.id,
+        }),
+        (None, Some(_)) => unreachable!("parse_thread_tags normalizes reply-only tags"),
+    };
+    let builder =
+        buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
+            .map_err(|e| format!("build response event: {e}"))?;
+    builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("sign response event: {e}"))
+}
+
+/// Best-effort: post the ACP response back into the originating Buzz thread.
+/// This is only called when `auto_publish_responses` is explicitly enabled.
+async fn post_auto_response(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    content: &str,
+) {
+    let event = match build_auto_response_event(&rest.keys, channel_id, triggering_event, content) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "ACP auto-response build failed: {error}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {
+            tracing::info!(channel = %channel_id, event_id = %event.id, "ACP response published to Buzz")
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "ACP auto-response publish failed: {error}")
+        }
+        Err(_) => tracing::warn!(channel = %channel_id, "ACP auto-response publish timed out"),
+    }
+}
+
+/// Best-effort: publish one ACP response when the opt-in compatibility fallback
+/// is enabled. Heartbeats and empty responses are deliberately ignored.
+async fn maybe_publish_auto_response(
+    ctx: &PromptContext,
+    source: &PromptSource,
+    batch: Option<&FlushBatch>,
+    response: Option<String>,
+) {
+    if !ctx.auto_publish_responses {
+        return;
+    }
+    let (PromptSource::Channel(channel_id), Some(batch), Some(response)) =
+        (source, batch, response)
+    else {
+        return;
+    };
+    let Some(triggering_event) = batch.events.last() else {
+        return;
+    };
+    post_auto_response(
+        &ctx.rest_client,
+        *channel_id,
+        &triggering_event.event,
+        &response,
+    )
+    .await;
 }
 
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
@@ -6542,7 +6646,46 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            auto_publish_responses: false,
         }
+    }
+
+    #[test]
+    fn auto_response_event_replies_to_triggering_message() {
+        let channel_id = Uuid::new_v4();
+        let trigger_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let trigger = buzz_sdk::build_message(
+            channel_id,
+            "@Bumble canary",
+            None,
+            &[&agent_keys.public_key().to_hex()],
+            false,
+            &[],
+        )
+        .expect("trigger builder")
+        .sign_with_keys(&trigger_keys)
+        .expect("trigger event");
+
+        let response = build_auto_response_event(
+            &agent_keys,
+            channel_id,
+            &trigger,
+            "BUMBLE_CANARY_OK — SHADOW ONLY",
+        )
+        .expect("auto response event");
+
+        assert_eq!(response.kind, nostr::Kind::Custom(9));
+        assert_eq!(response.content, "BUMBLE_CANARY_OK — SHADOW ONLY");
+        assert!(response
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["h".to_string(), channel_id.to_string()] }));
+        assert!(response.tags.iter().any(|tag| {
+            tag.as_slice()[0] == "e"
+                && tag.as_slice()[1] == trigger.id.to_hex()
+                && tag.as_slice()[3] == "reply"
+        }));
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

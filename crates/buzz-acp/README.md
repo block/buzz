@@ -259,6 +259,16 @@ Forum event kinds:
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
+### ACP output compatibility fallback
+
+Some ACP adapters return assistant text over `session/update` but do not call
+the Buzz CLI themselves. For a deliberately isolated adapter canary, set
+`--auto-publish-responses` (or `BUZZ_ACP_AUTO_PUBLISH_RESPONSES=true`) to have
+`buzz-acp` publish one signed kind:9 reply to the originating thread after a
+successful channel turn. It is off by default: do not enable it for an agent
+that already publishes through Buzz CLI, or replies will be duplicated. Empty
+responses, heartbeats, and failed turns are never published.
+
 > **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
 
 ## Bring Your Own Harness (BYOH)

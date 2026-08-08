@@ -211,6 +211,11 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// ACP assistant text accumulated from `agent_message_chunk` updates for
+    /// the current prompt. The normal contract is that the agent publishes
+    /// through Buzz CLI; the opt-in harness fallback consumes this buffer when
+    /// an adapter only returns text over ACP.
+    turn_response: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +555,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_response: String::new(),
         })
     }
 
@@ -768,6 +774,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.turn_response.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -865,6 +872,14 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.steering_supported
+    }
+
+    /// Take the assistant text captured during the most recent ACP turn.
+    /// Empty/whitespace-only turns are not publishable responses.
+    pub fn take_turn_response(&mut self) -> Option<String> {
+        let response = std::mem::take(&mut self.turn_response);
+        let trimmed = response.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1731,6 +1746,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_response.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3552,6 +3568,27 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_are_captured_for_relay_fallback() {
+        let mut client = spawn_inert_client().await;
+        client.handle_session_update(&serde_json::json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"text": "hello "}
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"text": "world"}
+            }}
+        }));
+
+        assert_eq!(client.take_turn_response().as_deref(), Some("hello world"));
+        assert_eq!(client.take_turn_response(), None);
+        client.shutdown().await;
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
