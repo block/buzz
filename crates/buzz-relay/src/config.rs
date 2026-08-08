@@ -249,6 +249,12 @@ pub struct Config {
     pub git_repo_path: std::path::PathBuf,
     /// Parent directory for process-isolated immutable pack cache sessions.
     pub git_pack_cache_path: std::path::PathBuf,
+    /// Conditional-request compatibility for the git object-store backend.
+    ///
+    /// Defaults to standards-compliant, opaque ETag forwarding. Set
+    /// `BUZZ_GIT_S3_COMPATIBILITY=ceph-rgw` only for Ceph RGW deployments that
+    /// reject quoted ETags in `If-Match`.
+    pub git_s3_compatibility: crate::api::git::store::S3BackendCompatibility,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
     /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
@@ -827,6 +833,27 @@ impl Config {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
         )?;
+        let git_s3_compatibility = match std::env::var("BUZZ_GIT_S3_COMPATIBILITY") {
+            Err(std::env::VarError::NotPresent) => {
+                crate::api::git::store::S3BackendCompatibility::Standard
+            }
+            Ok(value) if value.eq_ignore_ascii_case("standard") => {
+                crate::api::git::store::S3BackendCompatibility::Standard
+            }
+            Ok(value) if value.eq_ignore_ascii_case("ceph-rgw") => {
+                crate::api::git::store::S3BackendCompatibility::CephRgw
+            }
+            Ok(value) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_GIT_S3_COMPATIBILITY must be 'standard' or 'ceph-rgw', got {value:?}"
+                )));
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_GIT_S3_COMPATIBILITY must be valid Unicode".to_string(),
+                ));
+            }
+        };
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1027,6 +1054,7 @@ impl Config {
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,
+            git_s3_compatibility,
             git_max_pack_bytes,
             git_max_repo_bytes,
             git_pack_cache_max_bytes,
@@ -1157,6 +1185,37 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+        assert_eq!(
+            config.git_s3_compatibility,
+            crate::api::git::store::S3BackendCompatibility::Standard,
+            "git S3 compatibility must default to standards-compliant ETag forwarding"
+        );
+    }
+
+    #[test]
+    fn git_s3_compatibility_is_explicit_and_validated() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_GIT_S3_COMPATIBILITY");
+
+        std::env::set_var("BUZZ_GIT_S3_COMPATIBILITY", "ceph-rgw");
+        let ceph = Config::from_env().expect("Ceph compatibility config");
+        assert_eq!(
+            ceph.git_s3_compatibility,
+            crate::api::git::store::S3BackendCompatibility::CephRgw
+        );
+
+        std::env::set_var("BUZZ_GIT_S3_COMPATIBILITY", "auto");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::InvalidValue(message))
+                if message.contains("BUZZ_GIT_S3_COMPATIBILITY")
+        ));
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_GIT_S3_COMPATIBILITY", value);
+        } else {
+            std::env::remove_var("BUZZ_GIT_S3_COMPATIBILITY");
+        }
     }
 
     #[test]

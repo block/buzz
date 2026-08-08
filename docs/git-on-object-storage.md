@@ -366,7 +366,11 @@ conditional writes cannot admit a backend against it.
 4. **ETag-token consistency.** Verify HEAD-path and GET-path ETag extraction
    agree byte-for-byte (quoting included). `If-Match` compares tokens literally;
    a quote mismatch between the read path and the write path silently tests the
-   wrong thing. The probe must use the exact token format the pointer write uses.
+   wrong thing. The standard S3/MinIO policy therefore forwards the token
+   byte-for-byte. Ceph RGW deployments that reject quoted `If-Match` values may
+   explicitly select `BUZZ_GIT_S3_COMPATIBILITY=ceph-rgw`, which removes one
+   surrounding quote pair only for that header. The probe must use the exact
+   token format selected for the pointer write.
 
 **Proof surface (explicit non-goals of the probe and the design).** The protocol
 depends only on conditional writes of *small single objects* (the manifest
