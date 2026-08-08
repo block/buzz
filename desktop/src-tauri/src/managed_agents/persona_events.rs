@@ -239,12 +239,78 @@ pub async fn flush_pending_events(
 /// The scope snapshots its relay, owner keys, and database path together
 /// before network work starts. Switching communities during the flush cannot
 /// redirect rows from the old scope into the new relay.
+///
+/// Prefer [`flush_all_pending_events`]: draining only the active scope is what
+/// stranded definitions queued in a community the user has since left. Kept for
+/// the tests that pin single-scope behaviour, and so a caller that genuinely
+/// wants one scope has a name for it.
+#[cfg(test)]
 pub async fn flush_active_pending_events(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<u32, String> {
     let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
     flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+}
+
+/// Flush EVERY retention scope, each to its own relay.
+///
+/// The bug this closes: a definition is retained with `pending_sync = 1` in the
+/// scope that was active when it was authored, and the flush loop only ever
+/// drained the ACTIVE scope. Switch or leave that community and the row is
+/// never retried again — not on restart, not ever. The agent then exists only
+/// on the device that created it, and every other client renders it as
+/// "Unknown" with a "Configuration missing" badge. No amount of retrying from
+/// the new community could fix it, because the rows were never in the new
+/// community's database.
+///
+/// Each scope publishes to ITS OWN relay, never the active one: republishing
+/// community A's definitions onto community B's relay is the leak the per-scope
+/// split exists to prevent.
+///
+/// A scope whose relay is unknown (a database written before scopes were
+/// stamped) is counted and reported rather than guessed at. One log line per
+/// sweep, only when such rows exist — silence here is what let the original bug
+/// hide for so long.
+///
+/// Best-effort per scope: one unreachable relay leaves its rows pending and
+/// does not stop the others. Returns the total events accepted across scopes.
+pub async fn flush_all_pending_events(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<u32, String> {
+    use crate::managed_agents::retention::{get_pending_sync, open_retention_db};
+
+    let owner_keys = state.signing_keys()?;
+    let scopes = crate::managed_agents::retention::all_retention_scopes(app, state)?;
+
+    let mut flushed = 0u32;
+    let mut stranded = 0usize;
+    for scope in scopes {
+        let Some(relay_url) = scope.relay_url else {
+            // Count what is stuck so the operator can see it, but never guess a
+            // destination for it.
+            if let Ok(conn) = open_retention_db(&scope.db_path) {
+                stranded += get_pending_sync(&conn).map(|rows| rows.len()).unwrap_or(0);
+            }
+            continue;
+        };
+        match flush_pending_events_at(&scope.db_path, state, &relay_url, &owner_keys).await {
+            Ok(count) => flushed += count,
+            Err(error) => {
+                eprintln!("buzz-desktop: event-flush scope {relay_url}: {error}");
+            }
+        }
+    }
+
+    if stranded > 0 {
+        eprintln!(
+            "buzz-desktop: event-flush: {stranded} pending event(s) in retention \
+             scope(s) with no recorded relay — they cannot be published until \
+             their community is opened again"
+        );
+    }
+    Ok(flushed)
 }
 
 async fn flush_pending_events_at(
@@ -269,6 +335,11 @@ async fn flush_pending_events_at(
     let mut flushed = 0u32;
     let mut failed_tombstones: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
+    // A rejected row used to vanish here without a single log line, so a
+    // definition the relay keeps refusing retried every 30s forever and the
+    // operator never learned. Collected and reported as ONE line per sweep:
+    // enough to see it, bounded when the relay is simply unreachable.
+    let mut refused: Vec<String> = Vec::new();
     for row in pending {
         if row.pubkey != owner_pubkey {
             continue;
@@ -306,15 +377,18 @@ async fn flush_pending_events_at(
             event
         };
 
-        if crate::relay::submit_signed_event_at_with_keys(
+        if let Err(error) = crate::relay::submit_signed_event_at_with_keys(
             &event,
             state,
             &relay_api_base,
             owner_keys,
         )
         .await
-        .is_err()
         {
+            refused.push(format!(
+                "kind:{} '{}' ({error})",
+                current.kind, current.d_tag
+            ));
             if current.kind == 5 {
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
             }
@@ -331,6 +405,14 @@ async fn flush_pending_events_at(
             &current.content,
         )?;
         flushed += 1;
+    }
+
+    if !refused.is_empty() {
+        eprintln!(
+            "buzz-desktop: event-flush: {} event(s) still pending after this sweep at {relay_url}: {}",
+            refused.len(),
+            refused.join("; ")
+        );
     }
 
     Ok(flushed)

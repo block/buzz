@@ -140,11 +140,121 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
             raw_event TEXT NOT NULL,
             pending_sync INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (kind, pubkey, d_tag)
+        );
+        CREATE TABLE IF NOT EXISTS scope_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )
     .map_err(|e| format!("failed to create retention table: {e}"))?;
 
     Ok(conn)
+}
+
+/// `scope_meta` key holding the relay URL this database's rows belong to.
+const SCOPE_META_RELAY_URL: &str = "relay_url";
+
+/// Stamp this database with the relay its rows publish to.
+///
+/// [`scoped_retention_db_path`] hashes `(owner, relay)` into the filename, and
+/// a hash cannot be reversed — so without this stamp there is no way to look at
+/// a retention database on disk and know where its pending rows should go. That
+/// is precisely why the flush loop could only ever drain the ACTIVE community:
+/// it was the only scope whose relay was known. Recording the relay at scope
+/// resolution makes every scope self-describing, so
+/// [`all_retention_scopes`] can hand the flush loop a relay per database.
+///
+/// Idempotent, and best-effort by design: a write failure here must never break
+/// resolving a scope, since every read and write path depends on it.
+pub fn record_scope_relay(conn: &Connection, relay_url: &str) {
+    let normalized = normalized_relay_scope(relay_url);
+    if normalized.is_empty() {
+        return;
+    }
+    if let Err(error) = conn.execute(
+        "INSERT INTO scope_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![SCOPE_META_RELAY_URL, normalized],
+    ) {
+        eprintln!("buzz-desktop: retention-scope-stamp: {error}");
+    }
+}
+
+/// The relay this database's rows belong to, if it has been stamped.
+///
+/// `None` for a database written before the stamp existed, or by a build that
+/// does not write it. Callers must treat that as "unknown", never as the active
+/// relay — publishing community A's events to community B's relay is the exact
+/// failure the per-scope split exists to prevent.
+pub fn read_scope_relay(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM scope_meta WHERE key = ?1",
+        params![SCOPE_META_RELAY_URL],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .filter(|value| !value.trim().is_empty())
+}
+
+/// One retention database on disk, with the relay it belongs to if known.
+pub struct DiscoveredScope {
+    pub db_path: PathBuf,
+    /// `None` when the database predates the relay stamp; its pending rows
+    /// cannot be published because their destination is unknowable.
+    pub relay_url: Option<String>,
+}
+
+/// Every retention database for this owner, not just the active community's.
+///
+/// The active scope is resolved first (and stamped in passing), so it is always
+/// present and always has a known relay even on a first run. Remaining
+/// databases are read from disk and identified by their own stamp.
+///
+/// Databases belonging to a DIFFERENT owner are indistinguishable from this
+/// owner's here — the filename hash covers both — so a scope is only ever
+/// flushed for rows whose `pubkey` matches the signing key, which
+/// `flush_pending_events_at` already enforces per row.
+pub fn all_retention_scopes(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<Vec<DiscoveredScope>, String> {
+    let active = active_retention_scope(app, state)?;
+    if let Ok(conn) = open_retention_db(&active.db_path) {
+        record_scope_relay(&conn, &active.relay_url);
+    }
+
+    let mut scopes = vec![DiscoveredScope {
+        db_path: active.db_path.clone(),
+        relay_url: Some(active.relay_url.clone()),
+    }];
+
+    let dir = match active.db_path.parent() {
+        Some(dir) => dir,
+        None => return Ok(scopes),
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // A missing directory is not an error: it just means no other scope
+        // has ever been written.
+        Err(_) => return Ok(scopes),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == active.db_path || path.extension().is_none_or(|ext| ext != "db") {
+            continue;
+        }
+        let relay_url = open_retention_db(&path)
+            .ok()
+            .and_then(|conn| read_scope_relay(&conn));
+        scopes.push(DiscoveredScope {
+            db_path: path,
+            relay_url,
+        });
+    }
+    Ok(scopes)
 }
 
 fn set_wal_mode(conn: &Connection) -> Result<(), String> {
@@ -930,5 +1040,137 @@ mod tests {
             "other-persona",
             &failed
         ));
+    }
+
+    /// A retention database is stamped with the relay it belongs to, so a later
+    /// sweep can publish its rows without knowing which community was active
+    /// when they were written.
+    #[test]
+    fn a_scope_records_and_reports_the_relay_it_belongs_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = scoped_retention_db_path(dir.path(), "wss://a.example", "ownerpubkey");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = open_retention_db(&db_path).unwrap();
+
+        assert_eq!(
+            read_scope_relay(&conn),
+            None,
+            "an unstamped database must report unknown, never a guess"
+        );
+
+        record_scope_relay(&conn, "wss://a.example");
+        assert_eq!(read_scope_relay(&conn), Some("wss://a.example".to_string()));
+    }
+
+    /// The stamp normalizes exactly like the path hash does, so a trailing
+    /// slash cannot make one scope look like two.
+    #[test]
+    fn the_recorded_relay_is_normalized_like_the_scope_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = scoped_retention_db_path(dir.path(), "wss://a.example", "ownerpubkey");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = open_retention_db(&db_path).unwrap();
+
+        record_scope_relay(&conn, "  wss://a.example/  ");
+
+        assert_eq!(read_scope_relay(&conn), Some("wss://a.example".to_string()));
+        assert_eq!(
+            scoped_retention_db_path(dir.path(), "wss://a.example/", "ownerpubkey"),
+            db_path,
+            "path hashing and the stamp must agree on what one scope is"
+        );
+    }
+
+    /// Re-stamping is idempotent: a scope opened on every sweep must not
+    /// accumulate rows or change its answer.
+    #[test]
+    fn re_recording_the_same_relay_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = scoped_retention_db_path(dir.path(), "wss://a.example", "ownerpubkey");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = open_retention_db(&db_path).unwrap();
+
+        record_scope_relay(&conn, "wss://a.example");
+        record_scope_relay(&conn, "wss://a.example");
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scope_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(read_scope_relay(&conn), Some("wss://a.example".to_string()));
+    }
+
+    /// An empty relay is not a relay. Stamping one would be worse than leaving
+    /// the scope unknown, because the flush loop would then try to publish to
+    /// nowhere instead of reporting the rows as stranded.
+    #[test]
+    fn an_empty_relay_is_never_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = scoped_retention_db_path(dir.path(), "wss://a.example", "ownerpubkey");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = open_retention_db(&db_path).unwrap();
+
+        record_scope_relay(&conn, "   ");
+
+        assert_eq!(read_scope_relay(&conn), None);
+    }
+
+    /// THE REGRESSION THIS FIX EXISTS FOR.
+    ///
+    /// A definition authored in community A is retained pending in A's
+    /// database. The user switches to community B. Before this fix the flush
+    /// loop resolved only B's scope, so A's row was never retried again — not
+    /// on the next sweep, not on restart, ever — and the agent showed up as
+    /// "Unknown / Configuration missing" in every other client.
+    ///
+    /// Scope discovery is the part that was missing: A's database must still be
+    /// found from B, and must still name A's relay rather than B's.
+    #[test]
+    fn a_scope_left_behind_is_still_discoverable_and_still_names_its_own_relay() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "ownerpubkey";
+        let community_a = scoped_retention_db_path(dir.path(), "wss://a.example", owner);
+        let community_b = scoped_retention_db_path(dir.path(), "wss://b.example", owner);
+        std::fs::create_dir_all(community_a.parent().unwrap()).unwrap();
+
+        for (path, relay) in [
+            (&community_a, "wss://a.example"),
+            (&community_b, "wss://b.example"),
+        ] {
+            let conn = open_retention_db(path).unwrap();
+            record_scope_relay(&conn, relay);
+        }
+
+        // Community B is active; walk the directory the way `all_retention_scopes`
+        // does and confirm A is found, carrying A's relay.
+        let mut discovered: Vec<(std::path::PathBuf, Option<String>)> =
+            std::fs::read_dir(community_b.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+                .map(|path| {
+                    let relay = open_retention_db(&path)
+                        .ok()
+                        .and_then(|conn| read_scope_relay(&conn));
+                    (path, relay)
+                })
+                .collect();
+        discovered.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(discovered.len(), 2, "both scopes must be visible from either");
+        let relay_for = |target: &std::path::Path| {
+            discovered
+                .iter()
+                .find(|(path, _)| path == target)
+                .and_then(|(_, relay)| relay.clone())
+        };
+        assert_eq!(relay_for(&community_a), Some("wss://a.example".to_string()));
+        assert_eq!(relay_for(&community_b), Some("wss://b.example".to_string()));
+        assert_ne!(
+            relay_for(&community_a),
+            relay_for(&community_b),
+            "a left-behind scope must never inherit the active community's relay"
+        );
     }
 }
