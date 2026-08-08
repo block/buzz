@@ -221,7 +221,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                       },
                     }
                   : testInfo.title.includes(
-                        "send waits for an in-flight link preview snapshot upload",
+                        "Enter during an in-flight snapshot upload",
                       )
                     ? {
                         linkPreviewMetadata: {
@@ -235,36 +235,57 @@ test.beforeEach(async ({ page }, testInfo) => {
                         linkPreviewMetadataDelayMs: 300,
                         linkPreviewUploadDelayMs: 1_200,
                       }
-                    : testInfo.title.includes("link preview") ||
-                        testInfo.title.includes("supported Compact")
+                    : testInfo.title.includes(
+                          "snapshot thumbnail upload failure",
+                        )
                       ? {
                           linkPreviewMetadata: {
                             title: "Buzz pull request",
                             siteName: "GitHub",
                             description: "A sender-authored preview snapshot.",
-                            imageDataUrl: null,
-                            imageDomain: null,
+                            imageDataUrl:
+                              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                            imageDomain: "opengraph.githubassets.com",
+                            faviconDataUrl:
+                              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                           },
-                          linkPreviewMetadataDelayMs: testInfo.title.includes(
-                            "loading card before cold resolver work",
-                          )
-                            ? 10_000
-                            : testInfo.title.includes("send does not wait")
-                              ? 3_000
-                              : testInfo.title.includes("style defaults") ||
-                                  testInfo.title.includes("attachment-sized")
-                                ? 1_500
-                                : undefined,
-                          linkPreviewMetadataStartBlockMs:
-                            testInfo.title.includes(
+                          // Fail only the thumbnail upload; the favicon survives,
+                          // so the snapshot degrades to a favicon-only preview.
+                          linkPreviewUploadErrorFilenames: [
+                            "link-preview-image",
+                          ],
+                        }
+                      : testInfo.title.includes("link preview") ||
+                          testInfo.title.includes("supported Compact")
+                        ? {
+                            linkPreviewMetadata: {
+                              title: "Buzz pull request",
+                              siteName: "GitHub",
+                              description:
+                                "A sender-authored preview snapshot.",
+                              imageDataUrl: null,
+                              imageDomain: null,
+                            },
+                            linkPreviewMetadataDelayMs: testInfo.title.includes(
                               "loading card before cold resolver work",
                             )
-                              ? 150
-                              : undefined,
-                        }
-                      : undefined;
+                              ? 10_000
+                              : testInfo.title.includes("send does not wait")
+                                ? 3_000
+                                : testInfo.title.includes("style defaults") ||
+                                    testInfo.title.includes("attachment-sized")
+                                  ? 1_500
+                                  : undefined,
+                            linkPreviewMetadataStartBlockMs:
+                              testInfo.title.includes(
+                                "loading card before cold resolver work",
+                              )
+                                ? 150
+                                : undefined,
+                          }
+                        : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
-    ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 150 }
+    ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
   await installMockBridge(page, mock);
 });
@@ -751,46 +772,49 @@ test("send does not wait for a pending link preview snapshot", async ({
   expect(linkPreviewTags ?? []).toEqual([]);
 });
 
-test("send waits for an in-flight link preview snapshot upload", async ({
+test("Enter during an in-flight snapshot upload cannot ship a bare link", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246";
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await page.getByTestId("message-input").fill(previewUrl);
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
 
   const composerPreviews = page.locator("[data-composer-link-previews]");
   const card = composerPreviews.locator("[data-link-preview-composer-card]");
   await expect(card).toBeVisible();
-  // From the moment the preview appears (metadata still resolving) Send is
-  // disabled, so the button never flashes ready before the snapshot is built.
-  await expect(page.getByTestId("send-message")).toBeDisabled();
   // Metadata resolves (image painted) but the sendable tag is not ready yet:
-  // the snapshot media upload is still in flight, so the card must NOT claim
-  // "done" and no tag is captured.
+  // the snapshot media upload is still in flight (linkPreviewUploadDelayMs), so
+  // the composer reports the preview as still pending.
   await expect(card).toHaveAttribute("data-image-state", "image");
   await expect(card).toHaveAttribute("data-snapshot-tag-ready", "false");
-  await expect(composerPreviews).toHaveAttribute(
-    "data-ready-snapshot-count",
-    "0",
-  );
   await expect(composerPreviews).toHaveAttribute(
     "data-has-pending-snapshots",
     "true",
   );
-  // Send stays disabled across the whole settle window (pending -> uploading),
-  // mirroring the attachment-upload guard, so the button visibly reflects "not
-  // ready yet" without flickering.
-  await expect(page.getByTestId("send-message")).toBeDisabled();
 
-  // Once the upload settles the tag is captured, the card claims "done", and
-  // Send re-enables.
+  // Drive Enter (not a disabled-button click, which the browser swallows on its
+  // own) while the upload is deterministically in flight. The synchronous submit
+  // guard must reject it: no send_channel_message call may occur before the tag
+  // is ready, or the link would ship bare. This is the core Enter-bypass fix —
+  // the disabled state is enforced on the keyboard path, not just the button.
+  await expect(input).toBeFocused();
+  await input.press("Enter");
+  await input.press("Enter");
+  const sendsDuringUpload = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+  expect(sendsDuringUpload).toBe(0);
+
+  // Once the upload settles the tag is captured and Send re-enables. Sending
+  // now lands the preview snapshot matching the body.
   await expect(card).toHaveAttribute("data-snapshot-tag-ready", "true");
   await expect(page.getByTestId("send-message")).toBeEnabled();
-
-  // Sending immediately must still land the preview: Send waits for the
-  // in-flight upload rather than shipping a bare link.
-  await page.getByTestId("send-message").click();
+  await input.press("Enter");
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toBeVisible();
@@ -804,6 +828,166 @@ test("send waits for an in-flight link preview snapshot upload", async ({
     )?.linkPreviewTags;
   });
   expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("rapid Enter presses on a ready link preview send exactly once", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?rapid=1";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+
+  // Wait until the snapshot is fully ready and Send is enabled, so the only
+  // thing under test is the composer-local send lock — not preview settling.
+  await waitForReadyComposerSnapshots(page);
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
+  // Mash Enter. The synchronous submit lock (isSubmitLockedRef), acquired before
+  // any await, must collapse these into exactly one send_channel_message so a
+  // duplicate cannot clear shared prep/hydration state mid-send.
+  await input.press("Enter");
+  await input.press("Enter");
+  await input.press("Enter");
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    )
+    .toBe(1);
+});
+
+test("pasting a link preview and immediately pressing Enter waits for resolution", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?fast=send";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+
+  // Fill the URL and press Enter within the debounce window, before resolution
+  // has even started. The live-candidate guard must treat the unresolved link
+  // as pending and reject the Enter, so the message cannot ship bare.
+  await input.fill(previewUrl);
+  await input.press("Enter");
+  const sendsBeforeResolution = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+  expect(sendsBeforeResolution).toBe(0);
+
+  // The debounce fires, resolution + upload complete, and only then does Send
+  // become available. A press now lands the snapshot.
+  await waitForReadyComposerSnapshots(page);
+  await input.press("Enter");
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("a snapshot thumbnail upload failure toasts and still sends with the favicon", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?upload=fail";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+
+  // The thumbnail upload is configured to reject while the favicon succeeds.
+  // The preview must degrade to the surviving favicon rather than dropping the
+  // whole card or spinning forever: a tag still lands, Send still enables.
+  await waitForReadyComposerSnapshots(page);
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "Something went wrong with the thumbnail" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
+  await input.press("Enter");
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  // The snapshot tag exists (survivor media) but carries no image url — proving
+  // the graceful per-media degrade rather than a dropped or all-or-nothing tag.
+  const imageUrl = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    const tags = (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+    const snapshot = tags?.find(
+      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
+    );
+    // Snapshot tag layout: ["link-preview","snapshot",<version>,<url>,...pairs].
+    const pairs = snapshot?.slice(4) ?? [];
+    const imageIndex = pairs.indexOf("image");
+    return imageIndex >= 0 ? pairs[imageIndex + 1] : null;
+  });
+  expect(imageUrl).toBeFalsy();
+});
+
+test("editing a message excludes link previews entirely", async ({ page }) => {
+  const message = `Edit-me ${Date.now()}`;
+  const previewUrl = "https://github.com/block/buzz/pull/3246?edit=1";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+
+  // Send a plain message with no link, then edit it to add a supported URL.
+  await input.fill(message);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+
+  await expect(input).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+
+  // Adding a link while editing must NOT resolve, upload, gate Save, or render a
+  // composer preview card — edit mode does not persist snapshots (decision A).
+  await input.fill(`${message} ${previewUrl}`);
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+  // No snapshot upload was attempted for the edited link.
+  const uploadedPreviewMedia = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) =>
+          entry.command === "upload_media_bytes" &&
+          typeof (entry.payload as { filename?: string })?.filename ===
+            "string" &&
+          (entry.payload as { filename: string }).filename.startsWith(
+            "link-preview-",
+          ),
+      ).length,
+  );
+  expect(uploadedPreviewMedia).toBe(0);
+  // Save is not blocked waiting on a snapshot the edit will never emit.
+  await expect(page.getByTestId("send-message")).toBeEnabled();
 });
 
 test("hiding composer link previews suppresses the whole draft and emits the blanket marker", async ({

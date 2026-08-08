@@ -368,6 +368,10 @@ type E2eConfig = {
     /** Delays link-preview snapshot media uploads so specs can exercise the
      *  Send-time wait for in-flight snapshot uploads. */
     linkPreviewUploadDelayMs?: number;
+    /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
+     *  call should reject, so specs can drive a per-media snapshot upload failure
+     *  (e.g. `["link-preview-image"]` fails only the thumbnail, favicon survives). */
+    linkPreviewUploadErrorFilenames?: string[];
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -8934,8 +8938,14 @@ async function resolveMockUploadDescriptorForBytes(
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
   const uploadDelayMs = config?.mock?.linkPreviewUploadDelayMs ?? 0;
-  if (uploadDelayMs > 0 && args.filename?.startsWith("link-preview-")) {
-    await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+  if (args.filename?.startsWith("link-preview-")) {
+    if (uploadDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+    }
+    const errorFilenames = config?.mock?.linkPreviewUploadErrorFilenames;
+    if (errorFilenames?.some((needle) => args.filename?.includes(needle))) {
+      throw new Error(`mock upload failed for ${args.filename}`);
+    }
   }
   const configured = config?.mock?.uploadDescriptors;
   if (configured !== undefined) {

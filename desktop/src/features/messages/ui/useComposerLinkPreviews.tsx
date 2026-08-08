@@ -1,5 +1,6 @@
 import * as React from "react";
 import { ImageOff, LoaderCircle, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { getRelayHttpUrl, uploadMediaBytes } from "@/shared/api/tauri";
 import { extractSupportedLinkPreviews } from "@/shared/lib/linkPreview";
@@ -24,16 +25,15 @@ import {
 } from "@/shared/ui/attachment";
 import { Button } from "@/shared/ui/button";
 
-// Upper bound on how long Send waits for in-flight snapshot uploads before
-// giving up and sending without the not-yet-ready tag. Keeps a fast Enter from
-// dropping a preview whose upload is nearly done, without letting a stalled
-// relay upload hang the message indefinitely.
-const SNAPSHOT_SEND_WAIT_CAP_MS = 2000;
+// Idle time after the last keystroke before link-preview resolution runs, so
+// typing a URL does not flicker a card per character (debounce, not throttle:
+// throttle would still fire mid-type).
+const LINK_PREVIEW_DEBOUNCE_MS = 350;
 
 // Upper bound on how long Send stays disabled while a preview is still settling
 // (metadata resolving, or snapshot media uploading). Past this the button
 // re-enables even if the tag never lands, so a dead or slow link never traps
-// the composer — the send-wait cap above still gives the tag a final chance.
+// the composer — the message then sends as a bare link.
 const SNAPSHOT_SETTLE_DISABLE_CAP_MS = 2000;
 
 function previewHostname(href: string): string {
@@ -151,21 +151,73 @@ async function uploadDataUrl(
   return { url: uploaded.url, sha256: uploaded.sha256 };
 }
 
-export function useComposerLinkPreviews(content: string) {
+// Upload one snapshot media (image or favicon) independently so a single
+// failure degrades gracefully instead of dropping the whole preview: on
+// failure we return empty url/sha256 (a valid "no media" snapshot field) and
+// report which media failed so the caller can toast the user once.
+async function uploadSnapshotMedia(
+  dataUrl: string | null | undefined,
+  filename: string,
+  label: "thumbnail" | "favicon",
+): Promise<{ url: string; sha256: string; failed: null | typeof label }> {
+  try {
+    const { url, sha256 } = await uploadDataUrl(dataUrl, filename);
+    return { url, sha256, failed: null };
+  } catch {
+    return { url: "", sha256: "", failed: dataUrl ? label : null };
+  }
+}
+
+export function useComposerLinkPreviews(content: string, enabled = true) {
   const [suppressed, setSuppressed] = React.useState(false);
+  // Debounce the content that drives resolution so typing a URL character by
+  // character does not churn a new candidate href (and a flickering card) per
+  // keystroke. `content` is the live editor value; `debounced` is what actually
+  // resolves. A fast paste-and-Enter before the debounce fires is held by
+  // `hasUnresolvedLiveCandidates` below, which keeps Send disabled until the
+  // live candidates resolve — so no synchronous flush is needed at submit.
+  const [debounced, setDebounced] = React.useState(content);
+  const debouncedRef = React.useRef(debounced);
+  debouncedRef.current = debounced;
+  React.useEffect(() => {
+    if (content === debouncedRef.current) return;
+    const timer = window.setTimeout(
+      () => setDebounced(content),
+      LINK_PREVIEW_DEBOUNCE_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [content]);
+  const extractCandidates = React.useCallback(
+    (source: string) =>
+      enabled
+        ? extractSupportedLinkPreviews(source).filter((preview) =>
+            preview.href.startsWith("buzz://")
+              ? true
+              : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
+          )
+        : [],
+    [enabled],
+  );
   const candidates = React.useMemo(
-    () =>
-      extractSupportedLinkPreviews(content).filter((preview) =>
-        preview.href.startsWith("buzz://")
-          ? true
-          : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
-      ),
-    [content],
+    () => extractCandidates(debounced),
+    [extractCandidates, debounced],
+  );
+  // Supported candidates in the LIVE content. When these differ from what has
+  // resolved (debounce not yet fired after a paste/keystroke), Send must still
+  // treat the preview as pending so a fast Enter cannot ship a bare link ahead
+  // of resolution.
+  const liveCandidatesRef = React.useRef<string[]>([]);
+  liveCandidatesRef.current = extractCandidates(content).map(
+    (preview) => preview.href,
   );
   const previews = useResolvedLinkPreviews(suppressed ? [] : candidates);
+  // Clear a "hide previews" suppression as soon as the LIVE draft has no
+  // supported candidates — not the debounced set, whose lag would otherwise let
+  // a clear-then-retype race keep suppression stuck on after the draft changed.
+  const liveCandidatesEmpty = liveCandidatesRef.current.length === 0;
   React.useEffect(() => {
-    if (candidates.length === 0) setSuppressed(false);
-  }, [candidates.length]);
+    if (liveCandidatesEmpty) setSuppressed(false);
+  }, [liveCandidatesEmpty]);
   const [readyTags, setReadyTags] = React.useState<Record<string, string[]>>(
     {},
   );
@@ -175,9 +227,6 @@ export function useComposerLinkPreviews(content: string) {
   const suppressedRef = React.useRef(suppressed);
   suppressedRef.current = suppressed;
   const uploadsRef = React.useRef(new Set<string>());
-  // In-flight snapshot upload promises, keyed by href. Send awaits these (with
-  // a cap) so a snapshot that is mid-upload still lands its tag on the message.
-  const pendingUploadsRef = React.useRef(new Map<string, Promise<void>>());
   const activeHrefsRef = React.useRef(new Set<string>());
   activeHrefsRef.current = new Set(candidates.map((preview) => preview.href));
 
@@ -207,12 +256,33 @@ export function useComposerLinkPreviews(content: string) {
       )
         continue;
       uploadsRef.current.add(preview.href);
+      // Upload image and favicon independently so one failure degrades to the
+      // surviving media instead of dropping the whole preview. A snapshot tag
+      // with empty media fields is valid (renders as text + favicon, or
+      // text-only), so a partial or total media failure still ships a real
+      // inline preview and the card never spins forever.
       const uploadPromise = Promise.all([
-        uploadDataUrl(preview.imageDataUrl, "link-preview-image.png"),
-        uploadDataUrl(preview.faviconDataUrl, "link-preview-favicon.png"),
+        uploadSnapshotMedia(
+          preview.imageDataUrl,
+          "link-preview-image.png",
+          "thumbnail",
+        ),
+        uploadSnapshotMedia(
+          preview.faviconDataUrl,
+          "link-preview-favicon.png",
+          "favicon",
+        ),
       ])
         .then(([image, favicon]) => {
           if (!activeHrefsRef.current.has(preview.href)) return;
+          const failedMedia = [image.failed, favicon.failed].filter(
+            (label): label is "thumbnail" | "favicon" => label !== null,
+          );
+          if (failedMedia.length > 0) {
+            toast.error(
+              `Something went wrong with the ${failedMedia.join(" and ")}`,
+            );
+          }
           const tag = buildLinkPreviewSnapshotTag({
             canonicalUrl: preview.href,
             title: preview.title,
@@ -224,21 +294,17 @@ export function useComposerLinkPreviews(content: string) {
             faviconSha256: favicon.sha256,
           });
           if (!tag) return;
-          // Update the ref synchronously as well as state: Send awaits this
-          // promise and then reads `readyTagsByHrefRef`, which otherwise would
-          // not reflect the pending `setReadyTags` until the next render.
+          // Update the ref alongside state so a submit reading
+          // `readyTagsByHrefRef` sees the tag before the next render commits.
           readyTagsByHrefRef.current = {
             ...readyTagsByHrefRef.current,
             [preview.href]: tag,
           };
           setReadyTags((current) => ({ ...current, [preview.href]: tag }));
         })
-        .catch(() => {})
         .finally(() => {
           uploadsRef.current.delete(preview.href);
-          pendingUploadsRef.current.delete(preview.href);
         });
-      pendingUploadsRef.current.set(preview.href, uploadPromise);
       void uploadPromise;
     }
   }, [previews, readyTags]);
@@ -254,7 +320,7 @@ export function useComposerLinkPreviews(content: string) {
   // ready -> not-ready -> ready (buzz:// links never snapshot, so they never
   // report settling). `imageState === "none"` is terminal (no snapshot), so it
   // does not block. See the disable cap below for the dead/slow-link escape.
-  const hasSettlingSnapshots =
+  const hasResolvingSnapshots =
     !suppressed &&
     previews.some(
       (preview) =>
@@ -262,22 +328,43 @@ export function useComposerLinkPreviews(content: string) {
         (preview.imageState === "pending" ||
           (preview.snapshotReady && !readyTags[preview.href])),
     );
+  // A supported link in the LIVE content that resolution has not caught up to
+  // yet (debounce pending, or resolved for an older revision) also counts as
+  // settling — otherwise a paste-and-immediate-Enter would ship a bare link
+  // before resolution even starts. buzz:// links never snapshot, so ignore them.
+  const hasUnresolvedLiveCandidates =
+    !suppressed &&
+    liveCandidatesRef.current.some(
+      (href) =>
+        !href.startsWith("buzz://") &&
+        !readyTags[href] &&
+        !candidates.some((candidate) => candidate.href === href),
+    );
+  const hasSettlingSnapshots =
+    hasResolvingSnapshots || hasUnresolvedLiveCandidates;
   // Re-enable Send once the disable cap elapses even if a preview is still
   // settling, so a link whose metadata or upload stalls never traps the
-  // composer. Resets whenever settling ends or the draft's previews change.
+  // composer. Resets whenever settling ends or the live candidate set changes.
   const [settleDisableExpired, setSettleDisableExpired] = React.useState(false);
+  const liveCandidatesKey = liveCandidatesRef.current.join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: liveCandidatesKey intentionally restarts the anti-trap cap when the link set changes while still settling, so a replaced/added link gets a fresh disable window rather than inheriting the prior link's near-expired timer.
   React.useEffect(() => {
     if (!hasSettlingSnapshots) {
       setSettleDisableExpired(false);
       return;
     }
+    setSettleDisableExpired(false);
     const timer = window.setTimeout(
       () => setSettleDisableExpired(true),
       SNAPSHOT_SETTLE_DISABLE_CAP_MS,
     );
     return () => window.clearTimeout(timer);
-  }, [hasSettlingSnapshots]);
+  }, [hasSettlingSnapshots, liveCandidatesKey]);
   const hasPendingSnapshots = hasSettlingSnapshots && !settleDisableExpired;
+  // Ref mirror so a synchronous submit guard can read the pending state on any
+  // entry point (Enter, form, auto-submit), not just the reactive button prop.
+  const hasPendingSnapshotsRef = React.useRef(hasPendingSnapshots);
+  hasPendingSnapshotsRef.current = hasPendingSnapshots;
   const hideAll = React.useCallback(() => setSuppressed(true), []);
   const previewList = previews.length ? (
     <div
@@ -311,26 +398,24 @@ export function useComposerLinkPreviews(content: string) {
       </div>
     </div>
   ) : null;
-  // Send awaits this: give in-flight snapshot uploads a brief, capped chance to
-  // finish (so a fast Enter still lands the preview) before capturing the tags.
-  const getReadyTags = React.useCallback(async () => {
+  // Snapshot tags for a submit, read synchronously at submit start from the href
+  // set currently backing the previews (activeHrefsRef) — so the tags always
+  // correspond to the content being sent. No await: Send is disabled until every
+  // settling preview has its tag (or the anti-trap cap fires), so at submit time
+  // the tags that will ever exist already exist. A suppressed preview list emits
+  // the "none" marker; hrefs without a ready tag (dead/slow link past the cap)
+  // are omitted and the message sends as a bare link.
+  const getReadyTags = React.useCallback(() => {
     if (suppressedRef.current) return [["link-preview", "none"]];
-    const pending = [...activeHrefsRef.current]
-      .map((href) => pendingUploadsRef.current.get(href))
-      .filter((promise): promise is Promise<void> => Boolean(promise));
-    if (pending.length > 0) {
-      await Promise.race([
-        Promise.allSettled(pending),
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, SNAPSHOT_SEND_WAIT_CAP_MS);
-        }),
-      ]);
-      if (suppressedRef.current) return [["link-preview", "none"]];
-    }
     return [...activeHrefsRef.current].flatMap((href) => {
       const tag = readyTagsByHrefRef.current[href];
       return tag ? [tag] : [];
     });
   }, []);
-  return { previewList, getReadyTags, hasPendingSnapshots };
+  return {
+    previewList,
+    getReadyTags,
+    hasPendingSnapshots,
+    hasPendingSnapshotsRef,
+  };
 }

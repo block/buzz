@@ -321,6 +321,13 @@ type MockBridgeOptions = {
   linkPreviewMetadataDelayMs?: number;
   /** Simulates native cold-cache startup work before the async response. */
   linkPreviewMetadataStartBlockMs?: number;
+  /** Delays link-preview snapshot media uploads so specs can drive an in-flight
+   *  snapshot upload. See e2eBridge mock.linkPreviewUploadDelayMs. */
+  linkPreviewUploadDelayMs?: number;
+  /** Substrings of `link-preview-*` upload filenames whose upload should reject,
+   *  so specs can drive a per-media snapshot upload failure. See e2eBridge
+   *  mock.linkPreviewUploadErrorFilenames. */
+  linkPreviewUploadErrorFilenames?: string[];
   searchProfiles?: MockSearchProfileSeed[];
   updateAvailable?: boolean;
   updateChannelDelayMs?: number;
