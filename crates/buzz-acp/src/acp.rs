@@ -123,7 +123,7 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
 
 fn build_initialize_params() -> serde_json::Value {
     serde_json::json!({
-        "protocolVersion": 2,
+        "protocolVersion": 1,
         "clientCapabilities": build_client_capabilities(),
         "clientInfo": {
             "name": "buzz-acp",
@@ -596,8 +596,8 @@ impl AcpClient {
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
     /// Parsed here rather than at each call site so no caller can forget it.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
-        // Requesting version 2 is an intentional temporary pin — we are squatting
-        // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
+        // The v2 ACP request/response shape and prompt lifecycle are not yet
+        // implemented, so request v1 to avoid confusing v2-capable adapters.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
@@ -2399,7 +2399,7 @@ mod tests {
             "id": 0u64,
             "method": "initialize",
             "params": {
-                "protocolVersion": 2,
+                "protocolVersion": 1,
                 "clientCapabilities": build_client_capabilities(),
                 "clientInfo": {
                     "name": "buzz-acp",
@@ -2407,7 +2407,11 @@ mod tests {
                 }
             }
         });
-        assert_eq!(msg["params"]["protocolVersion"].as_u64(), Some(2));
+        assert_eq!(msg["params"]["protocolVersion"].as_u64(), Some(1));
+        assert!(
+            msg["params"].get("info").is_none(),
+            "v1 initialize params must not include the v2-only `info` field"
+        );
         assert_eq!(
             msg["params"]["clientInfo"]["name"].as_str(),
             Some("buzz-acp")
