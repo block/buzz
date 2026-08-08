@@ -12,6 +12,7 @@ export type ProfileAvatarEditorProps = {
   onEmojiAvatarChange?: () => void;
   onCustomColorPickerOpenChange?: (isOpen: boolean) => void;
   onModeChange?: (mode: AvatarMode) => void;
+  onLocalPreviewChange?: (url: string | null) => void;
   onUploadedAvatarChange?: (url: string | null) => void;
   onUploadingChange?: (isUploading: boolean) => void;
   onAnimatedAvatarApply?: (url: string) => void;

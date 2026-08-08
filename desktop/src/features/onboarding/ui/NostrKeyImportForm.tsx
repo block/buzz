@@ -33,7 +33,10 @@ type NostrKeyImportFormProps = {
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
   onStageChange?: (stage: NostrKeyImportStage) => void;
+  /** Hide the inline back control when the host renders navigation elsewhere. */
   showBack?: boolean;
+  /** Keep password-stage navigation out of the form when the host owns Back. */
+  showPasswordStageBack?: boolean;
   /** Restrict this instance to selecting a backup file instead of typing a key. */
   mode?: "key" | "backup";
   /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
@@ -57,6 +60,7 @@ export function NostrKeyImportForm({
   onImport,
   onStageChange,
   showBack = true,
+  showPasswordStageBack = true,
   mode = "key",
   footerMode = "onboarding",
   variant = "default",
@@ -611,7 +615,7 @@ export function NostrKeyImportForm({
           </Button>
         ) : null}
 
-        {showBack || isPasswordStage ? (
+        {showBack || (isPasswordStage && showPasswordStageBack) ? (
           <Button
             className={
               variant === "spotlight"

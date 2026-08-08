@@ -186,6 +186,12 @@
   transform-origin: center;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .buzz-avatar-squish {
+    animation: none;
+  }
+}
+
 .buzz-shimmer {
   --buzz-shimmer-duration: 2600ms;
   --buzz-shimmer-band: 250%;

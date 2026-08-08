@@ -194,6 +194,7 @@ test("backup options keep one-column geometry on narrow windows", async ({
 
   const panels = page.getByTestId("backup-option-panel");
   await expect(panels).toHaveCount(3);
+  await waitForAnimations(page);
   const geometry = await panels.evaluateAll((elements) => ({
     clientWidth: document.documentElement.clientWidth,
     lefts: elements.map((element) => element.getBoundingClientRect().left),

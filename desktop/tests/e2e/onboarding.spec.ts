@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { installFakeCamera } from "../helpers/fakeCamera";
 import {
   E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
@@ -1595,6 +1596,26 @@ test("first-community shows the scenario cards for localhost", async ({
     }),
   ).toBeVisible();
 
+  await page.getByTestId("community-choice-join").click();
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-effect", "line-slide");
+  const joinBack = page.getByTestId("welcome-join-back");
+  await expect(joinBack).toBeVisible();
+  await joinBack.click();
+  await expect(
+    page
+      .getByTestId("welcome-setup")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "backward");
+
   await page.getByTestId("welcome-setup-back").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
   await expect(
@@ -1714,8 +1735,22 @@ test("community onboarding reuses an existing relay profile", async ({
     page.getByRole("heading", { name: "Meet your starter team" }),
   ).toBeVisible();
   await expect(
+    page
+      .getByTestId("community-onboarding-flow")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "forward");
+  await expect(
     page.getByRole("heading", { name: "Build your profile" }),
   ).toHaveCount(0);
+  await page.getByTestId("community-team-intro-back").click();
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("community-onboarding-flow")
+      .locator(".buzz-onboarding-transition-line"),
+  ).toHaveAttribute("data-onboarding-direction", "backward");
 });
 
 test("first-community direct join cancel returns to request access", async ({
@@ -1846,7 +1881,7 @@ test("canceling a join to an existing inactive community preserves it", async ({
     .toEqual(["active-community", "existing-community"]);
 });
 
-test("connected first-community profile step offers equal-width Next and Back controls", async ({
+test("connected first-community profile keeps Back bottom-left and balances the avatar editor", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -2014,7 +2049,7 @@ test("connected first-community profile step offers equal-width Next and Back co
   if (!dialogBox || !urlBox) {
     throw new Error("Could not measure avatar dialog layout");
   }
-  expect(dialogLayout.clientWidth).toBeLessThanOrEqual(560);
+  expect(dialogLayout.clientWidth).toBeLessThanOrEqual(920);
   const imageDialogHeight = dialogLayout.clientHeight;
   const dialogTransition = await avatarDialog.evaluate(
     (element) => window.getComputedStyle(element).transitionProperty,
@@ -2029,6 +2064,20 @@ test("connected first-community profile step offers equal-width Next and Back co
   expect(urlBox.y + urlBox.height).toBeLessThanOrEqual(
     dialogBox.y + dialogBox.height,
   );
+  const [livePreviewBox, editorBox] = await Promise.all([
+    page.getByTestId("community-avatar-live-preview").boundingBox(),
+    page.getByTestId("community-avatar-editor").boundingBox(),
+  ]);
+  if (!livePreviewBox || !editorBox) {
+    throw new Error("Could not measure avatar preview/editor spacing");
+  }
+  expect(
+    Math.abs(
+      livePreviewBox.x -
+        dialogBox.x -
+        (editorBox.x - (livePreviewBox.x + livePreviewBox.width)),
+    ),
+  ).toBeLessThanOrEqual(4);
   const saveButton = page.getByTestId("community-avatar-done");
   await page.getByTestId("community-avatar-input").setInputFiles({
     buffer: Buffer.from(
@@ -2038,14 +2087,14 @@ test("connected first-community profile step offers equal-width Next and Back co
     mimeType: "image/png",
     name: "community-avatar.png",
   });
-  const previewImage = page.getByTestId(
-    "community-avatar-upload-preview-image",
+  await expect(page.getByTestId("community-avatar-upload-preview")).toHaveCount(
+    0,
   );
-  await expect(previewImage).toHaveAttribute("src", /^blob:/);
   await expect(saveButton).toBeDisabled();
   await expect(saveButton).toHaveText("Save");
-  const localPreviewUrl = await previewImage.getAttribute("src");
-  await expect(previewImage).toHaveAttribute("src", localPreviewUrl ?? "");
+  await expect(
+    page.getByTestId("community-avatar-live-preview-image"),
+  ).toHaveAttribute("src", /^blob:/);
   await saveButton.click();
   await expect(avatarDialog).toHaveCount(0);
   const avatarCircleImage = page.getByTestId("community-avatar-circle-image");
@@ -2063,10 +2112,9 @@ test("connected first-community profile step offers equal-width Next and Back co
 
   await avatarButton.click();
   await expect(avatarDialog).toBeVisible();
-  await expect(previewImage).toHaveAttribute(
-    "src",
-    new RegExp(`^${uploadedAvatarUrl}`),
-  );
+  await expect(
+    page.getByTestId("community-avatar-live-preview-image"),
+  ).toHaveAttribute("src", new RegExp(`^${uploadedAvatarUrl}`));
   const modeContentShell = page.getByTestId(
     "community-avatar-mode-content-shell",
   );
@@ -2102,6 +2150,16 @@ test("connected first-community profile step offers equal-width Next and Back co
   });
   const defaultDialogHeight = imageDialogHeight;
   await page.getByRole("tab", { name: "Emoji" }).click();
+  const emojiPicker = page.locator("em-emoji-picker");
+  await expect(emojiPicker.locator("input[type='search']")).toBeVisible();
+  await expectEmojiMartStylesInstalled(emojiPicker);
+  await expect
+    .poll(() =>
+      emojiPicker.evaluate((element) =>
+        Boolean(element.shadowRoot?.querySelector(".skin-tone-button")),
+      ),
+    )
+    .toBe(true);
   await expect
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBe(defaultDialogHeight);
@@ -2110,21 +2168,65 @@ test("connected first-community profile step offers equal-width Next and Back co
   expect(emojiEditorLayout.saveBox.y).toBe(imageEditorLayout.saveBox.y);
   await page.getByRole("tab", { name: "Animated" }).click();
   await expect(saveButton).toHaveCount(0);
+  const iphoneCameraButton = page.getByTestId(
+    "community-avatar-animated-camera-iphone",
+  );
+  const computerCameraButton = page.getByTestId(
+    "community-avatar-animated-camera-computer",
+  );
+  await expect(iphoneCameraButton).toBeVisible();
+  await expect(computerCameraButton).toBeVisible();
+  await expect(iphoneCameraButton).toHaveAttribute("aria-pressed", "false");
+  await expect(computerCameraButton).toHaveAttribute("aria-pressed", "false");
+  await iphoneCameraButton.click();
   await expect(
     page.getByTestId("community-avatar-animated-error"),
   ).toContainText("Could not access the camera");
-  const retryCameraButton = page.getByTestId("community-avatar-animated-retry");
-  await expect(retryCameraButton).toHaveText("Try camera again");
-  await retryCameraButton.click();
+  await expect(iphoneCameraButton).toHaveAttribute("aria-pressed", "true");
+  await computerCameraButton.click();
+  await expect(computerCameraButton).toHaveAttribute("aria-pressed", "true");
   const captureButton = page.getByTestId("community-avatar-animated-record");
   await expect(captureButton).toHaveText("Capture 3 sec video");
+  const captureButtonStyles = await captureButton.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: Number.parseFloat(styles.borderRadius),
+      color: styles.color,
+      height: styles.height,
+    };
+  });
+  expect(captureButtonStyles).toMatchObject({
+    backgroundColor: "rgb(23, 23, 23)",
+    color: "rgb(240, 240, 205)",
+    height: "38px",
+  });
+  expect(captureButtonStyles.borderRadius).toBeGreaterThan(1_000);
   await captureButton.click();
   await expect(
     page.getByTestId("community-avatar-animated-sections"),
   ).toBeVisible({ timeout: 60_000 });
   await expect(saveButton).toBeVisible();
+  await saveButton.click();
+  await expect(avatarDialog).toHaveCount(0, { timeout: 30_000 });
+  await expect(
+    page.getByTestId("community-avatar-circle-image"),
+  ).toHaveAttribute("src", /^blob:/);
+  await avatarButton.click();
+  await expect(avatarDialog).toBeVisible();
   await page.getByRole("tab", { name: "Emoji" }).click();
   await selectFirstEmojiFromPicker(page);
+  const liveEmoji = page.getByTestId("community-avatar-live-preview-emoji");
+  await expect(liveEmoji).toHaveClass(/buzz-avatar-squish/);
+  await expect(
+    page.getByTestId("community-avatar-live-preview-panel"),
+  ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(page.getByTestId("community-avatar-live-preview")).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await expect(liveEmoji).toHaveCSS("animation-name", "none");
   await expect
     .poll(() => avatarDialog.evaluate((element) => element.clientHeight))
     .toBeGreaterThan(defaultDialogHeight);
@@ -2184,8 +2286,12 @@ test("connected first-community profile step offers equal-width Next and Back co
   if (!nextBox || !backBox) {
     throw new Error("Could not measure community profile navigation controls");
   }
-  expect(Math.abs(nextBox.width - backBox.width)).toBeLessThanOrEqual(1);
-  expect(nextBox.width).toBeLessThanOrEqual(160);
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Could not measure onboarding viewport");
+  expect(backBox.x).toBeLessThanOrEqual(32);
+  expect(
+    Math.abs(nextBox.x + nextBox.width / 2 - viewport.width / 2),
+  ).toBeLessThanOrEqual(1);
 
   await backButton.click();
   await expect(
