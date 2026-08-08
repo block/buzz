@@ -80,6 +80,8 @@ final mentionCandidatesProvider = Provider.family
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      final archived = ref.watch(archivedAgentPubkeysProvider).asData?.value ??
+          const <String>{};
       final channels =
           ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
@@ -100,6 +102,7 @@ final mentionCandidatesProvider = Provider.family
         userCache: userCache,
         ownerByAgentPubkey: owners,
         searchResults: searchResults,
+        archivedPubkeys: archived,
         currentPubkey: currentPubkey,
       );
 
