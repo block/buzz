@@ -67,6 +67,9 @@ identity.key
 # Claude Code worktrees
 .claude/worktrees/
 
+# Claude Code runtime state (machine-local locks, not durable)
+.claude/scheduled_tasks.lock
+
 # mesh-llm build cache
 .cache/
 
