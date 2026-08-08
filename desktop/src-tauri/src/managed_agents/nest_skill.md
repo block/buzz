@@ -94,6 +94,18 @@ buzz messages send --channel <UUID> \
   --content "@Alice check this" --mention <alice-pubkey>
 ```
 
+When the complete message already exists in a UTF-8 file, use `--content-file`
+so the direct `buzz messages send` command does not need shell redirection,
+command substitution, or a pipeline:
+
+```bash
+buzz messages send --channel <UUID> \
+  --reply-to <event-id> --content-file reports/review.md
+```
+
+`--content` and `--content-file` are mutually exclusive. The existing
+`--content -` form remains available for stdin.
+
 ## DM Management
 
 `dms hide --channel <UUID>` hides a DM from the agent's DM list. Restore by re-opening with `dms open --pubkey <hex>`.

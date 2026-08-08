@@ -212,6 +212,9 @@ buzz messages send --channel "$CHANNEL_ID" \
 echo 'Body with `backticks` and $vars stays literal.' \
   | buzz messages send --channel "$CHANNEL_ID" --content - | jq .
 
+# messages send directly from a UTF-8 file — no shell redirection required
+buzz messages send --channel "$CHANNEL_ID" --content-file message.md | jq .
+
 # messages get
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
