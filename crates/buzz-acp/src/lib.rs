@@ -3973,6 +3973,14 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_distinguishes_dm_and_channel_threading() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("top-level DM message without `--reply-to`"));
+        assert!(prompt.contains("thread root supplied in `[Context]`"));
+        assert!(prompt.contains("top-level channel message"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {

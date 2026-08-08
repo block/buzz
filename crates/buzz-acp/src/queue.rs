@@ -1176,6 +1176,19 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append a linear-reply instruction for a top-level DM message.
+///
+/// DMs are already scoped to their participants, so ordinary replies should
+/// remain in the main conversation instead of opening a thread implicitly.
+fn append_dm_top_level_reply_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: This is a top-level DM message. For ordinary replies in \
+         this turn, send without `--reply-to` so the conversation stays linear. \
+         Only use `--reply-to` if the human explicitly asks to start or continue \
+         a thread.",
+    );
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1230,11 +1243,11 @@ fn resolve_reply_anchor(
 
 /// Format a `[Context]` hints section based on event scope.
 ///
-/// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
-/// replies; in the channel branch a `Some` anchor means a human-facing
-/// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// `reply_anchor` is the pre-resolved `--reply-to` target for this turn. In a
+/// DM thread it is the thread root; in a channel thread it comes from
+/// [`resolve_reply_anchor`]. In the top-level channel branch a `Some` anchor
+/// means a human-facing mention whose reply should open a new thread rooted at
+/// the triggering event. Top-level DMs deliberately have no anchor.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1280,6 +1293,8 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        } else {
+            append_dm_top_level_reply_instruction(&mut s);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -1464,17 +1479,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
-    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
-    //   - top-level     → anchor to the triggering event (it becomes the root)
-    // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // Human-facing channel turns are anchored so replies stay readable at
+    // layer 1. DM turns follow conversation semantics instead:
+    //   - DM thread       → anchor to the thread ROOT (no nested threads)
+    //   - top-level DM    → no anchor (keep the DM conversation linear)
+    //   - channel thread  → anchor to the thread ROOT
+    //   - top-level channel → anchor to the triggering event (new thread root)
+    // Agent↔agent channel turns get no forced anchor; deep nesting is
+    // intentional there.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        thread_tags.root_event_id.clone()
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -3909,12 +3924,16 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_dm_thread_reply() {
+    fn test_reply_instruction_for_dm_nested_reply_anchors_to_root() {
         let ch = Uuid::new_v4();
-        let root_id = "b".repeat(64);
+        let root_id = "a".repeat(64);
+        let parent_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+            ],
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
@@ -3941,8 +3960,16 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "DM nested reply should anchor to the thread root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {parent_id}")),
+            "DM nested reply should not anchor to the immediate parent"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "DM nested reply should not anchor to the triggering event"
         );
     }
 
@@ -4004,8 +4031,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            !prompt.contains("`--reply-to "),
+            "DM non-reply should not include a reply-to destination"
+        );
+        assert!(
+            prompt.contains("send without `--reply-to`"),
+            "DM top-level prompts should explicitly keep the conversation linear"
         );
     }
 
