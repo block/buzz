@@ -76,7 +76,6 @@ import {
   UserProfilePersonaDialogs,
 } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import {
-  deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
   resolveAgentInstruction,
@@ -84,6 +83,7 @@ import {
   resolveProfileDisplayName,
   truncatePubkey,
   type UserProfilePanelProps,
+  useDerivedProfileChannels,
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useProfileDmAction } from "@/features/profile/ui/useProfileDmAction";
@@ -287,15 +287,14 @@ export function UserProfilePanel({
   const relayAgent = relayAgentsQuery.data?.find(
     (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
+  const profileSummary = usersBatchQuery.data?.profiles[pubkeyLower];
   const managedAgentLogQuery = useManagedAgentLogQuery(
     (view === "diagnostics" || view === "logs") &&
       managedAgent?.backend.type === "local"
       ? managedAgent.pubkey
       : null,
   );
-  const isAgentByOaOwner = Boolean(
-    usersBatchQuery.data?.profiles[pubkeyLower]?.isAgent,
-  );
+  const isAgentByOaOwner = Boolean(profileSummary?.isAgent);
   const isBot =
     Boolean(relayAgent || managedAgent || resolvedPersona) || isAgentByOaOwner;
   const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
@@ -367,15 +366,13 @@ export function UserProfilePanel({
     ) ??
       false);
 
-  const profileChannels = React.useMemo(
-    () =>
-      deriveProfileChannels(
-        pubkeyLower,
-        relayAgent,
-        managedAgent,
-        channelsQuery.data,
-      ),
-    [pubkeyLower, relayAgent, managedAgent, channelsQuery.data],
+  const profileChannels = useDerivedProfileChannels(
+    pubkeyLower,
+    relayAgent,
+    managedAgent,
+    channelsQuery.data,
+    profileSummary,
+    currentPubkey,
   );
 
   const channelIdToName = React.useMemo(() => {
