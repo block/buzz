@@ -1,3 +1,4 @@
+import { messagePreviewText } from "@/features/surfaces/spec";
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -313,7 +314,10 @@ export function MessageThreadPanel({
     replyTargetMessage && threadHead && replyTargetMessage.id !== threadHead.id
       ? {
           author: replyTargetMessage.author,
-          body: replyTargetMessage.body,
+          body: messagePreviewText(
+            replyTargetMessage.body,
+            replyTargetMessage.kind,
+          ),
           id: replyTargetMessage.id,
         }
       : null;

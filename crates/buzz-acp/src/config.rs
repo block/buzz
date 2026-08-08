@@ -1237,9 +1237,7 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
+    use buzz_core::kind::{KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED};
 
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
@@ -1256,11 +1254,13 @@ pub fn resolve_channel_filters(
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
             let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
+                // Conversational kinds (incl. surfaces — an agent must see a
+                // card it is @-mentioned in) plus the non-message kinds an
+                // agent is woken by.
+                buzz_core::kind::kinds_with(&[
                     KIND_WORKFLOW_APPROVAL_REQUESTED,
                     KIND_STREAM_REMINDER,
-                ]
+                ])
             });
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
@@ -1339,9 +1339,7 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
+    use buzz_core::kind::{KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED};
 
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
@@ -1361,11 +1359,13 @@ pub fn resolve_dynamic_channel_filter(
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
             kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
+                // Conversational kinds (incl. surfaces — an agent must see a
+                // card it is @-mentioned in) plus the non-message kinds an
+                // agent is woken by.
+                buzz_core::kind::kinds_with(&[
                     KIND_WORKFLOW_APPROVAL_REQUESTED,
                     KIND_STREAM_REMINDER,
-                ]
+                ])
             })),
             require_mention: !config.no_mention_filter,
         }),

@@ -20,6 +20,9 @@ export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
+// Surface card — versioned data-only UI spec rendered as a native card.
+// Mirror of buzz-core's KIND_SURFACE (number pending assignment on #2480).
+export const KIND_SURFACE = 40110;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;
@@ -81,9 +84,17 @@ export const KIND_DM_VISIBILITY = 30622;
 export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
+  KIND_SURFACE, // 40110 — surface cards are conversational content
   KIND_FORUM_POST,
   KIND_FORUM_COMMENT,
 ] as const;
+
+// Kinds that are a human-visible message someone wrote — the conversational
+// set. Mirrors `CONVERSATIONAL_KINDS` in crates/buzz-core/src/kind.rs (parity
+// asserted in kinds.test.mjs). Use this wherever a reader asks "is this a
+// message?", so a new content kind lands everywhere at once.
+export const CHANNEL_MESSAGE_CONVERSATIONAL_KINDS: ReadonlySet<number> =
+  new Set([KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_SURFACE]);
 
 // Keep this in sync with the Home-feed mention query in buzz-db.
 export const HOME_MENTION_EVENT_KINDS = [...CHANNEL_MESSAGE_EVENT_KINDS];
@@ -129,6 +140,7 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_STREAM_MESSAGE, // 9
   KIND_STREAM_MESSAGE_V2, // 40002
   KIND_STREAM_MESSAGE_DIFF, // 40008 — diff messages (own row)
+  KIND_SURFACE, // 40110 — surface cards (own row)
   KIND_SYSTEM_MESSAGE, // 40099 — system rows (join/leave/channel-created)
   KIND_JOB_REQUEST, // 43001
   KIND_JOB_ACCEPTED, // 43002

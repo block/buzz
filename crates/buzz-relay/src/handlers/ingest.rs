@@ -31,10 +31,10 @@ use buzz_core::kind::{
     KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
     KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_SURFACE,
+    KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -369,6 +369,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        | KIND_SURFACE
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
@@ -602,6 +603,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_SURFACE
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -899,11 +901,15 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
 
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
+/// Validate a kind:40003 edit: target exists, same channel, author-gated.
+///
+/// Returns the target event's kind so the caller can apply kind-specific
+/// content revalidation (e.g. a surface edit must itself be a valid spec).
 async fn validate_edit_ownership(
     community_id: CommunityId,
     event: &Event,
     state: &AppState,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let target_hex = event
         .tags
         .iter()
@@ -976,7 +982,7 @@ async fn validate_edit_ownership(
             return Err("must be event author to edit".to_string());
         }
     }
-    Ok(())
+    Ok(event_kind_u32(&target_event.event))
 }
 
 /// Validate kind:45002 vote targets a forum post (45001) or comment (45003).
@@ -2460,9 +2466,15 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
-        validate_edit_ownership(tenant.community(), &event, state)
+        let target_kind = validate_edit_ownership(tenant.community(), &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        // A surface edit is a full-spec replacement — the new content must
+        // itself be a valid SurfaceSpec, same strictness as first publish.
+        if target_kind == KIND_SURFACE {
+            buzz_core::surface::parse_and_validate(&event.content)
+                .map_err(|e| IngestError::Rejected(format!("invalid: surface edit: {e}")))?;
+        }
     }
 
     if kind_u32 == KIND_FORUM_VOTE {
@@ -2473,6 +2485,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_STREAM_MESSAGE_DIFF {
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_SURFACE {
+        buzz_core::surface::parse_and_validate(&event.content)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
     if kind_u32 == KIND_AGENT_ENGRAM {
@@ -3232,6 +3249,7 @@ mod tests {
         for kind in [
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_DIFF,
+            KIND_SURFACE,
             KIND_CANVAS,
             KIND_FORUM_POST,
             KIND_FORUM_VOTE,

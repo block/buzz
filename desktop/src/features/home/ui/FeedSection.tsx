@@ -4,9 +4,11 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { surfacePreviewText } from "@/features/surfaces/spec";
 import type { FeedItem } from "@/shared/api/types";
 import {
   KIND_APPROVAL_REQUEST,
+  KIND_SURFACE,
   KIND_FORUM_COMMENT,
   KIND_FORUM_POST,
   KIND_JOB_ACCEPTED,
@@ -94,6 +96,12 @@ function feedHeadline(item: FeedItem) {
 }
 
 function feedContent(item: FeedItem) {
+  // Surfaces carry spec JSON as content — preview the human fallbackText,
+  // never the raw spec (and never through the markdown pipeline).
+  if (item.kind === KIND_SURFACE) {
+    return surfacePreviewText(item.content);
+  }
+
   const content = item.content.trim();
   if (content.length > 0) {
     return content;

@@ -37,9 +37,50 @@ use buzz_core::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_SURFACE, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
+
+/// Kinds the home-feed *mentions* query matches — conversational content that
+/// can carry a `p` mention. Single source of truth for the SQL IN-list below
+/// and the drift tests; keep in sync with desktop's HOME_MENTION_EVENT_KINDS.
+pub const FEED_MENTION_KINDS: &[u32] = &[
+    KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_V2,
+    KIND_SURFACE,
+    KIND_TEXT_NOTE,
+    KIND_FORUM_POST,
+    KIND_FORUM_COMMENT,
+    KIND_GIT_PULL_REQUEST,
+    KIND_GIT_PR_UPDATE,
+    KIND_GIT_ISSUE,
+    KIND_GIT_STATUS_OPEN,
+    KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_CLOSED,
+    KIND_GIT_STATUS_DRAFT,
+];
+
+/// Kinds the home-feed *activity* query matches.
+pub const FEED_ACTIVITY_KINDS: &[u32] = &[
+    KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_V2,
+    KIND_SURFACE,
+    KIND_FORUM_POST,
+    KIND_JOB_REQUEST,
+    KIND_JOB_PROGRESS,
+    KIND_JOB_RESULT,
+];
+
+/// Render a kind slice as a SQL `IN (...)` body. Values are compile-time
+/// constants, never user input.
+fn sql_kind_list(kinds: &[u32]) -> String {
+    kinds
+        .iter()
+        .map(|k| k.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 use crate::error::Result;
 use crate::event::row_to_stored_event;
@@ -103,10 +144,8 @@ fn build_mentions_query(
     qb.push(" AND m.pubkey_hex = ").push_bind(pubkey_hex);
     qb.push(" AND e.deleted_at IS NULL");
     qb.push(format!(
-        " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, \
-         {KIND_TEXT_NOTE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT}, {KIND_GIT_PULL_REQUEST}, \
-         {KIND_GIT_PR_UPDATE}, {KIND_GIT_ISSUE}, {KIND_GIT_STATUS_OPEN}, \
-         {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT})"
+        " AND e.kind IN ({})",
+        sql_kind_list(FEED_MENTION_KINDS)
     ));
     push_visible_channel_filter(&mut qb, "e.channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -262,8 +301,8 @@ fn build_activity_query(
     qb.push_bind(*community.as_uuid());
     qb.push(" AND deleted_at IS NULL");
     qb.push(format!(
-        " AND kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, {KIND_FORUM_POST}, \
-         {KIND_JOB_REQUEST}, {KIND_JOB_PROGRESS}, {KIND_JOB_RESULT})"
+        " AND kind IN ({})",
+        sql_kind_list(FEED_ACTIVITY_KINDS)
     ));
     push_visible_channel_filter(&mut qb, "channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -618,16 +657,13 @@ mod tests {
 
     #[test]
     fn mentions_query_includes_stream_message_kind() {
-        use buzz_core::kind::{
-            KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
-        };
-        let mention_kinds: &[u32] = &[
-            KIND_STREAM_MESSAGE,
-            KIND_STREAM_MESSAGE_V2,
-            KIND_FORUM_POST,
-            KIND_FORUM_COMMENT,
-        ];
+        use buzz_core::kind::{KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE};
+        let mention_kinds: &[u32] = FEED_MENTION_KINDS;
 
+        assert!(
+            mention_kinds.contains(&KIND_SURFACE),
+            "surface kind must be in mentions"
+        );
         assert!(
             mention_kinds.contains(&KIND_STREAM_MESSAGE),
             "stream message kind must be in mentions"
@@ -663,18 +699,8 @@ mod tests {
 
     #[test]
     fn activity_query_includes_agent_job_kinds() {
-        use buzz_core::kind::{
-            KIND_FORUM_POST, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
-            KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
-        };
-        let activity_kinds: &[u32] = &[
-            KIND_STREAM_MESSAGE,
-            KIND_STREAM_MESSAGE_V2,
-            KIND_FORUM_POST,
-            KIND_JOB_REQUEST,
-            KIND_JOB_PROGRESS,
-            KIND_JOB_RESULT,
-        ];
+        use buzz_core::kind::{KIND_FORUM_POST, KIND_JOB_REQUEST, KIND_STREAM_MESSAGE};
+        let activity_kinds: &[u32] = FEED_ACTIVITY_KINDS;
 
         assert!(
             activity_kinds.contains(&KIND_JOB_REQUEST),
@@ -700,18 +726,7 @@ mod tests {
 
     #[test]
     fn activity_query_excludes_workflow_execution_kinds() {
-        use buzz_core::kind::{
-            KIND_FORUM_POST, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
-            KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2,
-        };
-        let activity_kinds: &[u32] = &[
-            KIND_STREAM_MESSAGE,
-            KIND_STREAM_MESSAGE_V2,
-            KIND_FORUM_POST,
-            KIND_JOB_REQUEST,
-            KIND_JOB_PROGRESS,
-            KIND_JOB_RESULT,
-        ];
+        let activity_kinds: &[u32] = FEED_ACTIVITY_KINDS;
 
         use buzz_core::kind::{KIND_WORKFLOW_APPROVAL_DENIED, KIND_WORKFLOW_TRIGGERED};
         for kind in KIND_WORKFLOW_TRIGGERED..=KIND_WORKFLOW_APPROVAL_DENIED {
@@ -724,20 +739,9 @@ mod tests {
 
     #[test]
     fn needs_action_kinds_do_not_overlap_with_activity_kinds() {
-        use buzz_core::kind::{
-            KIND_FORUM_POST, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
-            KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER,
-            KIND_WORKFLOW_APPROVAL_REQUESTED,
-        };
+        use buzz_core::kind::{KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED};
         let needs_action_kinds: &[u32] = &[KIND_WORKFLOW_APPROVAL_REQUESTED, KIND_STREAM_REMINDER];
-        let activity_kinds: &[u32] = &[
-            KIND_STREAM_MESSAGE,
-            KIND_STREAM_MESSAGE_V2,
-            KIND_FORUM_POST,
-            KIND_JOB_REQUEST,
-            KIND_JOB_PROGRESS,
-            KIND_JOB_RESULT,
-        ];
+        let activity_kinds: &[u32] = FEED_ACTIVITY_KINDS;
 
         for kind in needs_action_kinds {
             assert!(

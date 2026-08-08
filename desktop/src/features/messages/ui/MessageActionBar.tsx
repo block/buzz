@@ -34,7 +34,7 @@ import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
+import { KIND_HUDDLE_STARTED, KIND_SURFACE } from "@/shared/constants/kinds";
 import { Button } from "@/shared/ui/button";
 import { DeleteMessageConfirmDialog } from "./DeleteMessageConfirmDialog";
 import {
@@ -136,7 +136,10 @@ function MoreActionsMenu({
             }
           }}
         >
-          {onEdit ? (
+          {/* Surfaces are edited by their author via the CLI/SDK as a
+              full-spec replacement — a markdown textarea full of JSON is not
+              an edit experience, so the inline action is hidden for them. */}
+          {onEdit && message.kind !== KIND_SURFACE ? (
             <DropdownMenuItem
               data-testid={`edit-message-${message.id}`}
               onClick={() => {

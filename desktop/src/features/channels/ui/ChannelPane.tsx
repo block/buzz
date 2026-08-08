@@ -49,7 +49,10 @@ import {
   WELCOME_PERSONA_ROTATION_MS,
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
-import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import {
+  findLastOwnEditableMessage,
+  mentionsKnownAgent,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -60,7 +63,6 @@ import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -259,23 +261,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
   const findLastOwnEditable = React.useCallback(
-    (candidates: TimelineMessage[]): TimelineMessage | null => {
-      if (!onEdit || !currentPubkey) return null;
-      let best: TimelineMessage | null = null;
-      for (const message of candidates) {
-        if (
-          message.kind === KIND_SYSTEM_MESSAGE ||
-          message.pubkey !== currentPubkey ||
-          message.pending
-        ) {
-          continue;
-        }
-        if (!best || message.createdAt >= best.createdAt) {
-          best = message;
-        }
-      }
-      return best;
-    },
+    (candidates: TimelineMessage[]): TimelineMessage | null =>
+      onEdit && currentPubkey
+        ? findLastOwnEditableMessage(candidates, currentPubkey)
+        : null,
     [onEdit, currentPubkey],
   );
   const handleEditLastOwnMainMessage = React.useCallback((): boolean => {

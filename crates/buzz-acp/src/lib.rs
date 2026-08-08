@@ -1724,11 +1724,10 @@ async fn tokio_main() -> Result<()> {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
-                    vec![
-                        KIND_STREAM_MESSAGE,
+                    buzz_core::kind::kinds_with(&[
                         KIND_WORKFLOW_APPROVAL_REQUESTED,
                         KIND_STREAM_REMINDER,
-                    ]
+                    ])
                 }),
                 require_mention: !config.no_mention_filter,
                 filter: None,

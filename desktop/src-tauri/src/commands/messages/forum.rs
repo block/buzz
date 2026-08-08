@@ -163,7 +163,10 @@ pub async fn get_forum_posts(
 ) -> Result<ForumPostsResponse, String> {
     let cap = limit.unwrap_or(20).min(100);
     let mut filter = serde_json::Map::new();
-    filter.insert("kinds".to_string(), serde_json::json!([45001]));
+    filter.insert(
+        "kinds".to_string(),
+        serde_json::json!(crate::commands::query_kinds::forum_root_kinds()),
+    );
     filter.insert("#h".to_string(), serde_json::json!([channel_id.clone()]));
     filter.insert("limit".to_string(), serde_json::json!(cap));
     if let Some(t) = before {
@@ -212,14 +215,16 @@ pub async fn get_forum_thread(
     state: State<'_, AppState>,
 ) -> Result<ForumThreadResponse, String> {
     let _ = (limit, cursor);
-    // Two filters: the root event itself, plus any reply (kinds 9/45003)
-    // that references it via #e.
+    // Two filters: the root event itself, plus any reply that references it
+    // via #e. `forum_thread_kinds` includes surfaces, so a card can be a
+    // thread root or a reply.
+    let thread_kinds = crate::commands::query_kinds::forum_thread_kinds();
     let events = query_relay(
         &state,
         &[
-            serde_json::json!({ "ids": [event_id.clone()], "kinds": [9, 40002, 45001, 45003] }),
+            serde_json::json!({ "ids": [event_id.clone()], "kinds": &thread_kinds }),
             serde_json::json!({
-                "kinds": [9, 45003],
+                "kinds": &thread_kinds,
                 "#e": [event_id.clone()],
                 "#h": [channel_id.clone()],
             }),
@@ -242,16 +247,27 @@ pub async fn get_forum_thread(
     };
     let owner_pubkeys = fetch_agent_owner_pubkeys(&state, &events).await;
     let suppressed = link_preview_suppression_targets(&events, &edits, &owner_pubkeys);
+    // Edits are addressed to the event they replace, so a reply's edit carries
+    // the REPLY's id, not the root's — `edits` was fetched by the exact ids
+    // this page returned, and the latest one per target overlays its content
+    // (load-bearing for surfaces, whose update model is full-spec replacement).
+    let latest_edit = crate::commands::edit_overlay::latest_edit_by_target(&edits);
 
     let mut root: Option<ForumMessageInfo> = None;
     let mut replies: Vec<ForumThreadReplyInfo> = Vec::new();
     for ev in &events {
         if ev.id.to_hex() == event_id {
             let mut message = forum_message_from_event(ev, &channel_id);
+            if let Some(content) = latest_edit.get(&message.event_id) {
+                message.content = content.clone();
+            }
             apply_link_preview_suppression(&mut message.tags, &message.event_id, &suppressed);
             root = Some(message);
         } else if ev.kind.as_u16() as u32 != 40003 {
             let mut reply = forum_reply_from_event(ev, &channel_id, &event_id);
+            if let Some(content) = latest_edit.get(&reply.event_id) {
+                reply.content = content.clone();
+            }
             apply_link_preview_suppression(&mut reply.tags, &reply.event_id, &suppressed);
             replies.push(reply);
         }

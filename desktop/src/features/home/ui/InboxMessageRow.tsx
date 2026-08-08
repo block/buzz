@@ -16,6 +16,8 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
+import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -201,29 +203,33 @@ export function InboxMessageRow({
           )}
 
           <div className={isContinuation ? "mt-0" : "mt-0.5"}>
-            <Markdown
-              className={cn(
-                "max-w-full text-left text-sm text-foreground",
-                emojiOnly &&
-                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
-              )}
-              // Only pass the author pubkey for agent-authored messages so
-              // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey), not a relay-delegated display
-              // author, because the agent itself must have signed the card.
-              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
-                timelineMessage,
-                isKnownAgentPubkey,
-              )}
-              content={message.content}
-              messageId={message.id}
-              linkPreviewsSuppressed={hasLinkPreviewSuppression(
-                timelineMessage.tags,
-              )}
-              customEmoji={customEmoji}
-              mentionNames={message.mentionNames}
-              mentionPubkeysByName={message.mentionPubkeysByName}
-            />
+            {message.kind === KIND_SURFACE ? (
+              <SurfaceMessage content={message.content} />
+            ) : (
+              <Markdown
+                className={cn(
+                  "max-w-full text-left text-sm text-foreground",
+                  emojiOnly &&
+                    "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                )}
+                // Only pass the author pubkey for agent-authored messages so
+                // config-nudge cards can authenticate the sender. Uses the
+                // raw event signer (signerPubkey), not a relay-delegated display
+                // author, because the agent itself must have signed the card.
+                configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                  timelineMessage,
+                  isKnownAgentPubkey,
+                )}
+                content={message.content}
+                messageId={message.id}
+                linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                  timelineMessage.tags,
+                )}
+                customEmoji={customEmoji}
+                mentionNames={message.mentionNames}
+                mentionPubkeysByName={message.mentionPubkeysByName}
+              />
+            )}
             <MessageReactions
               canToggle={canToggleReactions}
               messageId={message.id}

@@ -140,6 +140,25 @@ buzz messages send --channel <UUID> \
 
 Other kind values are rejected. Use `messages vote --event <id> --direction up|down` to vote on forum posts.
 
+## Surface Cards
+
+For live structured status (deploys, incidents, metrics, checklists), publish a surface card — a data-only JSON spec the client renders as a native card. Edit it in place instead of posting update after update.
+
+```bash
+buzz messages send-surface --channel <UUID> --spec - <<'JSON'
+{"version":1,"fallbackText":"Deploy: 2/2 pods, rollout 100%","title":"Deployment","nodes":[
+  {"type":"badge","text":"HEALTHY","tone":"success"},
+  {"type":"statGrid","stats":[{"label":"Pods","value":2,"tone":"success"},{"label":"Errors","value":0}]},
+  {"type":"progress","label":"Rollout","value":100}]}
+JSON
+```
+
+- Nodes: `heading`, `text` (plain, no markdown), `badge`, `keyValue` (`items:[{label,value,tone?}]`), `statGrid` (`stats:[{label,value,delta?,tone?}]`), `table` (`columns` + `rows`, ≤12×100), `progress` (`value` 0–100). Tones: `default|success|warning|danger|info`.
+- `fallbackText` is required — it is what non-rendering clients show.
+- **To notify someone, pass `--mention <pubkey|npub|name>`** (repeatable). Card content is JSON, so `@name` inside the spec is NOT parsed as a mention.
+- **Save the returned `event_id`** — live-update the card with `buzz messages edit-surface --event <id> --spec <new-json>` (full-spec replacement; only the author can edit).
+- Limits: ≤32 nodes, ≤32 KiB JSON, text ≤4096 chars, labels/values ≤512 chars. Validation errors name the exact field — fix and resend.
+
 ## Message Formatting
 
 Message content is rendered as GitHub-flavored Markdown on both desktop and mobile. Key formatting:

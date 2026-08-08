@@ -675,6 +675,74 @@ test("CHANNEL_TIMELINE_CONTENT_KINDS matches isTimelineContentEvent", () => {
   }
 });
 
+test("same-second edits resolve deterministically by id tie-break", () => {
+  const original = streamMessage({ created_at: 1_700_000_000 });
+  // Two edits sharing one created_at (nostr timestamps are second-precision).
+  // The lexicographically-SMALLEST edit id wins on every client, regardless of
+  // arrival order. Smallest is not arbitrary: the relay orders
+  // `created_at DESC, id ASC`, so the winner under this rule is the first row a
+  // query returns — which is what lets readers resolve current state with a
+  // one-row lookup per target instead of fetching an unbounded edit history.
+  const editLowId = streamEdit(HEX64_A, "low-id edit", {
+    id: "1111111111111111111111111111111111111111111111111111111111111100",
+    created_at: 1_700_000_010,
+  });
+  const editHighId = streamEdit(HEX64_A, "high-id edit", {
+    id: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00",
+    created_at: 1_700_000_010,
+  });
+
+  for (const order of [
+    [original, editLowId, editHighId],
+    [original, editHighId, editLowId],
+  ]) {
+    const out = formatTimelineMessages(order, null, undefined, null);
+    assert.equal(out.length, 1, "one row, never duplicated by edits");
+    assert.equal(
+      out[0].body,
+      "low-id edit",
+      "the smallest edit id must win the same-second tie in any arrival order",
+    );
+    assert.equal(out[0].edited, true);
+  }
+});
+
+test("surface event renders as its own timeline row", () => {
+  const surface = streamMessage({
+    kind: 40110,
+    content: JSON.stringify({
+      version: 1,
+      fallbackText: "Deploy healthy",
+      nodes: [{ type: "badge", text: "HEALTHY", tone: "success" }],
+    }),
+  });
+  assert.equal(isTimelineContentEvent(surface), true);
+  const out = formatTimelineMessages([surface], null, undefined, null);
+  assert.equal(out.length, 1, "surface renders as a timeline row");
+  assert.equal(out[0].kind, 40110);
+});
+
+test("surface edit overlays the spec content on the surface row", () => {
+  const surface = streamMessage({
+    kind: 40110,
+    content: JSON.stringify({
+      version: 1,
+      fallbackText: "Deploy healthy",
+      nodes: [{ type: "badge", text: "HEALTHY", tone: "success" }],
+    }),
+  });
+  const incident = JSON.stringify({
+    version: 1,
+    fallbackText: "Deploy degraded",
+    nodes: [{ type: "badge", text: "DEGRADED", tone: "danger" }],
+  });
+  const edit = streamEdit(HEX64_A, incident, { created_at: 1_700_000_010 });
+  const out = formatTimelineMessages([surface, edit], null, undefined, null);
+  assert.equal(out.length, 1, "still a single row after the live update");
+  assert.equal(out[0].body, incident, "edit replaces the whole spec");
+  assert.equal(out[0].edited, true);
+});
+
 test("original message link-preview none marker suppresses all generated previews", () => {
   const [message] = formatTimelineMessages(
     [

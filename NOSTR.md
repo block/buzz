@@ -73,6 +73,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
+| **Surface cards (kind:40110)** | ⚠️ | Buzz-only data-only UI spec (NIP-SC); non-implementing clients ignore the kind. Edits (kind:40003) targeting a surface carry a full replacement spec. See `docs/nips/NIP-SC.md` |
 
 ### What Doesn't Work
 

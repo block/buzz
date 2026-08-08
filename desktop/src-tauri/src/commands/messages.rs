@@ -29,19 +29,7 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-const TIMELINE_KINDS: [u32; 11] = [
-    9,
-    40002,
-    40008,
-    40099,
-    43001,
-    43002,
-    43003,
-    43004,
-    43005,
-    43006,
-    buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
-];
+use crate::commands::query_kinds::{mention_kinds, thread_parent_kinds, TIMELINE_KINDS};
 
 #[tauri::command]
 pub async fn get_feed(
@@ -70,20 +58,7 @@ pub async fn get_feed(
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
-        "kinds": [
-            9,
-            40002,
-            1,
-            45001,
-            45003,
-            buzz_core_pkg::kind::KIND_GIT_PULL_REQUEST,
-            buzz_core_pkg::kind::KIND_GIT_PR_UPDATE,
-            buzz_core_pkg::kind::KIND_GIT_ISSUE,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_OPEN,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_MERGED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_CLOSED,
-            buzz_core_pkg::kind::KIND_GIT_STATUS_DRAFT,
-        ],
+        "kinds": mention_kinds(),
         "#p": [my_pubkey],
         "limit": cap,
     });
@@ -132,7 +107,7 @@ pub async fn get_feed(
     let mention_owner_pubkeys = fetch_agent_owner_pubkeys(&state, &mention_events).await;
     let suppressed_mentions =
         link_preview_suppression_targets(&mention_events, &mention_edits, &mention_owner_pubkeys);
-    let mentions: Vec<FeedItemInfo> = mention_events
+    let mut mentions: Vec<FeedItemInfo> = mention_events
         .iter()
         .map(|ev| {
             let mut item = feed_item_from_event(ev, "mentions");
@@ -140,6 +115,8 @@ pub async fn get_feed(
             item
         })
         .collect();
+    crate::commands::edit_overlay::apply_to_feed_items(&state, &mention_events, &mut mentions)
+        .await;
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()
         .map(|ev| feed_item_from_event(ev, "needs_action"))
@@ -413,7 +390,7 @@ pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<S
         &state,
         &[serde_json::json!({
             "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_SURFACE, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )
@@ -439,7 +416,7 @@ async fn resolve_thread_ref(
         state,
         &[serde_json::json!({
             "ids": [parent_event_id],
-            "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
+            "kinds": thread_parent_kinds(),
             "limit": 1
         })],
     )

@@ -10,7 +10,9 @@ import {
 } from "@/features/messages/lib/threading";
 import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
+import { readActivityFromStorage } from "./threadActivityStorage";
 import {
+  KIND_STREAM_MESSAGE_EDIT,
   CHANNEL_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
@@ -25,6 +27,8 @@ import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
+  /** Relay URL — scopes the persisted activity rows read at startup. */
+  relayUrl?: string;
   /**
    * When true, DM notifications also fire for the channel the user is
    * currently viewing (normally suppressed).
@@ -132,6 +136,81 @@ export function trackSeenEvent(
   return true;
 }
 
+/**
+ * Apply edits that landed while the app was closed to the persisted activity
+ * rows.
+ *
+ * Activity rows are hydrated from local storage with the content they were
+ * stored with, the catch-up query deliberately excludes edits, and the live
+ * subscription starts at `since: now` — so a card edited during downtime would
+ * keep its pre-edit fallbackText in Home forever while the detail view showed
+ * the current spec. One targeted lookup per persisted row closes that window;
+ * results flow through the same activity merge as live edits.
+ */
+/** Rows reconciled at startup — newest first, bounded so a large
+ * activity history cannot fan out into hundreds of queries. */
+const CATCH_UP_ROW_CAP = 40;
+
+function useOfflineActivityEditCatchUp(
+  pubkey: string | undefined,
+  relayUrl: string | undefined,
+  onEdit: ((channelId: string, event: RelayEvent) => void) | undefined,
+) {
+  // `onEdit` is rebuilt whenever the channel list changes; keep it in a ref so
+  // catch-up runs once per identity/relay scope rather than on every refresh.
+  const onEditRef = React.useRef(onEdit);
+  onEditRef.current = onEdit;
+  const doneScopeRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    const normalizedPubkey = pubkey?.trim().toLowerCase();
+    if (!normalizedPubkey || !relayUrl) return;
+    const scope = `${normalizedPubkey}:${relayUrl}`;
+    if (doneScopeRef.current === scope) return;
+    doneScopeRef.current = scope;
+
+    let cancelled = false;
+    void (async () => {
+      // Storage keeps rows ascending by createdAt, so the NEWEST rows — the
+      // ones Home actually shows — are at the tail.
+      const rows = readActivityFromStorage(normalizedPubkey, relayUrl).slice(
+        -CATCH_UP_ROW_CAP,
+      );
+      if (rows.length === 0) return;
+      try {
+        // One query per row, one row each: a shared OR-ed filter would let a
+        // heavily-edited card exhaust the budget and leave the others stale.
+        // `created_at DESC, id ASC` plus the smallest-id tie-break makes the
+        // first row the winner, so `limit: 1` is exact.
+        const results = await Promise.all(
+          rows.map((row) =>
+            relayClient
+              .fetchEvents({
+                kinds: [KIND_STREAM_MESSAGE_EDIT],
+                "#e": [row.id],
+                limit: 1,
+              })
+              .then((events) => ({ row, events }))
+              .catch(() => ({ row, events: [] as RelayEvent[] })),
+          ),
+        );
+        if (cancelled) return;
+        for (const { row, events } of results) {
+          for (const edit of events) {
+            onEditRef.current?.(row.channelId, edit);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to catch up activity edits", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pubkey, relayUrl]);
+}
+
 export function useLiveChannelUpdates(
   channels: Channel[],
   activeChannelId: string | null,
@@ -140,6 +219,12 @@ export function useLiveChannelUpdates(
   const queryClient = useQueryClient();
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
+
+  useOfflineActivityEditCatchUp(
+    options.currentPubkey,
+    options.relayUrl,
+    options.onThreadReplyNotification,
+  );
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
   // Reconnect replay overlaps each live filter by five seconds so no message is
   // lost at the boundary. Keep one shared guard for every notification side
@@ -272,6 +357,13 @@ export function useLiveChannelUpdates(
         event.id,
         SEEN_NOTIFICATION_EVENT_LIMIT,
       );
+    // An edit is not an unread trigger, so it never reaches the notification
+    // path below — but Home activity rows must still show current content, and
+    // the activity merge treats an edit as an overlay on the row it targets.
+    if (event.kind === KIND_STREAM_MESSAGE_EDIT) {
+      options.onThreadReplyNotification?.(channelId, event);
+    }
+
     const isThreadedReply = isThreadReply(event.tags);
 
     // DM alerts and every other notification side effect share this delivery

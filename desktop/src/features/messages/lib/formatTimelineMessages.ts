@@ -34,6 +34,7 @@ import {
   KIND_STREAM_MESSAGE_V2,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_STREAM_MESSAGE_DIFF,
+  KIND_SURFACE,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
@@ -51,6 +52,7 @@ export function isTimelineContentEvent(event: RelayEvent) {
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
     event.kind === KIND_STREAM_MESSAGE_DIFF ||
+    event.kind === KIND_SURFACE ||
     event.kind === KIND_SYSTEM_MESSAGE ||
     event.kind === KIND_JOB_REQUEST ||
     event.kind === KIND_JOB_ACCEPTED ||
@@ -262,7 +264,7 @@ export function formatTimelineMessages(
   // the original (`h`, `p` mentions, etc.) stay untouched.
   const editsByTargetId = new Map<
     string,
-    { content: string; tags: string[][]; createdAt: number }
+    { content: string; tags: string[][]; createdAt: number; editId: string }
   >();
   for (const event of events) {
     if (
@@ -287,12 +289,20 @@ export function formatTimelineMessages(
       previewSuppressedTargetIds.add(targetId);
     }
 
+    // Nostr timestamps are second-precision, so two edits can share a
+    // created_at. Break the tie on event id (lexicographic) — deterministic
+    // on every client, instead of load-order-dependent.
     const existing = editsByTargetId.get(targetId);
-    if (!existing || event.created_at > existing.createdAt) {
+    if (
+      !existing ||
+      event.created_at > existing.createdAt ||
+      (event.created_at === existing.createdAt && event.id < existing.editId)
+    ) {
       editsByTargetId.set(targetId, {
         content: event.content,
         tags: event.tags,
         createdAt: event.created_at,
+        editId: event.id,
       });
     }
   }

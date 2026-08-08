@@ -15,6 +15,8 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { Markdown } from "@/shared/ui/markdown";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
+import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { Skeleton } from "@/shared/ui/skeleton";
 
@@ -112,17 +114,23 @@ function ReplyRow({
         ) : null}
       </div>
       <div className="mt-1.5 pl-8">
-        <Markdown
-          channelNames={channelNames}
-          className="text-sm"
-          content={reply.content}
-          messageId={reply.eventId}
-          linkPreviewsSuppressed={hasLinkPreviewSuppression(reply.tags)}
-          linkPreviewTags={reply.tags}
-          imetaByUrl={parseImetaTags(reply.tags)}
-          mentionNames={replyMentionNames}
-          mentionPubkeysByName={replyMentionPubkeysByName}
-        />
+        {reply.kind === KIND_SURFACE ? (
+          // Surfaces are data-only specs — render the native card, never the
+          // markdown pipeline (which would print raw JSON).
+          <SurfaceMessage content={reply.content} />
+        ) : (
+          <Markdown
+            channelNames={channelNames}
+            className="text-sm"
+            content={reply.content}
+            messageId={reply.eventId}
+            linkPreviewsSuppressed={hasLinkPreviewSuppression(reply.tags)}
+            linkPreviewTags={reply.tags}
+            imetaByUrl={parseImetaTags(reply.tags)}
+            mentionNames={replyMentionNames}
+            mentionPubkeysByName={replyMentionPubkeysByName}
+          />
+        )}
       </div>
     </div>
   );
@@ -258,17 +266,23 @@ export function ForumThreadPanel({
             ) : null}
           </div>
           <div className="mt-3">
-            <Markdown
-              channelNames={channelNames}
-              className="text-sm"
-              content={post.content}
-              messageId={post.eventId}
-              linkPreviewsSuppressed={hasLinkPreviewSuppression(post.tags)}
-              linkPreviewTags={post.tags}
-              imetaByUrl={parseImetaTags(post.tags)}
-              mentionNames={postMentionNames}
-              mentionPubkeysByName={postMentionPubkeysByName}
-            />
+            {post.kind === KIND_SURFACE ? (
+              // A surface may be a thread root (NIP-SC §Event) — render the
+              // card, never spec JSON through markdown.
+              <SurfaceMessage content={post.content} />
+            ) : (
+              <Markdown
+                channelNames={channelNames}
+                className="text-sm"
+                content={post.content}
+                messageId={post.eventId}
+                linkPreviewsSuppressed={hasLinkPreviewSuppression(post.tags)}
+                linkPreviewTags={post.tags}
+                imetaByUrl={parseImetaTags(post.tags)}
+                mentionNames={postMentionNames}
+                mentionPubkeysByName={postMentionPubkeysByName}
+              />
+            )}
           </div>
         </div>
 

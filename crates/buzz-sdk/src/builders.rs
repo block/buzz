@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_SURFACE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -383,6 +383,56 @@ pub fn build_diff_message(
         thread_tags(tr, &mut tags)?;
     }
     Ok(EventBuilder::new(Kind::Custom(40008), content).tags(tags))
+}
+
+/// Build a surface card message (`KIND_SURFACE`).
+///
+/// Canonicalizes and validates the spec (structural limits + the 32 KiB
+/// content cap from `buzz_core::surface`) before building — a bad spec fails
+/// here with a field-specific error, never at the relay.
+///
+/// - `channel_id`: target channel UUID
+/// - `spec`: the typed `SurfaceSpec v1` payload
+/// - `thread_ref`: optional NIP-10 reply context (surface as thread root or reply)
+/// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
+pub fn build_surface(
+    channel_id: Uuid,
+    spec: &buzz_core::surface::SurfaceSpecV1,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+) -> Result<EventBuilder, SdkError> {
+    spec.validate()
+        .map_err(|e| SdkError::InvalidInput(format!("surface spec: {e}")))?;
+    let content = spec
+        .canonical_json()
+        .map_err(|e| SdkError::InvalidInput(format!("surface spec: {e}")))?;
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(tr) = thread_ref {
+        thread_tags(tr, &mut tags)?;
+    }
+    mention_tags(mentions, &mut tags)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_SURFACE as u16), &content).tags(tags))
+}
+
+/// Build a surface edit — full-spec replacement via the standard edit kind.
+///
+/// Same canonicalize→validate path as [`build_surface`]; the relay
+/// re-validates the replacement spec against the edit target.
+pub fn build_surface_edit(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    spec: &buzz_core::surface::SurfaceSpecV1,
+) -> Result<EventBuilder, SdkError> {
+    spec.validate()
+        .map_err(|e| SdkError::InvalidInput(format!("surface spec: {e}")))?;
+    let content = spec
+        .canonical_json()
+        .map_err(|e| SdkError::InvalidInput(format!("surface spec: {e}")))?;
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["e", &target_event_id.to_hex()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(40003), &content).tags(tags))
 }
 
 /// Build an edit event targeting an existing message (kind 40003).
@@ -2248,6 +2298,69 @@ mod tests {
             let s = t.as_slice();
             s.first().map(|v| v.as_str()) == Some(key) && s.get(1).map(|v| v.as_str()) == Some(val)
         })
+    }
+
+    #[test]
+    fn surface_happy_path_builds_canonical_content() {
+        use buzz_core::surface::parse_and_validate;
+        let cid = uuid();
+        let spec = parse_and_validate(
+            r#"{"version":1,"fallbackText":"Deploy healthy","title":"Deploy","nodes":[{"type":"badge","text":"HEALTHY","tone":"success"},{"type":"progress","label":"Rollout","value":100}]}"#,
+        )
+        .expect("valid spec");
+        let ev = sign(build_surface(cid, &spec, None, &[]).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40110);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert_eq!(ev.content, spec.canonical_json().expect("canonical"));
+        // Content parses back to an identical spec (canonical round-trip).
+        assert_eq!(parse_and_validate(&ev.content).expect("reparse"), spec);
+    }
+
+    #[test]
+    fn surface_invalid_spec_fails_with_field_error() {
+        use buzz_core::surface::SurfaceSpecV1;
+        let spec = SurfaceSpecV1 {
+            version: 1,
+            fallback_text: "x".into(),
+            title: None,
+            nodes: vec![],
+        };
+        let err = build_surface(uuid(), &spec, None, &[]).unwrap_err();
+        assert!(err.to_string().contains("nodes"), "{err}");
+    }
+
+    #[test]
+    fn surface_thread_and_mentions_tagged() {
+        use buzz_core::surface::parse_and_validate;
+        let cid = uuid();
+        let root = event_id();
+        let spec = parse_and_validate(
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"text","text":"y"}]}"#,
+        )
+        .expect("valid spec");
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let mention = keys().public_key().to_hex();
+        let ev = sign(build_surface(cid, &spec, Some(&tr), &[&mention]).unwrap());
+        assert!(has_tag(&ev, "e", &root.to_hex()));
+        assert!(has_tag(&ev, "p", &mention));
+    }
+
+    #[test]
+    fn surface_edit_targets_event_with_replacement_spec() {
+        use buzz_core::surface::parse_and_validate;
+        let cid = uuid();
+        let target = event_id();
+        let spec = parse_and_validate(
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"text","text":"y"}]}"#,
+        )
+        .expect("valid spec");
+        let ev = sign(build_surface_edit(cid, target, &spec).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40003);
+        assert!(has_tag(&ev, "e", &target.to_hex()));
+        assert_eq!(ev.content, spec.canonical_json().expect("canonical"));
     }
 
     #[test]

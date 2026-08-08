@@ -1,3 +1,5 @@
+import { surfacePreviewText } from "@/features/surfaces/spec";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   formatNotificationTitle,
@@ -68,7 +70,12 @@ export function notificationBody(item: FeedItem) {
     item.kind === 46010
       ? "A workflow is waiting for your approval."
       : "Something in Buzz needs your attention.";
-  return truncateNotificationBody(item.content, fallback);
+  // Surface events: notify with the spec's fallbackText, never raw JSON.
+  const body =
+    item.kind === KIND_SURFACE
+      ? surfacePreviewText(item.content)
+      : item.content;
+  return truncateNotificationBody(body, fallback);
 }
 
 export function collectHomeAlertItems(feed: HomeFeedResponse) {

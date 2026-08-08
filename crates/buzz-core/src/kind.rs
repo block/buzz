@@ -493,6 +493,51 @@ pub const KIND_STREAM_REMINDER: u32 = 40007;
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
+/// Surface Card — versioned, data-only UI spec rendered as a native card.
+///
+/// Content is canonical `SurfaceSpec v1` JSON (see [`crate::surface`]).
+/// Regular, stored, channel-scoped like stream messages; live updates reuse
+/// [`KIND_STREAM_MESSAGE_EDIT`] with full-spec replacement. See
+/// `docs/nips/NIP-SC.md`.
+///
+/// Number pending maintainer assignment on block/buzz#2480 — 40110 proposed
+/// (free, adjacent to canvas at 40100).
+pub const KIND_SURFACE: u32 = 40110;
+
+/// Kinds that are a **human-visible message in a channel timeline** — the
+/// conversational content set.
+///
+/// Every read path that asks "is this a message someone wrote?" must use this
+/// rather than spelling out `[KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2]`:
+/// mention/Home feeds, thread-parent resolution, channel recency, agent
+/// mention subscriptions, and agent context fetches. A kind that renders as a
+/// timeline row but is *not* conversational (system rows, job lifecycle,
+/// huddle cards) stays out.
+///
+/// Sites usually need this set **plus** something local (forum kinds, git
+/// kinds, huddle cards); compose with [`kinds_with`] rather than re-listing
+/// the conversational kinds, so a new content kind lands everywhere at once.
+///
+/// Mirrored by `CHANNEL_MESSAGE_EVENT_KINDS` in
+/// `desktop/src/shared/constants/kinds.ts` (parity is asserted on both sides).
+pub const CONVERSATIONAL_KINDS: &[u32] =
+    &[KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_SURFACE];
+
+/// [`CONVERSATIONAL_KINDS`] plus the caller's own kinds, deduplicated and
+/// order-stable (conversational kinds first).
+///
+/// Use at every site that needs the conversational set widened with something
+/// local — it keeps the shared part in one place while the local part stays
+/// visible at the call site.
+pub fn kinds_with(extra: &[u32]) -> Vec<u32> {
+    let mut out: Vec<u32> = CONVERSATIONAL_KINDS.to_vec();
+    for kind in extra {
+        if !out.contains(kind) {
+            out.push(*kind);
+        }
+    }
+    out
+}
 /// System message for channel state changes (join, leave, rename, etc.).
 pub const KIND_SYSTEM_MESSAGE: u32 = 40099;
 
@@ -708,6 +753,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_STREAM_REMINDER,
     KIND_STREAM_MESSAGE_DIFF,
     KIND_CANVAS,
+    KIND_SURFACE,
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
@@ -892,12 +938,59 @@ const _: () = assert!(KIND_REPORT <= u16::MAX as u32);
 const _: () = assert!(KIND_MODERATION_RESOLVE_REPORT <= u16::MAX as u32);
 const _: () = assert!(!is_ephemeral(KIND_REPORT));
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_BAN));
+// KIND_SURFACE is cast to u16 for nostr::Kind::Custom at every producer —
+// keep any future renumbering (pending maintainer assignment on #2480)
+// inside the encodable range, at compile time.
+const _: () = assert!(KIND_SURFACE <= u16::MAX as u32);
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_RESOLVE_REPORT));
 const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversational_kinds_include_every_channel_message_kind() {
+        // Surfaces are conversational content: every read path that treats
+        // kind:9 as "a message someone wrote" must treat 40110 the same way.
+        // Mirrors CHANNEL_MESSAGE_EVENT_KINDS in desktop's kinds.ts (parity is
+        // asserted there too).
+        for kind in [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_SURFACE] {
+            assert!(
+                CONVERSATIONAL_KINDS.contains(&kind),
+                "kind {kind} must be in CONVERSATIONAL_KINDS"
+            );
+        }
+    }
+
+    #[test]
+    fn conversational_kinds_exclude_non_conversational_rows() {
+        // Rows that render in a timeline but are not something a person wrote.
+        for kind in [
+            KIND_SYSTEM_MESSAGE,
+            KIND_HUDDLE_STARTED,
+            KIND_JOB_REQUEST,
+            KIND_STREAM_MESSAGE_EDIT,
+            KIND_REACTION,
+        ] {
+            assert!(
+                !CONVERSATIONAL_KINDS.contains(&kind),
+                "kind {kind} must NOT be in CONVERSATIONAL_KINDS"
+            );
+        }
+    }
+
+    #[test]
+    fn kinds_with_prepends_conversational_and_dedupes() {
+        let out = kinds_with(&[KIND_FORUM_POST, KIND_STREAM_MESSAGE]);
+        assert_eq!(&out[..CONVERSATIONAL_KINDS.len()], CONVERSATIONAL_KINDS);
+        assert!(out.contains(&KIND_FORUM_POST));
+        assert_eq!(
+            out.iter().filter(|k| **k == KIND_STREAM_MESSAGE).count(),
+            1,
+            "a kind already in the conversational set must not be duplicated"
+        );
+    }
 
     #[test]
     fn no_duplicate_kind_values() {

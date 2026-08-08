@@ -242,7 +242,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
             .iter()
             .map(|id| {
                 serde_json::json!({
-                    "kinds": [9, 40002],
+                    // Surface-only activity must advance channel recency too —
+                    // a card is a message someone posted.
+                    "kinds": buzz_core_pkg::kind::CONVERSATIONAL_KINDS,
                     "#h": [id],
                     "limit": 1
                 })

@@ -444,6 +444,37 @@ pub enum MessagesCmd {
         #[arg(long)]
         content: String,
     },
+    /// Publish a surface card — a versioned, data-only UI spec rendered as a native card
+    #[command(
+        after_help = "The spec is SurfaceSpec v1 JSON: {\"version\":1,\"fallbackText\":\"...\",\"title\":\"...\",\"nodes\":[...]}.\n\nNode shapes (tone is optional: default|success|warning|danger|info):\n  {\"type\":\"heading\",\"text\":\"...\"}\n  {\"type\":\"text\",\"text\":\"...\"}                          (plain text, max 4096 chars)\n  {\"type\":\"badge\",\"text\":\"...\",\"tone\":\"success\"}\n  {\"type\":\"keyValue\",\"items\":[{\"label\":\"...\",\"value\":\"...\",\"tone\":\"info\"}]}\n  {\"type\":\"statGrid\",\"stats\":[{\"label\":\"...\",\"value\":2,\"delta\":\"+1\",\"tone\":\"success\"}]}\n  {\"type\":\"table\",\"columns\":[\"A\",\"B\"],\"rows\":[[\"a1\",\"b1\"]]}      (max 12x100, rows match columns)\n  {\"type\":\"progress\",\"label\":\"...\",\"value\":80}            (0-100)\nValues/cells are strings or numbers. Limits: 1-32 nodes, 32 KiB total.\nThe response event_id is REQUIRED to update the card later via 'messages edit-surface'.\n\nExamples:\n  buzz messages send-surface --channel <UUID> --spec ./card.json\n  echo '{\"version\":1,...}' | buzz messages send-surface --channel <UUID> --spec -"
+    )]
+    SendSurface {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// SurfaceSpec v1 JSON — a file path, '-' for stdin, or inline JSON
+        #[arg(long)]
+        spec: String,
+        /// Event ID to reply to (surface as a thread reply)
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Mention someone on the card — pubkey hex, npub, or display name.
+        /// Repeatable. Surface content is JSON, so mentions are explicit.
+        #[arg(long = "mention")]
+        mention: Vec<String>,
+    },
+    /// Replace a surface card's spec in place (live update — full-spec replacement)
+    #[command(
+        after_help = "Replaces the whole spec; the card updates in place for everyone.\nOnly the surface author can edit it.\n\nExamples:\n  buzz messages edit-surface --event <EVENT_ID> --spec ./card-v2.json"
+    )]
+    EditSurface {
+        /// Event ID of the surface to update (from send-surface output)
+        #[arg(long)]
+        event: String,
+        /// Replacement SurfaceSpec v1 JSON — a file path, '-' for stdin, or inline JSON
+        #[arg(long)]
+        spec: String,
+    },
     /// Delete a message by event ID
     Delete {
         /// Event ID to delete (64-char hex)
@@ -2177,10 +2208,12 @@ mod tests {
             vec![
                 "delete",
                 "edit",
+                "edit-surface",
                 "get",
                 "search",
                 "send",
                 "send-diff",
+                "send-surface",
                 "thread",
                 "vote"
             ]
@@ -2315,7 +2348,7 @@ mod tests {
             ("feed", 1),
             ("issues", 4),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 10),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

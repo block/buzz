@@ -36,6 +36,9 @@ pub mod presence;
 pub mod private_managed_agent;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Surface Cards — versioned data-only UI spec: payload types, validation,
+/// canonicalization, and producer-side alias normalization.
+pub mod surface;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

@@ -1,3 +1,5 @@
+import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import { MessageSquare } from "lucide-react";
 import { useMemo } from "react";
 
@@ -119,16 +121,21 @@ export function ForumPostCard({
       </div>
 
       <div className="mt-2">
-        <Markdown
-          className="text-sm"
-          content={previewContent}
-          messageId={post.eventId}
-          linkPreviewsSuppressed={hasLinkPreviewSuppression(post.tags)}
-          linkPreviewTags={post.tags}
-          imetaByUrl={imetaByUrl}
-          mentionNames={mentionNames}
-          mentionPubkeysByName={mentionPubkeysByName}
-        />
+        {post.kind === KIND_SURFACE ? (
+          // Surfaces are data-only specs — render the card, never spec JSON.
+          <SurfaceMessage content={post.content} />
+        ) : (
+          <Markdown
+            className="text-sm"
+            content={previewContent}
+            messageId={post.eventId}
+            linkPreviewsSuppressed={hasLinkPreviewSuppression(post.tags)}
+            linkPreviewTags={post.tags}
+            imetaByUrl={imetaByUrl}
+            mentionNames={mentionNames}
+            mentionPubkeysByName={mentionPubkeysByName}
+          />
+        )}
       </div>
 
       {summary && summary.replyCount > 0 ? (

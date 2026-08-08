@@ -1,3 +1,5 @@
+import SurfaceMessage from "@/features/surfaces/ui/SurfaceMessage";
+import { KIND_SURFACE } from "@/shared/constants/kinds";
 import { EditorContent } from "@tiptap/react";
 import {
   ALargeSmall,
@@ -185,7 +187,7 @@ function useAgentCandidates() {
 }
 
 /** Live message feed for the conversation's backing DM channel, reduced to
- * plain chat rows (kind 9 / 40002 only). */
+ * plain chat rows (conversational kinds (9 / 40002 / surfaces)). */
 function ConversationThread({
   channel,
   agent,
@@ -238,12 +240,18 @@ function ConversationThread({
               <span className="text-xs font-semibold text-muted-foreground">
                 {isSelf ? "You" : agent.name}
               </span>
-              <Markdown
-                className="text-base text-foreground"
-                content={
-                  isSelf ? stripRepoContext(event.content) : event.content
-                }
-              />
+              {event.kind === KIND_SURFACE ? (
+                // Surfaces are data-only specs — render the native card. The
+                // markdown pipeline would dump raw spec JSON here.
+                <SurfaceMessage content={event.content} />
+              ) : (
+                <Markdown
+                  className="text-base text-foreground"
+                  content={
+                    isSelf ? stripRepoContext(event.content) : event.content
+                  }
+                />
+              )}
             </div>
           </div>
         );

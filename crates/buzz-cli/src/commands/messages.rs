@@ -350,6 +350,194 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// The `e` tag an edit addresses, if any.
+fn edit_target_id(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let parts = tag.as_array()?;
+                (parts.first()?.as_str()? == "e")
+                    .then(|| parts.get(1)?.as_str().map(str::to_string))
+                    .flatten()
+            })
+        })
+}
+
+/// Overlay the latest `kind:40003` edit content onto the events it targets,
+/// and report edits that landed in the polling window but target something
+/// outside this page.
+///
+/// Agents poll with `messages get` / `messages thread`, so those must report
+/// the message's CURRENT content — a surface card's whole update model is a
+/// full-spec replacement, and an agent reading the original spec forever would
+/// act on stale state.
+///
+/// Edits are looked up **by target id**: an edit tags the event it replaces,
+/// so a reply's edit does not carry the thread root's id, and a window scan
+/// could miss it entirely. Ties on `created_at` (second precision) break on
+/// event id, matching every other client so all readers converge.
+///
+/// When `since` is given, a second pass also pulls edits made inside that
+/// window whose target is NOT on this page — a card published earlier and
+/// updated now produces only an edit event, and a polling reader that never
+/// saw it would keep acting on stale state. Those edits are appended as their
+/// own rows; edits folded into a target on this page are not, since they would
+/// duplicate it.
+///
+/// Best-effort: a failed lookup leaves original content rather than failing
+/// the read.
+pub(crate) async fn overlay_latest_edits(client: &BuzzClient, events: &mut Vec<serde_json::Value>) {
+    overlay_latest_edits_in_window(client, events, None, None).await
+}
+
+/// [`overlay_latest_edits`] plus out-of-page edit reporting for a polling
+/// window (`channel_id` + `since`).
+pub(crate) async fn overlay_latest_edits_in_window(
+    client: &BuzzClient,
+    events: &mut Vec<serde_json::Value>,
+    channel_id: Option<&str>,
+    since: Option<i64>,
+) {
+    const EDIT_KIND: u64 = 40003;
+    // One filter per target: a single OR-ed `#e` filter shares one row budget
+    // (the relay caps a filter at 1000 rows), so one heavily-edited event could
+    // hide every other target's edit. One row each suffices — the relay orders
+    // `created_at DESC, id ASC` and the tie-break picks the smallest id, so the
+    // first row is the winner.
+    const FILTERS_PER_QUERY: usize = 25;
+    const ROWS_PER_TARGET: usize = 1;
+
+    let target_ids: Vec<String> = events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND))
+        .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+
+    // NOTE: no early return on an empty page — the window pass below is what
+    // tells a polling reader that a card published earlier just changed, and a
+    // window can legitimately contain only that edit.
+    let mut edits: Vec<serde_json::Value> = Vec::new();
+    for chunk in target_ids.chunks(FILTERS_PER_QUERY) {
+        let filters: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "kinds": [EDIT_KIND],
+                    "#e": [id],
+                    "limit": ROWS_PER_TARGET,
+                })
+            })
+            .collect();
+        let Ok(raw) = client.query_multi(&filters).await else {
+            continue;
+        };
+        edits.extend(serde_json::from_str::<Vec<serde_json::Value>>(&raw).unwrap_or_default());
+    }
+
+    // target id -> (created_at, edit id, content)
+    let mut latest: std::collections::HashMap<String, (u64, String, String)> =
+        std::collections::HashMap::new();
+    for edit in &edits {
+        let Some(target) = edit
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|tag| {
+                    let parts = tag.as_array()?;
+                    (parts.first()?.as_str()? == "e")
+                        .then(|| parts.get(1)?.as_str().map(str::to_string))
+                        .flatten()
+                })
+            })
+        else {
+            continue;
+        };
+        let created_at = edit.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = edit
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let content = edit
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let wins = latest.get(&target).is_none_or(|(at, existing_id, _)| {
+            created_at > *at || (created_at == *at && id < *existing_id)
+        });
+        if wins {
+            latest.insert(target, (created_at, id, content));
+        }
+    }
+
+    let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for event in events.iter_mut() {
+        if event.get("kind").and_then(|v| v.as_u64()) == Some(EDIT_KIND) {
+            continue;
+        }
+        let Some(id) = event.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        if let Some((_, _, content)) = latest.get(&id) {
+            if let Some(obj) = event.as_object_mut() {
+                obj.insert("content".into(), serde_json::json!(content));
+            }
+            applied.insert(id);
+        }
+    }
+
+    // Edits made inside the polling window whose target is NOT on this page:
+    // the only signal a reader gets that something published earlier changed.
+    // Only the winning edit per target is reported — a card updated 60 times
+    // is one changed thing, not 60 rows of spec JSON.
+    if let (Some(channel_id), Some(since)) = (channel_id, since) {
+        let filter = serde_json::json!({
+            "kinds": [EDIT_KIND],
+            "#h": [channel_id],
+            "since": since,
+        });
+        if let Ok(raw) = client.query(&filter).await {
+            let window_edits: Vec<serde_json::Value> =
+                serde_json::from_str(&raw).unwrap_or_default();
+            let page_ids: std::collections::HashSet<String> = target_ids.iter().cloned().collect();
+            let mut winners: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            for edit in window_edits {
+                let Some(target) = edit_target_id(&edit) else {
+                    continue;
+                };
+                if page_ids.contains(&target) {
+                    continue;
+                }
+                let created_at = edit.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                let id = edit.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let wins = winners.get(&target).is_none_or(|existing| {
+                    let at = existing
+                        .get("created_at")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let existing_id = existing.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    created_at > at || (created_at == at && id < existing_id)
+                });
+                if wins {
+                    winners.insert(target, edit);
+                }
+            }
+            events.extend(winners.into_values());
+        }
+    }
+
+    events.retain(|event| {
+        if event.get("kind").and_then(|v| v.as_u64()) != Some(EDIT_KIND) {
+            return true;
+        }
+        edit_target_id(event).is_none_or(|target| !applied.contains(&target))
+    });
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -362,8 +550,12 @@ pub async fn cmd_get_messages(
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
 
+    // Content kinds only. Edits are fetched separately (see
+    // `overlay_latest_edits`): sharing this limit with kind:40003 would let a
+    // heavily-edited card fill the page with raw edit rows and return no
+    // messages at all.
     let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
+        "kinds": [9, 40002, 40008, 40110, 45001, 45003],
         "#h": [channel_id],
         "limit": limit
     });
@@ -386,6 +578,7 @@ pub async fn cmd_get_messages(
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    overlay_latest_edits_in_window(client, &mut events, Some(channel_id), since).await;
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -406,8 +599,11 @@ pub async fn cmd_get_thread(
     // Two filters ORed in a single HTTP call:
     // 1. Replies referencing this event via e-tag (no kind restriction)
     // 2. The root event itself by ID
+    // Content kinds only — edits are resolved by target id in the overlay. If
+    // they shared this budget, a root edited 100+ times would fill the page
+    // with edit rows and drop every real reply.
     let mut reply_filter = serde_json::json!({
-        "kinds": [9, 40002, 40003, 40008, 45003],
+        "kinds": [9, 40002, 40008, 40110, 45003],
         "#h": [channel_id],
         "#e": [event_id],
         "limit": limit
@@ -422,6 +618,9 @@ pub async fn cmd_get_thread(
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    // The reply filter only catches edits tagged to the ROOT; an edited reply
+    // carries its own id, so resolve current content by target id.
+    overlay_latest_edits(client, &mut events).await;
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
@@ -834,6 +1033,238 @@ pub async fn cmd_edit_message(
     Ok(())
 }
 
+/// Resolve `--mention` values for a surface against the channel's membership.
+///
+/// Surface content is canonical JSON, so there is no `@name` text to parse —
+/// mentions are explicit. They still get the same guarantees the normal send
+/// path gives: a mention must be a *current channel member* (a `p` tag for a
+/// non-member is a notification the recipient can never read), values are
+/// deduplicated, and the total is capped at [`MENTION_CAP`].
+///
+/// Accepts pubkey hex, npub, or a member's display name.
+async fn resolve_surface_mentions(
+    client: &BuzzClient,
+    channel_id: &str,
+    mentions: &[String],
+) -> Result<Vec<String>, CliError> {
+    if mentions.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let members_filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
+        .await
+        .ok_or_else(|| {
+            CliError::Other("could not load channel membership for mention preflight".into())
+        })?;
+
+    // Display-name lookup, built from the members' own profiles.
+    let profiles_filter = serde_json::json!({
+        "kinds": [0],
+        "authors": member_pubkeys,
+        "limit": member_pubkeys.len(),
+    });
+    let profile_events = fetch_events(client, &profiles_filter)
+        .await
+        .unwrap_or_default();
+    let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in &profile_events {
+        let (Some(pubkey), Some(content_json)) = (
+            e.get("pubkey").and_then(|v| v.as_str()),
+            e.get("content").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(content_json) else {
+            continue;
+        };
+        if let Some(name) = v
+            .get("display_name")
+            .or_else(|| v.get("name"))
+            .and_then(|n| n.as_str())
+            .filter(|n| !n.is_empty())
+        {
+            name_to_pubkeys
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(pubkey.to_string());
+        }
+    }
+
+    let mut resolved: Vec<String> = Vec::new();
+    for value in mentions {
+        let raw = value.trim();
+        let hex = match PublicKey::parse(raw) {
+            Ok(pubkey) => pubkey.to_hex(),
+            Err(_) => match name_to_pubkeys
+                .get(&raw.to_ascii_lowercase())
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                [pubkey] => pubkey.clone(),
+                [] => {
+                    return Err(CliError::Usage(format!(
+                        "--mention '{raw}' does not match a current channel member; \
+                         retry with --mention <pubkey>"
+                    )))
+                }
+                candidates => {
+                    return Err(CliError::Usage(format!(
+                        "--mention '{raw}' is ambiguous; candidates: {}. \
+                         Retry with --mention <pubkey>",
+                        candidates.join(", ")
+                    )))
+                }
+            },
+        };
+        if !member_pubkeys.contains(&hex) {
+            return Err(CliError::Usage(format!(
+                "--mention {hex} is not a member of this channel; \
+                 a p tag for a non-member cannot be delivered"
+            )));
+        }
+        if !resolved.contains(&hex) {
+            resolved.push(hex);
+        }
+    }
+
+    if resolved.len() > MENTION_CAP {
+        return Err(CliError::Usage(format!(
+            "too many --mention values (max {MENTION_CAP})"
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Read a `--spec` argument: `-` for stdin, an existing file path, or inline JSON.
+fn read_spec_arg(value: &str) -> Result<String, CliError> {
+    if value == "-" {
+        return read_or_stdin(value);
+    }
+    let trimmed = value.trim_start();
+    if trimmed.starts_with('{') {
+        return Ok(value.to_string());
+    }
+    // Anything else that still looks like inline JSON (array, quoted string)
+    // is a shape mistake, not a file path — say so instead of ENOENT noise.
+    if trimmed.starts_with('[') || trimmed.starts_with('"') {
+        return Err(CliError::Usage(
+            "--spec: inline spec must be a JSON object like {\"version\":1,\"fallbackText\":\"...\",\"nodes\":[...]}".into(),
+        ));
+    }
+    std::fs::read_to_string(value)
+        .map_err(|e| CliError::Usage(format!("--spec: cannot read file {value}: {e}")))
+}
+
+/// Parse, alias-normalize, and validate a SurfaceSpec v1 JSON document.
+///
+/// Errors are field-specific (`nodes[3].table: 14 columns exceeds max 12`) so
+/// the payload can be fixed without a relay round-trip.
+fn parse_surface_spec(raw: &str) -> Result<buzz_core::surface::SurfaceSpecV1, CliError> {
+    // Syntax errors come from the FIRST parse so line/column point into the
+    // user's own file. Schema errors are decoded from the parsed value —
+    // serde reports field paths there, never positions in some internal
+    // re-serialization the user has no way to line up with their input.
+    let mut value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| CliError::Usage(format!("--spec is not valid JSON: {e}")))?;
+    buzz_core::surface::normalize_spec_aliases(&mut value);
+    let spec: buzz_core::surface::SurfaceSpecV1 = serde_json::from_value(value)
+        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))?;
+    spec.validate()
+        .map_err(|e| CliError::Usage(format!("invalid surface spec: {e}")))?;
+    Ok(spec)
+}
+
+/// Publish a surface card to a channel.
+pub async fn cmd_send_surface(
+    client: &BuzzClient,
+    channel_id: &str,
+    spec_arg: &str,
+    reply_to: Option<&str>,
+    mentions: &[String],
+) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+    if let Some(r) = &reply_to {
+        validate_hex64(r)?;
+    }
+    let spec = parse_surface_spec(&read_spec_arg(spec_arg)?)?;
+    let thread_ref = match reply_to {
+        Some(r) => Some(resolve_thread_ref(client, r).await?),
+        None => None,
+    };
+    let mention_pubkeys = resolve_surface_mentions(client, channel_id, mentions).await?;
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+
+    let builder = buzz_sdk::build_surface(channel_uuid, &spec, thread_ref.as_ref(), &mention_refs)
+        .map_err(crate::validate::sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+
+    // Report who was actually p-tagged so the caller (usually an agent) can
+    // verify delivery instead of assuming it.
+    let mut out: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("mention_pubkeys".into(), serde_json::json!(mention_pubkeys));
+    }
+    println!("{out}");
+    Ok(())
+}
+
+/// Replace a surface card's spec in place (live update via the edit kind).
+pub async fn cmd_edit_surface(
+    client: &BuzzClient,
+    event_id: &str,
+    spec_arg: &str,
+) -> Result<(), CliError> {
+    validate_hex64(event_id)?;
+    let spec = parse_surface_spec(&read_spec_arg(spec_arg)?)?;
+
+    // Resolve the target and verify it is a surface before signing anything.
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let event = events
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+    let kind = event.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
+    if kind != u64::from(buzz_core::kind::KIND_SURFACE) {
+        return Err(CliError::Usage(format!(
+            "event {event_id} is kind {kind}, not a surface (kind {}) — use 'messages edit' for regular messages",
+            buzz_core::kind::KIND_SURFACE
+        )));
+    }
+    let channel_uuid = event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|tag| {
+                let arr = tag.as_array()?;
+                if arr.first()?.as_str()? == "h" {
+                    Uuid::parse_str(arr.get(1)?.as_str()?).ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| CliError::Other("surface event has no valid h tag".into()))?;
+
+    let target_eid = parse_event_id(event_id)?;
+    let builder = buzz_sdk::build_surface_edit(channel_uuid, target_eid, &spec)
+        .map_err(crate::validate::sdk_err)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 /// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
@@ -929,6 +1360,13 @@ pub async fn dispatch(
             .await
         }
         MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::SendSurface {
+            channel,
+            spec,
+            reply_to,
+            mention,
+        } => cmd_send_surface(client, &channel, &spec, reply_to.as_deref(), &mention).await,
+        MessagesCmd::EditSurface { event, spec } => cmd_edit_surface(client, &event, &spec).await,
         MessagesCmd::Delete {
             event,
             action_id,

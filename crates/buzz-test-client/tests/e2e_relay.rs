@@ -2983,3 +2983,483 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
         "the last owner must keep their role"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Surface Cards (KIND_SURFACE) — ingest validation, membership, edit gating.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KIND_SURFACE_U16: u16 = 40110;
+const KIND_EDIT_U16: u16 = 40003;
+
+fn surface_demo_spec(fallback: &str, badge_tone: &str, progress: u32) -> String {
+    format!(
+        r#"{{"version":1,"fallbackText":"{fallback}","title":"Deployment — api-gateway","nodes":[{{"type":"badge","text":"STATE","tone":"{badge_tone}"}},{{"type":"statGrid","stats":[{{"label":"Pods","value":2,"tone":"success"}},{{"label":"Errors","value":0}}]}},{{"type":"table","columns":["Pod","Status"],"rows":[["web-7d9f","Running"],["web-a1c2","Running"]]}},{{"type":"progress","label":"Rollout","value":{progress}}}]}}"#
+    )
+}
+
+fn build_surface_event(channel_id: &str, keys: &Keys, content: &str) -> nostr::Event {
+    EventBuilder::new(Kind::Custom(KIND_SURFACE_U16), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+fn build_surface_edit_event(
+    channel_id: &str,
+    target_id: &str,
+    keys: &Keys,
+    content: &str,
+) -> nostr::Event {
+    EventBuilder::new(Kind::Custom(KIND_EDIT_U16), content)
+        .tags(vec![
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["e", target_id]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+/// A channel member's valid surface is accepted; a non-member's is rejected.
+#[tokio::test]
+#[ignore]
+async fn test_surface_member_accepted_nonmember_rejected() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let ok = owner_client
+        .send_event(build_surface_event(
+            &channel_id,
+            &owner_keys,
+            &surface_demo_spec("Deploy healthy", "success", 100),
+        ))
+        .await
+        .expect("send surface");
+    assert!(ok.accepted, "member surface rejected: {}", ok.message);
+
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+    let ok = outsider_client
+        .send_event(build_surface_event(
+            &channel_id,
+            &outsider_keys,
+            &surface_demo_spec("Deploy healthy", "success", 100),
+        ))
+        .await
+        .expect("send outsider surface");
+    assert!(
+        !ok.accepted,
+        "non-member surface must be rejected, got: {}",
+        ok.message
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+}
+
+/// Invalid schema, unknown version, unknown tone, and oversize payloads are
+/// all rejected at ingest with a field-specific error.
+#[tokio::test]
+#[ignore]
+async fn test_surface_invalid_payloads_rejected() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &keys).await;
+
+    let cases: Vec<(&str, String)> = vec![
+        ("broken JSON", "{not json".to_string()),
+        (
+            "unknown version",
+            r#"{"version":2,"fallbackText":"x","nodes":[{"type":"text","text":"y"}]}"#.to_string(),
+        ),
+        (
+            "unknown node type",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"iframe","src":"https://x"}]}"#
+                .to_string(),
+        ),
+        (
+            "unknown tone",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"badge","text":"B","tone":"sparkly"}]}"#
+                .to_string(),
+        ),
+        (
+            "boolean cell",
+            r#"{"version":1,"fallbackText":"x","nodes":[{"type":"table","columns":["A"],"rows":[[true]]}]}"#
+                .to_string(),
+        ),
+        (
+            "13 columns",
+            format!(
+                r#"{{"version":1,"fallbackText":"x","nodes":[{{"type":"table","columns":[{}],"rows":[]}}]}}"#,
+                (0..13)
+                    .map(|i| format!("\"c{i}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ),
+        ("oversize", {
+            let body = "y".repeat(4096);
+            let node = format!(r#"{{"type":"text","text":"{body}"}}"#);
+            format!(
+                r#"{{"version":1,"fallbackText":"x","nodes":[{}]}}"#,
+                vec![node.as_str(); 32].join(",")
+            )
+        }),
+    ];
+
+    for (name, content) in cases {
+        let ok = client
+            .send_event(build_surface_event(&channel_id, &keys, &content))
+            .await
+            .unwrap_or_else(|e| panic!("send {name}: {e}"));
+        assert!(!ok.accepted, "{name} must be rejected");
+        assert!(
+            ok.message.starts_with("invalid:"),
+            "{name}: expected field-specific 'invalid:' error, got: {}",
+            ok.message
+        );
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Live-update semantics: the author's edits replace the spec (latest wins);
+/// an invalid replacement spec is rejected; a non-author's edit is rejected.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_replacement_author_gated() {
+    let url = relay_url();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+
+    let mut alice_client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect as alice");
+    let channel_id = create_private_channel_ws(&mut alice_client, &alice).await;
+    let (accepted, msg) = add_member_ws(
+        &mut alice_client,
+        &channel_id,
+        &bob.public_key().to_hex(),
+        &alice,
+    )
+    .await;
+    assert!(accepted, "add bob: {msg}");
+
+    // Alice publishes the surface.
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec("Deploy healthy", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    let ok = alice_client.send_event(surface).await.expect("publish");
+    assert!(ok.accepted, "publish surface: {}", ok.message);
+
+    // Alice edits twice — healthy → incident → recovered. Both accepted.
+    for (fallback, tone, progress) in [
+        ("Deploy DEGRADED: 1/2 pods", "danger", 35),
+        ("Deploy recovered", "success", 100),
+    ] {
+        let ok = alice_client
+            .send_event(build_surface_edit_event(
+                &channel_id,
+                &surface_id,
+                &alice,
+                &surface_demo_spec(fallback, tone, progress),
+            ))
+            .await
+            .expect("send edit");
+        assert!(ok.accepted, "author edit rejected: {}", ok.message);
+    }
+
+    // An edit whose content is not a valid spec is rejected.
+    let ok = alice_client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &alice,
+            r#"{"version":1,"fallbackText":"x","nodes":[]}"#,
+        ))
+        .await
+        .expect("send invalid edit");
+    assert!(!ok.accepted, "invalid surface edit must be rejected");
+    assert!(
+        ok.message.contains("surface edit"),
+        "expected surface-edit validation error, got: {}",
+        ok.message
+    );
+
+    // Bob (member, but not the author) cannot edit Alice's surface.
+    let mut bob_client = BuzzTestClient::connect(&url, &bob)
+        .await
+        .expect("connect as bob");
+    let ok = bob_client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &bob,
+            &surface_demo_spec("Bob was here", "danger", 1),
+        ))
+        .await
+        .expect("send bob edit");
+    assert!(
+        !ok.accepted,
+        "non-author edit must be rejected, got: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("author"),
+        "expected author-gating error, got: {}",
+        ok.message
+    );
+
+    alice_client.disconnect().await.expect("disconnect alice");
+    bob_client.disconnect().await.expect("disconnect bob");
+}
+
+/// An edit targeting a surface in a DIFFERENT channel than the edit's own `h`
+/// tag is rejected — a cross-channel edit must not mutate a foreign surface.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_cross_channel_rejected() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_a = create_private_channel_ws(&mut client, &alice).await;
+    let channel_b = create_private_channel_ws(&mut client, &alice).await;
+
+    // Publish a surface in channel A.
+    let surface = build_surface_event(
+        &channel_a,
+        &alice,
+        &surface_demo_spec("in channel A", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    let ok = client.send_event(surface).await.expect("publish A");
+    assert!(ok.accepted, "publish in A: {}", ok.message);
+
+    // Edit event carries channel B's h tag but points its e tag at A's surface.
+    let ok = client
+        .send_event(build_surface_edit_event(
+            &channel_b,
+            &surface_id,
+            &alice,
+            &surface_demo_spec("hijacked into B", "danger", 1),
+        ))
+        .await
+        .expect("send cross-channel edit");
+    assert!(
+        !ok.accepted,
+        "cross-channel surface edit must be rejected, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// An accepted surface edit is actually stored and fanned out: after editing,
+/// a fresh subscription for the surface id returns the REPLACEMENT spec, not
+/// the original — proving the edit took effect, not merely that it was OK'd.
+#[tokio::test]
+#[ignore]
+async fn test_surface_edit_replacement_is_observable() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &alice).await;
+
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec("original", "success", 100),
+    );
+    let surface_id = surface.id.to_hex();
+    client.send_event(surface).await.expect("publish");
+
+    // Edit to a spec whose fallbackText carries a unique marker.
+    let marker = format!("edited-{}", uuid::Uuid::new_v4());
+    let ok = client
+        .send_event(build_surface_edit_event(
+            &channel_id,
+            &surface_id,
+            &alice,
+            &surface_demo_spec(&marker, "danger", 20),
+        ))
+        .await
+        .expect("send edit");
+    assert!(ok.accepted, "edit rejected: {}", ok.message);
+
+    // Read the edit event back by referencing the surface via #e.
+    let sid = sub_id("surface-edit-readback");
+    let filter = Filter::new().kind(Kind::Custom(KIND_EDIT_U16)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::E),
+        [surface_id.as_str()],
+    );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    assert!(
+        events.iter().any(|e| e.content.contains(&marker)),
+        "stored edit must contain the replacement spec marker {marker}; got {} events",
+        events.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// Surfaces are excluded from NIP-50 full-text search: a unique token placed
+/// in a surface's spec is NOT found by search, while the same token in a
+/// kind-9 message IS — proving the search path works and the exclusion is
+/// intentional (FTS allowlist, migration 0008).
+#[tokio::test]
+#[ignore]
+async fn test_surface_excluded_from_fts() {
+    let url = relay_url();
+    let alice = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &alice)
+        .await
+        .expect("connect");
+    let channel_id = create_private_channel_ws(&mut client, &alice).await;
+
+    let token = format!("surfacefts{}", uuid::Uuid::new_v4().simple());
+
+    // Publish the token inside a surface spec AND inside a kind-9 message.
+    let surface = build_surface_event(
+        &channel_id,
+        &alice,
+        &surface_demo_spec(&token, "success", 100),
+    );
+    client.send_event(surface).await.expect("publish surface");
+
+    let msg = EventBuilder::new(Kind::Custom(9), format!("plain {token} message"))
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&alice)
+        .unwrap();
+    client.send_event(msg).await.expect("publish message");
+
+    // NIP-50 search scoped to both content kinds.
+    let sid = sub_id("surface-fts");
+    let filter = Filter::new()
+        .kinds([Kind::Custom(9), Kind::Custom(KIND_SURFACE_U16)])
+        .search(&token)
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_id.as_str()],
+        );
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    let kinds: Vec<u16> = events.iter().map(|e| e.kind.as_u16()).collect();
+    assert!(
+        kinds.contains(&9),
+        "kind-9 message with the token must be searchable (proves FTS works); got {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&KIND_SURFACE_U16),
+        "surface content must NOT be full-text searchable; got {kinds:?}"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A surface carrying a `p` tag actually reaches the mentioned person.
+///
+/// The recipient is added to the (private) channel and does the read on their
+/// OWN authenticated connection — the path Home feeds, notifications and agent
+/// mention filters use. Querying on the author's connection would pass even if
+/// the recipient could never see the event, so this test deliberately does not.
+#[tokio::test]
+#[ignore]
+async fn test_surface_mention_is_deliverable() {
+    let url = relay_url();
+    let author = Keys::generate();
+    let mentioned = Keys::generate();
+    let mentioned_hex = mentioned.public_key().to_hex();
+
+    let mut author_client = BuzzTestClient::connect(&url, &author)
+        .await
+        .expect("connect as author");
+    let channel_id = create_private_channel_ws(&mut author_client, &author).await;
+
+    // The recipient must be a channel member — a p tag alone does not grant
+    // read access to a private channel.
+    let (accepted, msg) =
+        add_member_ws(&mut author_client, &channel_id, &mentioned_hex, &author).await;
+    assert!(accepted, "add mentioned member: {msg}");
+
+    let marker = format!("mention-{}", uuid::Uuid::new_v4());
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_SURFACE_U16),
+        surface_demo_spec(&marker, "success", 100),
+    )
+    .tags(vec![
+        Tag::parse(["h", &channel_id]).unwrap(),
+        Tag::parse(["p", &mentioned_hex]).unwrap(),
+    ])
+    .sign_with_keys(&author)
+    .unwrap();
+    let ok = author_client.send_event(event).await.expect("publish");
+    assert!(ok.accepted, "mention surface rejected: {}", ok.message);
+
+    // Read as the RECIPIENT, on their own connection.
+    let mut recipient_client = BuzzTestClient::connect(&url, &mentioned)
+        .await
+        .expect("connect as mentioned user");
+    let sid = sub_id("surface-mention");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_SURFACE_U16))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [mentioned_hex.as_str()],
+        );
+    recipient_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = recipient_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    assert!(
+        events.iter().any(|e| e.content.contains(&marker)),
+        "the mentioned user must receive the card through their own #p query; \
+         got {} events",
+        events.len()
+    );
+
+    author_client.disconnect().await.expect("disconnect author");
+    recipient_client
+        .disconnect()
+        .await
+        .expect("disconnect recipient");
+}

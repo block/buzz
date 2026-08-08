@@ -136,7 +136,6 @@ export function useUnreadChannels(
   const {
     pubkey,
     relayClient,
-    relayUrl: relayUrlOption,
     mutedChannelIds: mutedChannelIdsOption,
     ...liveUpdateOptions
   } = options;
@@ -144,8 +143,8 @@ export function useUnreadChannels(
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
   // Scoped relay key for activity storage; empty string when relay not yet known
   // so rows from an unknown relay never load into the wrong community.
-  const normalizedRelayUrl = relayUrlOption
-    ? normalizeRelayUrl(relayUrlOption)
+  const normalizedRelayUrl = liveUpdateOptions.relayUrl
+    ? normalizeRelayUrl(liveUpdateOptions.relayUrl)
     : "";
   // Single identity for the in-memory thread-activity buffer — computed once
   // per render and used at reset, both writers, and the return fence. The

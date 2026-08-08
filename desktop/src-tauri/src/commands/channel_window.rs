@@ -1,20 +1,7 @@
 use tauri::State;
 
+use crate::commands::query_kinds::TIMELINE_KINDS;
 use crate::{app_state::AppState, models::ChannelPageCursor, relay::query_relay};
-
-const TIMELINE_KINDS: [u32; 11] = [
-    9,
-    40002,
-    40008,
-    40099,
-    43001,
-    43002,
-    43003,
-    43004,
-    43005,
-    43006,
-    buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
-];
 
 fn build_channel_window_filter(
     channel_id: &str,

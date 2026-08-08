@@ -1,3 +1,4 @@
+import { messagePreviewText } from "@/features/surfaces/spec";
 import {
   AlertCircle,
   ArrowLeft,
@@ -246,6 +247,9 @@ function InboxMessageDetailPane({
               authorPubkey: item.item.pubkey,
               avatarUrl: item.avatarUrl,
               content: item.preview,
+              // Carry the kind so the row renders a surface as plain text
+              // rather than falling through to the markdown pipeline.
+              kind: item.item.kind,
               createdAt: item.item.createdAt,
               depth: 0,
               fullTimestampLabel: item.fullTimestampLabel,
@@ -419,7 +423,7 @@ function InboxMessageDetailPane({
     replyTarget && replyTarget.id !== item.id
       ? {
           author: replyTarget.authorLabel,
-          body: replyTarget.content,
+          body: messagePreviewText(replyTarget.content, replyTarget.kind),
           id: replyTarget.id,
         }
       : null;
