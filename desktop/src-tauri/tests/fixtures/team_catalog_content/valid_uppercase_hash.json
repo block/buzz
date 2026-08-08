@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "name": "Review Squad",
+  "members": [
+    {
+      "member_key": "reviewer",
+      "display_name": "Relay Reviewer",
+      "system_prompt": "Review.",
+      "builtin_slug": "fizz",
+      "projection_hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  ]
+}

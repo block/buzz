@@ -460,6 +460,43 @@ pub fn get_retained_event(
     .map_err(|e| format!("failed to get retained event: {e}"))
 }
 
+/// Return every retained event for `pubkey` at the given kind.
+///
+/// Used by the team-catalog reconcile, which enumerates retained 30178 heads
+/// as the authoritative worklist — not the current team store — so that a
+/// shared head whose team was later deleted is visible and can be tombstoned.
+pub fn get_retained_events_by_kind(
+    conn: &Connection,
+    kind: u32,
+    pubkey: &str,
+) -> Result<Vec<RetainedEvent>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, pubkey, d_tag, content, created_at, raw_event, pending_sync
+             FROM persona_events
+             WHERE kind = ?1 AND pubkey = ?2
+             ORDER BY d_tag",
+        )
+        .map_err(|e| format!("failed to prepare query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![kind, pubkey], |row| {
+            Ok(RetainedEvent {
+                kind: row.get(0)?,
+                pubkey: row.get(1)?,
+                d_tag: row.get(2)?,
+                content: row.get(3)?,
+                created_at: row.get(4)?,
+                raw_event: row.get(5)?,
+                pending_sync: row.get::<_, i32>(6)? != 0,
+            })
+        })
+        .map_err(|e| format!("failed to query retained events: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to read retained event row: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

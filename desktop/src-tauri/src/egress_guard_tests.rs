@@ -274,6 +274,8 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Mock-relay route in its in-file tests; production publish goes through
     // the guarded boundary-1 funnel (`submit_signed_event_at_with_keys`).
     ("src/commands/personas/sharing.rs", 1, 0),
+    // Mock-relay route in team-sharing tests; same pattern as persona sharing above.
+    ("src/commands/teams/sharing/tests.rs", 1, 0),
 ];
 
 // Needles are assembled at runtime so this scan file itself contains no

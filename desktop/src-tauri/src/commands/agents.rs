@@ -901,6 +901,7 @@ pub async fn create_managed_agent(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
@@ -1303,7 +1304,6 @@ pub async fn delete_managed_agent(
             for pubkey in &exited_pubkeys {
                 state.clear_agent_session_caches(pubkey);
             }
-
             // Guard: reject deletion of deployed remote agents unless explicitly forced.
             // This turns "don't orphan remote infra" from a UI convention into a backend
             // invariant — a buggy or compromised IPC caller cannot silently orphan a live
