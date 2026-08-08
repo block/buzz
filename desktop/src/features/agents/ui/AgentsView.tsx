@@ -108,6 +108,7 @@ export function AgentsView() {
         void teamActions.handleImportTeamSnapshotFile(
           pending.fileBytes,
           pending.fileName,
+          pending.desktopControlRequestId,
         );
       } else {
         void personas.handleImportSnapshotFile(
@@ -117,13 +118,19 @@ export function AgentsView() {
       }
     }
 
-    return subscribeSnapshotImport(({ fileBytes, fileName, snapshotKind }) => {
-      if (snapshotKind === "team") {
-        void teamActions.handleImportTeamSnapshotFile(fileBytes, fileName);
-      } else {
-        void personas.handleImportSnapshotFile(fileBytes, fileName);
-      }
-    });
+    return subscribeSnapshotImport(
+      ({ fileBytes, fileName, snapshotKind, desktopControlRequestId }) => {
+        if (snapshotKind === "team") {
+          void teamActions.handleImportTeamSnapshotFile(
+            fileBytes,
+            fileName,
+            desktopControlRequestId,
+          );
+        } else {
+          void personas.handleImportSnapshotFile(fileBytes, fileName);
+        }
+      },
+    );
   }, []);
 
   return (

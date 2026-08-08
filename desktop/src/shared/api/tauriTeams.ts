@@ -101,6 +101,7 @@ export type TeamSnapshotImportPreview = {
 export type TeamSnapshotImportConfirm = {
   fileBytes: number[];
   keepAllowlist: boolean;
+  desktopControlRequestId?: string;
 };
 
 export type TeamSnapshotImportMemberResult = {
