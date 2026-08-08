@@ -168,6 +168,17 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Launch-time restore waits for authoritative agent state.** A saved agent
+   must not auto-start from disk while the selected community's private-agent
+   backfill is incomplete. The frontend buffers live definition events during
+   backfill, drains them before completing bootstrap, and leaves restore pending
+   after any reconciliation or restore failure so reconnect can retry. The
+   backend captures the workspace scope, revalidates it under the runtime
+   transition lock, resolves each candidate through the relay-primary overlay,
+   and keeps `start_on_app_launch` device-local. Incomplete or stale authority
+   fails closed: the agent stays stopped. Every spawned child remains owned by
+   a cleanup guard until its receipt is durable and the runtime registry adopts
+   it; errors or deletions before adoption must terminate and reap the child.
 
 ## The tests that enforce this
 
@@ -195,6 +206,10 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- `lib/usePersonaSync.test.mjs` and the restore tests in
+  `desktop/src-tauri/src/managed_agents/restore.rs` pin the authoritative
+  backfill barrier, live-event drain, retry, workspace-scope, overlay, and
+  pre-adoption child-cleanup contracts.
 
 ## Keep this file true
 

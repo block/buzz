@@ -40,10 +40,8 @@ pub(crate) fn reconcile_agents_to_events(
     app: &tauri::AppHandle,
     keys: &nostr::Keys,
     db_path: &Path,
-) {
-    let Ok(base_dir) = super::managed_agents_base_dir(app) else {
-        return;
-    };
+) -> Result<(), String> {
+    let base_dir = super::managed_agents_base_dir(app)?;
 
     match reconcile_agents_in_dir_at(&base_dir, keys, db_path) {
         Ok(0) => {}
@@ -52,10 +50,9 @@ pub(crate) fn reconcile_agents_to_events(
                 "buzz-desktop: agent-event-reconcile: {reconciled} agents reconciled to retention"
             );
         }
-        Err(e) => {
-            eprintln!("buzz-desktop: agent-event-reconcile: {e}");
-        }
+        Err(error) => return Err(format!("agent-event-reconcile: {error}")),
     }
+    Ok(())
 }
 
 /// Core reconcile logic, decoupled from the Tauri `AppHandle` for testing.

@@ -36,8 +36,8 @@ pub struct AppState {
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
     /// Set during backend setup when managed agents are eligible for launch restore.
-    /// `apply_workspace` consumes it after installing the workspace relay and
-    /// identity, so agents never start against the fallback relay.
+    /// The frontend consumes it after workspace apply and authoritative relay
+    /// backfill, so agents never start against fallback or stale configuration.
     pub managed_agent_restore_pending: AtomicBool,
     /// Whether desktop may repair managed-agent kind:0 profiles from local records.
     /// Disabled by the experiment so agent profile updates survive start/restore.
