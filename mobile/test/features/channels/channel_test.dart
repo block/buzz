@@ -68,7 +68,10 @@ void main() {
       expect(channel.isPrivate, isTrue);
     });
 
-    test('defaults is_member to false when missing', () {
+    test('defaults is_member to true when missing — parity with desktop', () {
+      // Regression test for #4307: relay payloads that omit is_member
+      // should default to true (matching desktop tauriChannels.ts)
+      // because a readable channel implies the requester is a member.
       final json = {
         'id': 'abc-123',
         'name': 'test',
@@ -81,8 +84,26 @@ void main() {
 
       final channel = Channel.fromJson(json);
 
-      expect(channel.isMember, isFalse);
+      expect(channel.isMember, isTrue,
+          reason: 'Missing is_member must default to true, not false');
       expect(channel.isForum, isTrue);
+    });
+
+    test('respects explicit is_member: false', () {
+      final json = {
+        'id': 'abc-123',
+        'name': 'test',
+        'channel_type': 'forum',
+        'visibility': 'open',
+        'created_by': 'deadbeef',
+        'created_at': '2025-01-01T00:00:00+00:00',
+        'member_count': 0,
+        'is_member': false,
+      };
+
+      final channel = Channel.fromJson(json);
+
+      expect(channel.isMember, isFalse);
     });
   });
 
