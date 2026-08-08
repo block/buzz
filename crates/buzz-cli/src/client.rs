@@ -67,6 +67,17 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/aac",
+    "audio/opus",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +85,9 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for audio uploads (200 MB).
+const MAX_AUDIO_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1120,6 +1134,8 @@ impl BuzzClient {
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
+        } else if mime.starts_with("audio/") {
+            MAX_AUDIO_BYTES
         } else {
             MAX_IMAGE_BYTES
         };
@@ -1138,6 +1154,8 @@ impl BuzzClient {
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)
+        } else if mime.starts_with("audio/") {
+            Duration::from_secs(180)
         } else {
             Duration::from_secs(120)
         };
@@ -2303,8 +2321,8 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        BuzzClient,
+        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        create_response_with_id_if_accepted, ALLOWED_MIMES,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2374,6 +2392,24 @@ mod tests {
             "link field must be absent on rejected create"
         );
         assert_eq!(v["accepted"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn common_audio_mimes_are_allowed_for_uploads() {
+        for mime in [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/flac",
+            "audio/wav",
+            "audio/ogg",
+            "audio/aac",
+            "audio/opus",
+        ] {
+            assert!(
+                ALLOWED_MIMES.contains(&mime),
+                "audio MIME not allowed: {mime}"
+            );
+        }
     }
 
     // --- (a) auth-suppression regression pair ---
