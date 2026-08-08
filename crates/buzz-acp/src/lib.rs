@@ -1698,8 +1698,7 @@ async fn tokio_main() -> Result<()> {
     // In mentions mode, an explicit mention opts the agent into that one
     // conversation. Later human replies in the same thread are accepted
     // without another @mention; unrelated channel traffic remains ignored.
-    // This is intentionally process-local: a restarted harness asks for one
-    // fresh mention before resuming a thread.
+    // The relay history restores this cache lazily after a harness restart.
     let mut followed_threads: HashSet<(Uuid, String)> = HashSet::new();
 
     //
@@ -2196,19 +2195,28 @@ async fn tokio_main() -> Result<()> {
 
                             if config.subscribe_mode == SubscribeMode::Mentions
                                 && !config.no_mention_filter
-                                && !mention_mode_accepts_event(
+                            {
+                                recover_followed_thread(
                                     &buzz_event.event,
                                     buzz_event.channel_id,
                                     &pubkey_hex,
                                     &mut followed_threads,
+                                    &ctx.rest_client,
                                 )
-                            {
-                                tracing::debug!(
-                                    channel_id = %buzz_event.channel_id,
-                                    kind = buzz_event.event.kind.as_u16(),
-                                    "mentions mode — dropping event outside a followed thread"
-                                );
-                                continue;
+                                .await;
+                                if !mention_mode_accepts_event(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    &pubkey_hex,
+                                    &mut followed_threads,
+                                ) {
+                                    tracing::debug!(
+                                        channel_id = %buzz_event.channel_id,
+                                        kind = buzz_event.event.kind.as_u16(),
+                                        "mentions mode — dropping event outside a followed thread"
+                                    );
+                                    continue;
+                                }
                             }
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
@@ -2755,12 +2763,114 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
+/// Restore a followed-thread entry from relay history after a harness restart.
+///
+/// The lookup runs only for an unmentioned stream-message reply that is not
+/// already cached. A thread is followed when its root or any reply either
+/// explicitly mentions the agent or was authored by the agent. Query failure
+/// is fail-closed: the current event remains outside the followed set.
+async fn recover_followed_thread(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    followed_threads: &mut HashSet<(Uuid, String)>,
+    rest: &relay::RestClient,
+) {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    if event_mentions_agent(event, agent_pubkey_hex)
+        || u32::from(event.kind.as_u16()) != KIND_STREAM_MESSAGE
+    {
+        return;
+    }
+
+    let Some(root) = queue::parse_thread_tags(event).root_event_id else {
+        return;
+    };
+    if followed_threads.contains(&(channel_id, root.clone())) {
+        return;
+    }
+
+    let Ok(root_id) = nostr::EventId::from_hex(&root) else {
+        return;
+    };
+    let Ok(agent_pubkey) = nostr::PublicKey::from_hex(agent_pubkey_hex) else {
+        return;
+    };
+    let channel = channel_id.to_string();
+    let kinds = [
+        nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+        nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+    ];
+    let mentioned_reply = nostr::Filter::new()
+        .kinds(kinds)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [root.as_str()])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::P), [agent_pubkey_hex])
+        .limit(1);
+    let authored_reply = nostr::Filter::new()
+        .kinds(kinds)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::E), [root.as_str()])
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+        .author(agent_pubkey)
+        .limit(1);
+    let filters = [
+        nostr::Filter::new().id(root_id),
+        mentioned_reply,
+        authored_reply,
+    ];
+
+    let history = tokio::time::timeout(Duration::from_secs(2), rest.query(&filters)).await;
+    let Ok(Ok(history)) = history else {
+        tracing::debug!(
+            channel_id = %channel_id,
+            root = %root,
+            "mentions mode — unable to restore followed thread from relay history"
+        );
+        return;
+    };
+    let participated = history.as_array().is_some_and(|events| {
+        events
+            .iter()
+            .any(|event| json_event_proves_agent_participation(event, agent_pubkey_hex))
+    });
+    if participated {
+        followed_threads.insert((channel_id, root.clone()));
+        tracing::info!(
+            channel_id = %channel_id,
+            root = %root,
+            "mentions mode — restored followed thread from relay history"
+        );
+    }
+}
+
+fn json_event_proves_agent_participation(
+    event: &serde_json::Value,
+    agent_pubkey_hex: &str,
+) -> bool {
+    if event.get("pubkey").and_then(|value| value.as_str()) == Some(agent_pubkey_hex) {
+        return true;
+    }
+    event
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                let Some(parts) = tag.as_array() else {
+                    return false;
+                };
+                parts.first().and_then(|value| value.as_str()) == Some("p")
+                    && parts.get(1).and_then(|value| value.as_str()) == Some(agent_pubkey_hex)
+            })
+        })
+}
+
 /// Apply the default consumer-facing mentions policy.
 ///
 /// The first explicit mention starts (or joins) a followed thread. Subsequent
-/// unmentioned stream-message replies in that thread are accepted until the
-/// process restarts. Top-level channel messages and replies in other threads
-/// remain ignored.
+/// unmentioned stream-message replies in that thread are accepted. Relay
+/// history restores followed threads after a restart. Top-level channel
+/// messages and replies in other threads remain ignored.
 fn mention_mode_accepts_event(
     event: &nostr::Event,
     channel_id: Uuid,
@@ -4407,6 +4517,27 @@ mod owner_control_command_tests {
             &agent,
             &mut followed
         ));
+    }
+
+    #[test]
+    fn relay_history_restores_threads_mentioned_or_authored_by_agent() {
+        let agent = "ab".repeat(32);
+        let mentioned = serde_json::json!({
+            "pubkey": "cd".repeat(32),
+            "tags": [["p", agent.clone()]],
+        });
+        let authored = serde_json::json!({
+            "pubkey": agent.clone(),
+            "tags": [],
+        });
+        let unrelated = serde_json::json!({
+            "pubkey": "ef".repeat(32),
+            "tags": [["p", "12".repeat(32)]],
+        });
+
+        assert!(json_event_proves_agent_participation(&mentioned, &agent));
+        assert!(json_event_proves_agent_participation(&authored, &agent));
+        assert!(!json_event_proves_agent_participation(&unrelated, &agent));
     }
 
     #[test]
