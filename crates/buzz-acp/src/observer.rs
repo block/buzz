@@ -39,15 +39,17 @@ pub struct ObserverHandle {
 struct ObserverInner {
     tx: broadcast::Sender<ObserverEvent>,
     buffer: Mutex<VecDeque<ObserverEvent>>,
+    replay_enabled: bool,
     seq: AtomicU64,
 }
 
-fn new_observer_handle() -> ObserverHandle {
+fn new_observer_handle(replay_enabled: bool) -> ObserverHandle {
     let (tx, _) = broadcast::channel(OBSERVER_BUFFER_CAP);
     ObserverHandle {
         inner: Arc::new(ObserverInner {
             tx,
             buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
+            replay_enabled,
             seq: AtomicU64::new(1),
         }),
     }
@@ -81,7 +83,17 @@ pub struct ObserverEvent {
 impl ObserverHandle {
     /// Create an in-process observer feed.
     pub fn in_process() -> Self {
-        new_observer_handle()
+        new_observer_handle(true)
+    }
+
+    /// Create a live-only observer feed without retaining raw ACP frames.
+    ///
+    /// Used by the local turn audit when encrypted relay observation is off:
+    /// the audit consumes each frame immediately and persists only its strict
+    /// metadata projection, so keeping prompts/tool payloads in the replay
+    /// buffer would add memory cost without a reader.
+    pub fn in_process_unbuffered() -> Self {
+        new_observer_handle(false)
     }
 
     /// Subscribe to live observer events.
@@ -120,15 +132,17 @@ impl ObserverHandle {
             payload,
         };
 
-        match self.inner.buffer.lock() {
-            Ok(mut buffer) => {
-                if buffer.len() >= OBSERVER_BUFFER_CAP {
-                    buffer.pop_front();
+        if self.inner.replay_enabled {
+            match self.inner.buffer.lock() {
+                Ok(mut buffer) => {
+                    if buffer.len() >= OBSERVER_BUFFER_CAP {
+                        buffer.pop_front();
+                    }
+                    buffer.push_back(event.clone());
                 }
-                buffer.push_back(event.clone());
-            }
-            Err(error) => {
-                tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                Err(error) => {
+                    tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                }
             }
         }
 
@@ -162,5 +176,25 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unbuffered_feed_delivers_live_without_retaining_replay() {
+        let observer = ObserverHandle::in_process_unbuffered();
+        let mut receiver = observer.subscribe();
+        observer.emit(
+            "acp_read",
+            Some(0),
+            &ObserverContext::default(),
+            serde_json::json!({"secret": "transient"}),
+        );
+        assert!(observer.snapshot().is_empty());
+        let delivered = receiver.try_recv().expect("live subscriber receives frame");
+        assert_eq!(delivered.kind, "acp_read");
     }
 }
