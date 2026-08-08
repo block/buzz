@@ -164,6 +164,14 @@ pub async fn apply_workspace(
         };
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
+        // Serialize workspace mutation with launch-time restore. If restore
+        // already crossed into spawning, this switch waits for its children to
+        // be tracked. If the switch wins, restore's post-lock scope check stops
+        // the stale launch.
+        let restore_transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         // Serialize the scope transition with inbound private-config handling.
         // Inbound holds this lock from scope resolution through overlay insert,
         // so a patch decrypted for the old workspace cannot land after this clear.
@@ -196,6 +204,7 @@ pub async fn apply_workspace(
         state
             .managed_agent_profile_reconcile_enabled
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+        drop(restore_transition);
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
@@ -230,37 +239,39 @@ pub async fn apply_workspace(
     // Backfill this exact relay+owner scope only after the workspace has been
     // applied. Running at process boot would target the fallback relay and
     // collapse every community into one pending-event store.
-    match crate::managed_agents::retention::active_retention_scope(&restore_app, &state) {
-        Ok(scope) => {
-            // Adopt whatever the pre-scoping release left queued in the global
-            // retention database BEFORE the scoped reconcile and flush run, so
-            // stranded tombstones and archive requests publish on this boot
-            // instead of being abandoned by the storage cutover.
-            migrate_legacy_retention_into(&restore_app, &scope);
-            crate::event_sync::spawn_event_sync(
-                restore_app.clone(),
-                scope.owner_keys,
-                scope.db_path,
-            )
-        }
-        Err(error) => {
-            eprintln!("buzz-desktop: scoped event-sync unavailable after workspace apply: {error}");
-        }
-    }
+    let event_sync_task =
+        match crate::managed_agents::retention::active_retention_scope(&restore_app, &state) {
+            Ok(scope) => {
+                // Adopt whatever the pre-scoping release left queued in the global
+                // retention database BEFORE the scoped reconcile and flush run, so
+                // stranded tombstones and archive requests publish on this boot
+                // instead of being abandoned by the storage cutover.
+                migrate_legacy_retention_into(&restore_app, &scope);
+                let owner_pubkey = scope.owner_keys.public_key().to_hex();
+                let db_path = scope.db_path.clone();
+                let task = crate::event_sync::spawn_event_sync(
+                    restore_app.clone(),
+                    scope.owner_keys,
+                    scope.db_path,
+                );
+                Some((owner_pubkey, db_path, task))
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-desktop: scoped event-sync unavailable after workspace apply: {error}"
+                );
+                None
+            }
+        };
+    crate::event_sync::replace_event_sync_task(event_sync_task)?;
 
-    let restore_pending = state
-        .managed_agent_restore_pending
-        .swap(false, Ordering::AcqRel);
-
-    // The coordinator starts before React applies the selected workspace, so
-    // its startup publication may have used the fallback relay and placeholder
-    // identity. Correct it off the command path so an unavailable relay cannot
-    // hold the frontend on its loading gate. On initial launch, restore MeshLLM
-    // first so a slow stopped-status request cannot overwrite a newly restored
-    // serving status, then restore managed agents after the admission identity
-    // has been published (or the bounded publication attempt has timed out).
+    // Managed-agent restore waits for the frontend's authoritative relay
+    // backfill. Starting it here would race both that backfill and the local
+    // event-sync task above. Mesh restore remains independent and can proceed
+    // while the agent configuration boundary is settling.
     #[cfg(feature = "mesh-llm")]
     {
+        let restore_pending = state.managed_agent_restore_pending.load(Ordering::Acquire);
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
@@ -272,28 +283,84 @@ pub async fn apply_workspace(
                 }
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
-            if restore_pending {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-                {
-                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-                }
-            }
-        });
-    }
-
-    #[cfg(not(feature = "mesh-llm"))]
-    if restore_pending {
-        let app = restore_app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = app.state::<AppState>();
-            if let Err(error) =
-                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-            {
-                eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-            }
         });
     }
 
     Ok(())
+}
+
+/// Finish launch-time restore only after the selected community's private
+/// agent backfill has been fully reconciled.
+///
+/// The relay and owner are supplied by the subscription that completed. A
+/// stale completion from a previous workspace is ignored before it can consume
+/// the one-shot restore request.
+#[tauri::command]
+pub async fn complete_managed_agent_bootstrap(
+    owner_pubkey: String,
+    arrival_relay_url: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let Some(scope) = crate::managed_agents::retention::arrival_retention_scope(
+        &app,
+        &state,
+        &arrival_relay_url,
+    )?
+    else {
+        return Ok(());
+    };
+    if !scope
+        .owner_keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(owner_pubkey.trim())
+    {
+        return Ok(());
+    }
+
+    let event_sync_task = crate::event_sync::take_event_sync_task(
+        &scope.owner_keys.public_key().to_hex(),
+        &scope.db_path,
+    )?;
+    if let Some(task) = event_sync_task {
+        task.await
+            .map_err(|error| format!("managed-agent event sync failed: {error}"))?;
+    }
+
+    let sync_app = app.clone();
+    let sync_owner_keys = scope.owner_keys.clone();
+    let sync_db_path = scope.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::event_sync::run_managed_agent_event_sync(&sync_app, &sync_owner_keys, &sync_db_path)
+    })
+    .await
+    .map_err(|error| format!("managed-agent event sync failed: {error}"))??;
+
+    // A community switch can complete while the blocking reconcile above is
+    // running. Revalidate before consuming the process-wide one-shot restore
+    // flag; an old community must never launch agents in the newly selected one.
+    let Some(current_scope) = crate::managed_agents::retention::arrival_retention_scope(
+        &app,
+        &state,
+        &arrival_relay_url,
+    )?
+    else {
+        return Ok(());
+    };
+    if current_scope.db_path != scope.db_path
+        || current_scope.owner_keys.public_key() != scope.owner_keys.public_key()
+    {
+        return Ok(());
+    }
+
+    if !state.managed_agent_restore_pending.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let restore_scope = crate::managed_agents::ManagedAgentRestoreScope {
+        owner_pubkey: scope.owner_keys.public_key().to_hex(),
+        relay_url: scope.relay_url,
+        db_path: scope.db_path,
+    };
+    restore_managed_agents_on_launch(&app, &state.shutdown_started, &restore_scope).await
 }

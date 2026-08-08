@@ -1,14 +1,69 @@
 //! Boot-time disk→relay event reconcile ("event sync").
 //!
-//! Reconciles the on-disk JSON stores (`personas.json`, `teams.json`,
-//! `managed-agents.json`) into signed retention events queued for relay
-//! publish. Runs after identity resolution (event signing needs the owner
-//! keys), unlike the pre-identity migrations in [`crate::migration`].
+//! Reconciles on-disk persona/team stores into signed retention events, then
+//! reconciles managed agents only after authoritative relay backfill. Runs
+//! after identity resolution (event signing needs the owner keys), unlike the
+//! pre-identity migrations in [`crate::migration`].
 
-use std::path::Path;
+use std::{path::Path, sync::OnceLock};
+use tauri::Manager;
 
-/// Reconcile personas, teams, and managed agents into signed retention
-/// events. All readers consume the already-synced
+type EventSyncTask = tauri::async_runtime::JoinHandle<()>;
+
+struct ScopedEventSyncTask {
+    owner_pubkey: String,
+    db_path: std::path::PathBuf,
+    task: EventSyncTask,
+}
+
+fn event_sync_task_slot() -> &'static std::sync::Mutex<Option<ScopedEventSyncTask>> {
+    static SLOT: OnceLock<std::sync::Mutex<Option<ScopedEventSyncTask>>> = OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Replace the workspace-scoped boot reconcile task, aborting work retained
+/// from a previous workspace. Passing `None` clears the slot when the selected
+/// workspace has no valid retention scope.
+pub fn replace_event_sync_task(
+    task: Option<(String, std::path::PathBuf, EventSyncTask)>,
+) -> Result<(), String> {
+    let task = task.map(|(owner_pubkey, db_path, task)| ScopedEventSyncTask {
+        owner_pubkey,
+        db_path,
+        task,
+    });
+    let mut slot = event_sync_task_slot()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let previous = std::mem::replace(&mut *slot, task);
+    drop(slot);
+    if let Some(previous) = previous {
+        previous.task.abort();
+    }
+    Ok(())
+}
+
+/// Take the current workspace's boot reconcile task so the post-backfill
+/// managed-agent phase can wait for its local retention writes.
+pub fn take_event_sync_task(
+    owner_pubkey: &str,
+    db_path: &Path,
+) -> Result<Option<EventSyncTask>, String> {
+    let mut slot = event_sync_task_slot()
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let matches_scope = slot.as_ref().is_some_and(|scoped| {
+        scoped.owner_pubkey.eq_ignore_ascii_case(owner_pubkey) && scoped.db_path == db_path
+    });
+    if matches_scope {
+        Ok(slot.take().map(|scoped| scoped.task))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Reconcile personas and teams into signed retention events. Both readers
+/// consume the already-synced
 /// `personas.json`/`teams.json`/`managed-agents.json` that
 /// `sync_team_personas` wrote in [`crate::migration::run_boot_migrations`]
 /// (see its `# Ordering` guard). Event signing needs the resolved owner keys,
@@ -16,8 +71,43 @@ use std::path::Path;
 pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys, db_path: &Path) {
     migrate_personas_to_events(app, owner_keys, db_path);
     migrate_teams_to_events(app, owner_keys, db_path);
-    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
-    hydrate_private_config_overlay(app, owner_keys, db_path);
+}
+
+/// Reconcile managed-agent projections only after the frontend has completed
+/// the selected relay's authoritative backfill.
+///
+/// On a fresh device the scoped retention store has no private-config head yet.
+/// Running this before relay backfill would treat a stale disk record as the
+/// first kind:30179 generation and publish it over the configuration another
+/// device already owns. The post-backfill order makes an existing relay head
+/// visible before boot reconcile decides whether a first private projection is
+/// actually missing.
+pub fn run_managed_agent_event_sync(
+    app: &tauri::AppHandle,
+    owner_keys: &nostr::Keys,
+    db_path: &Path,
+) -> Result<(), String> {
+    let state = app.state::<crate::app_state::AppState>();
+    // Keep workspace apply outside the entire disk→retention→overlay
+    // transaction. Otherwise a stale A completion could write B's disk record
+    // into A's retention store before hydration notices that the workspace
+    // changed.
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let active = crate::managed_agents::retention::active_retention_scope(app, &state)?;
+    if active.db_path != db_path || active.owner_keys.public_key() != owner_keys.public_key() {
+        return Err("workspace changed before managed-agent event sync completed".into());
+    }
+    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path)?;
+    let hydrated = hydrate_private_config_overlay(app, owner_keys, db_path)?;
+    if hydrated > 0 {
+        eprintln!(
+            "buzz-desktop: private-config-overlay: hydrated {hydrated} agents from retention"
+        );
+    }
+    Ok(())
 }
 
 /// Rebuild the relay-config overlay from the retained kind:30179 rows.
@@ -31,31 +121,25 @@ fn hydrate_private_config_overlay(
     app: &tauri::AppHandle,
     owner_keys: &nostr::Keys,
     db_path: &Path,
-) {
-    use tauri::Manager;
-
-    let result = (|| -> Result<usize, String> {
-        let conn = crate::managed_agents::retention::open_retention_db(db_path)?;
-        let hydrated = crate::managed_agents::private_config_overlay::hydrate_from_retention(
-            &conn, owner_keys,
-        )?;
-        let count = hydrated.len();
-        let state = app.state::<crate::app_state::AppState>();
-        *state
-            .private_managed_agent_overlay
-            .lock()
-            .map_err(|error| error.to_string())? = hydrated;
-        Ok(count)
-    })();
-    match result {
-        Ok(0) => {}
-        Ok(count) => {
-            eprintln!(
-                "buzz-desktop: private-config-overlay: hydrated {count} agents from retention"
-            )
-        }
-        Err(error) => eprintln!("buzz-desktop: private-config-overlay: {error}"),
+) -> Result<usize, String> {
+    let state = app.state::<crate::app_state::AppState>();
+    // The caller holds `managed_agents_store_lock` across validation,
+    // reconciliation, and this assignment. Workspace apply therefore either
+    // runs after A installs and clears it, or runs first and makes A fail its
+    // scope check before writing anything.
+    let active = crate::managed_agents::retention::active_retention_scope(app, &state)?;
+    if active.db_path != db_path || active.owner_keys.public_key() != owner_keys.public_key() {
+        return Err("workspace changed before private-config hydration completed".into());
     }
+    let conn = crate::managed_agents::retention::open_retention_db(db_path)?;
+    let hydrated =
+        crate::managed_agents::private_config_overlay::hydrate_from_retention(&conn, owner_keys)?;
+    let count = hydrated.len();
+    *state
+        .private_managed_agent_overlay
+        .lock()
+        .map_err(|error| error.to_string())? = hydrated;
+    Ok(count)
 }
 
 /// Spawn the best-effort event reconcile off the synchronous Tauri setup path.
@@ -68,7 +152,7 @@ pub fn spawn_event_sync(
     app: tauri::AppHandle,
     owner_keys: nostr::Keys,
     db_path: std::path::PathBuf,
-) {
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
             run_event_sync(&app, &owner_keys, &db_path);
@@ -77,7 +161,7 @@ pub fn spawn_event_sync(
         {
             eprintln!("buzz-desktop: event-sync: spawn_blocking failed: {e}");
         }
-    });
+    })
 }
 
 /// Reconcile `personas.json` into the persona-event retention store.

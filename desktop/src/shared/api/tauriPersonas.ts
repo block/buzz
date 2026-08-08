@@ -457,3 +457,17 @@ export async function reconcileInboundPersonaEvent(
     arrivalRelayUrl,
   });
 }
+
+/**
+ * Release launch-time agent restore after this exact relay and owner have
+ * completed their authoritative private-config backfill.
+ */
+export async function completeManagedAgentBootstrap(
+  ownerPubkey: string,
+  arrivalRelayUrl: string,
+): Promise<void> {
+  await invokeTauri("complete_managed_agent_bootstrap", {
+    ownerPubkey,
+    arrivalRelayUrl,
+  });
+}
