@@ -2120,9 +2120,6 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let routing_policy = crate::routing::Policy::from_env();
-    let self_harness_class = crate::config::harness_class(&config.agent_command);
-
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
@@ -2928,16 +2925,6 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
-                            if let Some(policy) = routing_policy.as_ref() {
-                                if let Some(target) = policy.harness_decline(&buzz_event.event.content, &self_harness_class) {
-                                    tracing::info!(
-                                        target: "acp::harness_route",
-                                        channel_id = %buzz_event.channel_id,
-                                        to = %target.class, reason = ?target.reason,
-                                        "declining turn — owned by another harness class");
-                                    continue; // skip queue.push; a matching-class agent takes it
-                                }
-                            }
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,

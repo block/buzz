@@ -708,8 +708,10 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
-/// Canonical harness *class* for a spawn command — the coarse bucket the
-/// decline gate compares against, stable across binary-name variants.
+/// Canonical harness *class* for a spawn command — the coarse bucket a harness
+/// dispatcher compares against, stable across binary-name variants.
+/// UNWIRED (decline-gate caller reverted 2026-08-08); kept for the dispatcher.
+#[allow(dead_code)]
 pub(crate) fn harness_class(command: &str) -> String {
     let id = normalize_agent_command_identity(command);
     match id.as_str() {
