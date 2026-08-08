@@ -416,7 +416,7 @@ export function WelcomeComposerBanner({
               </motion.span>
             )}
           </AnimatePresence>
-          {state === "prompt" && onDismiss ? (
+          {state === "prompt" && onDismiss && !settingUp ? (
             <button
               aria-label="Dismiss hint"
               className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
