@@ -2872,39 +2872,53 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
+/// Reconcile one community's event-backed NIP-43 membership view.
+///
+/// `relay_members` is canonical. The snapshot is rebuilt only when it is
+/// absent or its member/role set differs from the canonical rows, so this is
+/// cheap (two queries) when nothing changed. Returns whether a repair
+/// publication happened.
+pub async fn reconcile_nip43_membership_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+) -> anyhow::Result<bool> {
+    if !state
+        .db
+        .nip43_membership_snapshot_needs_reconciliation(
+            tenant.community(),
+            &state.relay_keypair.public_key(),
+        )
+        .await?
+    {
+        return Ok(false);
+    }
+
+    publish_nip43_membership_list(tenant, state).await?;
+    Ok(true)
+}
+
 /// Reconcile every community's event-backed NIP-43 membership view.
 ///
-/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
-/// or its member/role set differs from the canonical rows. This makes the sweep
-/// safe to run at startup and periodically without producing an event stream
-/// when nothing changed. A failure in one community is logged and counted but
-/// does not prevent the remaining communities from being repaired.
+/// A failure in one community is logged and counted but does not prevent the
+/// remaining communities from being repaired.
+///
+/// This sweep is O(communities) — sequential, two queries each, plus a
+/// publication per repair. On a large deployment it takes minutes, so it MUST
+/// NOT run on the pre-bind startup path (a startup probe SIGKILLs the pod
+/// mid-sweep and the restart begins again at community #1, forever). It runs
+/// post-bind, jittered, and leader-gated — see the sweep task in `main.rs`.
 pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
+    let started_at = std::time::Instant::now();
     let communities = state.db.usage_community_hosts().await?;
+    let total = communities.len();
+    let mut scanned = 0usize;
     let mut reconciled = 0usize;
 
     for community in communities {
         let community_id = buzz_core::CommunityId::from_uuid(community.id);
         let host = community.host;
-        let result = async {
-            if !state
-                .db
-                .nip43_membership_snapshot_needs_reconciliation(
-                    community_id,
-                    &state.relay_keypair.public_key(),
-                )
-                .await?
-            {
-                return Ok::<bool, anyhow::Error>(false);
-            }
-
-            let tenant = TenantContext::resolved(community_id, host.clone());
-            publish_nip43_membership_list(&tenant, state).await?;
-            Ok::<bool, anyhow::Error>(true)
-        }
-        .await;
-
-        match result {
+        let tenant = TenantContext::resolved(community_id, host.clone());
+        match reconcile_nip43_membership_snapshot(&tenant, state).await {
             Ok(true) => reconciled += 1,
             Ok(false) => {}
             Err(error) => {
@@ -2913,9 +2927,21 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
                 warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
             }
         }
+        scanned += 1;
+        if scanned.is_multiple_of(1000) {
+            info!(
+                scanned,
+                total,
+                reconciled,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "NIP-43 membership sweep progress"
+            );
+        }
     }
 
     metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
+    metrics::histogram!("buzz_nip43_membership_sweep_seconds")
+        .record(started_at.elapsed().as_secs_f64());
     Ok(reconciled)
 }
 
