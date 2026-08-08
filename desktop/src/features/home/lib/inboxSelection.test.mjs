@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveInboxFilterSelection } from "./inboxSelection.ts";
+import {
+  resolveInboxCompletionSelection,
+  resolveInboxFilterSelection,
+} from "./inboxSelection.ts";
 
 const items = [
   { conversationId: "first-conversation", id: "first-event" },
@@ -49,5 +52,38 @@ test("empty filter selection clears detail at every width", () => {
       selectedConversationId: "filtered-out-conversation",
     }),
     { autoSelectedEventId: null, preserveSelection: false },
+  );
+});
+
+test("wide explicit completion selects the next Inbox conversation", () => {
+  assert.equal(
+    resolveInboxCompletionSelection({
+      completedConversationId: "first-conversation",
+      isNarrow: false,
+      items,
+    }),
+    "second-event",
+  );
+});
+
+test("wide explicit completion falls back to the previous final row", () => {
+  assert.equal(
+    resolveInboxCompletionSelection({
+      completedConversationId: "second-conversation",
+      isNarrow: false,
+      items,
+    }),
+    "first-event",
+  );
+});
+
+test("narrow explicit completion returns to the Inbox list", () => {
+  assert.equal(
+    resolveInboxCompletionSelection({
+      completedConversationId: "first-conversation",
+      isNarrow: true,
+      items,
+    }),
+    null,
   );
 });
