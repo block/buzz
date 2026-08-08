@@ -2,6 +2,8 @@
 
 This is the single-node/VPS deployment bundle. It is intentionally separate from
 the root `docker-compose.yml`, which remains local development infrastructure.
+For NixOS deployments, use the NixOS module guide in
+[`../nixos/README.md`](../nixos/README.md).
 
 ## Quick start
 
