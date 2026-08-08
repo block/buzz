@@ -395,6 +395,13 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Pubkey that MUST appear in the sent event's p-tags (hex or npub;
+        /// repeatable). If any required key is absent after the event is built,
+        /// the send fails WITHOUT publishing — a fail-closed delivery
+        /// assertion for automation that must not trust `accepted:true` and
+        /// exit 0 alone (see #5010).
+        #[arg(long = "require-mention")]
+        require_mentions: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
