@@ -490,6 +490,9 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
+    /// Whether the harness publishes the final ACP assistant message as the
+    /// ordinary threaded reply for this turn.
+    pub auto_publish_final: bool,
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
     /// on `session/new`. Never part of the prompt.
     pub session_title: Option<String>,
@@ -1333,6 +1336,15 @@ pub async fn run_prompt_task(
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
+    let reply_target = batch.as_ref().and_then(|batch| {
+        let last = batch.events.last()?;
+        let tags = crate::queue::parse_thread_tags(&last.event);
+        let anchor = tags
+            .root_event_id
+            .clone()
+            .unwrap_or_else(|| last.event.id.to_hex());
+        Some((batch.channel_id, anchor))
+    });
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -2020,6 +2032,24 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        if let Err(error) = publish_final_response_if_enabled(
+                            &ctx,
+                            &mut agent,
+                            reply_target.as_ref(),
+                        )
+                        .await
+                        {
+                            tracing::error!(target: "pool::prompt", "automatic final reply publish failed: {error}");
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(AcpError::Protocol(error)),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2082,6 +2112,21 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            if let Err(error) =
+                publish_final_response_if_enabled(&ctx, &mut agent, reply_target.as_ref()).await
+            {
+                tracing::error!(target: "pool::prompt", "automatic final reply publish failed: {error}");
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(AcpError::Protocol(error)),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -2257,6 +2302,58 @@ pub async fn run_prompt_task(
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
+}
+
+/// Publish the final ACP assistant message as the ordinary threaded reply.
+///
+/// The harness owns the agent's signing key; the downstream model runtime does
+/// not need it. The reply is anchored to the triggering thread root (or to the
+/// triggering top-level event, which opens a new thread), matching the prompt
+/// contract's flat human-facing conversation shape.
+async fn publish_final_response_if_enabled(
+    ctx: &PromptContext,
+    agent: &mut OwnedAgent,
+    reply_target: Option<&(Uuid, String)>,
+) -> Result<(), String> {
+    if !ctx.auto_publish_final {
+        return Ok(());
+    }
+
+    let content = agent.acp.take_agent_message();
+    let content = content.trim();
+    if content.is_empty() {
+        tracing::debug!(target: "pool::prompt", "automatic final reply skipped: no assistant text");
+        return Ok(());
+    }
+
+    let Some((channel_id, anchor_hex)) = reply_target else {
+        // Heartbeats have no triggering channel message and therefore no
+        // ordinary reply destination.
+        return Ok(());
+    };
+    let anchor = nostr::EventId::from_hex(anchor_hex)
+        .map_err(|error| format!("invalid reply anchor {anchor_hex}: {error}"))?;
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: anchor,
+        parent_event_id: anchor,
+    };
+    let builder = buzz_sdk::build_message(*channel_id, content, Some(&thread_ref), &[], false, &[])
+        .map_err(|error| format!("build reply: {error}"))?;
+    let event = builder
+        .sign_with_keys(&ctx.rest_client.keys)
+        .map_err(|error| format!("sign reply: {error}"))?;
+    tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event))
+        .await
+        .map_err(|_| "reply publish timed out".to_string())?
+        .map_err(|error| format!("submit reply: {error}"))?;
+    tracing::info!(
+        target: "pool::prompt",
+        channel = %channel_id,
+        reply_to = %anchor_hex,
+        event_id = %event.id,
+        "automatically published final assistant reply"
+    );
+    Ok(())
 }
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
@@ -5302,6 +5399,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
+            auto_publish_final: false,
             session_title: None,
             team_instructions: None,
             heartbeat_prompt: None,

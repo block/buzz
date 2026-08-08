@@ -1529,6 +1529,17 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let system_prompt = if config.auto_publish_final {
+        let transport_instruction = "[Buzz reply transport]\nBuzz automatically publishes the final assistant message from this turn. Do not call `buzz messages send` for the ordinary reply. Use the Buzz CLI only for additional side effects or when the human explicitly requests a separate top-level or broadcast message.";
+        Some(match config.system_prompt.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{}\n\n{}", existing.trim_end(), transport_instruction)
+            }
+            _ => transport_instruction.to_string(),
+        })
+    } else {
+        config.system_prompt.clone()
+    };
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1536,7 +1547,8 @@ async fn tokio_main() -> Result<()> {
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
-        system_prompt: config.system_prompt.clone(),
+        system_prompt,
+        auto_publish_final: config.auto_publish_final,
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
@@ -5083,6 +5095,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            auto_publish_final: false,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5304,6 +5317,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            auto_publish_final: false,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

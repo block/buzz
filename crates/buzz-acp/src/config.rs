@@ -261,6 +261,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Publish the ACP turn's final assistant text through the harness.
+    /// This keeps ordinary reply delivery inside the credentialed transport
+    /// boundary for runtimes that cannot accept a scoped Buzz MCP server.
+    #[arg(long, env = "BUZZ_ACP_AUTO_PUBLISH_FINAL", default_value_t = false)]
+    pub auto_publish_final: bool,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -495,6 +501,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub auto_publish_final: bool,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1029,12 +1036,20 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        // OpenClaw's ACP adapter cannot accept the scoped Buzz MCP server that
+        // ordinary replies historically used. Keep reply delivery inside the
+        // credentialed harness automatically for that runtime, including when
+        // buzz-acp is launched by an older desktop build.
+        let auto_publish_final = args.auto_publish_final
+            || normalize_agent_command_identity(&agent_command) == "openclaw";
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            auto_publish_final,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1417,6 +1432,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            auto_publish_final: false,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -2666,6 +2682,36 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn openclaw_automatically_uses_harness_reply_transport() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "/opt/homebrew/bin/openclaw",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("OpenClaw config should resolve");
+
+        assert!(config.auto_publish_final);
+    }
+
+    #[test]
+    fn other_runtimes_keep_explicit_reply_transport_default() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "goose",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("Goose config should resolve");
+
+        assert!(!config.auto_publish_final);
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
