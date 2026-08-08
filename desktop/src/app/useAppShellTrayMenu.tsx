@@ -8,10 +8,12 @@ export function AppShellTrayMenu({
   channels,
   goChannel,
   openCreateChannel,
+  openSettings,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
   openCreateChannel: () => void;
+  openSettings: () => void;
 }) {
   if (!isMacPlatform()) return null;
   return (
@@ -19,6 +21,7 @@ export function AppShellTrayMenu({
       channels={channels}
       goChannel={goChannel}
       openCreateChannel={openCreateChannel}
+      openSettings={openSettings}
     />
   );
 }
@@ -27,15 +30,18 @@ function MacAppShellTrayMenu({
   channels,
   goChannel,
   openCreateChannel,
+  openSettings,
 }: {
   channels: Channel[];
   goChannel: (channelId: string) => Promise<unknown>;
   openCreateChannel: () => void;
+  openSettings: () => void;
 }): null {
   useTrayMenu({
     channels,
     goChannel,
     openCreateChannel,
+    openSettings,
   });
   return null;
 }
