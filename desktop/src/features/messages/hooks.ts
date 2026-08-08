@@ -28,6 +28,7 @@ import {
 export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
+import { readStoredReplyMentionSettings } from "@/features/messages/lib/replyMentionSettings";
 import {
   clearTimeoutState,
   recordTimeoutFromRejection,
@@ -93,15 +94,22 @@ export function createOptimisticMessage(
   const tags: string[][] = [];
 
   if (parentEventId) {
+    // Honor the per-account reply-mention settings so the optimistic event's
+    // p-tags match what the send path actually puts on the wire.
+    const replyMentionSettings = readStoredReplyMentionSettings(
+      identity.pubkey,
+    );
     tags.push(
       ...buildReplyTags(
         channelId,
         identity.pubkey,
         parentEventId,
         resolveReplyRootId(parentEventId, currentMessages),
-        mentionPubkeys,
-        resolveReplyTargetAuthorPubkey(parentEventId, currentMessages) ??
-          undefined,
+        [...mentionPubkeys, ...replyMentionSettings.mentionPrefixPubkeys],
+        replyMentionSettings.autoMentionRepliedTo
+          ? (resolveReplyTargetAuthorPubkey(parentEventId, currentMessages) ??
+              undefined)
+          : undefined,
       ),
     );
   } else {
@@ -472,23 +480,34 @@ export function useSendMessageMutation(
       // accounts, which wake on an explicit mentioning `p` tag) even when the
       // composer body has no literal "@mention". Resolve the replied-to event's
       // author from the local cache and fold it into the real recipient p-tags
-      // so the reply actually reaches them on the wire.
+      // so the reply actually reaches them on the wire. Both behaviors are
+      // user-configurable per account (see lib/replyMentionSettings.ts): the
+      // implicit author fold can be toggled off, and extra "prefix" pubkeys
+      // can be folded into every reply.
       let recipientPubkeys = recipientPubkeysBase;
+      let replyTargetAuthor: string | null = null;
       if (parentEventId) {
+        const replyMentionSettings = readStoredReplyMentionSettings(
+          identity.pubkey,
+        );
         const replyParentMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
           ) ?? [];
-        const replyTargetAuthor = resolveReplyTargetAuthorPubkey(
-          parentEventId,
-          replyParentMessages,
-        );
-        if (replyTargetAuthor) {
-          recipientPubkeys = normalizeMentionPubkeys(
-            [...recipientPubkeysBase, replyTargetAuthor],
-            identity.pubkey,
+        if (replyMentionSettings.autoMentionRepliedTo) {
+          replyTargetAuthor = resolveReplyTargetAuthorPubkey(
+            parentEventId,
+            replyParentMessages,
           );
         }
+        recipientPubkeys = normalizeMentionPubkeys(
+          [
+            ...recipientPubkeysBase,
+            ...replyMentionSettings.mentionPrefixPubkeys,
+            ...(replyTargetAuthor ? [replyTargetAuthor] : []),
+          ],
+          identity.pubkey,
+        );
       }
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
@@ -520,8 +539,8 @@ export function useSendMessageMutation(
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
               recipientPubkeys,
-              resolveReplyTargetAuthorPubkey(parentEventId, cachedMessages) ??
-                undefined,
+              // Settings-aware: null when autoMentionRepliedTo is toggled off.
+              replyTargetAuthor ?? undefined,
             )
           : [];
         const baseTags = parentEventId
