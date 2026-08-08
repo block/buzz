@@ -379,6 +379,266 @@ test("opens channel matches from search", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
 });
 
+test("global search offers an optional current-channel scope", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page).toHaveURL(
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+  );
+
+  await focusSidebarSearchWithShortcut(page);
+
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  await expect
+    .poll(() =>
+      scopeControl
+        .getByTestId("search-current-scope-label")
+        .evaluate((element) => element.textContent),
+    )
+    .toBe("Search in #general");
+  await expect(scopeControl).toContainText("Search in");
+  await expect(scopeControl).toContainText("#general");
+  await expect(scopeControl).toContainText("Search messages in this channel");
+  await expect(page.getByTestId("search-dialog-input-row")).toHaveCSS(
+    "border-bottom-width",
+    "1px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS(
+    "border-bottom-width",
+    "0px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-top", "14px");
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-bottom", "14px");
+  const [controlBox, dialogBox] = await Promise.all([
+    scopeControl.boundingBox(),
+    page.getByTestId("search-results").boundingBox(),
+  ]);
+  expect(controlBox).not.toBeNull();
+  expect(dialogBox).not.toBeNull();
+  expect(controlBox?.width ?? 0).toBeGreaterThan((dialogBox?.width ?? 0) * 0.9);
+  expect(controlBox?.width ?? 0).toBeLessThan(dialogBox?.width ?? 0);
+  await scopeControl.click();
+
+  const scopeChip = page.getByTestId("search-channel-scope-chip");
+  const input = page.getByTestId("search-dialog-input");
+  await expect(scopeChip).toHaveText(/#general/);
+  await expect(input).toBeFocused();
+  await input.fill("w");
+  const relevantHeader = page.getByText("Most relevant", { exact: true });
+  const firstScopedResult = page
+    .locator('[data-search-section="messages"] .search-result-row')
+    .first();
+  await expect(page.getByText("Welcome to #general")).toBeVisible();
+  await expect(page.getByText(/Searching messages in/)).toHaveCount(0);
+  await expect(relevantHeader).toBeVisible();
+  await expect(firstScopedResult).toBeVisible();
+  const contentStart = (element: HTMLElement) => {
+    const styles = window.getComputedStyle(element);
+    return (
+      element.getBoundingClientRect().left +
+      Number.parseFloat(styles.paddingLeft)
+    );
+  };
+  const [inputStart, headerStart, resultStart] = await Promise.all([
+    page.getByTestId("search-dialog-input-row").evaluate(contentStart),
+    relevantHeader.evaluate(contentStart),
+    firstScopedResult.evaluate(contentStart),
+  ]);
+  expect(Math.abs(inputStart - headerStart)).toBeLessThanOrEqual(1);
+  expect(Math.abs(inputStart - resultStart)).toBeLessThanOrEqual(1);
+
+  await input.fill("x");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "No messages for x in #general.",
+  );
+
+  await scopeChip.click();
+  await expect(scopeChip).toHaveCount(0);
+  await expect(input).toBeFocused();
+  await input.fill("shipped");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "Engineering shipped the desktop build.",
+  );
+});
+
+test("global search offers a conversation-specific scope in direct messages", async ({
+  page,
+}) => {
+  const directMessageId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(page).toHaveURL(
+    new RegExp(`#\\/channels\\/${directMessageId}$`),
+  );
+
+  await focusSidebarSearchWithShortcut(page);
+
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  await expect
+    .poll(() =>
+      scopeControl
+        .getByTestId("search-current-scope-label")
+        .evaluate((element) => element.textContent),
+    )
+    .toBe("Search conversation with alice");
+  await expect(scopeControl).toContainText("Search conversation with alice");
+  await expect(scopeControl).toContainText(
+    "Search messages in this conversation.",
+  );
+  await expect(scopeControl).not.toContainText("channel");
+  await expect(page.getByTestId("search-dialog-input-row")).toHaveCSS(
+    "border-bottom-width",
+    "1px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS(
+    "border-bottom-width",
+    "0px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-top", "14px");
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-bottom", "14px");
+
+  await scopeControl.click();
+
+  const scopeChip = page.getByTestId("search-channel-scope-chip");
+  const input = page.getByTestId("search-dialog-input");
+  await expect(scopeChip).toHaveText(/^alice$/);
+  await expect(scopeChip).not.toContainText("#");
+  await expect(input).toBeFocused();
+  await input.fill("a");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "No messages for a in alice.",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const calls =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: unknown;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+        return calls.findLast((entry) => entry.command === "search_messages")
+          ?.payload;
+      }),
+    )
+    .toMatchObject({
+      channelId: directMessageId,
+      q: "a",
+    });
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(page.getByTestId("search-results")).toBeVisible();
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveText(
+    /^alice$/,
+  );
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+});
+
+test("channel find shortcut opens unified search with scope selected", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page).toHaveURL(
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+  );
+
+  await page.keyboard.press("ControlOrMeta+f");
+
+  await expect(page.getByTestId("search-results")).toBeVisible();
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveText(
+    /#general/,
+  );
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+});
+
+test("global search omits channel scoping when no channel is active", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expectHomeView(page);
+
+  await focusSidebarSearchWithShortcut(page);
+
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveCount(0);
+});
+
+test("global search tolerates small channel and people typos", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await focusSidebarSearchWithShortcut(page);
+
+  const input = page.getByTestId("search-dialog-input");
+  const results = page.getByTestId("search-results");
+  await input.fill("engneering");
+  await expect(results).toContainText("Engineering discussions");
+
+  await input.fill("alcie");
+  await expect(results).toContainText("alice");
+});
+
+test("global search exposes a larger scrollable result window", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-deep-history").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+  await expect(
+    page.locator('[data-message-id^="mock-deep-history-"]').first(),
+  ).toBeVisible();
+
+  await focusSidebarSearchWithShortcut(page);
+  await page.getByTestId("search-dialog-input").fill("deep history message");
+
+  const resultRows = page.locator(
+    '[data-search-section="messages"] .search-result-row',
+  );
+  await expect(resultRows).toHaveCount(40);
+  const resultList = page.getByTestId("search-results-list");
+  await expect(resultList).toBeVisible();
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  await expect(
+    resultList.getByTestId("search-current-channel-control"),
+  ).toBeVisible();
+  const dimensions = await resultList.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await resultList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(scopeControl).not.toBeInViewport();
+  await resultList.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+
+  for (let index = 0; index < 14; index += 1) {
+    await page.keyboard.press("ArrowDown");
+  }
+  await expect(resultRows.nth(14)).toHaveAttribute("aria-selected", "true");
+  await expect(resultRows.nth(14)).toBeInViewport();
+});
+
 test("closes sidebar search with Escape", async ({ page }) => {
   await page.goto("/");
 
