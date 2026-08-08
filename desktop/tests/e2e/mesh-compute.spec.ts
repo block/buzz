@@ -26,6 +26,7 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   const model = page.getByTestId("mesh-share-compute-model");
 
   await expect(card).not.toContainText("Not sharing right now");
+  await expect(card).not.toContainText("local file");
   await expect(
     page.getByTestId("mesh-share-compute-options-motion"),
   ).toHaveCount(0);

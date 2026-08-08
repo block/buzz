@@ -574,8 +574,9 @@ function MeshModelPicker({
       <p className="text-sm font-normal text-muted-foreground">
         {catalog
           ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
-          : "Choose a model or enter a model reference or local file."}{" "}
-        Buzz downloads remote models when sharing starts.
+          : "Choose a model or enter a catalog name or HuggingFace ref."}{" "}
+        Buzz downloads remote models when sharing starts; local files are not
+        supported yet.
       </p>
     </div>
   );
