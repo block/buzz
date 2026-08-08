@@ -93,6 +93,11 @@ export function MachineOnboardingFlow({
     "backup" | "phone" | null
   >(null);
   const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
+  // Owned here (not in the form) so navigating Back out of setup → key-import
+  // preserves the already-entered private key instead of clearing it. Cleared
+  // on a successful import and on "start new identity" so a stale key never
+  // lingers across identity switches.
+  const [keyDraft, setKeyDraft] = React.useState("");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -171,6 +176,7 @@ export function MachineOnboardingFlow({
     setIsPending(true);
     setError(null);
     try {
+      setKeyDraft("");
       const identity = await persistCurrentIdentity();
       queryClient.setQueryData(["identity"], identity);
       setSelectedPubkey(identity.pubkey);
@@ -191,6 +197,8 @@ export function MachineOnboardingFlow({
   const importExistingIdentity = React.useCallback(
     async (nsec: string, password?: string) => {
       const identity = await importIdentity(nsec, password);
+      // The draft survives import on purpose: pressing Back from setup must
+      // re-show the key the user entered (masked), not an empty field.
       continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
@@ -348,6 +356,7 @@ export function MachineOnboardingFlow({
                 <div className="flex flex-col items-center">
                   <NostrKeyImportForm
                     backLabel="Back"
+                    nsecValue={keyDraft}
                     onBack={() => {
                       setKeyImportStage("key-entry");
                       if (identityLost) {
@@ -356,6 +365,7 @@ export function MachineOnboardingFlow({
                       setPage("identity");
                     }}
                     onImport={importExistingIdentity}
+                    onNsecChange={setKeyDraft}
                     onStageChange={setKeyImportStage}
                     showBack={!identityLost}
                     variant="spotlight"

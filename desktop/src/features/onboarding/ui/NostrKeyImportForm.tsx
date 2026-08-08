@@ -38,6 +38,11 @@ type NostrKeyImportFormProps = {
   mode?: "key" | "backup";
   /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
   footerMode?: "onboarding" | "inline";
+  /** Controlled entered-key value. When provided with `onNsecChange`, the
+   * caller owns the key text so it survives remounts (e.g. onboarding Back
+   * navigation). The field stays masked (`type="password"`). */
+  nsecValue?: string;
+  onNsecChange?: (value: string) => void;
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
 };
@@ -59,9 +64,23 @@ export function NostrKeyImportForm({
   showBack = true,
   mode = "key",
   footerMode = "onboarding",
+  nsecValue,
+  onNsecChange,
   variant = "default",
 }: NostrKeyImportFormProps) {
-  const [nsecInput, setNsecInput] = React.useState("");
+  const [internalNsecInput, setInternalNsecInput] = React.useState("");
+  const isControlled = nsecValue !== undefined;
+  const nsecInput = isControlled ? nsecValue : internalNsecInput;
+  const setNsecInput = React.useCallback(
+    (value: string) => {
+      if (isControlled) {
+        onNsecChange?.(value);
+      } else {
+        setInternalNsecInput(value);
+      }
+    },
+    [isControlled, onNsecChange],
+  );
   const [passphrase, setPassphrase] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
@@ -156,31 +175,34 @@ export function NostrKeyImportForm({
     fileInputRef.current?.click();
   }, [isInteractionDisabled]);
 
-  const handleFiles = React.useCallback(async (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file) {
-      return;
-    }
+  const handleFiles = React.useCallback(
+    async (files: FileList | null) => {
+      const file = files?.[0];
+      if (!file) {
+        return;
+      }
 
-    if (file.size > NOSTR_KEY_FILE_MAX_BYTES) {
-      setImportError(
-        "That file is too large to be a key backup or private key. Choose another file.",
-      );
-      return;
-    }
+      if (file.size > NOSTR_KEY_FILE_MAX_BYTES) {
+        setImportError(
+          "That file is too large to be a key backup or private key. Choose another file.",
+        );
+        return;
+      }
 
-    try {
-      const text = await file.text();
-      const firstLine =
-        text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
-      setNsecInput(firstLine.trim());
-      setImportError(null);
-    } catch (error) {
-      setImportError(
-        error instanceof Error ? error.message : "Couldn't read that file.",
-      );
-    }
-  }, []);
+      try {
+        const text = await file.text();
+        const firstLine =
+          text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
+        setNsecInput(firstLine.trim());
+        setImportError(null);
+      } catch (error) {
+        setImportError(
+          error instanceof Error ? error.message : "Couldn't read that file.",
+        );
+      }
+    },
+    [setNsecInput],
+  );
 
   const handleSubmit = React.useCallback(async () => {
     // Guard here, not just on the submit button: the button now lives in the
@@ -235,7 +257,7 @@ export function NostrKeyImportForm({
     setImportError(null);
     setIsRevealed(false);
     onStageChange?.("key-entry");
-  }, [isPasswordStage, onBack, onStageChange]);
+  }, [isPasswordStage, onBack, onStageChange, setNsecInput]);
 
   return (
     <form
