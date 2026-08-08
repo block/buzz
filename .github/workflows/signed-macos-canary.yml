@@ -117,7 +117,8 @@ jobs:
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-lmstudio-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          test -x target/release/buzz-lmstudio-agent
           ./scripts/bundle-sidecars.sh
 
       # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
@@ -213,6 +214,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$EXTRACT_DIR/Buzz.app"
           spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Buzz.app"
           desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Buzz.app"
+          HELPER="$EXTRACT_DIR/Buzz.app/Contents/MacOS/buzz-apple-inputs"
+          test -x "$HELPER"
+          codesign --verify --strict --verbose=2 "$HELPER"
 
       - name: Stage signed DMG
         id: artifact
