@@ -17,6 +17,44 @@ use crate::validation::{
     validate_video_file,
 };
 
+/// Extract an optional `h` (channel) tag from a Blossom auth event.
+///
+/// When the uploader includes `["h", "<uuid>"]` in the kind:24242 auth
+/// event, the sidecar is bound to that channel and subsequent `GET`/`HEAD`
+/// requests require channel membership for private channels. `None` means
+/// unbound (legacy / avatar / open-channel) — relay membership alone suffices.
+/// If an `h` tag is present but malformed (missing value, not a UUID, nil
+/// UUID, or multiple conflicting values), the upload fails with
+/// `InvalidTag("h")` (400) rather than silently downgrading to unbound.
+fn extract_channel_id(
+    auth_event: &nostr::Event,
+) -> Result<Option<uuid::Uuid>, crate::error::MediaError> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut found: Option<uuid::Uuid> = None;
+    for tag in auth_event.tags.iter() {
+        if tag.kind() == nostr::TagKind::SingleLetter(h_tag) {
+            let val = tag
+                .content()
+                .ok_or(crate::error::MediaError::InvalidTag("h"))?;
+            let id = uuid::Uuid::parse_str(val)
+                .map_err(|_| crate::error::MediaError::InvalidTag("h"))?;
+            if id.is_nil() {
+                return Err(crate::error::MediaError::InvalidTag("h"));
+            }
+            if let Some(existing) = found {
+                if existing != id {
+                    // Multiple h tags with different UUIDs — ambiguous binding.
+                    return Err(crate::error::MediaError::InvalidTag("h"));
+                }
+                // Duplicate same UUID — idempotent, keep first.
+            } else {
+                found = Some(id);
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Shared buffered-upload pipeline for the image and generic-file paths.
 ///
 /// Both paths are identical except for two steps, which are injected:
@@ -212,6 +250,7 @@ pub async fn process_upload(
     body: Bytes,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
+    let channel_id = extract_channel_id(auth_event)?;
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -226,7 +265,11 @@ pub async fn process_upload(
             let ext = mime_to_ext(&mime).to_string();
             Ok((mime, ext))
         },
-        |input| async move { prepare_image_metadata(storage, config, input).await },
+        |input| async move {
+            let mut meta = prepare_image_metadata(storage, config, input).await?;
+            meta.channel_id = channel_id;
+            Ok(meta)
+        },
     )
     .await
 }
@@ -250,6 +293,7 @@ pub async fn process_file_upload(
     body: Bytes,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
+    let channel_id = extract_channel_id(auth_event)?;
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -271,6 +315,7 @@ pub async fn process_file_upload(
                 mime_type: input.mime,
                 uploaded_at: input.uploaded_at,
                 duration_secs: None,
+                channel_id,
             };
             Ok(meta)
         },
@@ -298,6 +343,7 @@ pub async fn process_video_upload(
     content_length: Option<u64>,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
+    let channel_id = extract_channel_id(auth_event)?;
     // --- 1. Stream body to temp file, compute SHA-256 incrementally ---
     let tmp = tempfile::NamedTempFile::new().map_err(|e| MediaError::Io(e.to_string()))?;
     let tmp_path = tmp.path().to_path_buf();
@@ -476,6 +522,7 @@ pub async fn process_video_upload(
         size: file_size,
         uploaded_at,
         duration_secs: Some(video_meta.duration_secs),
+        channel_id,
     };
 
     // Record before publishing the sidecar serve gate. See the buffered path.
@@ -596,6 +643,7 @@ mod tests {
             size: 5_000_000,
             uploaded_at: 1700000000,
             duration_secs: Some(29.5),
+            channel_id: None,
         };
 
         let desc = build_descriptor(
@@ -654,6 +702,7 @@ mod tests {
             size: 100_000,
             uploaded_at: 1700000000,
             duration_secs: None,
+            channel_id: None,
         };
 
         let desc = build_descriptor(
@@ -709,6 +758,101 @@ mod tests {
 
         // Non-limit errors should remain as Other.
         assert_eq!(detect("connection reset"), std::io::ErrorKind::Other);
+    }
+
+    /// Sign a kind:24242 Blossom auth event carrying `tags`.
+    ///
+    /// `extract_channel_id` only reads tags, but it takes a real `nostr::Event`,
+    /// so the tests build and sign real events rather than a stub.
+    fn auth_event_with_tags(tags: Vec<nostr::Tag>) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        nostr::EventBuilder::new(nostr::Kind::from(24242), "Upload buzz-media")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("sign auth event")
+    }
+
+    fn h_tag(value: &str) -> nostr::Tag {
+        nostr::Tag::parse(["h", value]).expect("h tag")
+    }
+
+    #[track_caller]
+    fn assert_invalid_h_tag(result: Result<Option<uuid::Uuid>, MediaError>) {
+        match result {
+            Err(MediaError::InvalidTag(tag)) => assert_eq!(tag, "h"),
+            other => panic!("expected InvalidTag(\"h\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_channel_id_absent_h_tag_is_unbound() {
+        // No h tag at all: the blob is unbound (avatar / legacy / open channel).
+        let event = auth_event_with_tags(vec![
+            nostr::Tag::parse(["t", "upload"]).expect("t tag"),
+            nostr::Tag::parse(["x", &"a".repeat(64)]).expect("x tag"),
+        ]);
+        assert_eq!(extract_channel_id(&event).expect("no h tag is valid"), None);
+    }
+
+    #[test]
+    fn extract_channel_id_single_valid_h_tag_binds_channel() {
+        let channel_id = uuid::Uuid::from_u128(0x1234_5678_9abc_def0);
+        let event = auth_event_with_tags(vec![
+            nostr::Tag::parse(["t", "upload"]).expect("t tag"),
+            h_tag(&channel_id.to_string()),
+        ]);
+        assert_eq!(
+            extract_channel_id(&event).expect("valid h tag"),
+            Some(channel_id)
+        );
+    }
+
+    #[test]
+    fn extract_channel_id_rejects_non_uuid_value() {
+        let event = auth_event_with_tags(vec![h_tag("general")]);
+        assert_invalid_h_tag(extract_channel_id(&event));
+    }
+
+    #[test]
+    fn extract_channel_id_rejects_nil_uuid() {
+        // The nil UUID is a parseable-but-meaningless binding — fail closed
+        // rather than silently downgrading the blob to unbound.
+        let event = auth_event_with_tags(vec![h_tag("00000000-0000-0000-0000-000000000000")]);
+        assert_invalid_h_tag(extract_channel_id(&event));
+    }
+
+    #[test]
+    fn extract_channel_id_rejects_empty_value() {
+        let event = auth_event_with_tags(vec![h_tag("")]);
+        assert_invalid_h_tag(extract_channel_id(&event));
+    }
+
+    #[test]
+    fn extract_channel_id_rejects_valueless_h_tag() {
+        let event = auth_event_with_tags(vec![nostr::Tag::parse(["h"]).expect("valueless h tag")]);
+        assert_invalid_h_tag(extract_channel_id(&event));
+    }
+
+    #[test]
+    fn extract_channel_id_duplicate_same_uuid_is_idempotent() {
+        let channel_id = uuid::Uuid::from_u128(0xfeed_face);
+        let value = channel_id.to_string();
+        let event = auth_event_with_tags(vec![h_tag(&value), h_tag(&value)]);
+        assert_eq!(
+            extract_channel_id(&event).expect("duplicate identical h tags are idempotent"),
+            Some(channel_id)
+        );
+    }
+
+    #[test]
+    fn extract_channel_id_rejects_conflicting_h_tags() {
+        // Two different channels is an ambiguous binding — reject rather than
+        // letting tag order decide which channel's ACL guards the blob.
+        let event = auth_event_with_tags(vec![
+            h_tag(&uuid::Uuid::from_u128(1).to_string()),
+            h_tag(&uuid::Uuid::from_u128(2).to_string()),
+        ]);
+        assert_invalid_h_tag(extract_channel_id(&event));
     }
 
     #[test]

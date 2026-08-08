@@ -330,6 +330,67 @@ mod tests {
         );
     }
 
+    /// Sidecars written before channel binding existed have no `channel_id`
+    /// key. They must still parse, as unbound. This is what makes rolling the
+    /// channel ACL out migration-free — every already-stored sidecar in S3
+    /// predates the field.
+    #[test]
+    fn blob_meta_legacy_sidecar_without_channel_id_parses_as_unbound() {
+        let legacy = r#"{
+            "dim": "800x600",
+            "blurhash": "LEHV6nWB2yk8pyo0adR*",
+            "thumb_url": "https://media.example.com/abc.thumb.jpg",
+            "ext": "jpg",
+            "mime_type": "image/jpeg",
+            "size": 1234,
+            "uploaded_at": 1700000000
+        }"#;
+
+        let meta: BlobMeta = serde_json::from_str(legacy).expect("legacy sidecar must still parse");
+        assert_eq!(meta.channel_id, None, "legacy sidecars are unbound");
+        // The rest of the sidecar must survive untouched.
+        assert_eq!(meta.ext, "jpg");
+        assert_eq!(meta.mime_type, "image/jpeg");
+        assert_eq!(meta.size, 1234);
+        assert_eq!(meta.uploaded_at, 1700000000);
+    }
+
+    /// The other half of the back-compat contract: an unbound sidecar must
+    /// serialize *without* the key, so newly written sidecars stay readable by
+    /// any older relay still running the previous binary.
+    #[test]
+    fn blob_meta_unbound_omits_channel_id_key() {
+        let meta = BlobMeta {
+            ext: "jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size: 1234,
+            channel_id: None,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&meta).expect("serialize unbound sidecar");
+        assert!(
+            json.get("channel_id").is_none(),
+            "unbound sidecars must omit channel_id entirely, got {json}"
+        );
+    }
+
+    #[test]
+    fn blob_meta_bound_round_trips_channel_id() {
+        let channel_id = uuid::Uuid::from_u128(0x0bad_c0de);
+        let meta = BlobMeta {
+            ext: "jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size: 1234,
+            channel_id: Some(channel_id),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize bound sidecar");
+        let parsed: BlobMeta = serde_json::from_str(&json).expect("round-trip bound sidecar");
+        assert_eq!(parsed.channel_id, Some(channel_id));
+    }
+
     #[test]
     fn partial_static_keys_are_rejected() {
         let err = match MediaStorage::new(&storage_config("buzz_dev", "")) {
@@ -422,4 +483,10 @@ pub struct BlobMeta {
     /// Video duration in seconds. `None` for non-video blobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    /// Optional originating channel — when `Some`, reads require channel membership
+    /// for private channels (relay membership alone is insufficient). `None` means
+    /// the blob is not bound to a channel (e.g. avatar, open-channel, legacy).
+    /// Added as follow-up to `769ac70` which noted channel binding was missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<uuid::Uuid>,
 }

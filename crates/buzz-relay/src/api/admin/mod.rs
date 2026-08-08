@@ -223,12 +223,22 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_blob_for_tenant(&state, &tenant, &sha256, &headers)
-        .await
-        .map_err(|error| match error {
-            buzz_media::MediaError::NotFound => ApiError::not_found(),
-            _ => ApiError::internal(),
-        })?;
+    // `Operator`: this read is already admin-authorized above and pinned to the
+    // feedback row's own provenance, so the sidecar channel ACL is deliberately
+    // not applied — an admin must be able to read an attachment from a private
+    // channel they are not a member of.
+    let response = crate::api::media::serve_blob_for_tenant_with_authority(
+        &state,
+        &tenant,
+        &sha256,
+        &headers,
+        crate::api::media::BlobReadAuthority::Operator,
+    )
+    .await
+    .map_err(|error| match error {
+        buzz_media::MediaError::NotFound => ApiError::not_found(),
+        _ => ApiError::internal(),
+    })?;
     tracing::info!(
         feedback_id = %feedback.id,
         community_id = %feedback.community_id,

@@ -61,6 +61,9 @@ fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
 
 struct MediaReadAuth {
     tenant: TenantContext,
+    /// Pubkey of the Blossom auth signer — used for channel ACL when the
+    /// sidecar is bound to a private channel (follow-up to 769ac70).
+    pubkey: [u8; 32],
 }
 
 const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -507,7 +510,117 @@ async fn authenticate_media_read(
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
 
-    Ok(MediaReadAuth { tenant })
+    Ok(MediaReadAuth {
+        tenant,
+        pubkey: auth_event.pubkey.to_bytes(),
+    })
+}
+
+/// Who is reading a blob, for channel-ACL purposes.
+///
+/// Making the bypass a named variant rather than an absent pubkey means every
+/// call site has to *say* which one it is: skipping the channel ACL is a
+/// deliberate word in the source, not the default that falls out of passing
+/// `None`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BlobReadAuthority<'a> {
+    /// A Blossom-authenticated end user. Private-channel membership is enforced
+    /// against this pubkey before any bytes are served.
+    User(&'a [u8; 32]),
+    /// A server-side operator path that has already performed its own
+    /// authorization and provenance checks (e.g. the admin feedback-attachment
+    /// reader). The channel ACL is intentionally **not** applied.
+    Operator,
+}
+
+impl BlobReadAuthority<'_> {
+    /// Apply the channel ACL for this authority, if it is subject to one.
+    async fn enforce_channel_acl(
+        self,
+        state: &AppState,
+        tenant: &TenantContext,
+        sidecar: &buzz_media::BlobMeta,
+    ) -> Result<(), MediaError> {
+        match self {
+            Self::User(pubkey) => enforce_media_channel_acl(state, tenant, pubkey, sidecar).await,
+            Self::Operator => Ok(()),
+        }
+    }
+}
+
+/// Enforce channel ACL when a sidecar is bound to a channel.
+///
+/// Follow-up to `769ac70` which left channel binding as `TODO`: if
+/// `sidecar.channel_id` is `Some`, and the channel is `private`, the
+/// requester must be a current member (via `is_member_cached`). Open channels
+/// and unbound blobs rely on relay membership alone. Returns `NotFound` (not
+/// `Forbidden`) so a removed member cannot probe existence of private blobs.
+async fn enforce_media_channel_acl(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: &[u8; 32],
+    sidecar: &buzz_media::BlobMeta,
+) -> Result<(), MediaError> {
+    let Some(channel_id) = sidecar.channel_id else {
+        return Ok(());
+    };
+    // Look up channel to determine visibility. If the channel is missing,
+    // deleted, or lookup fails, fail closed as NotFound to avoid leaking
+    // existence of a private blob. Log at debug level for expected
+    // ChannelNotFound vs warn for DB transport errors to aid incident debugging
+    // without changing the wire 404.
+    let channel = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .map_err(|e| {
+            // Distinguish expected missing-channel (debug, high volume if channel deleted)
+            // from transport errors (warn, needs ops attention). Matched on the
+            // typed variant, never on the rendered message — the wire response is
+            // `NotFound` either way, so this only affects operator visibility.
+            if matches!(e, buzz_db::DbError::ChannelNotFound(_)) {
+                tracing::debug!(
+                    community = %tenant.community(),
+                    channel_id = %channel_id,
+                    error = %e,
+                    "media channel ACL: get_channel failed; returning NotFound"
+                );
+            } else {
+                tracing::warn!(
+                    community = %tenant.community(),
+                    channel_id = %channel_id,
+                    error = %e,
+                    "media channel ACL: get_channel DB error; returning NotFound"
+                );
+                metrics::counter!("buzz_media_channel_acl_db_errors_total").increment(1);
+            }
+            MediaError::NotFound
+        })?;
+    if channel.visibility != "private" {
+        return Ok(());
+    }
+    let is_member = state
+        .is_member_cached(tenant.community(), channel_id, pubkey)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                community = %tenant.community(),
+                channel_id = %channel_id,
+                error = %e,
+                "media channel ACL: is_member_cached failed; returning NotFound"
+            );
+            metrics::counter!("buzz_media_channel_acl_db_errors_total").increment(1);
+            MediaError::NotFound
+        })?;
+    if !is_member {
+        tracing::debug!(
+            community = %tenant.community(),
+            channel_id = %channel_id,
+            "media channel ACL: not a member, returning NotFound"
+        );
+        return Err(MediaError::NotFound);
+    }
+    Ok(())
 }
 
 fn blob_cache_control() -> &'static str {
@@ -600,7 +713,14 @@ pub async fn get_blob(
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
     let media_auth = authenticate_media_read(&state, &req_headers, &sha256_ext).await?;
-    serve_blob_for_tenant(&state, &media_auth.tenant, &sha256_ext, &req_headers).await
+    serve_blob_for_tenant_with_authority(
+        &state,
+        &media_auth.tenant,
+        &sha256_ext,
+        &req_headers,
+        BlobReadAuthority::User(&media_auth.pubkey),
+    )
+    .await
 }
 
 /// Serve a validated blob from an already-authorized tenant context.
@@ -608,44 +728,51 @@ pub async fn get_blob(
 /// This is the common byte-serving mechanism for Blossom reads and narrowly
 /// scoped internal readers. Callers must establish their own authorization
 /// before entering this function; the tenant is never derived from client input.
-pub(crate) async fn serve_blob_for_tenant(
+///
+/// `authority` decides whether the sidecar's channel ACL applies — see
+/// [`BlobReadAuthority`]. [`BlobReadAuthority::Operator`] skips it and must only
+/// be passed by paths that have already authorized the read themselves.
+pub(crate) async fn serve_blob_for_tenant_with_authority(
     state: &AppState,
     tenant: &TenantContext,
     sha256_ext: &str,
     req_headers: &HeaderMap,
+    authority: BlobReadAuthority<'_>,
 ) -> Result<Response, MediaError> {
     validate_media_path(sha256_ext)?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
+    // When a sidecar is bound to a private channel, also enforce channel membership.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
-        let _ = state
+        let sidecar = state
             .media_storage
-            .read_sidecar_mime(tenant, parent_hash)
+            .get_sidecar(tenant, parent_hash)
             .await
-            .ok_or(MediaError::NotFound)?;
+            .map_err(|_| MediaError::NotFound)?;
+        authority
+            .enforce_channel_acl(state, tenant, &sidecar)
+            .await?;
         "image/jpeg".to_string()
     } else {
         // For explicit paths (hash.ext), verify the requested extension matches
         // the sidecar's canonical extension — sidecar is authoritative.
-        let sidecar_mime = state
+        let sidecar = state
             .media_storage
-            .read_sidecar_mime(tenant, sha256_ext)
+            .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
             .await
-            .ok_or(MediaError::NotFound)?;
+            .map_err(|_| MediaError::NotFound)?;
+        authority
+            .enforce_channel_acl(state, tenant, &sidecar)
+            .await?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
                 return Err(MediaError::NotFound);
             }
         }
-        sidecar_mime
+        sidecar.mime_type.clone()
     };
 
     // Images and video render inline; generic files force download. This is the
@@ -795,35 +922,38 @@ pub async fn head_blob(
     validate_media_path(&sha256_ext)?;
     let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
     let tenant = media_auth.tenant;
+    let authority = BlobReadAuthority::User(&media_auth.pubkey);
     let cache_control = blob_cache_control();
 
-    // Sidecar gate FIRST — reject before any blob I/O.
+    // Sidecar gate FIRST — reject before any blob I/O. Also enforce channel ACL
+    // for private channels when sidecar is bound (follow-up to 769ac70).
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
-        let _ = state
+        let sidecar = state
             .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
+            .get_sidecar(&tenant, parent_hash)
             .await
-            .ok_or(MediaError::NotFound)?;
+            .map_err(|_| MediaError::NotFound)?;
+        authority
+            .enforce_channel_acl(&state, &tenant, &sidecar)
+            .await?;
         "image/jpeg".to_string()
     } else {
-        let sidecar_mime = state
+        let sidecar = state
             .media_storage
-            .read_sidecar_mime(&tenant, &sha256_ext)
+            .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
             .await
-            .ok_or(MediaError::NotFound)?;
+            .map_err(|_| MediaError::NotFound)?;
+        authority
+            .enforce_channel_acl(&state, &tenant, &sidecar)
+            .await?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
                 return Err(MediaError::NotFound);
             }
         }
-        sidecar_mime
+        sidecar.mime_type.clone()
     };
 
     let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
