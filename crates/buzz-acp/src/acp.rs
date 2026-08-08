@@ -211,6 +211,56 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Plain assistant text streamed during the current turn, and whether the
+    /// agent published a reply itself. Small local models routinely finish a
+    /// multi-step turn by writing the answer as prose instead of calling
+    /// `send_message`; ACP treats streamed text as observability only, so that
+    /// answer is dropped. The pool's mesh-gated delivery fallback consumes
+    /// these via [`take_undelivered_turn_text`](Self::take_undelivered_turn_text).
+    turn_text: String,
+    /// Whether a message-publish tool call was observed during this turn.
+    turn_published: bool,
+}
+
+/// Maximum assistant text retained per turn for the delivery fallback.
+///
+/// Bounded so a rogue agent streaming forever cannot grow the buffer without
+/// limit; a chat reply that exceeds this is truncated rather than dropped.
+const MAX_TURN_TEXT_BYTES: usize = 8 * 1024;
+
+/// Whether an ACP `tool_call` update represents the agent publishing a message.
+///
+/// Matches both shapes an agent can use: the first-class `send_message` tool
+/// (any `dev__`/server prefix) and a shell command that runs the CLI directly.
+fn is_message_publish(title: &str, raw_input: &str) -> bool {
+    title.ends_with("send_message")
+        || raw_input.contains("messages send")
+        || raw_input.contains("social publish")
+}
+
+/// Whether text is a bare acknowledgement not worth publishing as a reply.
+///
+/// Guards the fallback against posting filler like "OK" or "Done." when the
+/// agent had nothing substantive to say.
+fn is_bare_acknowledgement(text: &str) -> bool {
+    let normalized: String = text
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "" | "ok"
+            | "okay"
+            | "done"
+            | "sure"
+            | "got it"
+            | "understood"
+            | "acknowledged"
+            | "will do"
+            | "thanks"
+    )
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +600,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_text: String::new(),
+            turn_published: false,
         })
     }
 
@@ -777,6 +829,11 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
 
+        // Reset per-turn delivery-fallback state alongside usage: text streamed
+        // by a previous turn must never be republished by this one.
+        self.turn_text.clear();
+        self.turn_published = false;
+
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
         self.next_id += 1;
@@ -879,6 +936,23 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Take the turn's assistant text if the agent never published a reply.
+    ///
+    /// Returns `None` when the agent published via `send_message` (or the CLI)
+    /// itself, or when the only text was a bare acknowledgement. Consuming
+    /// clears the buffer so the same text can never be posted twice.
+    pub fn take_undelivered_turn_text(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.turn_text);
+        if self.turn_published {
+            return None;
+        }
+        let trimmed = text.trim();
+        if trimmed.is_empty() || is_bare_acknowledgement(trimmed) {
+            return None;
+        }
+        Some(trimmed.to_string())
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1732,6 +1806,15 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Retain for the mesh-gated delivery fallback (bounded).
+                    let remaining = MAX_TURN_TEXT_BYTES.saturating_sub(self.turn_text.len());
+                    if remaining > 0 {
+                        let mut end = text.len().min(remaining);
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        self.turn_text.push_str(&text[..end]);
+                    }
                 }
                 false
             }
@@ -1745,6 +1828,15 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if !self.turn_published {
+                    let raw_input = update
+                        .get("rawInput")
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    if is_message_publish(title, &raw_input) {
+                        self.turn_published = true;
+                    }
+                }
                 true
             }
             "tool_call_update" => {
@@ -2255,6 +2347,43 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_detection_matches_tool_and_shell_shapes() {
+        // First-class tool, with the MCP server prefix the agent reports.
+        assert!(is_message_publish("dev__send_message", "{}"));
+        assert!(is_message_publish("send_message", "{}"));
+        // Shell shapes: the CLI invoked directly.
+        assert!(is_message_publish(
+            "dev__shell",
+            r#"{"command":"buzz messages send --channel c --content hi"}"#
+        ));
+        assert!(is_message_publish(
+            "dev__shell",
+            r#"{"command":"buzz social publish --content hi"}"#
+        ));
+        // Unrelated tools must not suppress the fallback.
+        assert!(!is_message_publish("dev__todo", "{}"));
+        assert!(!is_message_publish("dev__shell", r#"{"command":"ls -la"}"#));
+        // `read_file` ends in neither name and must not match.
+        assert!(!is_message_publish("dev__read_file", r#"{"path":"a"}"#));
+    }
+
+    #[test]
+    fn bare_acknowledgements_are_not_worth_publishing() {
+        for text in ["OK", "ok.", "Done!", "  Sure  ", "Got it", "will do", ""] {
+            assert!(
+                is_bare_acknowledgement(text),
+                "expected {text:?} to be a bare ack"
+            );
+        }
+        for text in ["12", "The capital is Paris.", "OK, the answer is 12"] {
+            assert!(
+                !is_bare_acknowledgement(text),
+                "expected {text:?} to be substantive"
+            );
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
