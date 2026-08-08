@@ -95,9 +95,18 @@ pub fn verify_nip98_event(
         .ok_or_else(|| AuthError::Nip98Invalid("missing `u` tag".to_string()))?;
 
     if normalize_url(u_tag) != normalize_url(expected_url) {
-        return Err(AuthError::Nip98Invalid(format!(
-            "URL mismatch: event has `{u_tag}`, expected `{expected_url}`"
-        )));
+        // Log the detail (both URLs) server-side for diagnosis, but return
+        // only a generic "URL mismatch" to the client. The expected URL is
+        // derived from the relay's configured bind address, which is often an
+        // internal/private address fronted by a reverse proxy; echoing it back
+        // to an unauthenticated caller discloses internal topology (and, for
+        // routable origins, the origin address itself, undermining the proxy).
+        tracing::warn!(
+            u_tag = %u_tag,
+            expected_url = %expected_url,
+            "NIP-98 auth URL mismatch"
+        );
+        return Err(AuthError::Nip98Invalid("URL mismatch".to_string()));
     }
 
     // 6. Verify `method` tag matches expected_method (case-insensitive).
