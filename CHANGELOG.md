@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.8
+
+### Desktop and shared changes
+
+- feat(desktop): unify add agent flows ([#5015](https://github.com/block/buzz/pull/5015)) ([`02f640bc4559c48ac0c2ec595ef34dd2c294b0db`](https://github.com/block/buzz/commit/02f640bc4559c48ac0c2ec595ef34dd2c294b0db))
+- fix(buzz-agent): budget summarizer reasoning separately so it cannot starve the handoff summary ([#5248](https://github.com/block/buzz/pull/5248)) ([`c7b663680a29a837dbd2fdde810f239f3d303025`](https://github.com/block/buzz/commit/c7b663680a29a837dbd2fdde810f239f3d303025))
+
+### Other repository changes
+
+- Revert "fix(acp): reject unattended permission requests" ([#5323](https://github.com/block/buzz/pull/5323)) ([`6a17d035f79ad582ca3f4f3cdc38d376f2c4087f`](https://github.com/block/buzz/commit/6a17d035f79ad582ca3f4f3cdc38d376f2c4087f))
+- infra: bind development services to loopback ([#4871](https://github.com/block/buzz/pull/4871)) ([`65834d68d0d3441c4e628540d6d5c8b0a2e757c9`](https://github.com/block/buzz/commit/65834d68d0d3441c4e628540d6d5c8b0a2e757c9))
+
+[Compare desktop-v0.5.7...desktop-v0.5.8](https://github.com/block/buzz/compare/desktop-v0.5.7...desktop-v0.5.8)
+
 ## v0.5.7
 
 ### Desktop and shared changes
