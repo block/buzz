@@ -111,11 +111,45 @@ pub enum AcpError {
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// detail (e.g. a `data` field) is not lost. When `message` is present
+/// and a `data` field exists, append the `data` payload to the message so
+/// actionable detail (e.g. an adapter's remediation hint) is not dropped.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
     let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
+        Some(m) => {
+            let mut msg = m.to_string();
+            if let Some(data) = error.get("data") {
+                if !data.is_null() {
+                    // Prefer a nested human-readable `details` string when
+                    // present (the ACP TS SDK wraps plain exceptions as
+                    // `{code, message, data: {details}}`); otherwise fall
+                    // back to a stringified form of the whole `data` value.
+                    let data_str = data
+                        .get("details")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| match data.as_str() {
+                            Some(s) => s.to_string(),
+                            None => data.to_string(),
+                        });
+                    // Truncate defensively so a pathological adapter
+                    // cannot flood logs with megabytes of `data`.
+                    const MAX_DATA_LEN: usize = 2048;
+                    let truncated = if data_str.chars().count() > MAX_DATA_LEN {
+                        let cut: String = data_str.chars().take(MAX_DATA_LEN).collect();
+                        format!("{cut}…")
+                    } else {
+                        data_str
+                    };
+                    if !truncated.is_empty() {
+                        msg.push_str(": ");
+                        msg.push_str(&truncated);
+                    }
+                }
+            }
+            msg
+        }
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
@@ -4375,6 +4409,101 @@ mod tests {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_appends_data_details_when_present() {
+        // ACP TS SDK wraps plain thrown exceptions as
+        // `{code, message: "Internal error", data: {details: "<real cause>"}}`.
+        // The actionable remediation hint lives only in `data.details` — it
+        // must not be dropped from the surfaced message.
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": "Claude native binary not found for win32-x64. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set CLAUDE_CODE_EXECUTABLE."}
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.contains("Internal error"),
+                    "expected original message in output, got: {message}"
+                );
+                assert!(
+                    message.contains("Claude native binary not found for win32-x64"),
+                    "expected data.details in output, got: {message}"
+                );
+                assert!(
+                    message.contains("CLAUDE_CODE_EXECUTABLE"),
+                    "expected remediation hint in output, got: {message}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_appends_string_data_when_details_missing() {
+        // Some adapters put a plain string in `data` (not a nested object).
+        // The full payload must still be surfaced.
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": "quota exceeded"
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.contains("Internal error"),
+                    "expected original message in output, got: {message}"
+                );
+                assert!(
+                    message.contains("quota exceeded"),
+                    "expected string data in output, got: {message}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_ignores_null_data() {
+        // `data: null` carries no information; do not append it.
+        let error = serde_json::json!({
+            "code": -32001,
+            "message": "auth denied",
+            "data": null
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32001);
+                assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_truncates_oversized_data() {
+        let big = "x".repeat(4096);
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": big
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.chars().count() < 2200,
+                    "expected message to be truncated, got {} chars",
+                    message.chars().count()
+                );
+                assert!(message.ends_with('…'), "expected ellipsis on truncation");
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
