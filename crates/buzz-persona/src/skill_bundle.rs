@@ -206,6 +206,34 @@ pub fn inspect_skill_md(
     })
 }
 
+impl PortableSkill {
+    /// Validate this exact Skill directory without installing or activating it.
+    ///
+    /// The fields remain mutable, so callers must revalidate after any change.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_skill_name(&self.name)?;
+        validate_skill_description(&self.name, &self.description)?;
+        validate_skill_files(self, &mut 0)
+    }
+
+    /// Stable SHA-256 content identity for this exact Skill directory.
+    ///
+    /// This digest identifies reviewed content. It is not proof of trust,
+    /// permission, installation, or runtime availability.
+    pub fn canonical_digest(&self) -> Result<String, String> {
+        self.validate()?;
+        skill_digest(self)
+    }
+
+    /// Build exact review metadata for this Skill after revalidating it.
+    ///
+    /// `allowed-tools` remains an untrusted request and is never a Buzz grant.
+    pub fn inspection(&self) -> Result<PortableSkillInspection, String> {
+        self.validate()?;
+        inspect_skill(self)
+    }
+}
+
 impl SkillBundle {
     /// Validate exact contents without publishing, installing, or executing.
     pub fn validate(&self) -> Result<(), String> {

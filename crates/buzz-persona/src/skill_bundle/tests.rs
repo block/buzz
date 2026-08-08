@@ -81,6 +81,69 @@ fn digest_is_deterministic_across_skill_and_file_order() {
 }
 
 #[test]
+fn single_skill_identity_matches_its_bundle_review() {
+    let mut candidate = skill("production-health", "Inspect production health");
+    candidate.validate().unwrap();
+
+    let bundle_inspection = bundle(vec![candidate.clone()]).inspection().unwrap();
+    assert_eq!(
+        candidate.canonical_digest().unwrap(),
+        bundle_inspection.skills[0].digest
+    );
+    assert_eq!(candidate.inspection().unwrap(), bundle_inspection.skills[0]);
+    assert_eq!(
+        candidate
+            .inspection()
+            .unwrap()
+            .requested_allowed_tools
+            .as_deref(),
+        Some("Bash(vercel:*) Read")
+    );
+
+    let digest = candidate.canonical_digest().unwrap();
+    candidate.files.reverse();
+    assert_eq!(candidate.canonical_digest().unwrap(), digest);
+}
+
+#[test]
+fn single_skill_identity_methods_fail_closed_on_invalid_content() {
+    let mut missing_manifest = skill("safe-skill", "Safe Skill");
+    missing_manifest
+        .files
+        .retain(|file| file.path != "SKILL.md");
+
+    let mut mismatched_metadata = skill("safe-skill", "Safe Skill");
+    mismatched_metadata.files[0].bytes = skill_md("other-skill", "Safe Skill", "");
+
+    let mut colliding_path = skill("safe-skill", "Safe Skill");
+    colliding_path.files.push(PortableSkillFile {
+        path: "SCRIPTS/check.sh".to_string(),
+        bytes: b"exit 1\n".to_vec(),
+        executable: true,
+    });
+
+    let mut oversized = skill("safe-skill", "Safe Skill");
+    for index in 0..4 {
+        oversized.files.push(PortableSkillFile {
+            path: format!("assets/large-{index}.bin"),
+            bytes: vec![index as u8; MAX_PORTABLE_SKILL_FILE_BYTES],
+            executable: false,
+        });
+    }
+
+    for candidate in [
+        missing_manifest,
+        mismatched_metadata,
+        colliding_path,
+        oversized,
+    ] {
+        assert!(candidate.validate().is_err());
+        assert!(candidate.canonical_digest().is_err());
+        assert!(candidate.inspection().is_err());
+    }
+}
+
+#[test]
 fn digest_changes_with_every_identity_bearing_field() {
     let original = skill("identity", "Identity Skill");
     let original_digest = bundle(vec![original.clone()]).canonical_digest().unwrap();
