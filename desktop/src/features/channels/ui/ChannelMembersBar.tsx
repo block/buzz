@@ -13,6 +13,7 @@ import {
 } from "@/features/agents/hooks";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
+import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -64,7 +65,10 @@ export function ChannelMembersBar({
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const members = membersQuery.data ?? [];
-  const memberCount = membersQuery.data?.length ?? channel.memberCount;
+  const isArchivedIdentity = useIsArchivedPredicate();
+  const memberCount = membersQuery.data
+    ? members.filter((member) => !isArchivedIdentity(member.pubkey)).length
+    : channel.memberCount;
   const providers = React.useMemo(
     () =>
       [...(providersQuery.data ?? [])].sort((left, right) => {

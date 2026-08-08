@@ -58,6 +58,7 @@ import {
 import { EditRespondToDialog } from "./EditRespondToDialog";
 import { InviteLinkSection } from "@/features/community-members/ui/InviteLinkSection";
 import { DEFAULT_INVITE_TTL_SECS } from "@/features/community-members/ui/InviteLinkSection";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
@@ -159,6 +160,7 @@ export function MembersSidebar({
     DEFAULT_INVITE_TTL_SECS,
   );
   const identityQuery = useIdentityQuery();
+  const relayMembershipQuery = useMyRelayMembershipQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
@@ -438,8 +440,12 @@ export function MembersSidebar({
     normalizedSearchQuery,
   ]);
 
+  const relayRole = relayMembershipQuery.data?.role;
   const canManageMembers =
-    selfMember?.role === "owner" || selfMember?.role === "admin";
+    selfMember?.role === "owner" ||
+    selfMember?.role === "admin" ||
+    relayRole === "owner" ||
+    relayRole === "admin";
 
   const {
     canModerate,
