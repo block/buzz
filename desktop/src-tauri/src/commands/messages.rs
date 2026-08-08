@@ -29,9 +29,7 @@ use crate::{
 /// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
 /// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
 /// kind) but still passes through the p-gate before it runs.
-use crate::commands::query_kinds::{
-    forum_root_kinds, forum_thread_kinds, mention_kinds, thread_parent_kinds, TIMELINE_KINDS,
-};
+use crate::commands::query_kinds::{mention_kinds, thread_parent_kinds, TIMELINE_KINDS};
 
 #[tauri::command]
 pub async fn get_feed(
