@@ -50,6 +50,7 @@ mod project_git_exec;
 mod project_git_merge_error;
 mod project_git_push;
 mod project_git_workflow;
+mod project_repo_discovery;
 mod project_repo_paths;
 mod project_terminal;
 mod qr_download;
