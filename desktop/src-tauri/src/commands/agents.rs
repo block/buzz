@@ -913,6 +913,7 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            effort_level: None,
         };
 
         records.push(record);
@@ -1331,16 +1332,10 @@ pub async fn delete_managed_agent(
                 return Err(format!("agent {pubkey} not found"));
             }
             save_managed_agents(&app, &records)?;
-            // Remove the agent's nsec from the keyring after the record is gone.
             crate::managed_agents::delete_agent_key(&pubkey);
-            // Tombstone-after-validation: only reached past the deployed-remote
-            // guard above and a confirmed removal — never orphan a live remote
-            // deployment's relay record. Inside the lock, before the block closes
-            // (no .await here). Every agent published, so every delete tombstones.
+            // Tombstone after confirmed removal (inside lock; every published agent tombstones).
             tombstone_managed_agent_pending(&app, &state, &pubkey);
-            // NIP-IA: archive the deleted agent's identity on the relay so it
-            // stops appearing in member pickers and autocomplete. Same
-            // best-effort, inside-the-lock contract as the tombstone above.
+            // NIP-IA: archive deleted agent identity so it stops appearing in pickers.
             archive_managed_agent_pending(&app, &state, &pubkey);
         }
         try_regenerate_nest(&app);

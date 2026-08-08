@@ -218,18 +218,15 @@ type RawGitBashPrerequisite = {
   install_instructions_url: string;
   install_hint: string;
 };
-
 type RawCommandAvailability = {
   command: string;
   resolved_path: string | null;
   available: boolean;
 };
-
 type RawManagedAgentPrereqs = {
   acp: RawCommandAvailability;
   mcp: RawCommandAvailability;
 };
-
 type RawRelayMember = {
   pubkey: string;
   role: string;
@@ -240,7 +237,6 @@ type RawRelayMember = {
 type RawListRelayMembersResponse = {
   members: RawRelayMember[];
 };
-
 type RawCanvasResponse = {
   content: string | null;
   updated_at: number | null;
@@ -1001,7 +997,11 @@ export async function putAgentSessionConfig(
 ): Promise<void> {
   return invokeTauri<void>("put_agent_session_config", { pubkey, payload });
 }
-
+export const persistAgentEffortLevel = (p: string, l: string | null) =>
+  invokeTauri<void>("persist_agent_effort_level", {
+    pubkey: p,
+    effortLevel: l,
+  });
 /** File-layer config for a runtime (e.g. `~/.config/goose/config.yaml`). */
 export type RuntimeFileConfigSubset = {
   /** Provider set in the harness config file. */

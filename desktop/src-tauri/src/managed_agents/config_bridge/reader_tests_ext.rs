@@ -16,7 +16,7 @@ fn numeric_context_limit_inherits_from_persona_env() {
     let runtime = buzz_agent_runtime();
     let tiers = persona_env_tiers("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000");
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let field = surface.normalized.context_limit.unwrap();
     assert_eq!(field.value.as_deref(), Some("200000"));
@@ -33,7 +33,7 @@ fn record_max_tokens_overrides_global_env_with_secondary() {
     let runtime = buzz_agent_runtime();
     let tiers = global_env_tiers("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "16384");
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let field = surface.normalized.max_output_tokens.unwrap();
     assert_eq!(field.value.as_deref(), Some("8192"));
@@ -64,7 +64,7 @@ fn global_env_prompt_wins_over_persona_structured_prompt() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let prompt = surface.normalized.system_prompt.unwrap();
     assert_eq!(prompt.value.as_deref(), Some("global-env-prompt"));
@@ -87,7 +87,7 @@ fn persona_env_model_wins_over_persona_structured_model() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let model = surface.normalized.model.unwrap();
     // persona env outranks persona struct because env candidates precede struct
@@ -106,7 +106,7 @@ fn structured_fallback_intact_when_no_env_representation() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("struct-persona-model"));
@@ -130,7 +130,7 @@ fn post_sanitization_empty_global_env_falls_through_to_persona_tier() {
     // No global env (stripped); persona provides the valid fallback.
     let tiers = persona_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "medium");
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     // Persona value surfaces instead of the stripped global value.
     let effort = surface.normalized.thinking_effort.unwrap();
@@ -157,7 +157,7 @@ fn record_env_prompt_wins_over_record_struct_prompt_as_buzz_explicit() {
     );
     let runtime = test_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
 
     let prompt = surface.normalized.system_prompt.unwrap();
     assert_eq!(prompt.value.as_deref(), Some("env-prompt-B"));
@@ -189,7 +189,7 @@ fn definition_env_beats_structured_persona_model() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("harness-model"));
@@ -222,7 +222,7 @@ fn global_env_beats_definition_env() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("global-model"));
@@ -249,10 +249,136 @@ fn reserved_key_absent_from_definition_env_falls_through() {
         ..Default::default()
     };
 
-    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers, None);
 
     let model = surface.normalized.model.unwrap();
     // Falls through to persona structured model.
     assert_eq!(model.value.as_deref(), Some("persona-struct-model"));
     assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
+}
+
+// ── B4/B5 canonical effort_level tier tests ────────────────────────────────
+//
+// record.effort_level is the Buzz-canonical seeded value (B5 persisted from
+// a positive ACP ack).  It must surface as BuzzExplicit and take precedence
+// over the config-file tier (but not over record env vars).
+
+/// B4: record.effort_level surfaces as BuzzExplicit when no env var is set.
+#[test]
+fn b4_canonical_effort_level_surfaces_as_buzz_explicit() {
+    let mut record = test_record();
+    record.effort_level = Some("high".to_string());
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from canonical record tier");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+}
+
+/// B4: record.effort_level shadows the config-file tier.
+#[test]
+fn b4_canonical_effort_level_shadows_file_tier() {
+    let mut record = test_record();
+    // canonical effort takes precedence over file tier
+    record.effort_level = Some("medium".to_string());
+    // no env var set — config-file would otherwise win if canonical absent
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("canonical effort must shadow file tier");
+    assert_eq!(effort.value.as_deref(), Some("medium"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+}
+
+/// B4: a record env var override still wins over record.effort_level.
+#[test]
+fn b4_record_env_var_wins_over_canonical_effort_level() {
+    let mut record = test_record();
+    record.effort_level = Some("low".to_string());
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string());
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("env var must win over canonical effort");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+    // canonical is the overridden baseline
+    assert_eq!(effort.overridden_value.as_deref(), Some("low"));
+}
+
+/// B4: None effort_level does not introduce a spurious tier.
+#[test]
+fn b4_none_canonical_effort_does_not_surface() {
+    let record = test_record(); // effort_level defaults to None
+    let runtime = buzz_agent_runtime();
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    // No env var, no session cache, no file config → effort_level field absent.
+    assert!(
+        surface.normalized.thinking_effort.is_none(),
+        "effort field must be absent when no tier has a value"
+    );
+}
+
+// ── CLAUDE_CONFIG_DIR path resolution ─────────────────────────────────────────
+
+#[test]
+fn claude_mcp_config_path_honors_custom_claude_config_dir() {
+    // M-2: mcp_config_file_path_for_runtime must use the custom dir when
+    // claude_config_dir is Some, not fall back to ~/.claude.json.
+    let record = test_record();
+    let runtime = &KnownAcpRuntime {
+        id: "claude",
+        config_file_path: Some("~/.claude/settings.json"),
+        ..*test_runtime()
+    };
+    let custom_dir = std::path::PathBuf::from("/custom/config/dir");
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), Some(&custom_dir));
+
+    let mcp_path = surface
+        .sources
+        .mcp_config_file_path
+        .expect("mcp_config_file_path must be present for claude runtime");
+    assert_eq!(
+        std::path::Path::new(&mcp_path),
+        custom_dir.join(".claude.json"),
+        "mcp config path must be <custom_dir>/.claude.json when CLAUDE_CONFIG_DIR is set"
+    );
+    assert!(
+        surface.claude_config_dir_custom,
+        "claude_config_dir_custom must be true when a custom dir was passed"
+    );
+}
+
+#[test]
+fn claude_config_dir_none_falls_back_to_home_claude_json() {
+    // M-3: None (i.e. the caller stripped an empty string) must resolve to
+    // the default ~/.claude.json path, matching Claude's `CLAUDE_CONFIG_DIR || homedir()`.
+    let record = test_record();
+    let runtime = &KnownAcpRuntime {
+        id: "claude",
+        config_file_path: Some("~/.claude/settings.json"),
+        ..*test_runtime()
+    };
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers(), None);
+    assert!(
+        !surface.claude_config_dir_custom,
+        "claude_config_dir_custom must be false when dir is None (unset)"
+    );
+    assert!(
+        surface
+            .sources
+            .mcp_config_file_path
+            .as_deref()
+            .is_some_and(|p| p.ends_with(".claude.json")),
+        "mcp path must fall back to ~/.claude.json when no custom dir"
+    );
 }

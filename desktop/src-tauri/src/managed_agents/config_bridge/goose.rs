@@ -130,6 +130,7 @@ fn parse_extensions(
                 name,
                 kind,
                 enabled,
+                source: None,
             })
         })
         .collect()

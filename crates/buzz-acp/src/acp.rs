@@ -2105,11 +2105,58 @@ pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_jso
         .unwrap_or_default()
 }
 
+/// Extract `configOptions` entries relevant to agent capability tracking from a
+/// `session/new` result.
+///
+/// Returns entries with `category == "model"` (for model catalog/validation, existing
+/// callers) **and** `category == "thought_level"` (so the pool-level capability cache
+/// can populate `valid_values` and the harness `invalid_value` guard runs in production).
+///
+/// Stored in `AgentModelCapabilities::config_options_raw`; `extract_model_config_options`
+/// is kept as a separate helper for callers that only need the model category.
+pub fn extract_agent_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    result["configOptions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|opt| {
+                    matches!(
+                        opt.get("category").and_then(|c| c.as_str()),
+                        Some("model") | Some("thought_level")
+                    )
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Extract `SessionModelState` (unstable path) from a `session/new` result.
 ///
 /// Returns the `models` object if present: `{ currentModelId, availableModels: [...] }`.
 pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Value> {
     result.get("models").cloned()
+}
+
+/// B5: Extract the `configId` for the `thought_level` category option from a
+/// `session/new` result, if the adapter advertised one.
+///
+/// Claude Code's adapter uses `category: "thought_level"` in its configOptions.
+/// The configId is adapter-defined (e.g. `"effort"` on claude-agent-acp) and
+/// must not be hardcoded in the harness — this function discovers it at session
+/// time so `set_idle_agent_effort` can forward the real id.
+pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<String> {
+    let arr = result["configOptions"].as_array()?;
+    for opt in arr {
+        if opt.get("category").and_then(|c| c.as_str()) == Some("thought_level") {
+            let config_id = opt
+                .get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|v| v.as_str())?;
+            return Some(config_id.to_string());
+        }
+    }
+    None
 }
 
 /// Match a desired model ID against a fresh `session/new` response.

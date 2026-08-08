@@ -79,6 +79,7 @@ fn parse_mcp_servers(table: &toml::Table) -> Vec<ExtensionEntry> {
             name: name.clone(),
             kind: "mcp".to_string(),
             enabled: true,
+            source: None,
         })
         .collect()
 }

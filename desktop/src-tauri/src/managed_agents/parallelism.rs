@@ -116,6 +116,7 @@ mod tests {
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
+            effort_level: None,
             relay_mesh: None,
         }
     }

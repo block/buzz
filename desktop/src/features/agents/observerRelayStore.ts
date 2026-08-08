@@ -3,7 +3,10 @@ import * as React from "react";
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
 import type { ControlResultFrame } from "@/shared/api/types";
-import { putAgentSessionConfig } from "@/shared/api/tauri";
+import {
+  putAgentSessionConfig,
+  persistAgentEffortLevel,
+} from "@/shared/api/tauri";
 import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
@@ -168,6 +171,53 @@ let unsubscribeRelay: (() => Promise<void>) | null = null;
 let startPromise: Promise<void> | null = null;
 let eventProcessingQueue: Promise<void> = Promise.resolve();
 let generation = 0;
+
+/**
+ * Tracks the most recently dispatched nonce per agent. The observer persistence
+ * gate for effort acks checks this: only acks whose nonce matches the current
+ * entry are persisted. This prevents a stale ack from a superseded pick (or a
+ * late result after an 8s timeout) from overwriting a newer persisted value.
+ *
+ * Key: normalized agent pubkey. Value: nonce string from the last dispatch.
+ *
+ * This map is the authoritative in-memory view. It is populated from
+ * `localStorage` on module load and on every `resetAgentObserverStore` call so
+ * that legitimate acks survive Desktop restart or community switch.
+ */
+const currentEffortNonce = new Map<string, string>();
+
+/**
+ * `localStorage` key prefix for persisted effort nonces.
+ * Full key: `buzz:effort-nonce:<normalized-agent-pubkey>`.
+ */
+const EFFORT_NONCE_KEY_PREFIX = "buzz:effort-nonce:";
+
+/**
+ * Load any previously-persisted effort nonces from `localStorage` into the
+ * in-memory map. Best-effort: errors are silently ignored so a corrupted
+ * entry never blocks startup.
+ */
+function loadNoncesFromStorage(): void {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return;
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(EFFORT_NONCE_KEY_PREFIX)) {
+        const pubkey = key.slice(EFFORT_NONCE_KEY_PREFIX.length);
+        const nonce = storage.getItem(key);
+        if (pubkey && nonce) {
+          currentEffortNonce.set(pubkey, nonce);
+        }
+      }
+    }
+  } catch {
+    // localStorage unavailable (e.g., test environment without a mock) — ignore.
+  }
+}
+
+// Populate from storage on module init so persisted nonces survive restart.
+loadNoncesFromStorage();
 
 function notifyListeners() {
   for (const listener of listeners) {
@@ -525,9 +575,63 @@ function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
   );
 }
 
+/**
+ * Pure predicate: returns `true` when `ackNonce` matches the registered nonce
+ * for `agentPubkey` in the current `currentEffortNonce` map state.
+ *
+ * Rules (P3 nonce gate):
+ *   - No nonce ever registered for this agent (startup path): ack-nonce must
+ *     also be absent.
+ *   - A nonce is registered: ack-nonce must be present and equal to it.
+ *
+ * Used by both `dispatchControlResult` (production gate) and the nonce-gate
+ * test helpers, ensuring tests exercise the same logic as production.
+ */
+function effortNonceMatches(agentPubkey: string, ackNonce: unknown): boolean {
+  const registered = currentEffortNonce.get(normalizePubkey(agentPubkey));
+  return registered === undefined
+    ? ackNonce === undefined
+    : ackNonce !== undefined && ackNonce === registered;
+}
+
 function dispatchControlResult(agentPubkey: string, payload: unknown) {
   if (!isControlResultFrame(payload)) {
     return;
+  }
+  // B5: on a positive set_config_option ack for a confirmed thought_level option,
+  // persist the canonical value. Two persistence triggers:
+  //   1. status === "ok" + category === "thought_level": terminal applied ack from
+  //      `pool.resolve_effort_report` (main loop `PoolEvent::EffortReport` arm),
+  //      emitted pre-prompt — the adapter accepted the value.
+  //   2. status === "cleared" + category === "thought_level": terminal clear ack
+  //      from `pool.resolve_effort_report` — session ran without effort override.
+  // Gate on `category === "thought_level"` (present only on thought_level acks)
+  // so synthetic acks (no category) never trigger persistence.
+  // Gate on nonce: if the harness echoes a nonce, it must match the most recently
+  // dispatched nonce for this agent. Mismatches indicate stale results from
+  // superseded picks (e.g. old `ok` arriving after a newer pick has been sent,
+  // or a late final ack after the 8s timeout).
+  if (
+    payload.type === "set_config_option" &&
+    payload.category === "thought_level"
+  ) {
+    const ackNonce = (payload as Record<string, unknown>).nonce;
+    const nonceOk = effortNonceMatches(agentPubkey, ackNonce);
+    if (nonceOk) {
+      if (payload.status === "ok") {
+        void persistAgentEffortLevel(agentPubkey, payload.value || null).catch(
+          (err: unknown) => {
+            console.warn("Failed to persist effort level:", err);
+          },
+        );
+      } else if (payload.status === "cleared") {
+        void persistAgentEffortLevel(agentPubkey, null).catch(
+          (err: unknown) => {
+            console.warn("Failed to clear effort level:", err);
+          },
+        );
+      }
+    }
   }
   const subscribers = controlResultListeners.get(normalizePubkey(agentPubkey));
   if (!subscribers) {
@@ -570,6 +674,26 @@ export function subscribeControlResults(
       controlResultListeners.delete(key);
     }
   };
+}
+
+/**
+ * Register the nonce for the most recently dispatched effort pick/clear for a
+ * given agent. The persistence gate in `dispatchControlResult` checks this: only
+ * `ok`/`cleared` acks whose echoed nonce matches the registered one are persisted.
+ * This prevents stale results from superseded picks from clobbering newer values.
+ *
+ * The registration is persisted to `localStorage` (keyed by normalized pubkey)
+ * so it survives Desktop restart and community-switch store resets. The gate
+ * therefore correctly rejects replayed acks even after a full restart.
+ */
+export function registerEffortNonce(agentPubkey: string, nonce: string): void {
+  const key = normalizePubkey(agentPubkey);
+  currentEffortNonce.set(key, nonce);
+  try {
+    globalThis.localStorage?.setItem(EFFORT_NONCE_KEY_PREFIX + key, nonce);
+  } catch {
+    // localStorage full or unavailable — in-memory registration still holds.
+  }
 }
 
 export function getAgentObserverSnapshot(
@@ -785,6 +909,12 @@ export function resetAgentObserverStore() {
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;
+  // Clear the in-memory nonce map, then immediately restore from localStorage.
+  // This ensures an in-flight ack that arrives after a community switch or
+  // store reset is still validated against the registered nonce rather than
+  // treated as a stale startup ack.
+  currentEffortNonce.clear();
+  loadNoncesFromStorage();
   notifyListeners();
   void unsubscribe?.();
 }
@@ -813,4 +943,49 @@ export function _testGetArchivedChannelEvents(
   return (
     archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ?? []
   );
+}
+
+/**
+ * Test-only: evaluate the persistence nonce gate for a given agent and ack
+ * nonce against the current `currentEffortNonce` map state.
+ *
+ * Delegates to the production `effortNonceMatches` predicate — tests exercise
+ * the same logic that runs in `dispatchControlResult`.
+ *
+ * Use `registerEffortNonce` to prime state before calling, and
+ * `resetAgentObserverStore` + `_testClearEffortNonceStorage` to clean up
+ * between tests.
+ * Only call from tests — never from production code.
+ */
+export function _testNonceGate(
+  agentPubkey: string,
+  ackNonce: unknown,
+): boolean {
+  return effortNonceMatches(agentPubkey, ackNonce);
+}
+
+/**
+ * Test-only: remove all `buzz:effort-nonce:*` entries from `localStorage` so
+ * the nonce gate's startup path is fully reset between tests. Call alongside
+ * `resetAgentObserverStore` when a test needs a clean-slate simulation of
+ * Desktop restart.
+ * Only call from tests — never from production code.
+ */
+export function _testClearEffortNonceStorage(): void {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return;
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(EFFORT_NONCE_KEY_PREFIX)) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Best-effort.
+  }
 }

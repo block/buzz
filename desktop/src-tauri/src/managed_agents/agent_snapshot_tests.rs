@@ -72,6 +72,7 @@ fn minimal_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: vec!["abc123def".to_string()],
         definition_parallelism: Some(4),
         relay_mesh: None,
+        effort_level: None,
     }
 }
 

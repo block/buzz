@@ -71,9 +71,8 @@ fn identifier_empty_returns_false() {
 
 #[test]
 fn marker_entry_is_namespaced_by_instance_id() {
-    // The spawn stamp and sweep matcher both go through buzz_marker_entry, pinning the on-the-wire
-    // format and guards against a dev build (`...app.dev`) matching a
-    // release build's (`...app`) agents.
+    // spawn stamp and sweep matcher both go through buzz_marker_entry (pins wire format,
+    // guards dev build `...app.dev` from matching release `...app` agents).
     assert_eq!(
         super::buzz_marker_entry("xyz.block.buzz.app"),
         b"BUZZ_MANAGED_AGENT=xyz.block.buzz.app".to_vec()

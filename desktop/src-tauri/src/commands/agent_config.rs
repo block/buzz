@@ -13,9 +13,9 @@ use crate::{
             },
         },
         current_instance_id, is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key,
-        known_acp_runtime, load_managed_agents, load_personas, save_managed_agents,
-        sync_managed_agent_processes, AgentDefinition, GlobalAgentConfig, KnownAcpRuntime,
-        ManagedAgentRecord, ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
+        known_acp_runtime, load_managed_agents, load_personas, resolve_effective_agent_env,
+        save_managed_agents, sync_managed_agent_processes, AgentDefinition, GlobalAgentConfig,
+        KnownAcpRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
     },
 };
 
@@ -121,6 +121,7 @@ fn resolve_config_surface(
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
+    claude_config_dir: Option<std::path::PathBuf>,
 ) -> RuntimeConfigSurface {
     // Linked instances are definition-authoritative: clear stale materialized
     // model/provider/prompt so they can never masquerade as BuzzExplicit and
@@ -138,7 +139,13 @@ fn resolve_config_surface(
         global,
     );
 
-    read_config_surface(&record, runtime_meta, session_cache, &tiers)
+    read_config_surface(
+        &record,
+        runtime_meta,
+        session_cache,
+        &tiers,
+        claude_config_dir.as_deref(),
+    )
 }
 
 /// Get the file-layer config for a runtime — used by the Create/Edit/Persona
@@ -288,12 +295,36 @@ pub async fn get_agent_config_surface(
     let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
+    // #3493: for claude agents, resolve the settings.json and .claude.json paths
+    // from the agent's effective CLAUDE_CONFIG_DIR env var (if set), falling
+    // back to ~/.claude/ and ~/.claude.json. We never provision this dir
+    // ourselves — we only respect what the user configured.
+    //
+    // Use resolve_effective_agent_env so the lookup covers all tiers (baked
+    // floor → definition → global → persona → record) and cannot diverge from
+    // what the spawned process actually sees.
+    let claude_config_dir: Option<std::path::PathBuf> = if runtime_meta
+        .is_some_and(|m| m.id == "claude")
+    {
+        let effective_env = resolve_effective_agent_env(&record, &personas, runtime_meta, &global);
+        // Treat empty or blank CLAUDE_CONFIG_DIR as unset, matching Claude's
+        // `CLAUDE_CONFIG_DIR || homedir()` resolver semantics.
+        effective_env
+            .env
+            .get("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.trim().is_empty())
+            .map(std::path::PathBuf::from)
+    } else {
+        None
+    };
+
     Ok(resolve_config_surface(
         record,
         &personas,
         runtime_meta,
         session_cache.as_ref(),
         &global,
+        claude_config_dir,
     ))
 }
 
@@ -501,6 +532,37 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
         })
         .collect();
     (models, current_model)
+}
+
+/// Persist the canonical effort level for a managed agent after a positive ACP ack.
+///
+/// B5: called by the TypeScript observer when `session/set_config_option` for
+/// the "effort" config option receives a positive acknowledgement. The record
+/// is updated in-place and persisted. At the next spawn the Desktop injects
+/// `BUZZ_ACP_EFFORT_LEVEL` so the harness applies this value via
+/// `session/set_config_option` at session creation, pairing with the
+/// adapter-advertised `thought_level` configId discovered from capabilities.
+///
+/// `effort_level` is the acknowledged value. Pass `None` to clear the
+/// canonical effort (reverts to adapter default on next spawn).
+#[tauri::command]
+pub fn persist_agent_effort_level(
+    pubkey: String,
+    effort_level: Option<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut records = load_managed_agents(&app)?;
+    let record = records
+        .iter_mut()
+        .find(|r| r.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    record.effort_level = effort_level;
+    save_managed_agents(&app, &records)
 }
 
 #[cfg(test)]
