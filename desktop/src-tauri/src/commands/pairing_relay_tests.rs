@@ -1,5 +1,6 @@
 use super::{
-    pairing_relay_from_nip11, probe_pairing_relay, resolve_pairing_relay_url, PairingRelay,
+    describe_connect_failure, pairing_relay_from_nip11, probe_pairing_relay,
+    resolve_pairing_relay_url, PairingRelay,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -101,4 +102,74 @@ fn main_relay_pairing_uses_main_relay_url() {
     .expect("resolve main pairing relay");
 
     assert_eq!(resolved, "wss://sprout-oss.stage.blox.sqprod.co");
+}
+
+/// Build the transport error tungstenite hands back when the upgrade request
+/// is answered with an HTTP status instead of a 101.
+fn http_error(status: u16) -> tokio_tungstenite::tungstenite::Error {
+    let response = tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(status)
+        .body(None)
+        .expect("build HTTP error response");
+    tokio_tungstenite::tungstenite::Error::Http(Box::new(response))
+}
+
+#[test]
+fn legacy_path_404_explains_the_missing_pairing_endpoint() {
+    let message = describe_connect_failure(
+        &PairingRelay::LegacyPath,
+        "wss://relay.example.com/pair",
+        &http_error(404),
+    );
+
+    // The URL that was actually dialled, because the old message named none.
+    assert!(message.contains("wss://relay.example.com/pair"));
+    // Why this URL was chosen at all.
+    assert!(message.contains("NIP-43"));
+    assert!(message.contains("pairing_relay_url"));
+    // Both levers that fix it: neither was discoverable without a source dive.
+    assert!(message.contains("BUZZ_PAIRING_RELAY_URL"));
+    assert!(message.contains("buzz-pair-relay"));
+}
+
+#[test]
+fn legacy_path_non_404_keeps_the_transport_error_and_gains_the_url() {
+    // A routed /pair whose sidecar is down answers 502, which is a different
+    // problem with a different fix, so it must not claim nothing is serving
+    // the path.
+    let message = describe_connect_failure(
+        &PairingRelay::LegacyPath,
+        "wss://relay.example.com/pair",
+        &http_error(502),
+    );
+
+    assert!(message.contains("wss://relay.example.com/pair"));
+    assert!(!message.contains("BUZZ_PAIRING_RELAY_URL"));
+}
+
+#[test]
+fn configured_pairing_relay_404_reports_the_url_it_was_given() {
+    // The split-domain case: the operator advertised a pairing_relay_url and
+    // it is wrong. Naming it is the whole fix; guessing at /pair advice here
+    // would point at a file that has nothing to do with the failure.
+    let message = describe_connect_failure(
+        &PairingRelay::Configured("wss://pairing.example.com".to_string()),
+        "wss://pairing.example.com",
+        &http_error(404),
+    );
+
+    assert!(message.contains("wss://pairing.example.com"));
+    assert!(!message.contains("BUZZ_PAIRING_RELAY_URL"));
+}
+
+#[test]
+fn main_relay_failure_keeps_the_transport_error() {
+    let message = describe_connect_failure(
+        &PairingRelay::MainRelay,
+        "wss://relay.example.com",
+        &http_error(500),
+    );
+
+    assert!(message.starts_with("WebSocket connection failed:"));
+    assert!(message.contains("wss://relay.example.com"));
 }
