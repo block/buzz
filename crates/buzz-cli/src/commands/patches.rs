@@ -276,6 +276,16 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
             )
             .await
         }
+        PatchesCmd::StatusGet { root, repo_owner } => {
+            // NIP-34 root kind for a patch series is 1617.
+            crate::commands::git_status::cmd_git_status_get(
+                client,
+                &root,
+                1617,
+                repo_owner.as_deref(),
+            )
+            .await
+        }
     }
 }
 

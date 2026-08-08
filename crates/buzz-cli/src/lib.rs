@@ -1470,6 +1470,18 @@ pub enum PatchesCmd {
         #[arg(long = "applied-as-commit")]
         applied_as_commit: Vec<String>,
     },
+    /// Read the currently-effective status of a patch root (NIP-34: latest
+    /// kind:1630-1633 from the root author or repo owner wins; no status yet
+    /// resolves to the implicit default "open" with `implicit: true`)
+    StatusGet {
+        /// Root patch event id (first patch of the series/revision)
+        #[arg(long)]
+        root: String,
+        /// Repo owner pubkey — when given, owner-authored statuses are
+        /// eligible alongside root-author statuses (mirrors the setter)
+        #[arg(long)]
+        repo_owner: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1614,6 +1626,18 @@ pub enum PrCmd {
         #[arg(long)]
         merge_commit: Option<String>,
     },
+    /// Read the currently-effective status of a PR root (NIP-34: latest
+    /// kind:1630-1633 from the PR author or repo owner wins; no status yet
+    /// resolves to the implicit default "open" with `implicit: true`)
+    StatusGet {
+        /// PR root event id
+        #[arg(long)]
+        root: String,
+        /// Repo owner pubkey — when given, owner-authored statuses are
+        /// eligible alongside root-author statuses (mirrors the setter)
+        #[arg(long)]
+        repo_owner: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1688,6 +1712,18 @@ pub enum IssuesCmd {
         /// given) — e.g. the issue author. Can be specified multiple times.
         #[arg(long = "to")]
         to: Vec<String>,
+    },
+    /// Read the currently-effective status of an issue (NIP-34: latest
+    /// kind:1630-1633 from the issue author or repo owner wins; no status yet
+    /// resolves to the implicit default "open" with `implicit: true`)
+    StatusGet {
+        /// Issue event id
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey — when given, owner-authored statuses are
+        /// eligible alongside issue-author statuses (mirrors the setter)
+        #[arg(long)]
+        repo_owner: Option<String>,
     },
 }
 
@@ -2264,11 +2300,11 @@ mod tests {
         assert_eq!(protect_names, vec!["list", "remove", "set"]);
         assert_eq!(
             names(&cmd, "pr"),
-            vec!["get", "list", "open", "status", "update"]
+            vec!["get", "list", "open", "status", "status-get", "update"]
         );
         assert_eq!(
             names(&cmd, "patches"),
-            vec!["get", "list", "send", "status"]
+            vec!["get", "list", "send", "status", "status-get"]
         );
         assert_eq!(
             names(&cmd, "projects"),
@@ -2284,7 +2320,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "issues"),
-            vec!["create", "get", "list", "status"]
+            vec!["create", "get", "list", "status", "status-get"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -2313,12 +2349,12 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("issues", 4),
+            ("issues", 5),
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
-            ("patches", 4),
-            ("pr", 5),
+            ("patches", 5),
+            ("pr", 6),
             ("projects", 7),
             ("reactions", 3),
             ("repos", 5),
