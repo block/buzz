@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { useReplyMentionSettings } from "@/features/messages/useReplyMentionSettings";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -96,11 +97,11 @@ export function ReplyMentionSettingsCard({
               <PubKey
                 className="text-sm"
                 pubkey={pubkey}
-                testId={`reply-mention-prefix-${pubkey.slice(0, 8)}`}
+                testId={`reply-mention-prefix-${truncatePubkey(pubkey)}`}
               />
               <Button
                 aria-label="Remove always-mention entry"
-                data-testid={`reply-mention-prefix-remove-${pubkey.slice(0, 8)}`}
+                data-testid={`reply-mention-prefix-remove-${truncatePubkey(pubkey)}`}
                 onClick={() => removePrefix(pubkey)}
                 size="icon-xs"
                 type="button"
