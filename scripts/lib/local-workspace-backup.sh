@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 
 LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION=3
+LOCAL_WORKSPACE_TOOLS_IMAGE_DEFAULT='alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce'
 
 local_workspace_die() {
   printf '[local-workspace] error: %s\n' "$*" >&2
   return 1
+}
+
+local_workspace_tools_image() {
+  printf '%s\n' \
+    "${BUZZ_LOCAL_WORKSPACE_TOOLS_IMAGE:-${LOCAL_WORKSPACE_TOOLS_IMAGE_DEFAULT}}"
 }
 
 local_workspace_repo_root() {

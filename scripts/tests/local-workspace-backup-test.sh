@@ -212,7 +212,7 @@ case "$*" in
   *"pg_dump --format=custom"*)
     printf 'mock-custom-format-dump'
     ;;
-  *"tar -C /source/current -czf /backup/memory-vault.tar.gz"*)
+  *"memory-vault.tar.gz"*)
     [[ ! -e "$MOCK_MEMORY_RUNNING_FILE" ]] ||
       { printf 'Memory writer still active during snapshot\n' >&2; exit 44; }
     for argument in "$@"; do
@@ -366,6 +366,17 @@ assert_contains "$backup_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
   "backup uses a writable transient MinIO client config"
 assert_contains "$restore_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
   "restore uses a writable transient MinIO client config"
+assert_contains "$backup_script" \
+  'for entry in /source/.[!.]* /source/..?* /source/*; do' \
+  "backup distinguishes an empty uninitialized Memory volume"
+assert_contains "$backup_script" '.empty-vault' \
+  "backup represents an uninitialized Memory vault explicitly"
+assert_contains "$backup_script" \
+  'memory_tools_image="$(local_workspace_tools_image)"' \
+  "backup selects the dedicated pinned Memory tools image"
+assert_contains "$restore_script" \
+  'memory_tools_image="$(local_workspace_tools_image)"' \
+  "restore selects the dedicated pinned Memory tools image"
 if grep -Fq 'sed -n "1p" /run/minio-credentials' \
   "$backup_script" "$restore_script"; then
   fail "MinIO helpers must not depend on sed in the minimal mc image"

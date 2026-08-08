@@ -18,6 +18,7 @@ default_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_TIMEOUT_SECONDS:-300}"
 database_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DATABASE_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 minio_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MINIO_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 memory_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MEMORY_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
+memory_tools_image="$(local_workspace_tools_image)"
 local_workspace_require_positive_timeout \
   "${database_timeout_seconds}" "database backup timeout"
 local_workspace_require_positive_timeout \
@@ -104,14 +105,26 @@ trap cleanup_backup EXIT
   local_workspace_run_bounded \
     "Memory vault backup" \
     "${memory_timeout_seconds}" \
-    docker compose run --rm -T --no-deps \
-      --user "$(id -u):$(id -g)" \
+    docker run --rm \
       --entrypoint /bin/sh \
       --volume "buzz-memory-vault:/source:ro" \
       --volume "${memory_tmp}:/backup" \
-      minio-init -eu -c \
-      'test -d /source/current
-       tar -C /source/current -czf /backup/memory-vault.tar.gz .'
+      "${memory_tools_image}" -eu -c \
+      'if [ -d /source/current ]; then
+         archive_root=/source/current
+       else
+         for entry in /source/.[!.]* /source/..?* /source/*; do
+           if [ -e "$entry" ]; then
+             printf "unexpected Memory vault entry without current/: %s\n" \
+               "$entry" >&2
+             exit 1
+           fi
+         done
+         archive_root=/tmp/empty-memory-vault
+         mkdir -p "$archive_root"
+         : > "$archive_root/.empty-vault"
+       fi
+       tar -C "$archive_root" -czf /backup/memory-vault.tar.gz .'
 }
 [[ -s "${memory_tmp}/memory-vault.tar.gz" ]] ||
   local_workspace_die "Memory vault backup did not produce an archive"
