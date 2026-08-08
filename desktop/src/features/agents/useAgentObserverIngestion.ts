@@ -5,7 +5,12 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import {
+  subscribeObserverEvents,
+  useManagedAgentObserverBridge,
+} from "@/features/agents/observerRelayStore";
+import { LiveCausalLedger } from "@/features/agents/lib/liveCausalLedger";
+import { createTauriCausalLedgerPersistence } from "@/shared/api/tauriCausalLedger";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -113,4 +118,15 @@ export function useAgentObserverIngestion() {
 
   useManagedAgentObserverBridge(ingestionAgents);
   useActiveAgentTurnsBridge(ingestionAgents);
+
+  React.useEffect(() => {
+    if (!currentPubkey) return;
+    const ledger = new LiveCausalLedger(
+      currentPubkey,
+      createTauriCausalLedgerPersistence(),
+    );
+    return subscribeObserverEvents((agentPubkey, event) => {
+      void ledger.ingest(agentPubkey, event);
+    });
+  }, [currentPubkey]);
 }
