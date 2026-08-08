@@ -1018,9 +1018,7 @@ async fn create_session_and_apply_model(
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
-        && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
-    {
+    if should_apply_permission_mode(&resp.raw, &ctx.permission_mode) {
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
     }
 
@@ -1130,10 +1128,6 @@ async fn apply_model_switch(
     Ok(())
 }
 
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back
-/// to its default permission mode (`"default"`), which still works via
 /// Check if the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
@@ -1150,7 +1144,20 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// per-tool auto-approval in `handle_permission_request`.
+/// Decide whether Buzz should override the adapter's session permission mode.
+/// The default deliberately leaves the adapter untouched so its individual
+/// permission requests reach the harness.
+fn should_apply_permission_mode(
+    session_new_result: &serde_json::Value,
+    mode: &PermissionMode,
+) -> bool {
+    !mode.is_default() && agent_supports_mode(session_new_result, mode.as_wire_str())
+}
+
+/// Set the session permission mode via `session/set_config_option`.
+///
+/// Non-fatal for application-level errors: the agent remains in its default
+/// mode and the harness handles its per-tool permission requests.
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
 /// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
@@ -4037,6 +4044,31 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[test]
+    fn default_permission_mode_never_sends_a_session_override() {
+        let session = json!({
+            "modes": {
+                "availableModes": [
+                    {"id": "default"},
+                    {"id": "bypassPermissions"}
+                ]
+            }
+        });
+
+        assert!(!should_apply_permission_mode(
+            &session,
+            &PermissionMode::Default
+        ));
+        assert!(should_apply_permission_mode(
+            &session,
+            &PermissionMode::BypassPermissions
+        ));
+        assert!(!should_apply_permission_mode(
+            &json!({}),
+            &PermissionMode::BypassPermissions
+        ));
     }
 
     #[test]
