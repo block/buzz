@@ -18,7 +18,7 @@ pub use bucket_index::{
     Page, SweepError,
 };
 pub use config::{MediaConfig, S3AddressingStyle};
-pub use error::MediaError;
+pub use error::{classify_body_error, BodyErrorKind, MediaError};
 pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};

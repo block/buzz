@@ -317,24 +317,25 @@ pub async fn process_video_upload(
     let (sha256_hex, file_size, first_bytes) = {
         use tokio_util::io::StreamReader;
 
-        // Convert axum::Error stream to std::io::Error stream for StreamReader.
-        // Box::pin is required because StreamReader needs a pinned stream.
-        // Belt-and-suspenders body-limit detection: axum wraps LengthLimitError
-        // in its error chain but doesn't expose the inner type for downcasting.
-        // We check multiple Display strings so that if axum changes the wording,
-        // at least one pattern still matches. test_body_limit_error_detection
-        // will catch a regression if ALL patterns break.
+        // Convert axum::Error stream to std::io::Error stream for StreamReader,
+        // preserving the error class in the io::ErrorKind so the read loop
+        // below can answer with the right status:
+        //   - idle-deadline trip (typed tower-http TimeoutError in the source
+        //     chain) -> TimedOut -> RequestBodyTimeout / 408
+        //   - body-limit breach -> WriteZero -> FileTooLarge / 413
+        //   - anything else -> Other -> Io / 500
+        // Limit detection is belt-and-suspenders by Display string because
+        // axum wraps LengthLimitError without exposing the inner type for
+        // downcasting (see classify_body_error + test_body_limit_error_detection).
         let mapped = futures_util::StreamExt::map(body_stream, |r| {
-            r.map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("length limit")
-                    || msg.contains("body limit")
-                    || msg.contains("LengthLimitError")
-                {
-                    std::io::Error::new(std::io::ErrorKind::WriteZero, msg)
-                } else {
-                    std::io::Error::other(e)
+            r.map_err(|e| match crate::error::classify_body_error(&e) {
+                crate::error::BodyErrorKind::IdleTimeout => {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, e)
                 }
+                crate::error::BodyErrorKind::LengthLimit => {
+                    std::io::Error::new(std::io::ErrorKind::WriteZero, e)
+                }
+                crate::error::BodyErrorKind::Other => std::io::Error::other(e),
             })
         });
         let mut reader = StreamReader::new(Box::pin(mapped));
@@ -356,6 +357,11 @@ pub async fn process_video_upload(
             use tokio::io::AsyncReadExt;
             let n = match reader.read(&mut buf).await {
                 Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Idle deadline fired — the client stopped sending bytes.
+                    // 408, never 500: this is not a storage failure.
+                    return Err(MediaError::RequestBodyTimeout);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WriteZero => {
                     // Body limit exceeded — return 413 instead of 500.
                     // `total` is bytes received before the cutoff — honest, not exact.
@@ -685,30 +691,156 @@ mod tests {
 
     #[test]
     fn test_body_limit_error_detection() {
-        // Verify that body-limit errors are mapped to WriteZero (which
-        // process_video_upload converts to FileTooLarge / 413).
-        // Must match the detection logic in process_video_upload exactly.
-        let detect = |msg: &str| -> std::io::ErrorKind {
-            if msg.contains("length limit")
-                || msg.contains("body limit")
-                || msg.contains("LengthLimitError")
-            {
-                std::io::ErrorKind::WriteZero
-            } else {
-                std::io::ErrorKind::Other
-            }
-        };
+        // Body-limit errors must classify as LengthLimit (which the upload
+        // paths convert to FileTooLarge / 413). Belt-and-suspenders by
+        // Display string because axum wraps LengthLimitError without
+        // exposing the type; if ALL patterns break this test catches it.
+        use crate::error::{classify_body_error, BodyErrorKind};
 
-        // All known patterns should trigger WriteZero.
+        let error = |msg: &str| std::io::Error::other(msg.to_string());
+
+        // All known patterns should classify as LengthLimit.
         assert_eq!(
-            detect("length limit exceeded"),
-            std::io::ErrorKind::WriteZero
+            classify_body_error(&error("length limit exceeded")),
+            BodyErrorKind::LengthLimit
         );
-        assert_eq!(detect("body limit exceeded"), std::io::ErrorKind::WriteZero);
-        assert_eq!(detect("LengthLimitError"), std::io::ErrorKind::WriteZero);
+        assert_eq!(
+            classify_body_error(&error("body limit exceeded")),
+            BodyErrorKind::LengthLimit
+        );
+        assert_eq!(
+            classify_body_error(&error("LengthLimitError")),
+            BodyErrorKind::LengthLimit
+        );
 
-        // Non-limit errors should remain as Other.
-        assert_eq!(detect("connection reset"), std::io::ErrorKind::Other);
+        // Non-limit errors should remain Other.
+        assert_eq!(
+            classify_body_error(&error("connection reset")),
+            BodyErrorKind::Other
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_body_error_detects_real_tower_http_timeout_by_type() {
+        // Drive a genuine tower_http::timeout::TimeoutBody so the classified
+        // error is the real typed TimeoutError — not a hand-rolled stand-in —
+        // wrapped the way axum wraps body errors in production.
+        use crate::error::{classify_body_error, BodyErrorKind};
+
+        let wrapped = axum::Error::new(real_tower_http_timeout_error().await);
+        assert_eq!(
+            classify_body_error(&wrapped),
+            BodyErrorKind::IdleTimeout,
+            "typed TimeoutError must classify as IdleTimeout through the axum::Error wrapping"
+        );
+
+        // Control: an unrelated wrapped error must NOT classify as a timeout.
+        let other = axum::Error::new(std::io::Error::other("connection reset"));
+        assert_eq!(classify_body_error(&other), BodyErrorKind::Other);
+    }
+
+    /// Produce a genuine `tower_http::timeout::TimeoutError` by driving a
+    /// real `TimeoutBody` over a body that never yields a frame — the exact
+    /// boxed error shape the media router's `RequestBodyTimeoutLayer`
+    /// produces when a client withholds body bytes past the idle deadline.
+    async fn real_tower_http_timeout_error() -> Box<dyn std::error::Error + Send + Sync> {
+        use http_body_util::BodyExt;
+
+        struct PendingBody;
+        impl http_body::Body for PendingBody {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+            fn poll_frame(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                std::task::Poll::Pending
+            }
+        }
+
+        // TimeoutBody pins a tokio Sleep and is never Unpin; Box::pin gives
+        // an Unpin handle that still implements Body, so BodyExt::frame works.
+        let mut body = Box::pin(tower_http::timeout::TimeoutBody::new(
+            std::time::Duration::from_millis(5),
+            PendingBody,
+        ));
+        body.frame()
+            .await
+            .expect("timeout should produce a frame result")
+            .expect_err("withheld body must error, not yield data")
+    }
+
+    #[tokio::test]
+    async fn video_stream_idle_timeout_maps_to_request_body_timeout_not_500() {
+        // Pins the timeout *conversion* chain at the video-stream boundary:
+        // a real tower_http TimeoutError, wrapped the way axum wraps body
+        // errors in production, must survive `axum::Error →
+        // classify_body_error → io::ErrorKind::TimedOut → the StreamReader
+        // read loop` and surface as RequestBodyTimeout / 408 — never as
+        // Io / 500, which would page operators for a storage failure that
+        // never happened.
+        //
+        // Honest scope (measured by Sami's mutation pass, M3): this test
+        // proves the conversion, NOT the video routing. The read loop
+        // returns on the error before `looks_like_mp4_iso_bmff` ever runs,
+        // so the chunk content is causally irrelevant here — the sniff
+        // decision (`should_stream_as_video`) lives in the relay's
+        // `upload_blob`, upstream of this entry point, and is not covered
+        // by this test. The MP4-shaped first chunk only makes the stream
+        // realistic: bytes flowed, then the client stalled mid-body.
+        use axum::response::IntoResponse;
+
+        let mp4_prefix: &[u8] = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42";
+        let timeout_error = real_tower_http_timeout_error().await;
+        let body_stream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(mp4_prefix)),
+            Err(axum::Error::new(timeout_error)),
+        ]);
+
+        // Storage/auth are constructed but never reached: the body error
+        // fires inside step 1 (stream-to-temp-file), before the MP4 check,
+        // auth verification, or any storage call. Static dummy creds keep
+        // `MediaStorage::new` off the AWS credential chain (which fails on
+        // hosts without AWS creds), and the unroutable endpoint guarantees
+        // any accidental network use fails loudly instead of hanging.
+        let config = MediaConfig {
+            s3_endpoint: "http://127.0.0.1:1".to_string(),
+            s3_access_key: "test".to_string(),
+            s3_secret_key: "test".to_string(),
+            s3_bucket: "unused".to_string(),
+            ..test_config()
+        };
+        let storage = MediaStorage::new(&config).expect("static-cred storage client");
+        let ctx = buzz_core::tenant::TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            "media.example.com",
+        );
+        let keys = nostr::Keys::generate();
+        let auth_event = nostr::EventBuilder::new(nostr::Kind::from(24242), "Upload buzz-media")
+            .sign_with_keys(&keys)
+            .expect("signable auth event");
+
+        let result = process_video_upload(
+            &storage,
+            &config,
+            &ctx,
+            &auth_event,
+            body_stream,
+            None,
+            None,
+        )
+        .await;
+
+        let error = result.expect_err("a timed-out video stream must fail the upload");
+        assert!(
+            matches!(error, MediaError::RequestBodyTimeout),
+            "post-sniff video-stream timeout must map to RequestBodyTimeout, got {error:?}"
+        );
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            "and it must answer the client with 408"
+        );
     }
 
     #[test]
