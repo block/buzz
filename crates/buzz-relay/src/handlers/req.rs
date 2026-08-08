@@ -854,19 +854,34 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
         })
 }
 
-/// Extract a channel UUID from a single filter's `#h` tag.
+/// Extract a **single** channel UUID from a filter's `#h` tag.
+///
+/// Returns `Some(id)` only when the filter names exactly one channel UUID.
+/// Multi-value `#h` (NIP-01 OR across channels) returns `None` so callers do
+/// not push an arbitrary first value as `EventQuery.channel_id` — that bug
+/// made Desktop's batched workflow list return empty while per-channel CLI
+/// list worked (multi-`#h` collapsed to one channel that often had zero
+/// workflows).
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
+    let mut found: Option<uuid::Uuid> = None;
     for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
+        if tag_key.to_string() != "h" {
+            continue;
+        }
+        for val in tag_values {
+            let Ok(id) = val.parse::<uuid::Uuid>() else {
+                continue;
+            };
+            match found {
+                Some(existing) if existing != id => {
+                    // Multiple distinct channel IDs — not a single-channel filter.
+                    return None;
                 }
+                _ => found = Some(id),
             }
         }
     }
-    None
+    found
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1326,6 +1341,31 @@ mod tests {
 
         assert!(query.channel_ids.is_none());
         assert_eq!(query.channel_id, Some(channel));
+    }
+
+    #[test]
+    fn single_h_filter_extracts_channel_id() {
+        let channel = uuid::Uuid::new_v4();
+        let filter =
+            Filter::new().custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel.to_string());
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel));
+    }
+
+    #[test]
+    fn multi_h_filter_does_not_collapse_to_first_channel() {
+        // Regression: multi-value #h used to return the first UUID only, so SQL
+        // was scoped to an arbitrary channel. Desktop batched workflow list then
+        // returned empty when that first channel had no kind:30620 events.
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let filter = Filter::new()
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), a.to_string())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), b.to_string());
+        assert_eq!(
+            extract_channel_id_from_filter(&filter),
+            None,
+            "multi-#h must not push a single channel_id"
+        );
     }
 
     /// S2 invariant: the bounded-concurrency pipeline (phase 2) must yield

@@ -10,6 +10,8 @@ const WorkflowsView = React.lazy(async () => {
 
 type WorkflowsScreenProps = {
   channels: Channel[];
+  /** True while the member-channel list is still loading (avoid false empty state). */
+  channelsLoading?: boolean;
   onCloseWorkflow: () => void;
   onSelectWorkflow: (workflowId: string) => void;
   selectedWorkflowId: string | null;
@@ -17,6 +19,7 @@ type WorkflowsScreenProps = {
 
 export function WorkflowsScreen({
   channels,
+  channelsLoading = false,
   onCloseWorkflow,
   onSelectWorkflow,
   selectedWorkflowId,
@@ -26,6 +29,7 @@ export function WorkflowsScreen({
       <React.Suspense fallback={<ViewLoadingFallback kind="workflows" />}>
         <WorkflowsView
           channels={channels}
+          channelsLoading={channelsLoading}
           onCloseWorkflow={onCloseWorkflow}
           onSelectWorkflow={onSelectWorkflow}
           selectedWorkflowId={selectedWorkflowId}
