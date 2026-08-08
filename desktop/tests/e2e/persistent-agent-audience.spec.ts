@@ -260,6 +260,32 @@ test("persistent agents restore through the native inline mention UI", async ({
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
+test("post-send restore keeps a trailing space so typing does not collapse the mention", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  await expect(input).toHaveText("@Morgarita ");
+
+  await input.pressSequentially("hello");
+  await expect(input).toHaveText("@Morgarita hello");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+
+  await composer.getByTestId("send-message").click();
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+
+  // Regression for #4979: without the trailing space, the next keystroke
+  // extends `@Morgarita` into `@Morgaritah` and drops the mention chip.
+  await input.pressSequentially("again");
+  await expect(input).toHaveText("@Morgarita again");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+});
+
 for (const theme of ["buzz", "buzz-dark"]) {
   test(`captures native persistent mentions in ${theme}`, async ({ page }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);
