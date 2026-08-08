@@ -139,16 +139,16 @@ export function ChannelScreen({
     setProfilePanelPubkey,
     setProfilePanelView,
   } = useChannelPanelHistoryState();
+  const [channelContentRef, channelContentWidthPx] =
+    useElementWidth<HTMLDivElement>();
   const {
     canReset: canResetThreadPanelWidth,
     onResetWidth: handleThreadPanelWidthReset,
     onResizeStart: handleThreadPanelResizeStart,
     widthPx: threadPanelWidthPx,
-  } = useThreadPanelWidth();
+  } = useThreadPanelWidth(channelContentWidthPx || undefined);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
-  const [channelContentRef, channelContentWidthPx] =
-    useElementWidth<HTMLDivElement>();
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
   );

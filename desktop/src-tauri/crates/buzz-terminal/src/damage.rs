@@ -118,6 +118,10 @@ pub struct Style {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowFrame {
     pub line: usize,
+    /// Whether this row continues onto the next screen row without a hard
+    /// line break. Retained separately from visual style so copy serialization
+    /// can reconstruct logical lines without exposing geometry flags to spans.
+    pub wrapped: bool,
     pub spans: Vec<Span>,
 }
 
@@ -332,6 +336,9 @@ impl Encoder {
             self.hashes[line] = hash;
             rows.push(RowFrame {
                 line,
+                wrapped: cells
+                    .last()
+                    .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE)),
                 spans: spans(&cells),
             });
         }

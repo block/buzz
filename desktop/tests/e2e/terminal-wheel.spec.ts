@@ -156,16 +156,17 @@ async function reveal(page: Page) {
     "data-terminal-owner",
     "terminal",
   );
-  // data-terminal-owner flips synchronously at chord-up; the 360ms reveal fade
-  // is still running. Every capture below must wait for it to settle or it
-  // photographs a half-faded app surface and reads as a rendering defect.
+  // The dock opens in the normal app surface now; unlike the removed
+  // full-screen takeover, it must not fade that surface away. Wait for the
+  // dock's own height transition before interacting with its viewport.
+  await expect(page.locator(TERM)).toHaveAttribute(
+    "data-terminal-mode",
+    "docked",
+  );
+  await expect(page.locator(TERM)).toBeVisible();
   await expect
-    .poll(async () =>
-      page
-        .locator(".buzz-huddle-app-surface")
-        .evaluate((el) => getComputedStyle(el).opacity),
-    )
-    .toBe("0");
+    .poll(async () => page.locator(TERM).evaluate((el) => el.clientHeight))
+    .toBeGreaterThanOrEqual(180);
 }
 
 test("scrollback: wheel over Buzz Term reaches terminal_scroll", async ({
@@ -217,16 +218,16 @@ test("concealed terminal viewport does not steal Buzz focus", async ({
 }) => {
   await reveal(page);
   await page.keyboard.press("Meta+j");
-  await expect(page.locator(TERM)).toHaveAttribute(
-    "data-terminal-owner",
-    "buzz",
-  );
+  await expect(page.locator(TERM)).toHaveCount(0);
 
   const input = page.getByLabel("Terminal input");
-  await expect(input).not.toBeFocused();
-  await page.locator(".buzz-terminal-viewport").click({
-    force: true,
-    position: { x: 40, y: 40 },
-  });
-  await expect(input).not.toBeFocused();
+  await expect(input).toHaveCount(0);
+  await page.getByTestId("chat-title").click();
+  await page.keyboard.type("BUZZ_KEYSTROKE");
+  const terminalInputs = await page.evaluate(
+    () =>
+      (window as typeof window & { __SAMI_TERM__: { inputs: string[] } })
+        .__SAMI_TERM__.inputs,
+  );
+  expect(terminalInputs.join("")).not.toContain("BUZZ_KEYSTROKE");
 });

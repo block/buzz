@@ -19,6 +19,18 @@ never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
 to the UI rather than inferred from a runtime ID in a component.
 
+**Second metadata source: command-keyed execution policy.**
+`harness_max_parallelism` (`managed_agents/parallelism.rs`) maps the harness's
+static command string to a spawn-time cap (`OPENCLAW_MAX_PARALLELISM = 5` for
+OpenClaw). This cap is not a `KnownAcpRuntime` field because it applies to
+preset harnesses (like OpenClaw) that are not in the builtin catalog. It is
+projected onto `AcpRuntimeCatalogEntry.max_parallelism` by all four
+catalog-producing constructors (builtin discovery, preset catalog, custom
+discovery, custom-save response) using the **static definition command**, not
+the resolved `entry.command` (which may be `null` for unavailable entries).
+The frontend reads `maxParallelism` from the catalog entry and never keeps a
+separate constant.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
@@ -101,13 +113,16 @@ with a TypeScript lookup table or an id comparison in a component.
    Once the Advanced toggle is visible, its expanded state is exclusively
    user-controlled: provider, harness, and required-env changes must never
    open it automatically in defaults, create, or edit flows. In Create mode,
-   the defaults summary follows preferred-harness changes saved while the
-   dialog is open, and its configured state includes required credentials as
-   well as provider/model values. If no available harness can resolve, Create
-   starts in Customize and lets unavailable catalog entries be selected only
-   to expose their setup guidance; submission remains blocked.
-   Advanced-only required credentials mark the collapsed Advanced toggle
-   without opening it in Global Defaults and Edit, and block incomplete saves.
+   `Run on` belongs in Advanced directly after **Who can send instructions**;
+   keep it out of the basic create fields. The defaults summary follows
+   preferred-harness changes saved while the dialog is open, and its configured
+   state includes required credentials as well as provider/model values. If no
+   available harness can resolve, Create starts in Customize and lets unavailable
+   catalog entries be selected only to expose their setup guidance; submission
+   remains blocked.
+   Advanced-only required credentials and incomplete remote **Run on** setup
+   mark the collapsed Advanced toggle without opening it, and block incomplete
+   saves.
    Runtime-file credentials satisfy Global Defaults just as they do Create and
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
@@ -152,7 +167,10 @@ with a TypeScript lookup table or an id comparison in a component.
    shown; when it *is* remote they picked that host from the selector
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
-   copy.
+   copy. **The owner-only-access build capability is backend-independent.** When
+   `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
+   locked to owner-only, including provider-backed agents. A provider backend
+   does not prove remote execution and must never create a policy carve-out.
 
 ## The tests that enforce this
 

@@ -5,6 +5,7 @@ import {
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -20,6 +21,7 @@ import {
 import {
   playNotificationSound,
   resolveSlotSound,
+  shouldPlayNotificationSound,
 } from "@/features/notifications/lib/sound";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
@@ -31,6 +33,7 @@ export function useAppShellDesktopNotifications({
   notificationSettings,
   openSearchHit,
   pubkey,
+  silentChannelIds,
 }: {
   channels: Channel[];
   enabled: boolean;
@@ -41,7 +44,15 @@ export function useAppShellDesktopNotifications({
     hit: import("@/shared/api/types").SearchHit,
   ) => Promise<unknown>;
   pubkey?: string;
+  silentChannelIds?: ReadonlySet<string>;
 }) {
+  // Roster alerts are owner/admin-only and self-gating; mounted here because
+  // it shares this hook's "desktop notifications are on" precondition and
+  // AppShell sits at the file-size ratchet ceiling.
+  useCommunityJoinAlerts({
+    enabled: enabled && notificationSettings.desktopEnabled,
+  });
+
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
       if (!enabled) return;
@@ -80,7 +91,9 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+          playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+        }
         void requestDockBounce();
       });
     },
@@ -126,9 +139,11 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(
-          resolveSlotSound(notificationSettings, "thread_reply"),
-        );
+        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+          playNotificationSound(
+            resolveSlotSound(notificationSettings, "thread_reply"),
+          );
+        }
         void requestDockBounce();
       });
     },

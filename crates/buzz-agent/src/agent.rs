@@ -3,10 +3,11 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
-use crate::handoff::HandoffOutcome;
+use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
@@ -20,6 +21,45 @@ use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Model-visible feedback after the provider truncates an assistant response at
+/// its output-token limit. This is a user message rather than a synthetic tool
+/// result because truncation can happen without a tool call (and an unpaired
+/// tool result is invalid on every provider wire format).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
+
+/// A provider can repeatedly spend its entire output allowance without making
+/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
+/// finite so a persistently truncating model eventually surfaces `max_tokens`.
+const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
+
+/// Remove image blocks that the provider has explicitly rejected while keeping
+/// their surrounding tool result (and therefore the tool-call/result pairing)
+/// intact. Returns the number of images removed; zero means the provider error
+/// cannot be safely recovered by mutating history.
+fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
+    let mut replaced = 0;
+    for item in history {
+        let HistoryItem::ToolResult(result) = item else {
+            continue;
+        };
+        let before = result.content.len();
+        result
+            .content
+            .retain(|content| !matches!(content, ToolResultContent::Image { .. }));
+        let removed = before - result.content.len();
+        if removed > 0 {
+            replaced += removed;
+            result.is_error = true;
+            result.content.push(ToolResultContent::Text(
+                UNSUPPORTED_IMAGE_TOOL_MESSAGE.to_string(),
+            ));
+        }
+    }
+    replaced
+}
 
 /// Maximum reply reminders emitted per prompt when `require_reply` is on.
 ///
@@ -116,6 +156,12 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
+    /// ACP v2 session identifier for this prompt turn. Used to derive
+    /// per-message `messageId` values that are unique within the ACP session.
+    /// Distinct from `session_id` (which is the ACP session); this is a
+    /// per-`session/prompt` random token so that IDs from one prompt invocation
+    /// never collide with those from another even within the same session.
+    pub run_id: String,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -201,6 +247,14 @@ impl RunCtx<'_> {
         *self.turn_output_tokens = None;
         *self.turn_cached_input_tokens = None;
         *self.turn_total_state = TurnTotalState::Unseen;
+        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
+        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
+        // `session/prompt` turn rather than per session lifetime. A
+        // long-lived session legitimately needs unbounded handoffs across
+        // prompts; the cap only exists to stop runaway within a single turn.
+        // The session-cumulative `handoff_count` (used in log lines) is not
+        // reset: it reflects total compactions since session start.
+        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -215,6 +269,14 @@ impl RunCtx<'_> {
         // successful publish. See `is_buzz_reply_call`.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
+        // Per-`run()` reactive context-recovery budget. Per-turn, not
+        // per-session: a fresh prompt deserves a fresh chance to recover, and
+        // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
+        let mut context_recoveries = 0u32;
+        // Per-run output-truncation recovery budget. Unlike context recovery,
+        // these successful provider requests consume a real round and are not
+        // refunded; this counter only bounds the default-unlimited case.
+        let mut max_tokens_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -227,7 +289,7 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff().await {
+            match self.maybe_handoff(&mut handoff_attempts).await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
                 // longer describes the (now much smaller) history. Clear both
@@ -249,10 +311,11 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response = tokio::select! {
+            let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
+                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -275,7 +338,78 @@ impl RunCtx<'_> {
                     }
                 } => unreachable!(),
             };
-
+            let response = match response_result {
+                Ok(response) => response,
+                Err(AgentError::UnsupportedImageInput(detail)) => {
+                    let removed = replace_unsupported_images(self.history);
+                    if removed == 0 {
+                        return Err(AgentError::UnsupportedImageInput(detail));
+                    }
+                    tracing::warn!(
+                        model = self.effective_model,
+                        removed_images = removed,
+                        "provider rejected image input; removed images from history and continuing turn"
+                    );
+                    continue;
+                }
+                // Reactive context recovery. A context-window 400 is the only
+                // ground-truth signal that history must shrink, and it arrives
+                // exactly when the proactive gate cannot act: a failed request
+                // reports no usage, so `last_request_input_tokens` stays frozen
+                // at the last SUCCESSFUL (sub-threshold) reading and
+                // `should_handoff()` returns false forever. Without this arm the
+                // error propagates out of `run()`, the in-memory session keeps
+                // the same oversized history, and every later prompt in that
+                // session fails the same way — a stick that persists across
+                // turns for the life of the session. (Restarting the agent DOES
+                // clear it: history lives only in the in-memory session map, so
+                // a restart is the manual workaround, not an exception to it.)
+                //
+                // Retried in-loop rather than returned so the recovered context
+                // continues the turn the user is waiting on.
+                Err(AgentError::LlmContextExceeded(e)) => {
+                    match self
+                        .recover_from_context_overflow(&mut context_recoveries)
+                        .await
+                    {
+                        ContextRecovery::Recovered => {
+                            // Refund the round the rejected request consumed.
+                            // `round` is incremented before `complete()`, so
+                            // without this a finite `max_rounds` is spent by a
+                            // request the provider refused to serve: the loop
+                            // would re-enter, hit the cap at the top, and return
+                            // `MaxTurnRequests` having destroyed history and
+                            // never asked the model again — a worse outcome than
+                            // the error it replaced.
+                            //
+                            // This cannot become an unbounded amnesty: refunds
+                            // happen only on a *successful* recovery, and
+                            // recoveries are independently capped by
+                            // `MAX_CONTEXT_RECOVERIES_PER_RUN`, so at most that
+                            // many rounds can ever be refunded in one turn. An
+                            // ordinary round is never refunded.
+                            round = round.saturating_sub(1);
+                            // Same reset as the proactive path (see
+                            // `HandoffOutcome::Performed` above): the frozen
+                            // token reading describes history that no longer
+                            // exists. Clearing it is what lets the gate work
+                            // again on later rounds.
+                            *self.last_request_input_tokens = None;
+                            *self.last_request_history_bytes = None;
+                            continue;
+                        }
+                        ContextRecovery::Cancelled => return Ok(StopReason::Cancelled),
+                        // No rescue left. Surface the provider's own error
+                        // rather than a synthetic one: it names the model and
+                        // the offending sizes, and a visible failure is the
+                        // point — the alternative is retrying forever.
+                        ContextRecovery::Exhausted => {
+                            return Err(AgentError::LlmContextExceeded(e))
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             // Record provider-reported input usage so the next loop iteration's
             // handoff gate can compare it against the token budget. We capture
             // it together with the history byte size AT THIS MOMENT — which is
@@ -349,6 +483,23 @@ impl RunCtx<'_> {
                 self.emit_usage_update().await;
             }
 
+            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
+            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
+            // that belong to the same logical message must share the same ID, and
+            // IDs must be unique per message within the ACP session.
+            //
+            // A provider round produces at most one thought and one assistant
+            // message (the parsers collapse all provider output into one
+            // LlmResponse.reasoning string and one LlmResponse.text string).
+            // These are two *distinct* logical messages, so they get distinct IDs.
+            //
+            // `run_id` is a fresh random token per `session/prompt` invocation,
+            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
+            // unique within the ACP session even across multiple prompts.
+            //
+            // ACP v1 allows the field, so this is a backwards-safe addition.
+            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
+            let message_msg_id = format!("{}-message-{round}", self.run_id);
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -356,6 +507,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
+                            "messageId": &thought_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -370,11 +522,43 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
+                            "messageId": &message_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),
                 )
                 .await;
+            }
+
+            // `max_tokens` describes a truncated assistant response, not turn
+            // completion. Never execute tool calls from it: although one may
+            // parse as valid, a later call (or surrounding instructions) may
+            // have been cut off. Replay only the text, with no tool calls, so
+            // the history remains valid without fabricated tool results; then
+            // add actionable user-role feedback and ask the model to continue.
+            if response.stop == ProviderStop::MaxTokens {
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                    tracing::warn!(
+                        recoveries = max_tokens_recoveries,
+                        "provider repeatedly hit output token limit; recovery budget exhausted"
+                    );
+                    return Ok(StopReason::MaxTokens);
+                }
+                max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
+                tracing::warn!(
+                    recovery = max_tokens_recoveries,
+                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
+                    discarded_tool_calls = response.tool_calls.len(),
+                    "provider hit output token limit; asking model to continue in smaller steps"
+                );
+                self.history
+                    .push(HistoryItem::User(MAX_TOKENS_RECOVERY_MESSAGE.to_string()));
+                continue;
             }
 
             if response.tool_calls.is_empty() {
@@ -945,6 +1129,66 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `truncate_history` cannot serve as the context-window fallback: it is
+    /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
+    /// limiter) while the thing the fallback must defend is a TOKEN window
+    /// (`max_context_tokens`, default 200k). A history large enough to blow a
+    /// 200k-token window is nowhere near 16 MiB, so at the default budget the
+    /// fallback evicts nothing at all — which is why the `Skipped ->
+    /// truncate_history` path left the agent permanently stuck and the reactive
+    /// ladder had to be built instead.
+    ///
+    /// The negative assertion is paired with a positive control (same helper,
+    /// same fixture, budget set to the window instead) so that "evicted
+    /// nothing" is a real observation about the unit mismatch rather than a
+    /// blind probe that could never evict.
+    #[test]
+    fn truncate_history_is_a_noop_at_context_window_scale() {
+        // ~800 KB of history. At any real bytes/token density (densest real
+        // content is ~1.4 B/tok, typical prose ~3-4) this is >= 200k tokens,
+        // i.e. already over a 200k window.
+        let mut history: Vec<HistoryItem> = Vec::new();
+        for i in 0..400 {
+            history.push(HistoryItem::User(format!("q{i} {}", "x".repeat(1000))));
+            history.push(HistoryItem::Assistant {
+                text: format!("a{i} {}", "y".repeat(1000)),
+                tool_calls: vec![],
+                reasoning_details: None,
+            });
+        }
+        let total: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        let pressure: usize = history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum();
+        assert!(
+            total > 800_000,
+            "fixture must be big enough to exceed a 200k-token window, got {total}"
+        );
+
+        // NEGATIVE: the real configured default budget.
+        let default_budget = 16 * 1024 * 1024;
+        let mut under_default = history.clone();
+        truncate_history(&mut under_default, default_budget);
+        assert_eq!(
+            under_default.len(),
+            history.len(),
+            "16 MiB byte budget evicted nothing from a {total}-byte history \
+             (pressure {pressure}) that already exceeds a 200k-token window"
+        );
+
+        // POSITIVE CONTROL: same helper, same fixture, budget set to the
+        // window instead. If this also evicted nothing the assertion above
+        // would prove nothing about the unit mismatch -- it would just mean
+        // the probe is blind.
+        let mut under_window = history.clone();
+        truncate_history(&mut under_window, 200_000);
+        assert!(
+            under_window.len() < history.len(),
+            "positive control must evict: probe is blind otherwise"
+        );
+    }
+
     /// The shapes the guard must recognize as a publish attempt. Callers apply
     /// the registry checks first; these cover the name suffix and command text.
     #[test]
@@ -1073,6 +1317,47 @@ mod tests {
         );
         let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
         assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn unsupported_images_become_recoverable_tool_errors() {
+        let mut history = vec![
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call-image".into(),
+                    name: "dev__view_image".into(),
+                    arguments: json!({ "source": "spec.png" }),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call-image".into(),
+                content: vec![
+                    ToolResultContent::Text("10x10 image from spec.png".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(replace_unsupported_images(&mut history), 1);
+        let HistoryItem::ToolResult(result) = &history[1] else {
+            panic!("tool result must stay paired with the assistant tool call");
+        };
+        assert_eq!(result.provider_id, "call-image");
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .iter()
+            .all(|content| !matches!(content, ToolResultContent::Image { .. })));
+        assert!(result.text().contains("does not support image input"));
+        assert!(result.text().contains("10x10 image from spec.png"));
+        assert_eq!(replace_unsupported_images(&mut history), 0);
     }
 
     #[test]

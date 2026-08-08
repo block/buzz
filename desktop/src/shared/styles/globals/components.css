@@ -10,10 +10,9 @@
     --buzz-huddle-drawer-radius: 24px;
     --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
-    /* The lifted app surface reveals this shell at its rounded corners. The
-     * Buzz theme paints its gradient here; the drawer remains responsible for
-     * its own dark surface below. */
-    background: transparent;
+    /* Keep the drawer surface behind the lifted app so the dark background
+     * remains visible through its rounded lower corners. */
+    background: hsl(var(--buzz-huddle-drawer-surface));
   }
 
   .buzz-huddle-app-surface {
@@ -58,6 +57,26 @@
   }
 
   .buzz-huddle-app-surface-open::after {
+    opacity: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop {
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    bottom: 0;
+    height: calc(
+      var(--buzz-huddle-drawer-height) +
+      var(--buzz-huddle-drawer-radius)
+    );
+    left: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    transition: opacity 260ms var(--buzz-huddle-drawer-ease);
+    z-index: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop-open {
     opacity: 1;
   }
 
@@ -196,6 +215,10 @@
     }
 
     .buzz-huddle-app-surface {
+      transition: none;
+    }
+
+    .buzz-huddle-drawer-backdrop {
       transition: none;
     }
 
@@ -749,121 +772,5 @@
     .buzz-onboarding-name-placeholder-caret {
       animation: none;
     }
-  }
-}
-
-@layer components {
-  .buzz-terminal-substrate {
-    background: var(--buzz-terminal-background, #101014);
-    color: var(--buzz-terminal-foreground, #e8e8ec);
-    display: flex;
-    flex-direction: column;
-    font-family: "JetBrains Mono", monospace;
-    font-variant-ligatures: none;
-    inset: 0;
-    position: absolute;
-    user-select: none;
-    z-index: 0;
-  }
-
-  .buzz-terminal-contract-bar {
-    align-items: stretch;
-    border-bottom: 1px solid hsl(var(--border));
-    display: flex;
-    flex: 0 0 32px;
-    justify-content: space-between;
-    min-width: 0;
-  }
-
-  .buzz-terminal-tabs,
-  .buzz-terminal-readout {
-    align-items: center;
-    display: flex;
-    min-width: 0;
-  }
-
-  .buzz-terminal-tab,
-  .buzz-terminal-tab-select,
-  .buzz-terminal-close,
-  .buzz-terminal-new-tab {
-    align-items: center;
-    background: transparent;
-    border: 0;
-    color: inherit;
-    display: flex;
-    font: inherit;
-    gap: 8px;
-    height: 100%;
-    opacity: 0.62;
-    padding: 0 10px;
-    position: relative;
-  }
-
-  .buzz-terminal-tab-active {
-    opacity: 1;
-  }
-
-  .buzz-terminal-tab-active::after {
-    background: hsl(var(--buzz-selected-accent));
-    bottom: 0;
-    content: "";
-    height: 1px;
-    left: 0;
-    position: absolute;
-    right: 0;
-  }
-
-  .buzz-terminal-designator,
-  .buzz-terminal-readout {
-    font-size: 0.5625rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
-  .buzz-terminal-close {
-    opacity: 0;
-  }
-
-  .buzz-terminal-tab:hover .buzz-terminal-close,
-  .buzz-terminal-close:focus {
-    opacity: 1;
-  }
-
-  .buzz-terminal-readout {
-    gap: 14px;
-    padding: 0 12px;
-    white-space: nowrap;
-  }
-
-  .buzz-terminal-viewport,
-  .buzz-terminal-viewport canvas {
-    height: 100%;
-    min-height: 0;
-    width: 100%;
-  }
-
-  .buzz-terminal-viewport {
-    overflow: hidden;
-    position: relative;
-  }
-
-  .buzz-terminal-viewport canvas {
-    display: block;
-  }
-
-  .buzz-terminal-welcome {
-    inset: 0;
-    pointer-events: none;
-    position: absolute;
-    z-index: 1;
-  }
-
-  .buzz-terminal-input {
-    height: 1px;
-    left: -10000px;
-    opacity: 0;
-    position: absolute;
-    top: 0;
-    width: 1px;
   }
 }

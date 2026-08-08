@@ -71,9 +71,10 @@ impl SttPipeline {
     /// therefore never cancel TTS. Push-to-talk and remote participant speech
     /// remain explicit, reliable barge-in paths.
     ///
-    /// `ptt_active` (optional) is the push-to-talk flag. When `Some`, the STT
-    /// pipeline only accumulates speech while the flag is true (key held).
-    /// When `None`, the pipeline runs in continuous VAD mode.
+    /// `ptt_active` and `manual_mic_unmuted` are present when the PTT shortcut
+    /// is enabled. The pipeline accepts speech while either input path is open;
+    /// manual unmute uses normal VAD flushing while a shortcut hold is grouped
+    /// into one utterance.
     ///
     /// Returns `Err` only if the thread cannot be spawned (OS error).
     /// If model files are missing, the worker logs and exits cleanly —
@@ -87,6 +88,7 @@ impl SttPipeline {
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
         ptt_active: Option<Arc<AtomicBool>>,
+        manual_mic_unmuted: Option<Arc<AtomicBool>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
@@ -94,6 +96,7 @@ impl SttPipeline {
 
         let shutdown_worker = Arc::clone(&shutdown);
         let ptt_active_worker = ptt_active.as_ref().map(Arc::clone);
+        let manual_mic_unmuted_worker = manual_mic_unmuted.as_ref().map(Arc::clone);
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
@@ -104,6 +107,7 @@ impl SttPipeline {
                     shutdown_worker,
                     tts_active,
                     ptt_active_worker,
+                    manual_mic_unmuted_worker,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -203,6 +207,7 @@ fn stt_worker(
     shutdown: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<Arc<AtomicBool>>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
@@ -275,9 +280,12 @@ fn stt_worker(
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut tts_was_active = false;
-    let mut ptt_was_active = ptt_active
+    let mut transmit_was_active = ptt_active
         .as_ref()
-        .is_some_and(|p| p.load(Ordering::Acquire));
+        .is_some_and(|ptt| ptt.load(Ordering::Acquire))
+        || manual_mic_unmuted
+            .as_ref()
+            .is_some_and(|manual| manual.load(Ordering::Acquire));
     loop {
         // Check shutdown flag before blocking.
         if shutdown.load(Ordering::Acquire) {
@@ -292,20 +300,22 @@ fn stt_worker(
         }
         tts_was_active = tts_now;
 
-        // Track PTT transitions — flush accumulated speech when key is released.
-        // The worklet stops sending frames when PTT is inactive, so the normal
-        // silence-accumulation flush path never runs. We must flush here on the
-        // active→inactive edge to avoid buffering speech across PTT presses.
+        // Track the combined manual/PTT transmission edge. When both paths
+        // close, the worklet stops sending frames, so flush here rather than
+        // waiting for silence that will never arrive.
         if let Some(ref ptt) = ptt_active {
-            let ptt_now = ptt.load(Ordering::Acquire);
-            if ptt_was_active && !ptt_now && in_speech && !speech_buf.is_empty() {
+            let transmit_now = ptt.load(Ordering::Acquire)
+                || manual_mic_unmuted
+                    .as_ref()
+                    .is_some_and(|manual| manual.load(Ordering::Acquire));
+            if transmit_was_active && !transmit_now && in_speech && !speech_buf.is_empty() {
                 flush_to_stt(&speech_buf, voiced_frames, &recognizer, &text_tx);
                 speech_buf.clear();
                 silence_frames = 0;
                 in_speech = false;
                 voiced_frames = 0;
             }
-            ptt_was_active = ptt_now;
+            transmit_was_active = transmit_now;
         }
 
         // Use recv_timeout so we can periodically check the shutdown flag.
@@ -343,6 +353,7 @@ fn stt_worker(
                     &tts_active,
                     &mut tts_stopped_at,
                     ptt_active.as_ref(),
+                    manual_mic_unmuted.as_ref(),
                 );
             }
         }
@@ -385,11 +396,9 @@ fn resample_chunk(resampler: &mut rubato::Fft<f32>, chunk_48k: &[f32]) -> Vec<f3
 ///   - In PTT mode, the shortcut handler remains the explicit cancellation path.
 ///   - After TTS stops, a cooldown prevents tail audio from being transcribed.
 ///
-/// When `ptt_active` is `Some`:
-///   - VAD `is_speech` is ANDed with the PTT flag — when the key is released,
-///     `is_speech` becomes false, silence_frames accumulates, and the existing
-///     flush logic kicks in naturally. The 200 ms release delay + ~300 ms
-///     silence flush gives a natural utterance tail.
+/// When `ptt_active` is `Some`, input is accepted while either the shortcut is
+/// held or the microphone is manually unmuted. Manual-open input keeps normal
+/// VAD pause flushing; shortcut-only input flushes when the shortcut closes.
 #[allow(clippy::too_many_arguments)]
 fn process_16k_samples(
     samples: &[f32],
@@ -404,6 +413,7 @@ fn process_16k_samples(
     tts_active: &Arc<AtomicBool>,
     tts_stopped_at: &mut Option<std::time::Instant>,
     ptt_active: Option<&Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<&Arc<AtomicBool>>,
 ) {
     leftover.extend_from_slice(samples);
 
@@ -413,13 +423,11 @@ fn process_16k_samples(
         let prob = vad.predict_f32(&clamped);
         let is_speech = prob > VAD_THRESHOLD;
 
-        // PTT gating: when PTT key is not held, treat as silence.
-        // This causes natural flush when the key is released — silence_frames
-        // accumulates and the existing flush logic kicks in after
-        // SILENCE_FLUSH_FRAMES. The 200 ms release delay + ~300 ms silence
-        // flush gives a natural utterance tail.
+        let manually_open = manual_mic_unmuted.is_some_and(|manual| manual.load(Ordering::Acquire));
+        // Shortcut-enabled mode accepts input from either the held shortcut or
+        // a manually open microphone.
         let is_speech = if let Some(ptt) = ptt_active {
-            is_speech && ptt.load(Ordering::Acquire)
+            is_speech && (ptt.load(Ordering::Acquire) || manually_open)
         } else {
             is_speech
         };
@@ -478,11 +486,9 @@ fn process_16k_samples(
             speech_buf.extend_from_slice(&frame);
             *silence_frames += 1;
 
-            // In PTT mode, don't flush on silence — accumulate the entire
-            // key-hold as one utterance. The PTT release edge in the main
-            // loop handles the flush. In VAD mode, flush after the silence
-            // threshold so each natural pause becomes a separate message.
-            if ptt_active.is_none() && *silence_frames >= SILENCE_FLUSH_FRAMES {
+            // A manually open microphone behaves like normal VAD. A
+            // shortcut-only transmission stays grouped until key release.
+            if (ptt_active.is_none() || manually_open) && *silence_frames >= SILENCE_FLUSH_FRAMES {
                 // End of utterance — transcribe.
                 flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx);
                 speech_buf.clear();

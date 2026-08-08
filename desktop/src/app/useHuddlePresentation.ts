@@ -202,6 +202,18 @@ export function useHuddlePresentation() {
     },
     [goChannel, location.pathname],
   );
+  const returnToHuddleParentAfterEnd = React.useCallback(
+    (ephemeralChannelId: string | null, parentChannelId: string | null) => {
+      if (
+        ephemeralChannelId &&
+        parentChannelId &&
+        location.pathname === `/channels/${ephemeralChannelId}`
+      ) {
+        void goChannel(parentChannelId, { replace: true });
+      }
+    },
+    [goChannel, location.pathname],
+  );
   const handleHuddleCompanionOpen = React.useCallback(() => {
     const ephemeralChannelId = activeHuddleChannelIdRef.current;
     huddleCompanionDismissedChannelIdRef.current = null;
@@ -315,15 +327,20 @@ export function useHuddlePresentation() {
     (ephemeralChannelId: string | null) => {
       const endedChannelId =
         ephemeralChannelId ?? activeHuddleChannelIdRef.current;
+      returnToHuddleParentAfterEnd(
+        endedChannelId,
+        activeHuddleParentChannelIdRef.current,
+      );
       hideHuddleChannel(endedChannelId);
       activeHuddleChannelIdRef.current = null;
+      activeHuddleParentChannelIdRef.current = null;
       huddleCompanionChannelIdRef.current = null;
       huddleCompanionDismissedChannelIdRef.current = null;
       huddleCompanionOpenPromiseRef.current = null;
       setIsHuddleCompanionOpen(false);
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     },
-    [hideHuddleChannel, queryClient],
+    [hideHuddleChannel, queryClient, returnToHuddleParentAfterEnd],
   );
 
   React.useEffect(() => {
@@ -397,7 +414,10 @@ export function useHuddlePresentation() {
         );
       }
       if (event.payload.phase === "idle") {
-        hideHuddleChannel(activeHuddleChannelIdRef.current);
+        const endedChannelId = activeHuddleChannelIdRef.current;
+        const parentChannelId = activeHuddleParentChannelIdRef.current;
+        returnToHuddleParentAfterEnd(endedChannelId, parentChannelId);
+        hideHuddleChannel(endedChannelId);
         activeHuddleChannelIdRef.current = null;
         activeHuddleParentChannelIdRef.current = null;
         huddleCompanionChannelIdRef.current = null;
@@ -421,6 +441,7 @@ export function useHuddlePresentation() {
     isHuddleRoom,
     openHuddleCompanion,
     queryClient,
+    returnToHuddleParentAfterEnd,
     trackHuddleBackingChannel,
   ]);
 

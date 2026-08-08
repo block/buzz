@@ -2,7 +2,6 @@ part of '../channels_page.dart';
 
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
-  final int? unreadCount;
   final bool isUnread;
   final bool isMuted;
   final String? currentPubkey;
@@ -17,7 +16,6 @@ class _ChannelTile extends ConsumerWidget {
 
   const _ChannelTile({
     required this.channel,
-    this.unreadCount,
     required this.isUnread,
     required this.currentPubkey,
     required this.onTap,
@@ -28,6 +26,12 @@ class _ChannelTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final contentColor = isMuted
+        ? navigationSecondaryForeground(context)
+        : navigationPrimaryForeground(
+            context,
+          ).withValues(alpha: isUnread ? 1 : 0.8);
+
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
       onTap: onTap,
@@ -49,8 +53,9 @@ class _ChannelTile extends ConsumerWidget {
                     ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
                     : Icon(
                         channelIcon(channel),
+                        key: ValueKey('channel-icon-${channel.id}'),
                         size: _kChannelIconSize,
-                        color: context.colors.onSurface,
+                        color: contentColor,
                       ),
               ),
             ),
@@ -67,7 +72,7 @@ class _ChannelTile extends ConsumerWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: contentListTitleTextStyle.copyWith(
-                      color: context.colors.onSurface,
+                      color: contentColor,
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
                   ),
@@ -83,12 +88,8 @@ class _ChannelTile extends ConsumerWidget {
               Icon(
                 LucideIcons.bellOff,
                 size: 12,
-                color: context.colors.onSurfaceVariant,
+                color: context.colors.onSurface.withValues(alpha: 0.4),
               ),
-            ],
-            if (isUnread && !channel.isDm) ...[
-              const SizedBox(width: Grid.xxs),
-              _UnreadBadge(channelId: channel.id, count: unreadCount ?? 0),
             ],
             if (!channel.isMember && !channel.isDm)
               Padding(

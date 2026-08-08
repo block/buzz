@@ -8,15 +8,21 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/directional_transition_scope.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 
 class HomePage extends HookConsumerWidget {
-  const HomePage({required this.settingsPageBuilder, super.key});
+  const HomePage({
+    required this.settingsPageBuilder,
+    required this.hasUnreadInbox,
+    super.key,
+  });
 
   final WidgetBuilder settingsPageBuilder;
+  final bool hasUnreadInbox;
 
   static const double _tabBarHeight = mobileTabBarHeight;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -29,6 +35,13 @@ class HomePage extends HookConsumerWidget {
   static const double _tabIconSize = 22;
   static const double _fabClearance = _tabBarHeight + _tabBarBottomGap;
   static const Duration _tabIconWeightDuration = Duration(milliseconds: 120);
+  static const Duration _tabUnreadBadgeDuration = Duration(milliseconds: 220);
+  static const double _settingsBackgroundScale = 0.97;
+  static const Duration _tabContentTransitionDuration = Duration(
+    milliseconds: 240,
+  );
+  static const Curve _tabContentTransitionCurve = Cubic(0.22, 1, 0.36, 1);
+  static const double _tabContentTransitionDistance = 24;
 
   static const _destinations = [
     _HomeDestination(
@@ -51,6 +64,22 @@ class HomePage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tabIndex = useState(0);
+    final tabContentTransitionDirection = useRef(1.0);
+    final tabContentTransitionController = useAnimationController(
+      duration: _tabContentTransitionDuration,
+      initialValue: 1,
+    );
+    final tabContentTransitionValue = useAnimation(
+      tabContentTransitionController,
+    );
+    final homeReselection = useValueNotifier(0);
+    final activityReselection = useValueNotifier(0);
+    final searchReselection = useValueNotifier(0);
+    final settingsTransitionProgress = useValueNotifier(0.0);
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
+    final tabContentTransitionProgress = reducedMotion
+        ? 1.0
+        : _tabContentTransitionCurve.transform(tabContentTransitionValue);
     final systemBottomInset = MediaQuery.paddingOf(context).bottom;
     final navigationBarWidth = _floatingTabBarWidth(
       MediaQuery.sizeOf(context).width,
@@ -58,61 +87,141 @@ class HomePage extends HookConsumerWidget {
     );
 
     final pages = [
-      ChannelsPage(settingsPageBuilder: settingsPageBuilder),
-      const ActivityPage(),
-      const SearchPage(),
+      ChannelsPage(
+        settingsPageBuilder: settingsPageBuilder,
+        tabReselection: homeReselection,
+        onSettingsTransitionProgress: (progress) {
+          if (settingsTransitionProgress.value != progress) {
+            settingsTransitionProgress.value = progress;
+          }
+        },
+      ),
+      ActivityPage(tabReselection: activityReselection),
+      SearchPage(tabReselection: searchReselection),
     ];
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      // Keep the floating navigation and Home quick actions anchored while the
-      // keyboard is visible on any tab.
-      resizeToAvoidBottomInset: false,
-      extendBody: true,
-      body: SizedBox.expand(
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(child: ColoredBox(color: context.colors.surface)),
-            Positioned.fill(
-              child: MediaQuery(
-                data: _mediaQueryWithFloatingTabBarClearance(
-                  context,
-                  HomePage._fabClearance,
-                ),
-                child: IndexedStack(index: tabIndex.value, children: pages),
-              ),
+    final settingsTransitionGradient = tabIndex.value == 0
+        ? context.appColors.topSectionGradient
+        : null;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fill(
+          child: DecoratedBox(
+            key: const ValueKey('home-settings-transition-backdrop'),
+            decoration: BoxDecoration(
+              color: settingsTransitionGradient == null
+                  ? context.colors.surface
+                  : null,
+              gradient: settingsTransitionGradient,
             ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: IgnorePointer(
-                child: MobileTabFooterBackdrop(
-                  height: mobileTabFooterBackdropHeight(context),
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: ChannelQuickActionsLauncher(
-                visible: tabIndex.value == 0,
-                navigationBarHeight: HomePage._tabBarHeight,
-                navigationBarBottomGap: HomePage._tabBarBottomGap,
-                navigationBarWidth: navigationBarWidth,
-                systemBottomInset: systemBottomInset,
-                rightInset: Grid.sm,
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
-      bottomNavigationBar: _FloatingTabBar(
-        selectedIndex: tabIndex.value,
-        onDestinationSelected: (i) {
-          if (i == tabIndex.value) return;
-          unawaited(HapticFeedback.selectionClick());
-          tabIndex.value = i;
-        },
-        destinations: _destinations,
-      ),
+        ValueListenableBuilder<double>(
+          valueListenable: settingsTransitionProgress,
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            // Keep the floating navigation and Home quick actions anchored while the
+            // keyboard is visible on any tab.
+            resizeToAvoidBottomInset: false,
+            extendBody: true,
+            body: SizedBox.expand(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: ColoredBox(color: context.colors.surface),
+                  ),
+                  Positioned.fill(
+                    child: MediaQuery(
+                      data: _mediaQueryWithFloatingTabBarClearance(
+                        context,
+                        HomePage._fabClearance,
+                      ),
+                      child: DirectionalTransitionScope(
+                        horizontalOffset:
+                            tabContentTransitionDirection.value *
+                            _tabContentTransitionDistance *
+                            (1 - tabContentTransitionProgress),
+                        opacity: tabContentTransitionProgress,
+                        child: ClipRect(
+                          child: IndexedStack(
+                            index: tabIndex.value,
+                            children: pages,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: IgnorePointer(
+                      child: MobileTabFooterBackdrop(
+                        height: mobileTabFooterBackdropHeight(context),
+                        tint: context.colors.primaryContainer,
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: ChannelQuickActionsLauncher(
+                      visible: tabIndex.value == 0,
+                      navigationBarHeight: HomePage._tabBarHeight,
+                      navigationBarBottomGap: HomePage._tabBarBottomGap,
+                      navigationBarWidth: navigationBarWidth,
+                      systemBottomInset: systemBottomInset,
+                      rightInset: Grid.sm,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            bottomNavigationBar: _FloatingTabBar(
+              selectedIndex: tabIndex.value,
+              hasUnreadInbox: hasUnreadInbox,
+              onDestinationSelected: (i) {
+                if (i == tabIndex.value) {
+                  switch (i) {
+                    case 0:
+                      homeReselection.value++;
+                    case 1:
+                      activityReselection.value++;
+                    case 2:
+                      searchReselection.value++;
+                  }
+                  return;
+                }
+                tabContentTransitionDirection.value = i > tabIndex.value
+                    ? 1
+                    : -1;
+                unawaited(HapticFeedback.selectionClick());
+                tabIndex.value = i;
+                if (reducedMotion) {
+                  tabContentTransitionController.value = 1;
+                } else {
+                  unawaited(tabContentTransitionController.forward(from: 0));
+                }
+              },
+              destinations: _destinations,
+            ),
+          ),
+          builder: (context, progress, child) {
+            final curvedProgress = reducedMotion
+                ? 0.0
+                : Curves.easeOutCubic.transform(progress);
+            return Opacity(
+              key: const ValueKey('home-settings-transition-opacity'),
+              opacity: 1 - curvedProgress,
+              child: Transform.scale(
+                key: const ValueKey('home-settings-transition-scale'),
+                scale: lerpDouble(1, _settingsBackgroundScale, curvedProgress),
+                alignment: Alignment.center,
+                child: child,
+              ),
+            );
+          },
+        ),
+      ],
     );
   }
 }
@@ -165,11 +274,13 @@ class _HomeDestination {
 
 class _FloatingTabBar extends StatelessWidget {
   final int selectedIndex;
+  final bool hasUnreadInbox;
   final ValueChanged<int> onDestinationSelected;
   final List<_HomeDestination> destinations;
 
   const _FloatingTabBar({
     required this.selectedIndex,
+    required this.hasUnreadInbox,
     required this.onDestinationSelected,
     required this.destinations,
   });
@@ -271,6 +382,7 @@ class _FloatingTabBar extends StatelessWidget {
                                 child: _FloatingTabDestination(
                                   destination: destinations[i],
                                   selected: i == safeSelectedIndex,
+                                  showUnreadBadge: i == 1 && hasUnreadInbox,
                                   onTap: () => onDestinationSelected(i),
                                 ),
                               ),
@@ -292,27 +404,37 @@ class _FloatingTabBar extends StatelessWidget {
 class _FloatingTabDestination extends StatelessWidget {
   final _HomeDestination destination;
   final bool selected;
+  final bool showUnreadBadge;
   final VoidCallback onTap;
 
   const _FloatingTabDestination({
     required this.destination,
     required this.selected,
+    required this.showUnreadBadge,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = context.colors;
+    final isDark = context.theme.brightness == Brightness.dark;
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final foregroundColor = selected
         ? colorScheme.onPrimaryContainer
         : colorScheme.onSurfaceVariant;
     final icon = selected ? destination.selectedIcon : destination.icon;
+    final badgeOutlineColor = selected
+        ? colorScheme.primaryContainer
+        : (isDark ? colorScheme.surfaceContainerHighest : colorScheme.surface);
+
+    final showVisibleUnreadBadge = showUnreadBadge && !selected;
 
     return Semantics(
       button: true,
       selected: selected,
-      label: destination.label,
+      label: showVisibleUnreadBadge
+          ? '${destination.label}, unread'
+          : destination.label,
       child: Tooltip(
         message: destination.label,
         excludeFromSemantics: true,
@@ -327,19 +449,60 @@ class _FloatingTabDestination extends StatelessWidget {
             ),
             borderRadius: BorderRadius.circular(HomePage._selectedTabRadius),
             child: Center(
-              child: AnimatedSwitcher(
-                duration: reducedMotion
-                    ? Duration.zero
-                    : HomePage._tabIconWeightDuration,
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeOutCubic,
-                transitionBuilder: (child, animation) =>
-                    FadeTransition(opacity: animation, child: child),
-                child: Icon(
-                  icon,
-                  key: ValueKey('${destination.label}-$icon'),
-                  color: foregroundColor,
-                  size: HomePage._tabIconSize,
+              child: SizedBox(
+                width: HomePage._tabIconSize + 8,
+                height: HomePage._tabIconSize + 8,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Center(
+                      child: AnimatedSwitcher(
+                        duration: reducedMotion
+                            ? Duration.zero
+                            : HomePage._tabIconWeightDuration,
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeOutCubic,
+                        transitionBuilder: (child, animation) =>
+                            FadeTransition(opacity: animation, child: child),
+                        child: Icon(
+                          icon,
+                          key: ValueKey('${destination.label}-$icon'),
+                          color: foregroundColor,
+                          size: HomePage._tabIconSize,
+                        ),
+                      ),
+                    ),
+                    if (showUnreadBadge)
+                      Positioned(
+                        top: 0,
+                        right: 0,
+                        child: AnimatedScale(
+                          key: const ValueKey('activity-tab-unread-dot-scale'),
+                          scale: selected ? 0 : 1,
+                          alignment: const Alignment(-0.5, 0.5),
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : HomePage._tabUnreadBadgeDuration,
+                          curve: Curves.easeOutCubic,
+                          child: Container(
+                            key: const ValueKey('activity-tab-unread-dot'),
+                            width: 12,
+                            height: 12,
+                            padding: const EdgeInsets.all(2),
+                            decoration: BoxDecoration(
+                              color: badgeOutlineColor,
+                              shape: BoxShape.circle,
+                            ),
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: colorScheme.primary,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),

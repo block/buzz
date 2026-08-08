@@ -82,7 +82,7 @@ pub(crate) struct EffectiveAgentEnv {
 //
 // A single owned type that fully describes what a spawn would run.  Produced
 // by `resolve_effective_harness_descriptor` and consumed by spawn_agent_child,
-// spawn_config_hash, build_managed_agent_summary, get_agent_models, and
+// spawn_snapshot, build_managed_agent_summary, get_agent_models, and
 // agent_readiness — so the harness-definition lookup and arg/env resolution
 // happen exactly once, in one place.
 

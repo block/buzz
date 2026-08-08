@@ -1,9 +1,8 @@
 part of '../compose_bar.dart';
 
 class _ComposeBarLayout extends StatelessWidget {
-  final List<BlobDescriptor> attachments;
-  final int uploadingCount;
-  final ValueChanged<String> onRemoveAttachment;
+  final List<_PendingAttachment> attachments;
+  final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
   final bool isExpanded;
   final TextEditingController controller;
@@ -31,7 +30,6 @@ class _ComposeBarLayout extends StatelessWidget {
 
   const _ComposeBarLayout({
     required this.attachments,
-    required this.uploadingCount,
     required this.onRemoveAttachment,
     required this.uploadError,
     required this.isExpanded,
@@ -85,10 +83,9 @@ class _ComposeBarLayout extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (attachments.isNotEmpty || hasPendingUploads) ...[
+          if (attachments.isNotEmpty) ...[
             _AttachmentStrip(
               attachments: attachments,
-              uploadingCount: uploadingCount,
               onRemove: onRemoveAttachment,
             ),
             const SizedBox(height: Grid.xxs),

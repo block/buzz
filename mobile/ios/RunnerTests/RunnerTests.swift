@@ -1,3 +1,4 @@
+import AVFoundation
 import Flutter
 import UIKit
 import XCTest
@@ -5,6 +6,48 @@ import XCTest
 @testable import Buzz
 
 class RunnerTests: XCTestCase {
+
+  func testRelativeTrackInsertionTimesPreserveAudioDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 1, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1.5, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.audio ?? .invalid,
+        CMTime(seconds: 0.5, preferredTimescale: 600)
+      ),
+      0
+    )
+  }
+
+  func testRelativeTrackInsertionTimesPreserveVideoDelay() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 2, preferredTimescale: 600),
+      audioStart: CMTime(seconds: 1, preferredTimescale: 600)
+    )
+
+    XCTAssertEqual(
+      CMTimeCompare(
+        times.video,
+        CMTime(seconds: 1, preferredTimescale: 600)
+      ),
+      0
+    )
+    XCTAssertEqual(CMTimeCompare(times.audio ?? .invalid, .zero), 0)
+  }
+
+  func testRelativeTrackInsertionTimesZeroBasesVideoWithoutAudio() {
+    let times = AppDelegate.relativeTrackInsertionTimes(
+      videoStart: CMTime(seconds: 3, preferredTimescale: 600),
+      audioStart: nil
+    )
+
+    XCTAssertEqual(CMTimeCompare(times.video, .zero), 0)
+    XCTAssertNil(times.audio)
+  }
 
   @MainActor
   func testExpandedAttachmentSurfaceDismissesKeyboard() {

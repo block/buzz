@@ -10,6 +10,7 @@ import type {
   ProjectPullRequest,
   ProjectPullRequestListItem,
   ProjectRepoSnapshot,
+  Repository,
 } from "@/features/projects/hooks";
 import {
   formatExactTimestamp,
@@ -37,9 +38,15 @@ type ActivityTarget =
   | {
       type: "pull-request";
       project: Project;
+      repository: Repository;
       pullRequest: ProjectPullRequest;
     }
-  | { type: "issue"; project: Project; issue: ProjectIssue };
+  | {
+      type: "issue";
+      project: Project;
+      repository: Repository;
+      issue: ProjectIssue;
+    };
 
 type ProjectActivityItem = {
   id: string;
@@ -59,10 +66,15 @@ type ProjectsActivityFeedProps = {
   isLoading: boolean;
   issues: ProjectIssueListItem[];
   onOpenCommit: (project: Project, commitHash: string) => void;
-  onOpenIssue: (project: Project, issue: ProjectIssue) => void;
+  onOpenIssue: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   onOpenProject: (project: Project) => void;
   onOpenPullRequest: (
     project: Project,
+    repository: Repository,
     pullRequest: ProjectPullRequest,
   ) => void;
   profiles?: UserProfileLookup;
@@ -129,10 +141,15 @@ function buildActivityItems({
     });
   }
 
-  for (const { project, pullRequest } of pullRequests) {
-    const target = { type: "pull-request", project, pullRequest } as const;
+  for (const { project, pullRequest, repository } of pullRequests) {
+    const target = {
+      type: "pull-request",
+      project,
+      pullRequest,
+      repository,
+    } as const;
     items.push({
-      id: `pr:${pullRequest.id}`,
+      id: `pr:${repository.id}:${pullRequest.id}`,
       kind: "pull-request",
       createdAt: pullRequest.createdAt,
       actorPubkey: pullRequest.author,
@@ -145,7 +162,7 @@ function buildActivityItems({
     });
     for (const update of pullRequest.updates) {
       items.push({
-        id: `pr-update:${update.id}`,
+        id: `pr-update:${repository.id}:${update.id}`,
         kind: "commit",
         createdAt: update.createdAt,
         actorPubkey: update.author,
@@ -172,7 +189,7 @@ function buildActivityItems({
               ? "review-request"
               : "comment";
       items.push({
-        id: `pr-comment:${comment.id}`,
+        id: `pr-comment:${repository.id}:${comment.id}`,
         kind,
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
@@ -198,10 +215,10 @@ function buildActivityItems({
     }
   }
 
-  for (const { project, issue } of issues) {
-    const target = { type: "issue", project, issue } as const;
+  for (const { project, issue, repository } of issues) {
+    const target = { type: "issue", project, issue, repository } as const;
     items.push({
-      id: `issue:${issue.id}`,
+      id: `issue:${repository.id}:${issue.id}`,
       kind: "issue",
       createdAt: issue.createdAt,
       actorPubkey: issue.author,
@@ -214,7 +231,7 @@ function buildActivityItems({
     });
     for (const comment of issue.comments) {
       items.push({
-        id: `issue-comment:${comment.id}`,
+        id: `issue-comment:${repository.id}:${comment.id}`,
         kind: "comment",
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
@@ -235,18 +252,23 @@ function buildActivityItems({
 
 function ActivityCard({
   compact,
+  isFirst,
+  isLast,
   item,
   onOpen,
   onOpenProject,
   profiles,
 }: {
   compact: boolean;
+  isFirst: boolean;
+  isLast: boolean;
   item: ProjectActivityItem;
   onOpen: () => void;
   onOpenProject: () => void;
   profiles?: UserProfileLookup;
 }) {
   const visual = PROJECT_EVENT_VISUALS[item.kind];
+  const TypeIcon = visual.icon;
   const profile = item.actorPubkey
     ? profiles?.[normalizePubkey(item.actorPubkey)]
     : undefined;
@@ -257,42 +279,71 @@ function ActivityCard({
   return (
     <div
       className={cn(
-        "relative block w-full rounded-xl border border-border/60 bg-transparent text-left transition-colors hover:bg-muted/20",
-        compact ? "p-3" : "p-4",
+        "relative block w-full rounded-xl bg-transparent text-left transition-colors hover:bg-muted/20",
+        compact ? "py-3 pr-3" : "py-4 pr-4",
       )}
       data-testid="projects-activity-card"
     >
       <button
         aria-label={`Open ${item.title} in ${item.target.project.name}`}
-        className="absolute inset-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        className="absolute inset-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={onOpen}
         type="button"
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
-        {item.actorPubkey ? (
-          <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
-            <button
-              aria-label={`View ${actorLabel}'s profile`}
-              className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                accent={profile?.isAgent === true}
-                avatarUrl={profile?.avatarUrl ?? null}
-                displayName={actorLabel}
-                size={compact ? "xs" : "md"}
-              />
-            </button>
-          </UserProfilePopover>
-        ) : (
-          <UserAvatar
-            accent={profile?.isAgent === true}
-            avatarUrl={profile?.avatarUrl ?? null}
-            className="shrink-0"
-            displayName={actorLabel}
-            size={compact ? "xs" : "md"}
-          />
-        )}
+        {/* Avatar gutter: a vertical spine runs through the avatar centers
+            to connect consecutive cards. Segments extend into the card's
+            vertical padding so they meet the neighbouring card's segments;
+            the first card has no incoming line and the last no outgoing. */}
+        <div
+          className={cn(
+            "relative flex shrink-0 items-start justify-center self-stretch",
+            compact ? "w-5" : "w-9",
+          )}
+        >
+          {isFirst ? null : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-1/2 w-px -translate-x-1/2 bg-border/80",
+                compact ? "-top-3 h-3" : "-top-4 h-4",
+              )}
+            />
+          )}
+          {isLast ? null : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-1/2 w-px -translate-x-1/2 bg-border/80",
+                compact ? "-bottom-3 top-5" : "-bottom-4 top-9",
+              )}
+            />
+          )}
+          {item.actorPubkey ? (
+            <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
+              <button
+                aria-label={`View ${actorLabel}'s profile`}
+                className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                type="button"
+              >
+                <UserAvatar
+                  accent={profile?.isAgent === true}
+                  avatarUrl={profile?.avatarUrl ?? null}
+                  displayName={actorLabel}
+                  size={compact ? "xs" : "md"}
+                />
+              </button>
+            </UserProfilePopover>
+          ) : (
+            <UserAvatar
+              accent={profile?.isAgent === true}
+              avatarUrl={profile?.avatarUrl ?? null}
+              className="relative z-10 shrink-0"
+              displayName={actorLabel}
+              size={compact ? "xs" : "md"}
+            />
+          )}
+        </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-start gap-2">
             <div className="min-w-0 flex-1 text-xs text-muted-foreground/70">
@@ -303,7 +354,7 @@ function ActivityCard({
                     triggerElement="span"
                   >
                     <button
-                      className="pointer-events-auto relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                      className="pointer-events-auto relative z-10 rounded-sm font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                       type="button"
                     >
                       {actorLabel}
@@ -314,7 +365,7 @@ function ActivityCard({
                 )}{" "}
                 {item.action}{" "}
                 <button
-                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
+                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
                   onClick={onOpenProject}
                   type="button"
                 >
@@ -348,9 +399,16 @@ function ActivityCard({
             ) : null}
           </div>
           <div className={compact ? "mt-2" : "mt-3"}>
-            <p className="min-w-0 truncate text-sm font-semibold leading-5 text-foreground">
-              {item.title}
-            </p>
+            {/* Bare event-type glyph beside the headline (no badge circle). */}
+            <div className="flex min-w-0 items-start gap-2">
+              <TypeIcon
+                aria-hidden="true"
+                className={cn("mt-0.5 h-4 w-4 shrink-0", visual.iconClassName)}
+              />
+              <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground">
+                {item.title}
+              </p>
+            </div>
             {item.body ? (
               <p
                 className={cn(
@@ -403,13 +461,16 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
 
   return (
     <div
-      className={cn("relative", props.compact ? "space-y-2.5" : "space-y-3")}
+      className="relative bg-transparent"
+      data-testid="projects-activity-timeline"
     >
-      {items.map((item) => {
+      {items.map((item, index) => {
         return (
           <div className="relative" key={item.id}>
             <ActivityCard
               compact={props.compact === true}
+              isFirst={index === 0}
+              isLast={index === items.length - 1}
               item={item}
               onOpen={() => {
                 if (item.target.type === "project") {
@@ -422,10 +483,15 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
                 } else if (item.target.type === "pull-request") {
                   props.onOpenPullRequest(
                     item.target.project,
+                    item.target.repository,
                     item.target.pullRequest,
                   );
                 } else {
-                  props.onOpenIssue(item.target.project, item.target.issue);
+                  props.onOpenIssue(
+                    item.target.project,
+                    item.target.repository,
+                    item.target.issue,
+                  );
                 }
               }}
               onOpenProject={() => props.onOpenProject(item.target.project)}

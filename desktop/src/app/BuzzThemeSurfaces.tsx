@@ -23,8 +23,10 @@ export function GradientLayer() {
 export function ContentSurface({
   children,
   unframed = false,
+  terminal,
 }: {
   children: ReactNode;
+  terminal?: ReactNode;
   /** Used by dedicated huddle windows, which should not resemble app cards. */
   unframed?: boolean;
 }) {
@@ -38,7 +40,12 @@ export function ContentSurface({
       data-buzz-content-surface
       data-buzz-content-unframed={unframed ? true : undefined}
     >
-      {children}
+      <div className="buzz-content-primary flex min-h-0 flex-1 flex-col overflow-hidden">
+        {children}
+      </div>
+      <div className="buzz-terminal-dock-host" data-terminal-dock>
+        {terminal}
+      </div>
     </div>
   );
 }

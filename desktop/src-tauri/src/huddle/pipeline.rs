@@ -315,6 +315,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         expected_generation,
         stt_starting,
         ptt_active_for_stt,
+        manual_mic_unmuted_for_stt,
         old_stt,
     ) = {
         let mut hs = state.huddle()?;
@@ -338,6 +339,11 @@ pub(crate) async fn maybe_start_stt_pipeline(
         } else {
             None
         };
+        let manual_mic_unmuted = if hs.voice_input_mode == VoiceInputMode::PushToTalk {
+            Some(Arc::clone(&hs.manual_mic_unmuted))
+        } else {
+            None
+        };
         (
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.agent_pubkeys),
@@ -345,6 +351,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
             hs.session_generation.load(Ordering::Acquire),
             stt_starting,
             ptt,
+            manual_mic_unmuted,
             old,
         )
     };
@@ -352,7 +359,12 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, tts_active, ptt_active_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            tts_active,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {
@@ -647,14 +659,23 @@ pub(crate) fn spawn_transcription_task(
                 .clone();
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
-            let builder =
-                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("buzz-desktop: STT build_message: {e}");
-                        continue;
-                    }
-                };
+            let builder = match events::build_message(
+                channel_uuid,
+                &t,
+                None,
+                &p_tags,
+                &[],
+                &[],
+                &[],
+                &[],
+                &crate::relay::relay_api_base_url(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT build_message: {e}");
+                    continue;
+                }
+            };
             // Wait before signing: the relay enforces NIP-98 freshness (±60s)
             // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
             // the kind event and build NIP-98 auth after the wait so both

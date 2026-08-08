@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { relayClient } from "@/shared/api/relayClient";
+import { useRelayResumeTriggers } from "@/shared/api/useRelayResumeTriggers";
 
 type AppShellLifecycleEffectsOptions = {
   desktopBadgeEnabled: boolean;
@@ -16,6 +17,10 @@ export function useAppShellLifecycleEffects({
   unreadChannelIds,
   unreadChannelNotificationCount,
 }: AppShellLifecycleEffectsOptions) {
+  // Event-driven reconnect: network online / focus / visibility short-circuit
+  // the backoff timer when the relay session is degraded (CMD+R gap G1).
+  useRelayResumeTriggers();
+
   // Prevent webview file:/// navigation on file drop outside the composer.
   // Scoped to file drags only (text drag-and-drop into inputs still works).
   // Composer's onDrop fires first (React synthetic before window bubble).

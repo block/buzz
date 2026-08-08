@@ -7,6 +7,9 @@ class _ChannelsBody extends StatelessWidget {
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
   final String? currentPubkey;
+  final double topSectionHeight;
+  final bool usesPinnedGradient;
+  final ScrollController scrollController;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
 
@@ -17,13 +20,16 @@ class _ChannelsBody extends StatelessWidget {
     required this.sessionStatus,
     required this.showConnectionSkeleton,
     required this.currentPubkey,
+    required this.topSectionHeight,
+    required this.usesPinnedGradient,
+    required this.scrollController,
     required this.onRefresh,
     required this.onSelectChannel,
   });
 
   @override
   Widget build(BuildContext context) {
-    final barHeight = frostedAppBarHeight(context);
+    final barHeight = topSectionHeight;
     final loadedChannels = channels;
     final loading =
         showConnectionSkeleton || (loadedChannels == null && !showError);
@@ -34,17 +40,36 @@ class _ChannelsBody extends StatelessWidget {
           )
         : loadedChannels == null
         ? const SizedBox.shrink()
-        : RefreshIndicator(
+        : BeeRefreshIndicator(
             edgeOffset: barHeight,
             onRefresh: onRefresh,
             child: CustomScrollView(
+              controller: scrollController,
+              // The transparent gap shows the top section and must not absorb
+              // taps meant for the community or profile controls beneath it.
+              hitTestBehavior: HitTestBehavior.deferToChild,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                _SliverChannelsList(
-                  channels: loadedChannels,
-                  currentPubkey: currentPubkey,
-                  onSelectChannel: onSelectChannel,
-                ),
+                if (usesPinnedGradient)
+                  _SliverChannelsList(
+                    channels: loadedChannels,
+                    currentPubkey: currentPubkey,
+                    onSelectChannel: onSelectChannel,
+                  )
+                else
+                  DecoratedSliver(
+                    decoration: BoxDecoration(
+                      color: context.colors.surface,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(Radii.dialog),
+                      ),
+                    ),
+                    sliver: _SliverChannelsList(
+                      channels: loadedChannels,
+                      currentPubkey: currentPubkey,
+                      onSelectChannel: onSelectChannel,
+                    ),
+                  ),
               ],
             ),
           );
@@ -148,11 +173,6 @@ class _SliverChannelsList extends HookConsumerWidget {
             readState.effectiveTimestamp(channelId) != null)
           channelId,
     };
-    final unreadChannelCounts = {
-      for (final entry in unreadState.counts.entries)
-        if (unreadChannelIds.contains(entry.key)) entry.key: entry.value,
-    };
-
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
     // through to the built-in "Channels" list.
@@ -226,7 +246,6 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
-                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -249,7 +268,6 @@ class _SliverChannelsList extends HookConsumerWidget {
                   sortState.sortModeFor(sectionSortGroupKey(section.id)),
                 ),
                 unreadChannelIds: unreadChannelIds,
-                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
@@ -260,7 +278,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                     userSections.first.id != section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
-                  final name = await showDialog<String>(
+                  final name = await showBuzzDialog<String>(
                     context: context,
                     builder: (_) => _SectionNameDialog(
                       title: 'Rename Section',
@@ -275,7 +293,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                   }
                 },
                 onDelete: () async {
-                  final confirmed = await showDialog<bool>(
+                  final confirmed = await showBuzzDialog<bool>(
                     context: context,
                     builder: (_) => AlertDialog(
                       title: Text('Delete "${section.name}"?'),
@@ -340,7 +358,6 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
-              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
@@ -356,7 +373,6 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
               unreadChannelIds: unreadChannelIds,
-              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',

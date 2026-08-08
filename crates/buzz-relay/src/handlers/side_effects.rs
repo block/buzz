@@ -355,27 +355,27 @@ pub async fn validate_admin_event(
                 .iter()
                 .find(|m| m.pubkey == actor_bytes)
                 .and_then(|m| m.role.parse().ok());
-
-            // PUT_USER: open channels allow any authenticated user; private channels
-            // require the actor to be an existing member (any role can invite).
-            if channel.visibility == "private" {
-                if actor_role.is_none() {
-                    return Err(anyhow::anyhow!("actor not authorized"));
-                }
-
-                // Only owners/admins may grant elevated roles.
-                if requested_role.is_some_and(|r| r.is_elevated())
-                    && !actor_role.is_some_and(|r| r.is_elevated())
-                {
-                    return Err(anyhow::anyhow!(
-                        "only owners/admins may grant elevated roles"
-                    ));
-                }
-            }
-
-            // Extract target pubkey from p tag
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+
+            // PUT_USER: open channels allow any authenticated user. Private
+            // channels only let owners/admins add another identity; otherwise
+            // any compromised member could extend access to channel history.
+            //
+            // A self-targeted add skips this check so an idempotent re-add
+            // still works. That is not a way into a private channel: ingest's
+            // `check_channel_membership` rejects a non-member (and a
+            // soft-removed member) before this validator runs, and `add_member`
+            // independently requires the self-inviter to hold an active role.
+            // Self-promotion is caught by the role-change guard below.
+            if channel.visibility == "private"
+                && target_pubkey != actor_bytes
+                && !actor_role.is_some_and(|r| r.is_elevated())
+            {
+                return Err(anyhow::anyhow!(
+                    "only owners/admins may add private-channel members"
+                ));
+            }
 
             // Changing an ACTIVE existing member's role is privileged in both
             // directions, on every visibility. `get_members` filters

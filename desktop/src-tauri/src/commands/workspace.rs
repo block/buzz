@@ -212,6 +212,8 @@ pub async fn apply_workspace(
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
     let state = restore_app.state::<AppState>();
+    super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
+
     // Backfill this exact relay+owner scope only after the workspace has been
     // applied. Running at process boot would target the fallback relay and
     // collapse every community into one pending-event store.

@@ -45,7 +45,7 @@ class _MessageList extends HookConsumerWidget {
       initialMessageId == null && initialThreadRootId == null,
     );
     final isAutoScrolling = useRef(false);
-    final autoScrollScheduled = useRef(false);
+    final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
     final didOpenInitialThread = useRef(false);
@@ -155,6 +155,13 @@ class _MessageList extends HookConsumerWidget {
           : displayEntries.length - 1 - chronologicalIndex;
     }
 
+    double latestAlignment() {
+      final viewportHeight = context.size?.height ?? 0;
+      return viewportHeight > 0
+          ? (composerBottomInset / viewportHeight).clamp(0.0, 1.0).toDouble()
+          : 0.0;
+    }
+
     Future<void> scrollToLatest() async {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
       followsLatest.value = true;
@@ -163,6 +170,7 @@ class _MessageList extends HookConsumerWidget {
       try {
         await itemScrollController.scrollTo(
           index: 0,
+          alignment: latestAlignment(),
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
         );
@@ -198,26 +206,40 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
-    void scheduleAutoScrollToLatest() {
-      if (autoScrollScheduled.value || isAutoScrolling.value) return;
-      autoScrollScheduled.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        autoScrollScheduled.value = false;
-        if (!context.mounted || !followsLatest.value || hasUserScrolled.value) {
-          return;
-        }
-        scrollToLatest();
-      });
-    }
-
     bool latestIsAtBoundary() {
-      // In this reversed list, item 0's leading edge is the bottom boundary.
-      // Being merely visible is not enough: a user who has pulled a tall
-      // newest row away from the boundary must not snap back on live updates.
+      // In this reversed list, item 0's leading edge is the visible bottom
+      // boundary above the composer. Being merely visible is not enough: a
+      // user who has pulled a tall newest row away from that boundary must not
+      // snap back on live updates.
+      final boundary = latestAlignment();
       return itemPositionsListener.itemPositions.value.any(
         (position) =>
-            position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+            position.index == 0 &&
+            (position.itemLeadingEdge - boundary).abs() < 0.01,
       );
+    }
+
+    void realignLatestAfterLayoutChange() {
+      if (latestRealignmentQueued.value ||
+          !followsLatest.value ||
+          hasUserScrolled.value) {
+        return;
+      }
+      latestRealignmentQueued.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        latestRealignmentQueued.value = false;
+        if (!context.mounted ||
+            !itemScrollController.isAttached ||
+            !followsLatest.value ||
+            hasUserScrolled.value ||
+            latestIsAtBoundary()) {
+          return;
+        }
+        // A dock or keyboard resize is a layout correction, not a navigation
+        // action. Keeping it instant avoids restarting a smooth scroll for
+        // every position report while the viewport settles.
+        itemScrollController.jumpTo(index: 0);
+      });
     }
 
     useEffect(() {
@@ -232,12 +254,7 @@ class _MessageList extends HookConsumerWidget {
         }
         if (nextIsAtLatest) {
           if (!isAtLatest.value) isAtLatest.value = true;
-        } else if (followsLatest.value && !hasUserScrolled.value) {
-          // The viewport can shrink when the composer or keyboard opens.
-          // Preserve auto-follow until the user scrolls the timeline.
-          if (!isAtLatest.value) isAtLatest.value = true;
-          scheduleAutoScrollToLatest();
-        } else if (isAtLatest.value) {
+        } else if (!followsLatest.value && isAtLatest.value) {
           isAtLatest.value = false;
         }
 
@@ -260,6 +277,22 @@ class _MessageList extends HookConsumerWidget {
         onPositionsChanged,
       );
     }, [channelId, entries.length, itemPositionsListener]);
+
+    // Composer size changes and keyboard metrics changes arrive in separate
+    // layout passes. Preserve the latest-message anchor for both, but only
+    // while the user has not deliberately left the tail.
+    useEffect(() {
+      realignLatestAfterLayoutChange();
+      return null;
+    }, [composerBottomInset]);
+
+    useEffect(() {
+      final observer = _ChannelLatestMetricsObserver(
+        onMetricsChanged: realignLatestAfterLayoutChange,
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () => WidgetsBinding.instance.removeObserver(observer);
+    }, [itemScrollController]);
 
     useEffect(() {
       if (initialThreadRootId == null || didOpenInitialThread.value) {
@@ -587,4 +620,13 @@ class _JumpToLatestButton extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ChannelLatestMetricsObserver with WidgetsBindingObserver {
+  final VoidCallback onMetricsChanged;
+
+  _ChannelLatestMetricsObserver({required this.onMetricsChanged});
+
+  @override
+  void didChangeMetrics() => onMetricsChanged();
 }

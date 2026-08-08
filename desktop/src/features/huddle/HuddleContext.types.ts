@@ -9,6 +9,8 @@ export interface HuddleContextValue {
   micConnected: boolean;
   isMuted: boolean;
   toggleMute: () => void;
+  /** Interrupt this agent only if it still owns the active utterance. */
+  interruptAgentSpeech: (agentPubkey: string) => Promise<void>;
   micLevel: number;
   pttActive: boolean;
   voiceInputMode: VoiceInputMode;

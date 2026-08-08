@@ -173,9 +173,11 @@ export function AppShell() {
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   usePersonaSync(
     identityQuery.data?.pubkey,
@@ -193,8 +195,8 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
-  // deferred) and unconditionally repairs the DB subscription on internal
-  // builds — otherwise frames emitted before the listener opens are lost.
+  // deferred): seeds kind 24200 for fresh identities, no-ops for explicit
+  // opt-outs. Frames before the listener opens are permanently lost.
   const observerReconciled = useObserverArchiveReconciliation(
     identityQuery.data?.pubkey,
   );
@@ -333,6 +335,7 @@ export function AppShell() {
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    silentChannelIds: huddleBackingChannelIds,
   });
   const {
     followedRootIds,
@@ -420,7 +423,6 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
@@ -439,8 +441,8 @@ export function AppShell() {
       getThreadReadAt,
       getMessageReadAt,
       channels,
+      huddleBackingChannelIds,
     );
-
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
@@ -632,8 +634,7 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links only from the main window. The
-  // companion is dedicated to its active Huddle route.
+  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
   useMessageDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
@@ -775,13 +776,11 @@ export function AppShell() {
             onShowHuddleInMainApp={showHuddleInMainApp}
             onViewHuddleChannel={viewHuddleChannel}
             onVisibilityChange={handleHuddleVisibilityChange}
-            terminal={<TerminalBootstrap {...terminalContext} />}
           >
             {hasCommunityRail && !isHuddleRoom ? (
               <CommunityRail
                 activeCommunityId={communitiesHook.activeCommunity?.id ?? null}
                 onAddCommunity={addCommunityDialog.openDialog}
-                onRemoveCommunity={(id) => void handleRemoveCommunity(id)}
                 onReorderCommunities={communitiesHook.reorderCommunities}
                 onSwitchCommunity={handleSwitchCommunity}
                 onUpdateCommunity={communitiesHook.updateCommunity}
@@ -789,7 +788,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
@@ -874,9 +873,7 @@ export function AppShell() {
                         onOpenAddCommunity={addCommunityDialog.openDialog}
                         onSendFeedback={() => setIsSendFeedbackOpen(true)}
                         onUpdateCommunity={communitiesHook.updateCommunity}
-                        onRemoveCommunity={(id) =>
-                          void handleRemoveCommunity(id)
-                        }
+                        onRemoveCommunity={handleRemoveCommunity}
                         onSwitchCommunity={handleSwitchCommunity}
                         onCreateAgent={() => requestOpenCreateAgent()}
                         selfPresenceStatus={presenceSession.currentStatus}
@@ -929,6 +926,7 @@ export function AppShell() {
                         selectedChannelId={selectedChannelId}
                         selectedView={selectedView}
                         unreadChannelIds={unreadChannelIds}
+                        previewActivityChannelIds={unreadThreadChannelIds}
                         unreadChannelCounts={unreadChannelCounts}
                         mutedChannelIds={mutedChannelIds}
                         onMuteChannel={muteChannel}
@@ -942,6 +940,7 @@ export function AppShell() {
                       isHuddleRoom={isHuddleRoom}
                       isHuddleRoomStarting={isHuddleRoomStarting}
                       mainInsetRef={mainInsetRef}
+                      terminal={<TerminalBootstrap {...terminalContext} />}
                     >
                       <Outlet />
                     </AppShellChannelSurface>

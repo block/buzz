@@ -17,12 +17,6 @@ type AppHuddleShellProps = {
   onShowHuddleInMainApp: (ephemeralChannelId: string) => void;
   onViewHuddleChannel: (ephemeralChannelId: string) => void;
   onVisibilityChange: (visible: boolean) => void;
-  /**
-   * Terminal substrate layer. Rendered behind the app surface (which carries
-   * z-10) so the ⌘J handoff can reveal it by fading the surface above. Not
-   * mounted in the dedicated Huddle room window.
-   */
-  terminal?: React.ReactNode;
 };
 
 export function AppHuddleShell({
@@ -37,7 +31,6 @@ export function AppHuddleShell({
   onShowHuddleInMainApp,
   onViewHuddleChannel,
   onVisibilityChange,
-  terminal,
 }: AppHuddleShellProps) {
   return (
     <HuddleProvider
@@ -55,7 +48,13 @@ export function AppHuddleShell({
           data-huddle-open={isDrawerOpen}
           data-huddle-window={isRoom}
         >
-          {isRoom ? null : terminal}
+          <div
+            aria-hidden="true"
+            className={cn(
+              "buzz-huddle-drawer-backdrop",
+              isDrawerOpen && "buzz-huddle-drawer-backdrop-open",
+            )}
+          />
           <div
             className={cn(
               "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
@@ -69,7 +68,7 @@ export function AppHuddleShell({
             {children}
           </div>
           {isRoom || !isCompanionOpen ? (
-            <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
+            <div className="absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
               <AppHuddleBar
                 mode={isRoom ? "room" : "main"}
                 onOpenHuddleWindow={isRoom ? undefined : onCompanionOpen}

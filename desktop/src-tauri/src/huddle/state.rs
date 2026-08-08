@@ -15,7 +15,7 @@ use super::{stt, tts};
 
 /// Voice input mode: push-to-talk (PTT) or voice-activity detection (VAD).
 ///
-/// PTT: mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
+/// PTT (the default): mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
 /// `ptt_active` and immediately cancels any playing TTS. Releasing the key
 /// (after a 200 ms delay) stops mic capture and flushes the utterance.
 ///
@@ -26,8 +26,8 @@ use super::{stt, tts};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceInputMode {
-    PushToTalk,
     #[default]
+    PushToTalk,
     VoiceActivity,
 }
 
@@ -135,6 +135,10 @@ pub struct HuddleState {
     /// Shared with the STT pipeline for mic gating.
     #[serde(skip)]
     pub ptt_active: Arc<AtomicBool>,
+    /// True while the clickable microphone control is manually unmuted.
+    /// In PTT mode, either this flag or `ptt_active` opens the STT gate.
+    #[serde(skip)]
+    pub manual_mic_unmuted: Arc<AtomicBool>,
 }
 
 fn serialize_agent_pubkeys<S>(v: &Arc<Mutex<Vec<String>>>, s: S) -> Result<S::Ok, S::Error>
@@ -190,6 +194,7 @@ impl Clone for HuddleState {
             session_generation: Arc::clone(&self.session_generation),
             voice_input_mode: self.voice_input_mode.clone(),
             ptt_active: Arc::clone(&self.ptt_active),
+            manual_mic_unmuted: Arc::clone(&self.manual_mic_unmuted),
         }
     }
 }
@@ -221,6 +226,7 @@ impl Default for HuddleState {
             session_generation: Arc::new(AtomicU64::new(0)),
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
+            manual_mic_unmuted: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -330,6 +336,13 @@ mod tests {
         assert!(state.maybe_auto_enable_transcription_for_agents());
         assert!(state.transcription_enabled);
         assert!(!state.maybe_auto_enable_transcription_for_agents());
+    }
+
+    #[test]
+    fn defaults_to_push_to_talk_with_an_open_microphone() {
+        let state = HuddleState::default();
+        assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
+        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
     }
 
     #[test]

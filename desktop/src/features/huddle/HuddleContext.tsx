@@ -65,6 +65,10 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+function interruptAgentSpeech(agentPubkey: string) {
+  return invoke<void>("interrupt_huddle_speech", { agentPubkey });
+}
+
 const HuddleContext = React.createContext<HuddleContextValue | null>(null);
 
 export function HuddleProvider({
@@ -99,10 +103,10 @@ export function HuddleProvider({
   const clearHuddleError = React.useCallback(() => setHuddleError(null), []);
   const [micConnected, setMicConnected] = React.useState(false);
   const [isMuted, setIsMuted] = React.useState(false);
-  const micConnectedRef = React.useRef(micConnected);
-  micConnectedRef.current = micConnected;
   const isMutedRef = React.useRef(isMuted);
   isMutedRef.current = isMuted;
+  const micConnectedRef = React.useRef(micConnected);
+  micConnectedRef.current = micConnected;
   const [mirroredAudioState, setMirroredAudioState] =
     React.useState<HuddleAudioMirrorState | null>(null);
   const [mirroredMicLevel, setMirroredMicLevel] = React.useState(0);
@@ -113,6 +117,12 @@ export function HuddleProvider({
     setVoiceInputModeState,
     voiceInputMode,
   } = useHuddlePttState(micConnected);
+  // Manual mute remains independently controllable in every input mode. The
+  // PTT shortcut temporarily opens a manually muted microphone while held.
+  const locallyMuted =
+    isMuted && !(voiceInputMode === "push_to_talk" && pttActive);
+  const locallyMutedRef = React.useRef(locallyMuted);
+  locallyMutedRef.current = locallyMuted;
   /** Ephemeral channel ID — set after start_huddle/join_huddle, used for TTS subscription */
   const [ephemeralChannelId, setEphemeralChannelId] = React.useState<
     string | null
@@ -140,6 +150,9 @@ export function HuddleProvider({
   const effectiveVoiceInputMode = ownsAudioSession
     ? voiceInputMode
     : (mirroredAudioState?.voiceInputMode ?? voiceInputMode);
+  const effectiveIsMuted = ownsAudioSession
+    ? locallyMuted
+    : (mirroredAudioState?.isMuted ?? true);
   const setSelectedDeviceId = React.useCallback(
     (deviceId: string) => {
       if (ownsAudioSession) {
@@ -237,12 +250,19 @@ export function HuddleProvider({
     [ownsAudioSession, setVoiceInputModeState],
   );
 
-  // Ref-track the current audio track so disconnectMedia is stable (no
-  // dependency on localAudioTrack state). This prevents the unmount-cleanup
-  // effect from re-firing mid-startup when setLocalAudioTrack triggers a
-  // leaveHuddle dependency chain update.
+  // Keep disconnectMedia stable so setting the track cannot re-fire the
+  // unmount cleanup during startup.
   const audioTrackRef = React.useRef<MediaStreamTrack | null>(null);
   audioTrackRef.current = localAudioTrack;
+
+  // Keep the browser track and worklet aligned with the combined manual/PTT
+  // state. The worklet tracks the manual state separately so a PTT release
+  // does not remute a microphone the user explicitly left open.
+  React.useEffect(() => {
+    if (!ownsAudioSession || !audioTrackRef.current) return;
+    audioTrackRef.current.enabled = !locallyMuted;
+    workletRef.current?.setTransmitting(!isMuted);
+  }, [isMuted, locallyMuted, ownsAudioSession]);
 
   const toggleMute = React.useCallback(() => {
     if (!ownsAudioSession) {
@@ -265,12 +285,19 @@ export function HuddleProvider({
       return;
     }
 
-    setIsMuted((previous) => {
-      const next = !previous;
-      if (audioTrackRef.current) audioTrackRef.current.enabled = !next;
-      return next;
+    // Set the effective state promised by the button instead of inverting the
+    // hidden manual preference, which can differ while PTT is held.
+    const requestedMuted = !locallyMuted;
+    setIsMuted(requestedMuted);
+    void invoke("set_huddle_manual_mic_unmuted", {
+      enabled: !requestedMuted,
     });
-  }, [mirroredAudioState?.isMuted, ownsAudioSession, voiceInputMode]);
+  }, [
+    locallyMuted,
+    mirroredAudioState?.isMuted,
+    ownsAudioSession,
+    voiceInputMode,
+  ]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -321,7 +348,7 @@ export function HuddleProvider({
     if (!ownsAudioSession) return;
 
     const state: HuddleAudioMirrorState = {
-      isMuted,
+      isMuted: locallyMuted,
       micConnected,
       audioDevices: localAudioDevices,
       selectedDeviceId: localSelectedDeviceId,
@@ -337,9 +364,9 @@ export function HuddleProvider({
       if (event.payload.type === "set-muted") {
         const requestedMuted = event.payload.isMuted;
         setIsMuted(() => {
-          if (audioTrackRef.current) {
-            audioTrackRef.current.enabled = !requestedMuted;
-          }
+          void invoke("set_huddle_manual_mic_unmuted", {
+            enabled: !requestedMuted,
+          });
           return requestedMuted;
         });
         return;
@@ -358,7 +385,7 @@ export function HuddleProvider({
         return;
       }
       void emit(HUDDLE_AUDIO_STATE_EVENT, {
-        isMuted: isMutedRef.current,
+        isMuted: locallyMutedRef.current,
         micConnected: micConnectedRef.current,
         audioDevices: localAudioDevices,
         selectedDeviceId: localSelectedDeviceId,
@@ -375,7 +402,7 @@ export function HuddleProvider({
       unlisten?.();
     };
   }, [
-    isMuted,
+    locallyMuted,
     localAudioDevices,
     localMicGain,
     localSelectedDeviceId,
@@ -570,10 +597,11 @@ export function HuddleProvider({
         setMicConnected(true);
 
         // Setup AudioWorklet — PCM goes to Rust via push_audio_pcm
-        const initialTransmitting = getVoiceInputMode() !== "push_to_talk";
+        audioTrack.enabled = !locallyMutedRef.current;
         const worklet = await setupAudioWorklet(
           audioTrack,
-          initialTransmitting,
+          getVoiceInputMode(),
+          !isMutedRef.current,
         );
         worklet.setGain(micGainRef.current);
 
@@ -612,6 +640,8 @@ export function HuddleProvider({
       tokenRef.current += 1;
       const myToken = tokenRef.current;
 
+      isMutedRef.current = false;
+      setIsMuted(false);
       setHuddleError(null);
       setIsStarting(true);
       onHuddleStartPendingChange?.(true);
@@ -685,6 +715,8 @@ export function HuddleProvider({
       busyRef.current = true;
       tokenRef.current += 1;
       const myToken = tokenRef.current;
+      isMutedRef.current = false;
+      setIsMuted(false);
       setHuddleError(null);
       setIsStarting(true);
 
@@ -928,10 +960,9 @@ export function HuddleProvider({
         micConnected: ownsAudioSession
           ? micConnected
           : (mirroredAudioState?.micConnected ?? false),
-        isMuted: ownsAudioSession
-          ? isMuted
-          : (mirroredAudioState?.isMuted ?? false),
+        isMuted: effectiveIsMuted,
         toggleMute,
+        interruptAgentSpeech,
         micLevel: ownsAudioSession ? micLevel : mirroredMicLevel,
         pttActive,
         voiceInputMode: effectiveVoiceInputMode,
