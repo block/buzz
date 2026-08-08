@@ -307,15 +307,15 @@ pub(crate) async fn flush_pending_events_at(
         let event = nostr::Event::from_json(&current.raw_event)
             .map_err(|e| format!("failed to parse retained event '{}': {e}", current.d_tag))?;
 
-        // NIP-IA requests are freshness-checked by the relay (±120s on
-        // `created_at`), so a request retained while the relay was
-        // unreachable would be permanently stale. Re-sign with a fresh
-        // timestamp at publish time; kind, tags, and content are preserved,
-        // and `mark_synced` below still compares against the retained row's
-        // original `created_at`/`content`, which are untouched.
-        let is_archive_request =
-            buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind);
-        let event = if is_archive_request {
+        // Relay ingest rejects events outside ±900s of server time
+        // (`MAX_TIMESTAMP_DRIFT_SECS`). Retention may hold a row longer than
+        // that while the relay is down or after a failed sweep, so replaying
+        // the retained pre-signed `raw_event` would be rejected forever.
+        // Re-sign at publish with a fresh `created_at`; kind, tags, and
+        // content are preserved. `mark_synced` below still keys off the
+        // retained row's original `created_at`+`content` (untouched by
+        // re-sign).
+        let event = if needs_fresh_timestamp_at_publish(current.kind) {
             resign_with_fresh_timestamp(&event, state)?
         } else {
             event
@@ -351,12 +351,27 @@ pub(crate) async fn flush_pending_events_at(
     Ok(flushed)
 }
 
+/// Whether a retained event must be re-signed with a fresh `created_at` at
+/// flush time (see `flush_pending_events_at`).
+///
+/// Covers identity-archive requests, NIP-33 parameterized replaceables
+/// (30175/30176/30177/30178 and siblings), and NIP-09 tombstones (kind:5) —
+/// all gated by the relay's ±900s timestamp window.
+fn needs_fresh_timestamp_at_publish(kind: u32) -> bool {
+    use buzz_core_pkg::kind::{
+        is_identity_archive_request_kind, is_parameterized_replaceable, KIND_DELETION,
+    };
+    is_identity_archive_request_kind(kind)
+        || is_parameterized_replaceable(kind)
+        || kind == KIND_DELETION
+}
+
 /// Re-sign a retained event with the current owner keys and a fresh
 /// `created_at`, preserving kind, tags, and content.
 ///
-/// Used for relay-freshness-checked kinds (NIP-IA 9035/9036) that would
-/// otherwise go permanently stale sitting in the retention store while the
-/// relay is unreachable. `.allow_self_tagging()` mirrors
+/// Used for kinds that would otherwise go permanently stale sitting in the
+/// retention store past the relay's ±900s ingest window (see
+/// [`needs_fresh_timestamp_at_publish`]). `.allow_self_tagging()` mirrors
 /// `events::build_archive_identity_request` — nostr strips `p` tags matching
 /// the signer by default, which would corrupt a self-targeted request.
 ///
