@@ -76,6 +76,9 @@ grep -Fq 'GH_TOKEN: ${{ github.token }}' "$candidate_workflow" || {
   exit 1
 }
 grep -Fq 'reviewed candidate' "$repo_root/scripts/prepare-desktop-release.sh"
+grep -Fq 'gh pr list --repo block/buzz' "$repo_root/scripts/prepare-desktop-release.sh"
+grep -Fq 'gh pr edit --repo block/buzz' "$repo_root/scripts/prepare-desktop-release.sh"
+grep -Fq 'gh pr create --repo block/buzz' "$repo_root/scripts/prepare-desktop-release.sh"
 if grep -Fq 'current `main`' "$repo_root/scripts/prepare-desktop-release.sh"; then
   echo "desktop release PR body contains executable command substitution" >&2
   exit 1
