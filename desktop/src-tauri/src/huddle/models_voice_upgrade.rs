@@ -120,9 +120,11 @@ mod tests {
             TTS_MODEL_VERSION
         );
         assert!(!model_dir.join("marius.wav").exists());
-        assert!(
-            ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION)
-                .is_ready(temp.path())
-        );
+        assert!(ModelSlot::new(
+            TTS_MODEL_DIR_NAME,
+            TTS_EXPECTED_FILES.to_vec(),
+            TTS_MODEL_VERSION,
+        )
+        .is_ready(temp.path()));
     }
 }
