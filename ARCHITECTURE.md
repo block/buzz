@@ -543,6 +543,12 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | `request_approval` | Suspend execution; fields: `from`, `message`, `timeout` (default 24h) |
 | `delay` | Pause execution (max 300 seconds) |
 
+**Workflow-to-agent authority:** `send_message` output is a kind `9` event signed by the relay identity advertised as NIP-11 `self`. The event carries exactly one `["buzz:workflow", "true"]` marker and exactly one `["workflow-owner", "<64-hex-pubkey>"]` authority tag. The latter names the workflow owner whose authorization is being exercised; `p` tags remain attribution and mention/wake routing only and never grant authority.
+
+An ACP harness may evaluate a workflow message under `workflow-owner` instead of the event signer only when all of the following verify: kind `9`; signature/author equals the configured endpoint's valid NIP-11 `self`; one exact workflow marker; and one syntactically valid, unambiguous `workflow-owner`. Missing NIP-11 identity, malformed/duplicate provenance, a non-relay signer, or a bare owner `p` tag fails closed to ordinary author authorization. The derived workflow owner is then subject to the same `respond_to` policy and DM hardening as a directly authored message. This delegates no broader authority to relay-authored events.
+
+**Discovery query correctness:** multi-value `#h` workflow filters are intersected with the authenticated reader's accessible channels and pushed into SQL before the historical `LIMIT`. Unlike the broader access-scope predicate, an explicit `#h` filter excludes channel-less global events.
+
 **Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. Single-pass resolution (not recursive). Unknown variables left as literal text.
 
 **Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.

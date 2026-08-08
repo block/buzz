@@ -189,6 +189,23 @@ fn workflow_wire_serializes_with_snake_case_keys() {
 }
 
 #[test]
+fn workflow_overview_cursor_uses_timestamp_and_event_id() {
+    let first = wf_event(WF, CHAN, YAML);
+    let second = wf_event("33333333-3333-3333-3333-333333333333", CHAN, YAML);
+    let mut filter = serde_json::json!({
+        "kinds": [30620],
+        "member_channels": true,
+        "limit": WORKFLOW_OVERVIEW_PAGE_SIZE,
+    });
+
+    advance_workflow_cursor(&mut filter, &[first, second.clone()]);
+
+    assert_eq!(filter["until"], second.created_at.as_secs());
+    assert_eq!(filter["before_id"], second.id.to_hex());
+    assert!(filter.get("#h").is_none());
+}
+
+#[test]
 fn runs_and_approvals_serialize_to_bare_empty_array() {
     // Regression guard for the crash class this fix closed. The frontend
     // wrappers `getWorkflowRuns` / `getRunApprovals` do `raw.map(...)`, so the

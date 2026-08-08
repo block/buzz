@@ -66,34 +66,42 @@ pub async fn get_channel_workflows(
     Ok(events.iter().map(workflow_from_event).collect())
 }
 
-/// Fetch workflows across many channels in a single relay round-trip.
-///
-/// The Workflows overview screen previously issued one `get_channel_workflows`
-/// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+const WORKFLOW_OVERVIEW_PAGE_SIZE: usize = 500;
+
+fn advance_workflow_cursor(filter: &mut Value, page: &[nostr::Event]) {
+    let last = page
+        .last()
+        .expect("a full workflow overview page always has a last event");
+    filter["until"] = serde_json::json!(last.created_at.as_secs());
+    filter["before_id"] = serde_json::json!(last.id.to_hex());
+}
+
+/// Fetch every workflow in channels where the authenticated user is an active
+/// member. The relay resolves membership server-side; channel UUIDs never cross
+/// the Desktop/relay boundary. Composite keyset pagination keeps each DB read
+/// bounded while preserving workflows created in the same second.
 #[tauri::command]
-pub async fn get_channels_workflows(
-    channel_ids: Vec<String>,
+pub async fn get_member_channel_workflows(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkflowWire>, String> {
-    if channel_ids.is_empty() {
-        return Ok(Vec::new());
+    let mut filter = serde_json::json!({
+        "kinds": [30620],
+        "member_channels": true,
+        "limit": WORKFLOW_OVERVIEW_PAGE_SIZE,
+    });
+    let mut workflows = Vec::new();
+
+    loop {
+        let page = query_relay(&state, &[filter.clone()]).await?;
+        let done = page.len() < WORKFLOW_OVERVIEW_PAGE_SIZE;
+        if !done {
+            advance_workflow_cursor(&mut filter, &page);
+        }
+        workflows.extend(page.iter().map(workflow_from_event));
+        if done {
+            return Ok(workflows);
+        }
     }
-
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
-
-    Ok(events.iter().map(workflow_from_event).collect())
 }
 
 #[tauri::command]
