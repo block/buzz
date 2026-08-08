@@ -1366,6 +1366,20 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    // #3980: a turn that produced non-empty reply text but completed no tool
+    // call ends silently — the reply never reached the relay. Log it so the
+    // silent-failure mode is at least visible in operator logs (observable
+    // via Desktop's observer view); publishing via `post_failure_notice`
+    // requires channel + thread context unavailable at this chokepoint.
+    if let Some(silent) = agent.acp.take_unpublished_turn_notice() {
+        tracing::warn!(
+            target: "pool::prompt",
+            turn = %turn_id,
+            bytes = silent.len(),
+            "turn produced reply text but no publish — silent on relay (#3980): {:.200}",
+            silent.trim()
+        );
+    }
     let _ = result_tx.send(PromptResult {
         agent,
         source,
