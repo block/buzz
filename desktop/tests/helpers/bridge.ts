@@ -179,6 +179,16 @@ type MockBridgeOptions = {
     normalized_host?: string;
     archived_at?: string | null;
   }>;
+  /**
+   * Effective per-owner community limit the relay reports through Builderlab as
+   * `max_communities_per_owner`. Omitted = a relay (or hop) that doesn't report
+   * one, so the desktop falls back to its own default (#4160).
+   */
+  builderlabCommunityLimit?: number;
+  /** Rejection returned by hosted community creation; `limit` is the relay's reported `max_communities_per_owner`. */
+  builderlabCreateError?: { code?: string; message?: string; limit?: number };
+  /** Rejection returned by hosted community transfer; `limit` is the relay's reported `max_communities_per_owner`. */
+  builderlabTransferError?: { code?: string; message?: string; limit?: number };
   acpRuntimesCatalog?: Record<string, unknown>[];
   /** Catalog returned after a successful mocked install. */
   acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];

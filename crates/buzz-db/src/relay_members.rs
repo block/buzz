@@ -340,7 +340,7 @@ pub async fn update_relay_member_role(
 /// **Deployment-root authority exception:** This function is called only by
 /// startup initialization and legacy operator provisioning
 /// (`community_provisioning.rs`). It is NOT an end-user path and does NOT
-/// enforce the per-owner community limit (`MAX_COMMUNITIES_PER_OWNER`) or
+/// enforce the per-owner community limit ([`max_communities_per_owner`]) or
 /// acquire the per-recipient advisory lock. The per-owner limit is an
 /// end-user invariant enforced by `create_community_with_owner` and
 /// `transfer_ownership`; deployment-root operations may exceed it by design.
@@ -403,6 +403,11 @@ pub enum TransferResult {
 /// Default maximum number of communities a single pubkey can own. Enforced at
 /// the relay layer — the authoritative layer — so that concurrent transfers or
 /// transfer-vs-create races cannot both pass a preflight count.
+///
+/// The desktop keeps a fallback copy of this default
+/// (`DEFAULT_HOSTED_COMMUNITY_LIMIT` in
+/// `desktop/src/features/communities/hostedCommunityLimit.ts`) for responses
+/// that don't carry the wire field yet — change the two together (#4160).
 pub const MAX_COMMUNITIES_PER_OWNER: i64 = 5;
 
 /// Effective per-owner community limit for this deployment.
@@ -453,7 +458,8 @@ pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
 /// 2. Locks the current owner row `FOR UPDATE` and verifies
 ///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
 ///    a delayed/retried request overwrites a completed transfer.
-/// 3. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
+/// 3. Enforces the effective per-owner limit ([`max_communities_per_owner`],
+///    which honors `BUZZ_MAX_COMMUNITIES_PER_OWNER`) on the transferee by
 ///    counting owned communities inside the same transaction.
 /// 4. Upserts `new_owner_pubkey` as `owner` (insert or promote).
 /// 5. Demotes every other owner in this community to `member` — **not**
