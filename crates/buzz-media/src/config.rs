@@ -33,6 +33,60 @@ impl FromStr for S3AddressingStyle {
     }
 }
 
+/// Relay media migration phase controlling both payload reads and writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+pub enum MediaMigrationPhase {
+    /// Behavior-preserving default: read and write only legacy keys.
+    #[default]
+    #[serde(rename = "legacy-only")]
+    LegacyOnly,
+    /// Migration phase: prefer sharded reads with legacy fallback and write
+    /// both layouts (sharded first, then legacy).
+    #[serde(rename = "dual-read-and-write")]
+    DualReadAndWrite,
+    /// Final phase: read and write only hash-sharded keys.
+    #[serde(rename = "sharded-only")]
+    ShardedOnly,
+}
+
+impl MediaMigrationPhase {
+    /// Whether reads include the sharded key.
+    pub const fn reads_sharded(self) -> bool {
+        !matches!(self, Self::LegacyOnly)
+    }
+
+    /// Whether reads include the legacy key.
+    pub const fn reads_legacy(self) -> bool {
+        !matches!(self, Self::ShardedOnly)
+    }
+
+    /// Whether writes include the sharded key.
+    pub const fn writes_sharded(self) -> bool {
+        matches!(self, Self::DualReadAndWrite | Self::ShardedOnly)
+    }
+
+    /// Whether writes include the legacy key.
+    pub const fn writes_legacy(self) -> bool {
+        !matches!(self, Self::ShardedOnly)
+    }
+}
+
+impl FromStr for MediaMigrationPhase {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "legacy-only" => Ok(Self::LegacyOnly),
+            "dual-read-and-write" => Ok(Self::DualReadAndWrite),
+            "sharded-only" => Ok(Self::ShardedOnly),
+            _ => Err(format!(
+                "BUZZ_MEDIA_MIGRATION_PHASE must be 'legacy-only', \
+                 'dual-read-and-write', or 'sharded-only', got {value:?}"
+            )),
+        }
+    }
+}
+
 fn default_max_video_bytes() -> u64 {
     524_288_000 // 500 MB
 }
@@ -67,6 +121,10 @@ pub struct MediaConfig {
     /// S3 URL addressing style. Defaults to path style for MinIO compatibility.
     #[serde(default)]
     pub s3_addressing_style: S3AddressingStyle,
+    /// Relay phase controlling media payload reads and writes. Defaults to
+    /// legacy-only reads and writes so upgrading does not change behavior.
+    #[serde(default)]
+    pub migration_phase: MediaMigrationPhase,
     /// Maximum upload size for images (bytes). Default: 50 MB.
     pub max_image_bytes: u64,
     /// Maximum upload size for animated GIFs (bytes). Default: 10 MB.
@@ -159,7 +217,7 @@ impl MediaConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{MediaConfig, S3AddressingStyle};
+    use super::{MediaConfig, MediaMigrationPhase, S3AddressingStyle};
     use std::str::FromStr;
 
     fn valid_config() -> MediaConfig {
@@ -170,6 +228,7 @@ mod tests {
             s3_bucket: "buzz-media".to_string(),
             s3_region: "us-east-1".to_string(),
             s3_addressing_style: S3AddressingStyle::Path,
+            migration_phase: MediaMigrationPhase::LegacyOnly,
             max_image_bytes: 1,
             max_gif_bytes: 1,
             max_video_bytes: 1,
@@ -207,6 +266,52 @@ mod tests {
                 error.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'"),
                 "unexpected error for {invalid:?}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn media_migration_phase_parses_and_has_behavior_preserving_default() {
+        assert_eq!(
+            MediaMigrationPhase::default(),
+            MediaMigrationPhase::LegacyOnly
+        );
+        assert_eq!("legacy-only".parse(), Ok(MediaMigrationPhase::LegacyOnly));
+        assert_eq!(
+            "dual-read-and-write".parse(),
+            Ok(MediaMigrationPhase::DualReadAndWrite)
+        );
+        assert_eq!("sharded-only".parse(), Ok(MediaMigrationPhase::ShardedOnly));
+        for invalid in [
+            "legacy",
+            "dual",
+            "dual-read-legacy-write",
+            "dual-read-dual-write",
+            "sharded",
+            "new",
+        ] {
+            assert!(invalid.parse::<MediaMigrationPhase>().is_err());
+        }
+    }
+
+    #[test]
+    fn media_migration_phase_selects_expected_layouts() {
+        let layouts = [
+            (MediaMigrationPhase::LegacyOnly, false, true, false, true),
+            (
+                MediaMigrationPhase::DualReadAndWrite,
+                true,
+                true,
+                true,
+                true,
+            ),
+            (MediaMigrationPhase::ShardedOnly, true, false, true, false),
+        ];
+
+        for (phase, reads_sharded, reads_legacy, writes_sharded, writes_legacy) in layouts {
+            assert_eq!(phase.reads_sharded(), reads_sharded, "{phase:?}");
+            assert_eq!(phase.reads_legacy(), reads_legacy, "{phase:?}");
+            assert_eq!(phase.writes_sharded(), writes_sharded, "{phase:?}");
+            assert_eq!(phase.writes_legacy(), writes_legacy, "{phase:?}");
         }
     }
 

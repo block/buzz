@@ -69,14 +69,18 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
-                                   -p buzz-pair-relay --bin buzz-pair-relay
+                                   -p buzz-pair-relay --bin buzz-pair-relay \
+                                   -p buzz-media --bin buzz-media-layout-backfill \
+                                                 --bin buzz-media-layout-delete-legacy
 
 # Derive the normal release binaries from the same optimized ELF files as the
 # debug image so the two variants cannot drift at code-generation time.
 FROM builder AS stripped-binaries
 RUN strip target/release/buzz-relay \
     && strip target/release/buzz-admin \
-    && strip target/release/buzz-pair-relay
+    && strip target/release/buzz-pair-relay \
+    && strip target/release/buzz-media-layout-backfill \
+    && strip target/release/buzz-media-layout-delete-legacy
 
 # ─── Stage 4: web bundle (pnpm + vite) ──────────────────────────────────────
 # Independent of the Rust layers so a CSS change doesn't bust Rust cache and
@@ -169,6 +173,8 @@ FROM runtime-base AS runtime-debug
 COPY --from=builder /build/target/release/buzz-relay /usr/local/bin/buzz-relay
 COPY --from=builder /build/target/release/buzz-admin /usr/local/bin/buzz-admin
 COPY --from=builder /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
+COPY --from=builder /build/target/release/buzz-media-layout-backfill /usr/local/bin/buzz-media-layout-backfill
+COPY --from=builder /build/target/release/buzz-media-layout-delete-legacy /usr/local/bin/buzz-media-layout-delete-legacy
 
 # Keep the stripped runtime as the final/default Dockerfile target so existing
 # `docker build .` callers and release tags retain their current behavior.
@@ -176,3 +182,5 @@ FROM runtime-base AS runtime
 COPY --from=stripped-binaries /build/target/release/buzz-relay /usr/local/bin/buzz-relay
 COPY --from=stripped-binaries /build/target/release/buzz-admin /usr/local/bin/buzz-admin
 COPY --from=stripped-binaries /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
+COPY --from=stripped-binaries /build/target/release/buzz-media-layout-backfill /usr/local/bin/buzz-media-layout-backfill
+COPY --from=stripped-binaries /build/target/release/buzz-media-layout-delete-legacy /usr/local/bin/buzz-media-layout-delete-legacy

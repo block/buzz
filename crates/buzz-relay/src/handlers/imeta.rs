@@ -244,15 +244,12 @@ pub async fn verify_imeta_blobs(
             .await
             .map_err(|_| format!("imeta references nonexistent blob: {x_value}"))?;
 
-        // 2. HEAD the actual blob object
-        let blob_key = format!("{x_value}.{}", sidecar.ext);
-        let blob_exists = storage
-            .head(&blob_key)
+        // 2. Resolve the actual blob object across sharded and legacy layouts.
+        let blob_name = format!("{x_value}.{}", sidecar.ext);
+        storage
+            .resolve_read_key(ctx, &blob_name)
             .await
             .map_err(|e| format!("storage error checking blob {x_value}: {e}"))?;
-        if !blob_exists {
-            return Err(format!("imeta blob object missing in storage: {x_value}"));
-        }
 
         // 3. Cross-check claimed metadata against sidecar.
         if !m_value.is_empty() && sidecar.mime_type != m_value {
@@ -275,18 +272,12 @@ pub async fn verify_imeta_blobs(
             }
         }
 
-        // 4. If thumb is claimed, HEAD the thumbnail object too.
+        // 4. If thumb is claimed, resolve the thumbnail object too.
         if !thumb_value.is_empty() {
-            let thumb_key = format!("{x_value}.thumb.jpg");
-            let thumb_exists = storage
-                .head(&thumb_key)
+            storage
+                .resolve_read_key(ctx, &format!("{x_value}.thumb.jpg"))
                 .await
                 .map_err(|e| format!("storage error checking thumbnail: {e}"))?;
-            if !thumb_exists {
-                return Err(format!(
-                    "imeta thumb references missing thumbnail: {x_value}"
-                ));
-            }
         }
 
         // 5. If image (poster frame) is claimed, verify sidecar + blob.
@@ -316,16 +307,11 @@ pub async fn verify_imeta_blobs(
                 }
             }
 
-            let img_key = format!("{img_hash}.{}", img_sidecar.ext);
-            let img_exists = storage
-                .head(&img_key)
+            let img_name = format!("{img_hash}.{}", img_sidecar.ext);
+            storage
+                .resolve_read_key(ctx, &img_name)
                 .await
                 .map_err(|e| format!("storage error checking poster image: {e}"))?;
-            if !img_exists {
-                return Err(format!(
-                    "imeta image references missing poster frame: {img_hash}"
-                ));
-            }
         }
     }
     Ok(())

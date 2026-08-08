@@ -1,0 +1,27 @@
+# Run in dry-run mode first. Destructive mode verifies every sharded destination
+# before deleting its legacy source and requires the explicit confirmation value.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: buzz-media-layout-delete-legacy
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: buzz-relay
+      containers:
+        - name: delete-legacy
+          image: ghcr.io/block/buzz:REPLACE_WITH_RELAY_TAG
+          command: ["/usr/local/bin/buzz-media-layout-delete-legacy"]
+          envFrom:
+            - secretRef:
+                name: buzz-relay-env
+          env:
+            - name: BUZZ_MEDIA_MIGRATION_REQUESTS_PER_SECOND
+              value: "25"
+            - name: BUZZ_MEDIA_MIGRATION_DRY_RUN
+              value: "true"
+            # For destructive mode set dry-run to false and uncomment:
+            # - name: BUZZ_MEDIA_DELETE_CONFIRM
+            #   value: delete-verified-legacy-media

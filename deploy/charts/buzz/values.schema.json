@@ -62,6 +62,7 @@
         "drainJitterMs": { "type": "integer", "minimum": 0 },
         "requireAuthToken": { "type": "boolean" },
         "requireRelayMembership": { "type": "boolean" },
+        "mediaMigrationPhase": { "type": "string", "enum": ["legacy-only", "dual-read-and-write", "sharded-only"] },
         "allowNipOaAuth": { "type": "boolean" },
         "huddleAudioAvailable": {
           "type": ["boolean", "null"],

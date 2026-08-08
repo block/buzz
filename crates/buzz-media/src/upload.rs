@@ -88,14 +88,18 @@ where
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    let key = format!("{sha256}.{ext}");
+    let legacy_key = crate::keys::legacy_blob_key(&sha256, &ext)
+        .map_err(|e| MediaError::StorageError(e.to_string()))?;
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
 
     // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
     // sidecar exists but the blob is missing, fall through to re-upload.
     let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    let existing_blob_key = storage
+        .existing_write_key(ctx, &legacy_key)
+        .await?
+        .filter(|_| sidecar_exists);
+    if let Some(existing_blob_key) = existing_blob_key {
         let meta = storage.get_sidecar(ctx, &sha256).await?;
         // A re-upload of known bytes is still a distinct upload *event*: no
         // blob PUT happens, so without this record the uploader would be
@@ -110,6 +114,7 @@ where
                 UploadEventFacts {
                     sha256: &sha256,
                     ext: &ext,
+                    blob_key: &existing_blob_key,
                     mime: &mime,
                     size: body.len() as u64,
                     uploaded_at: chrono::Utc::now().timestamp(),
@@ -138,7 +143,9 @@ where
     // content-addressed and bounded by the upload size limit, so the storage
     // cost is negligible. A V2 background GC job can sweep blobs with no
     // matching sidecar after a grace period.
-    storage.put(&key, &body, &mime).await?;
+    let blob_key = storage
+        .put_payload(ctx, &sha256, &ext, &body, &mime)
+        .await?;
 
     let meta = match prepare_metadata(MetadataInput {
         sha256: sha256.clone(),
@@ -168,6 +175,7 @@ where
             UploadEventFacts {
                 sha256: &sha256,
                 ext: &ext,
+                blob_key: &blob_key,
                 mime: &mime,
                 size: body.len() as u64,
                 uploaded_at,
@@ -226,7 +234,7 @@ pub async fn process_upload(
             let ext = mime_to_ext(&mime).to_string();
             Ok((mime, ext))
         },
-        |input| async move { prepare_image_metadata(storage, config, input).await },
+        |input| async move { prepare_image_metadata(storage, config, ctx, input).await },
     )
     .await
 }
@@ -423,13 +431,17 @@ pub async fn process_video_upload(
             .map_err(|_| MediaError::Internal)??;
 
     let ext = "mp4";
-    let key = format!("{sha256_hex}.{ext}");
+    let legacy_key = crate::keys::legacy_blob_key(&sha256_hex, ext)
+        .map_err(|e| MediaError::StorageError(e.to_string()))?;
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
 
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;
-    let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    let existing_blob_key = storage
+        .existing_write_key(ctx, &legacy_key)
+        .await?
+        .filter(|_| sidecar_exists);
+    if let Some(existing_blob_key) = existing_blob_key {
         let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
         // Re-upload of known bytes: still a distinct upload event — see the
         // buffered path's short-circuit for the rationale.
@@ -442,6 +454,7 @@ pub async fn process_video_upload(
                 UploadEventFacts {
                     sha256: &sha256_hex,
                     ext,
+                    blob_key: &existing_blob_key,
                     mime: &mime,
                     size: file_size,
                     uploaded_at: chrono::Utc::now().timestamp(),
@@ -463,7 +476,9 @@ pub async fn process_video_upload(
     let uploaded_at = chrono::Utc::now().timestamp();
 
     // --- 6. Stream blob from temp file to S3 ---
-    storage.put_file(&key, &tmp_path, &mime).await?;
+    let blob_key = storage
+        .put_payload_file(ctx, &sha256_hex, ext, &tmp_path, &mime)
+        .await?;
     drop(tmp); // Free temp file disk space immediately after S3 upload.
 
     // --- 7. Build metadata (no thumbnail for video — desktop handles that) ---
@@ -488,6 +503,7 @@ pub async fn process_video_upload(
             UploadEventFacts {
                 sha256: &sha256_hex,
                 ext,
+                blob_key: &blob_key,
                 mime: &mime,
                 size: file_size,
                 uploaded_at,
@@ -513,6 +529,7 @@ pub async fn process_video_upload(
 async fn prepare_image_metadata(
     storage: &MediaStorage,
     config: &MediaConfig,
+    ctx: &TenantContext,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
     let body_ref = input.body.clone();
@@ -529,8 +546,7 @@ async fn prepare_image_metadata(
     meta.uploaded_at = input.uploaded_at;
 
     if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
-        storage.put(&thumb_key, tb, "image/jpeg").await?;
+        storage.put_thumbnail(ctx, &input.sha256, tb).await?;
     }
 
     Ok(meta)
@@ -571,6 +587,7 @@ mod tests {
             s3_bucket: String::new(),
             s3_region: "us-east-1".to_string(),
             s3_addressing_style: crate::config::S3AddressingStyle::Path,
+            migration_phase: crate::config::MediaMigrationPhase::LegacyOnly,
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
