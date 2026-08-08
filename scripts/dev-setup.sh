@@ -24,6 +24,18 @@ success() { echo -e "${GREEN}[dev-setup]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[dev-setup]${NC} $*"; }
 error()   { echo -e "${RED}[dev-setup]${NC} $*" >&2; }
 
+# Hermit's bin/ entries are git symlinks. Windows checks them out as plain text
+# files when core.symlinks is false, and Hermit has no Windows build, so fall
+# back to whichever copy of the tool is already on PATH.
+hermit_tool() {
+  local tool="$1"
+  if [[ -x "${REPO_ROOT}/bin/${tool}" ]]; then
+    printf '%s' "${REPO_ROOT}/bin/${tool}"
+  else
+    printf '%s' "${tool}"
+  fi
+}
+
 # ---- Preflight checks -------------------------------------------------------
 
 if ! command -v docker &>/dev/null; then
@@ -111,7 +123,7 @@ fail_if_local_redis_blocks_compose
 # ---- Start services ---------------------------------------------------------
 
 log "Starting services and waiting for health..."
-"${REPO_ROOT}/bin/just" _ensure-services
+"$(hermit_tool just)" _ensure-services
 
 # ---- Run migrations ---------------------------------------------------------
 
@@ -128,7 +140,7 @@ until postgres_accepting_connections; do
   sleep 2
 done
 
-"${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+"$(hermit_tool cargo)" run -p buzz-admin -- migrate
 "${REPO_ROOT}/scripts/seed-local-community.sh"
 success "Database migrations complete"
 
@@ -175,8 +187,13 @@ log "Installing git hooks..."
 # linked-worktree dispatch (same failure mode as the old worktree-relative .hooks).
 HOOKS_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/hooks"
 git -C "${REPO_ROOT}" config --local core.hooksPath "$HOOKS_DIR"
-lefthook install --force
-success "Git hooks installed"
+if command -v lefthook &>/dev/null || [[ -x "${REPO_ROOT}/bin/lefthook" ]]; then
+  "$(hermit_tool lefthook)" install --force
+  success "Git hooks installed"
+else
+  warn "lefthook not found — skipping git hook install."
+  warn "Install it from https://lefthook.dev, then rerun 'just hooks'."
+fi
 
 # ---- Print connection info --------------------------------------------------
 
