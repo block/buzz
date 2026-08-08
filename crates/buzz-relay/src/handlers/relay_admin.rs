@@ -270,6 +270,14 @@ async fn execute_relay_admin_command(
                 .await
                 .map_err(|e| format!("database error: {e}"))?
         };
+        if sender_member.is_none() {
+            tracing::debug!(
+                pubkey = %sender_hex,
+                community = %tenant.community(),
+                kind = event.kind.as_u16(),
+                "relay_admin: no relay_member row found for sender — will be treated as no role"
+            );
+        }
         if !may_set_workspace_profile(
             sender_role,
             state.config.require_relay_membership,
