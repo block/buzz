@@ -113,16 +113,13 @@ with a TypeScript lookup table or an id comparison in a component.
    Once the Advanced toggle is visible, its expanded state is exclusively
    user-controlled: provider, harness, and required-env changes must never
    open it automatically in defaults, create, or edit flows. In Create mode,
-   `Run on` belongs in Advanced directly after **Who can send instructions**;
-   keep it out of the basic create fields. The defaults summary follows
-   preferred-harness changes saved while the dialog is open, and its configured
-   state includes required credentials as well as provider/model values. If no
-   available harness can resolve, Create starts in Customize and lets unavailable
-   catalog entries be selected only to expose their setup guidance; submission
-   remains blocked.
-   Advanced-only required credentials and incomplete remote **Run on** setup
-   mark the collapsed Advanced toggle without opening it, and block incomplete
-   saves.
+   the defaults summary follows preferred-harness changes saved while the
+   dialog is open, and its configured state includes required credentials as
+   well as provider/model values. If no available harness can resolve, Create
+   starts in Customize and lets unavailable catalog entries be selected only
+   to expose their setup guidance; submission remains blocked.
+   Advanced-only required credentials mark the collapsed Advanced toggle
+   without opening it in Global Defaults and Edit, and block incomplete saves.
    Runtime-file credentials satisfy Global Defaults just as they do Create and
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
@@ -167,10 +164,26 @@ with a TypeScript lookup table or an id comparison in a component.
    shown; when it *is* remote they picked that host from the selector
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
-   copy. **The owner-only-access build capability is backend-independent.** When
-   `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
-   locked to owner-only, including provider-backed agents. A provider backend
-   does not prove remote execution and must never create a policy carve-out.
+   copy.
+12. **Capability manifests project evidence; they never infer it.**
+    `lib/capabilityManifest.ts` combines `KnownAcpRuntime` facts,
+    managed-agent lifecycle, presence, and the encrypted owner observer stream.
+    A missing runtime field is `unknown`, an explicit `false` is
+    `unavailable`, and only a supplied fact is `reported`. Manifest projection
+    is allowlist-only: do not surface raw config, executable commands,
+    arguments, environment variables, prompts, paths, credentials, tool inputs,
+    or tool results. Reduce initialize, session-config, and command evidence
+    into the observer store independently of the capped raw transcript so a
+    long turn cannot erase the manifest. A newer initialize invalidates older
+    session and command evidence; a newer session config invalidates commands
+    until that session reports its own command update. Readiness labels are
+    local observations for the current owner, machine, process, and community;
+    they are never portable safety, reputation, or third-party delegation
+    claims. A shareable claim requires a separate authenticated event contract,
+    scoped receipts, and expiry semantics. Runtime catalog and lifecycle
+    queries must settle before the manifest renders readiness. Label the
+    positive aggregate state as "Runtime ready" and show the permission evidence
+    source so owners can distinguish runtime behavior from Buzz harness policy.
 
 ## The tests that enforce this
 
@@ -198,6 +211,11 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- `lib/capabilityManifest.test.mjs` — evidence semantics, durable reduction
+  across transcript trimming and session boundaries, staleness, permission
+  divergence, safe tool projection, and observation ordering.
+- `ui/AgentCapabilityManifestCard.render.test.mjs` — owner-facing readiness,
+  permission divergence, tool risk, and unknown-evidence rendering.
 
 ## Keep this file true
 

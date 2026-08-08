@@ -178,6 +178,7 @@ pub async fn save_custom_harness(
         source: HarnessSource::Custom,
         definition_env: definition.env,
         max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
+        capabilities: Default::default(),
     })
 }
 

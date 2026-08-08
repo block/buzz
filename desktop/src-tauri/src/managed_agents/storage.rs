@@ -11,12 +11,58 @@ use crate::app_state::keyring_service;
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
+use crate::managed_agents::types::CredentialPersistence;
 use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
 fn agent_keyring_name(pubkey: &str) -> String {
     format!("agent:{pubkey}")
+}
+
+/// Derive the credential persistence status for an agent from a read-only
+/// keyring probe and the record's in-memory `private_key_nsec` state.
+///
+/// After `hydrate_keys`, `private_key_nsec` is non-empty whether the key came
+/// from the keyring or from inline JSON fallback. To distinguish the two, we
+/// probe the keyring directly:
+///
+/// - `KeyringProbe::Present` → keyring verified (the key is in the keyring)
+/// - `KeyringProbe::ReachableButEmpty` + non-empty `private_key_nsec` →
+///   inline fallback (key is in JSON, not in the keyring)
+/// - `KeyringProbe::ReachableButEmpty` + empty `private_key_nsec` → missing
+/// - `KeyringProbe::Unreachable` → unavailable (cannot determine)
+///
+/// This is owner-local evidence. It does not prove the keyring entry's value
+/// derives the agent's pubkey — that would require loading the secret. See
+/// wolfyy970's feedback on #5311 and #2957.
+pub fn credential_persistence_for_agent(
+    pubkey: &str,
+    private_key_nsec: &str,
+) -> CredentialPersistence {
+    if pubkey.is_empty() {
+        return CredentialPersistence::Missing;
+    }
+    let Some(store) = agent_secret_store() else {
+        // No keyring backend in this build — if the key is inline it's
+        // inline fallback; otherwise it's missing.
+        return if private_key_nsec.is_empty() {
+            CredentialPersistence::Missing
+        } else {
+            CredentialPersistence::InlineFallback
+        };
+    };
+    match store.probe(&agent_keyring_name(pubkey)) {
+        KeyringProbe::Present => CredentialPersistence::KeyringVerified,
+        KeyringProbe::ReachableButEmpty => {
+            if private_key_nsec.is_empty() {
+                CredentialPersistence::Missing
+            } else {
+                CredentialPersistence::InlineFallback
+            }
+        }
+        KeyringProbe::Unreachable => CredentialPersistence::Unavailable,
+    }
 }
 
 /// The agent secret store. `None` when the build has no keyring backend, in

@@ -11,6 +11,7 @@ import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
+import { AgentCapabilityManifestCard } from "@/features/agents/ui/AgentCapabilityManifestCard";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -425,6 +426,12 @@ export function ProfileSummaryView({
           ) : null}
           {activeTab === "runtime" ? (
             <>
+              {isOwner === true && managedAgent !== undefined ? (
+                <AgentCapabilityManifestCard
+                  agent={managedAgent}
+                  presenceStatus={presenceStatus}
+                />
+              ) : null}
               <ProfileRuntimeTabContent
                 agentInstruction={agentInstruction}
                 autoRestartEnabled={
