@@ -601,13 +601,19 @@ CREATE TABLE relay_invites (
     use_count    INTEGER     NOT NULL DEFAULT 0 CHECK (use_count >= 0),
     expires_at   TIMESTAMPTZ NOT NULL,
     created_by   TEXT        NOT NULL,
+    channel_id  UUID,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, id),
     UNIQUE (community_id, token_hash),
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id) ON DELETE CASCADE,
     CHECK (max_uses IS NULL OR use_count <= max_uses)
 );
 
 CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);
+CREATE INDEX relay_invites_channel_idx
+    ON relay_invites (community_id, channel_id)
+    WHERE channel_id IS NOT NULL;
 
 -- ── Archived identities (NIP-IA) ──────────────────────────────────────────────
 -- Conformance: archive cannot hide a key in another community. PK scoped.

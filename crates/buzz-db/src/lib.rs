@@ -3058,8 +3058,12 @@ impl Db {
         created_by: &str,
         ttl_secs: u64,
         max_uses: Option<i32>,
+        channel_id: Option<Uuid>,
     ) -> Result<relay_invite::MintedInvite> {
-        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+        relay_invite::mint_relay_invite(
+            &self.pool, community, created_by, ttl_secs, max_uses, channel_id,
+        )
+        .await
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.

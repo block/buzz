@@ -39,6 +39,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Channel granted by this invite, or `None` for a community invite.
+        channel_id: Option<uuid::Uuid>,
     },
     /// The claimer was already a member. `use_count` was NOT incremented.
     AlreadyMember {
@@ -46,6 +48,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Channel scoped by this invite, or `None` for a community invite.
+        channel_id: Option<uuid::Uuid>,
     },
     /// The invite's `expires_at` has passed.
     Expired,
@@ -70,6 +74,8 @@ pub struct MintedInvite {
     pub uses_remaining: Option<i32>,
     /// The invite's database-generated UUID.
     pub invite_id: uuid::Uuid,
+    /// Channel granted on claim, or `None` for a community invite.
+    pub channel_id: Option<uuid::Uuid>,
 }
 
 fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
@@ -101,6 +107,7 @@ pub async fn mint_relay_invite(
     created_by: &str,
     ttl_secs: u64,
     max_uses: Option<i32>,
+    channel_id: Option<uuid::Uuid>,
 ) -> Result<MintedInvite> {
     validate_mint_inputs(ttl_secs, max_uses)?;
 
@@ -112,8 +119,8 @@ pub async fn mint_relay_invite(
     let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
     let row = sqlx::query(
-        "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by, channel_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
          RETURNING id",
     )
     .bind(community.as_uuid())
@@ -121,6 +128,7 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
+    .bind(channel_id)
     .fetch_one(pool)
     .await?;
 
@@ -132,6 +140,7 @@ pub async fn mint_relay_invite(
         max_uses,
         uses_remaining: max_uses,
         invite_id,
+        channel_id,
     })
 }
 
@@ -209,7 +218,7 @@ pub async fn claim_relay_invite(
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
     let row = sqlx::query(
-        "SELECT id, max_uses, use_count, expires_at \
+        "SELECT id, max_uses, use_count, expires_at, channel_id, created_by \
          FROM relay_invites \
          WHERE community_id = $1 AND token_hash = $2 \
          FOR UPDATE",
@@ -230,6 +239,8 @@ pub async fn claim_relay_invite(
     let max_uses: Option<i32> = invite.try_get("max_uses")?;
     let use_count: i32 = invite.try_get("use_count")?;
     let expires_at: DateTime<Utc> = invite.try_get("expires_at")?;
+    let channel_id: Option<uuid::Uuid> = invite.try_get("channel_id")?;
+    let created_by: String = invite.try_get("created_by")?;
 
     // Expiry is checked before membership deliberately. An expired bearer must
     // not authorize fresh policy-acceptance evidence, even for an existing
@@ -248,15 +259,31 @@ pub async fn claim_relay_invite(
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
 
-    // 5. Check existing membership.
-    let existing =
+    // 5. Check existing community and optional channel membership.
+    let existing_relay =
         sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
             .fetch_optional(&mut *tx)
             .await?;
 
-    if existing.is_some() {
+    let existing_channel = if let Some(channel_id) = channel_id {
+        sqlx::query(
+            "SELECT 1 FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 \
+               AND pubkey = decode($3, 'hex') AND removed_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(claimer_pubkey)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some()
+    } else {
+        true
+    };
+
+    if existing_relay.is_some() && existing_channel {
         // 6. Already a member — insert policy evidence but do NOT increment.
         if let Some(version) = policy_version {
             sqlx::query(
@@ -280,6 +307,7 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            channel_id,
         });
     }
 
@@ -301,7 +329,7 @@ pub async fn claim_relay_invite(
     // 8. Insert relay member. The conflict branch covers a claimant admitted
     // concurrently through a different invite: only the transaction that
     // actually inserted membership may consume this invite.
-    let inserted = sqlx::query(
+    let relay_inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'member', 'invite') \
          ON CONFLICT (community_id, pubkey) DO NOTHING",
@@ -312,6 +340,28 @@ pub async fn claim_relay_invite(
     .await?
     .rows_affected()
         > 0;
+
+    let channel_inserted = if let Some(channel_id) = channel_id {
+        sqlx::query(
+            "INSERT INTO channel_members \
+                (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, decode($3, 'hex'), 'guest', decode($4, 'hex')) \
+             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET \
+                removed_at = NULL, removed_by = NULL, role = 'guest', \
+                invited_by = EXCLUDED.invited_by \
+             WHERE channel_members.removed_at IS NOT NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(claimer_pubkey)
+        .bind(&created_by)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0
+    } else {
+        false
+    };
 
     // 9. Insert join-policy acceptance evidence. This is required for both a
     // new member and a claimant whose concurrent membership insert won first.
@@ -327,7 +377,7 @@ pub async fn claim_relay_invite(
         .await?;
     }
 
-    if !inserted {
+    if !relay_inserted && !channel_inserted {
         tx.commit().await?;
         log_claim_outcome(
             community,
@@ -339,6 +389,7 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            channel_id,
         });
     }
 
@@ -367,6 +418,7 @@ pub async fn claim_relay_invite(
     Ok(ClaimOutcome::Joined {
         use_count: new_use_count,
         uses_remaining: new_uses_remaining,
+        channel_id,
     })
 }
 
@@ -411,6 +463,11 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("delete test members");
+        sqlx::query("DELETE FROM channels WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test channels");
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -455,7 +512,7 @@ mod tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1), None)
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -467,6 +524,7 @@ mod tests {
             ClaimOutcome::Joined {
                 use_count: 1,
                 uses_remaining: Some(0),
+                channel_id: None,
             }
         );
         assert_eq!(
@@ -476,6 +534,7 @@ mod tests {
             ClaimOutcome::AlreadyMember {
                 use_count: 1,
                 uses_remaining: Some(0),
+                channel_id: None,
             }
         );
         assert_eq!(
@@ -501,7 +560,7 @@ mod tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1), None)
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
@@ -545,7 +604,7 @@ mod tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
+        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2), None)
             .await
             .expect("mint invite");
         let hash = hash_v2_code(&invite.code);
@@ -582,10 +641,10 @@ mod tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let old = mint_relay_invite(&pool, community, "owner", 3600, Some(1), None)
             .await
             .expect("mint old invite");
-        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let recent = mint_relay_invite(&pool, community, "owner", 3600, Some(1), None)
             .await
             .expect("mint recent invite");
         let cutoff = Utc::now() - chrono::Duration::days(30);
@@ -620,7 +679,7 @@ mod tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, None, None)
             .await
             .expect("mint unlimited invite");
         let hash = hash_v2_code(&invite.code);
@@ -633,6 +692,7 @@ mod tests {
                 ClaimOutcome::Joined {
                     use_count: expected_count,
                     uses_remaining: None,
+                    channel_id: None,
                 }
             );
         }
@@ -642,11 +702,93 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn scoped_invite_adds_existing_community_member_as_channel_guest_once() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let channel_id = Uuid::new_v4();
+        let owner = test_pubkey();
+        let guest = test_pubkey();
+
+        sqlx::query(
+            "INSERT INTO channels \
+                (community_id, id, name, channel_type, visibility, created_by) \
+             VALUES ($1, $2, 'guest-test', 'stream', 'private', decode($3, 'hex'))",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("insert private channel");
+        sqlx::query(
+            "INSERT INTO channel_members \
+                (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, decode($3, 'hex'), 'owner', decode($3, 'hex'))",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("insert channel owner");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+             VALUES ($1, $2, 'member', 'test')",
+        )
+        .bind(community.as_uuid())
+        .bind(&guest)
+        .execute(&pool)
+        .await
+        .expect("insert existing community member");
+
+        let invite = mint_relay_invite(&pool, community, &owner, 3600, Some(1), Some(channel_id))
+            .await
+            .expect("mint scoped invite");
+        let hash = hash_v2_code(&invite.code);
+
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash, &guest, None)
+                .await
+                .expect("claim scoped invite"),
+            ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0),
+                channel_id: Some(channel_id),
+            }
+        );
+        let role: String = sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 \
+               AND pubkey = decode($3, 'hex') AND removed_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&guest)
+        .fetch_one(&pool)
+        .await
+        .expect("read guest role");
+        assert_eq!(role, "guest");
+
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash, &guest, None)
+                .await
+                .expect("retry scoped invite"),
+            ClaimOutcome::AlreadyMember {
+                use_count: 1,
+                uses_remaining: Some(0),
+                channel_id: Some(channel_id),
+            }
+        );
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn policy_evidence_failure_rolls_back_membership_and_consumption() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1), None)
             .await
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);

@@ -38,15 +38,19 @@ type CopyStatus = "idle" | "copying" | "copied";
  * capped to a caller-selected number of successful joins.
  */
 export function InviteLinkSection({
+  channelId,
+  channelName,
   onTtlSecsChange,
   ttlSecs,
 }: {
+  channelId?: string;
+  channelName?: string;
   onTtlSecsChange: (ttlSecs: number) => void;
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
   const [maxUsesEnabled, setMaxUsesEnabled] = React.useState(true);
-  const [maxUsesInput, setMaxUsesInput] = React.useState("3");
+  const [maxUsesInput, setMaxUsesInput] = React.useState(channelId ? "1" : "3");
   const parsedMaxUses = Number(maxUsesInput);
   const maxUsesValid =
     !maxUsesEnabled ||
@@ -75,6 +79,7 @@ export function InviteLinkSection({
       const invite = await mintInvite({
         ttlSecs,
         maxUses: maxUsesEnabled ? parsedMaxUses : null,
+        channelId,
       });
       await writeTextToClipboard(invite.url);
       setCopyStatus("copied");
@@ -92,9 +97,13 @@ export function InviteLinkSection({
           <Link2 aria-hidden="true" className="h-4 w-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium">Share with a link</h3>
+          <h3 className="text-sm font-medium">
+            {channelId ? "Invite a guest" : "Share with a link"}
+          </h3>
           <p className="text-xs text-secondary-foreground/75">
-            Anyone with the link can join this community.
+            {channelId
+              ? `Anyone with the link can join #${channelName ?? "this channel"} as a read-only guest.`
+              : "Anyone with the link can join this community."}
           </p>
         </div>
         <DropdownMenu>

@@ -209,3 +209,41 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
     teardownTauriStubs();
   }
 });
+
+test("mintInvite scopes a one-use link to a channel guest", async () => {
+  setupTauriStubs("https://relay.example");
+  try {
+    const originalFetch = globalThis.fetch;
+    let capturedBody;
+    globalThis.fetch = async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          code: "v2.channel-guest",
+          expires_at: 1785100000,
+          url: "https://relay.example/invite/v2.channel-guest",
+          max_uses: 1,
+          uses_remaining: 1,
+          channel_id: "79b26b45-1b21-4dad-bf46-8c682633cbe2",
+          channel_role: "guest",
+        }),
+      );
+    };
+    try {
+      const result = await mintInvite({
+        channelId: "79b26b45-1b21-4dad-bf46-8c682633cbe2",
+        maxUses: 1,
+      });
+      assert.equal(
+        capturedBody.channel_id,
+        "79b26b45-1b21-4dad-bf46-8c682633cbe2",
+      );
+      assert.equal(capturedBody.max_uses, 1);
+      assert.equal(result.channelRole, "guest");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    teardownTauriStubs();
+  }
+});

@@ -27,6 +27,8 @@ export type MintedInvite = {
   url: string;
   maxUses: number | null;
   usesRemaining: number | null;
+  channelId: string | null;
+  channelRole: "guest" | null;
 };
 
 export type JoinPolicy = {
@@ -41,6 +43,8 @@ export type ClaimResult = {
   communityId: string;
   host: string;
   role: string;
+  channelId: string | null;
+  channelRole: "guest" | null;
 };
 
 async function sha256Hex(text: string): Promise<string> {
@@ -194,11 +198,13 @@ export async function acceptJoinPolicy(
 export async function mintInvite(options?: {
   ttlSecs?: number;
   maxUses?: number | null;
+  channelId?: string;
 }): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
   const payload: Record<string, unknown> = {};
   if (options?.ttlSecs != null) payload.ttl_secs = options.ttlSecs;
   if (options?.maxUses != null) payload.max_uses = options.maxUses;
+  if (options?.channelId != null) payload.channel_id = options.channelId;
   const body = JSON.stringify(payload);
   const raw = await invitePost<{
     code: string;
@@ -206,6 +212,8 @@ export async function mintInvite(options?: {
     url: string;
     max_uses: number | null;
     uses_remaining: number | null;
+    channel_id: string | null;
+    channel_role: "guest" | null;
   }>(base, "/api/invites", body);
   return {
     code: raw.code,
@@ -213,6 +221,8 @@ export async function mintInvite(options?: {
     url: raw.url,
     maxUses: raw.max_uses,
     usesRemaining: raw.uses_remaining,
+    channelId: raw.channel_id ?? null,
+    channelRole: raw.channel_role ?? null,
   };
 }
 
@@ -232,11 +242,15 @@ export async function claimInvite(
     community_id: string;
     host: string;
     role: string;
+    channel_id: string | null;
+    channel_role: "guest" | null;
   }>(base, "/api/invites/claim", body);
   return {
     status: raw.status,
     communityId: raw.community_id,
     host: raw.host,
     role: raw.role,
+    channelId: raw.channel_id ?? null,
+    channelRole: raw.channel_role ?? null,
   };
 }

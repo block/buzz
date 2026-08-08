@@ -56,6 +56,8 @@ import {
   managedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
 import { EditRespondToDialog } from "./EditRespondToDialog";
+import { InviteLinkSection } from "@/features/community-members/ui/InviteLinkSection";
+import { DEFAULT_INVITE_TTL_SECS } from "@/features/community-members/ui/InviteLinkSection";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
@@ -153,6 +155,9 @@ export function MembersSidebar({
   const [addingMemberPubkeys, setAddingMemberPubkeys] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
+  const [inviteTtlSecs, setInviteTtlSecs] = React.useState(
+    DEFAULT_INVITE_TTL_SECS,
+  );
   const identityQuery = useIdentityQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
@@ -726,6 +731,16 @@ export function MembersSidebar({
           </DialogHeader>
 
           <div className="max-h-[calc(100vh-12rem)] overflow-y-auto pb-6">
+            {canManageMembers && channel.channelType !== "dm" ? (
+              <section className="mb-4 rounded-xl border border-border/70 bg-background/70 p-3">
+                <InviteLinkSection
+                  channelId={channel.id}
+                  channelName={channel.name}
+                  onTtlSecsChange={setInviteTtlSecs}
+                  ttlSecs={inviteTtlSecs}
+                />
+              </section>
+            ) : null}
             <section>
               <div
                 className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"

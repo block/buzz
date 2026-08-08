@@ -58,6 +58,9 @@ pub struct MintInviteRequest {
     /// must be an integer from 1 through [`MAX_INVITE_USES`].
     #[serde(default)]
     pub max_uses: Option<i32>,
+    /// Optional private channel to grant with the read-only guest role.
+    #[serde(default)]
+    pub channel_id: Option<uuid::Uuid>,
 }
 
 fn validate_mint_request(
@@ -271,7 +274,8 @@ pub async fn mint_invite(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites", &body).await?;
 
-    // Authz mirrors kind:9030 (add member): owner or admin only.
+    // Community invites require a relay owner/admin. Channel-scoped invites
+    // may instead be minted by that channel's owner/admin.
     let sender_hex = pubkey.to_hex();
     let member = state
         .db
@@ -279,13 +283,6 @@ pub async fn mint_invite(
         .await
         .map_err(|e| internal_error(&format!("invite mint role lookup: {e}")))?;
     let role = member.map(|m| m.role).unwrap_or_default();
-    if role != "owner" && role != "admin" {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "only relay owners and admins can create invites",
-        ));
-    }
-
     let request: MintInviteRequest = if body.is_empty() {
         MintInviteRequest::default()
     } else {
@@ -297,12 +294,52 @@ pub async fn mint_invite(
         })?
     };
 
+    if let Some(channel_id) = request.channel_id {
+        let sender_bytes = pubkey.to_bytes();
+        let channel = state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .map_err(|_| api_error(StatusCode::NOT_FOUND, "channel_not_found"))?;
+        if channel.channel_type == "dm" {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "channel invites are not available for direct messages",
+            ));
+        }
+        let channel_role = state
+            .db
+            .get_members(tenant.community(), channel_id)
+            .await
+            .map_err(|e| internal_error(&format!("channel invite role lookup: {e}")))?
+            .into_iter()
+            .find(|member| member.pubkey == sender_bytes)
+            .map(|member| member.role);
+        if !matches!(channel_role.as_deref(), Some("owner" | "admin")) {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "only channel owners and admins can create channel invites",
+            ));
+        }
+    } else if role != "owner" && role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "only relay owners and admins can create invites",
+        ));
+    }
+
     let (ttl, max_uses) = validate_mint_request(&request)?;
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite(
+            tenant.community(),
+            &sender_hex,
+            ttl,
+            max_uses,
+            request.channel_id,
+        )
         .await
         .map_err(|error| match error {
             buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
@@ -334,6 +371,8 @@ pub async fn mint_invite(
         "expires_at": expires_at_unix,
         "max_uses": invite.max_uses,
         "uses_remaining": invite.uses_remaining,
+        "channel_id": invite.channel_id,
+        "channel_role": invite.channel_id.map(|_| "guest"),
         "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
     })))
 }
@@ -400,7 +439,7 @@ pub async fn claim_invite(
             .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
 
         return match outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::Joined { channel_id, .. } => {
                 tracing::info!(
                     community = %tenant.community(),
                     member = %claimer_hex,
@@ -415,19 +454,26 @@ pub async fn claim_invite(
                 if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
                     tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
                 }
+                if let Some(channel_id) = channel_id {
+                    state.invalidate_membership(&tenant, channel_id, &pubkey.to_bytes());
+                }
                 Ok(Json(serde_json::json!({
                     "status": "joined",
                     "community_id": tenant.community().to_string(),
                     "host": tenant.host(),
                     "role": "member",
+                    "channel_id": channel_id,
+                    "channel_role": channel_id.map(|_| "guest"),
                 })))
             }
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { channel_id, .. } => {
                 Ok(Json(serde_json::json!({
                     "status": "already_member",
                     "community_id": tenant.community().to_string(),
                     "host": tenant.host(),
                     "role": "member",
+                    "channel_id": channel_id,
+                    "channel_role": channel_id.map(|_| "guest"),
                 })))
             }
             buzz_db::relay_invite::ClaimOutcome::Expired => {
@@ -789,6 +835,7 @@ mod tests {
                 super::MintInviteRequest {
                     ttl_secs: Some(MIN_INVITE_TTL_SECS),
                     max_uses: Some(1),
+                    channel_id: None,
                 },
                 (MIN_INVITE_TTL_SECS, Some(1)),
             ),
@@ -796,6 +843,7 @@ mod tests {
                 super::MintInviteRequest {
                     ttl_secs: Some(MAX_INVITE_TTL_SECS),
                     max_uses: Some(MAX_INVITE_USES),
+                    channel_id: None,
                 },
                 (MAX_INVITE_TTL_SECS, Some(MAX_INVITE_USES)),
             ),
@@ -810,22 +858,27 @@ mod tests {
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(0),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(-1),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(MAX_INVITE_USES + 1),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MIN_INVITE_TTL_SECS - 1),
                 max_uses: None,
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
                 max_uses: None,
+                channel_id: None,
             },
         ] {
             assert_eq!(
