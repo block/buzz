@@ -86,6 +86,15 @@ async fn resolve_thread_ref(
 /// Resolve the channel UUID for an event by querying for it via POST /query.
 /// Extracts the `h` tag value from the returned event's tags.
 async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
+    let event = fetch_event_by_id(client, event_id).await?;
+    channel_id_from_event(&event, event_id)
+}
+
+/// Fetch a single event by its ID via POST /query.
+async fn fetch_event_by_id(
+    client: &BuzzClient,
+    event_id: &str,
+) -> Result<serde_json::Value, CliError> {
     let filter = serde_json::json!({
         "ids": [event_id]
     });
@@ -95,9 +104,13 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
     let arr = events
         .as_array()
         .ok_or_else(|| CliError::Other("query response is not an array".into()))?;
-    let event = arr
-        .first()
-        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+    arr.first()
+        .cloned()
+        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))
+}
+
+/// Extract the channel UUID from an event's h-tag.
+fn channel_id_from_event(event: &serde_json::Value, event_id: &str) -> Result<Uuid, CliError> {
     let tags = event
         .get("tags")
         .and_then(|t| t.as_array())
@@ -147,6 +160,27 @@ fn resolve_names_to_pubkeys(
         }
     }
     Ok(resolved)
+}
+
+/// Extract raw `imeta` tag vectors from a fetched event's JSON tags.
+/// Only `imeta` tags are returned — no other tag kinds are carried.
+fn extract_imeta_tags(event: &serde_json::Value) -> Vec<Vec<String>> {
+    event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|t| t.as_array())
+                .filter(|parts| parts.first().and_then(|v| v.as_str()) == Some("imeta"))
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve mention text against the channel membership snapshot.
@@ -812,19 +846,61 @@ pub async fn cmd_delete_message(
 }
 
 /// Edit a message you previously sent.
+///
+/// Attachment semantics:
+/// - No `--file` and no `--no-media`: preserves existing attachments (default carry-forward)
+/// - `--file` provided: replaces attachments with the uploaded file(s) and appends markdown
+/// - `--no-media`: removes all attachments from the message
 pub async fn cmd_edit_message(
     client: &BuzzClient,
     event_id: &str,
     content: &str,
+    files: &[String],
+    no_media: bool,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     validate_content_size(content)?;
 
-    // Resolve channel_id from the event's h-tag
-    let channel_uuid = resolve_channel_id(client, event_id).await?;
+    // Fetch the target event once; derive both the channel id and the
+    // carry-forward attachment set from that single query.
+    let target_event = fetch_event_by_id(client, event_id).await?;
+    let channel_uuid = channel_id_from_event(&target_event, event_id)?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
+    // Decide media_tags and final_content based on flags
+    let (media_tags, final_content) = if no_media {
+        // --no-media: clear all attachments
+        (Vec::new(), content.to_string())
+    } else if !files.is_empty() {
+        // --file provided: upload files and replace attachments
+        let mut media_tags: Vec<Vec<String>> = Vec::new();
+        let mut media_content = String::new();
+        for file_path in files {
+            let desc = client
+                .upload_file(file_path)
+                .await
+                .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
+            media_tags.push(crate::client::build_imeta_tag(&desc));
+            if desc.mime_type.starts_with("video/") {
+                media_content.push_str("\n![video](");
+            } else {
+                media_content.push_str("\n![image](");
+            }
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        }
+        let final_content = if media_content.is_empty() {
+            content.to_string()
+        } else {
+            format!("{}{media_content}", content)
+        };
+        (media_tags, final_content)
+    } else {
+        // Default: preserve existing attachments
+        (extract_imeta_tags(&target_event), content.to_string())
+    };
+
+    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, &final_content, &media_tags)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -928,7 +1004,12 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit {
+            event,
+            content,
+            files,
+            no_media,
+        } => cmd_edit_message(client, &event, &content, &files, no_media).await,
         MessagesCmd::Delete {
             event,
             action_id,
@@ -993,8 +1074,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        event_mention_pubkeys, extract_imeta_tags, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1371,5 +1452,43 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn extract_imeta_tags_returns_only_imeta() {
+        let event = json!({
+            "tags": [
+                ["h", "channel-uuid"],
+                ["e", "event-id", "", "reply"],
+                ["imeta", "url", "https://example.com/image.png", "m", "image/png"],
+                ["emoji", "🎉"],
+                ["imeta", "url", "https://example.com/video.mp4", "m", "video/mp4"],
+            ]
+        });
+        let imeta_tags = extract_imeta_tags(&event);
+        assert_eq!(imeta_tags.len(), 2);
+        // Verify the full imeta vectors are preserved
+        assert_eq!(imeta_tags[0][0], "imeta");
+        assert_eq!(imeta_tags[0][1], "url");
+        assert_eq!(imeta_tags[1][0], "imeta");
+    }
+
+    #[test]
+    fn extract_imeta_tags_empty_when_none() {
+        let event = json!({
+            "tags": [
+                ["h", "channel-uuid"],
+                ["e", "event-id"],
+            ]
+        });
+        let imeta_tags = extract_imeta_tags(&event);
+        assert!(imeta_tags.is_empty());
+    }
+
+    #[test]
+    fn extract_imeta_tags_handles_missing_tags() {
+        let event = json!({});
+        let imeta_tags = extract_imeta_tags(&event);
+        assert!(imeta_tags.is_empty());
     }
 }
