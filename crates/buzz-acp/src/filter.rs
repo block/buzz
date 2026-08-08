@@ -373,6 +373,26 @@ pub async fn match_event(
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
+    // Ephemeral events (kind 20000–29999) are never delivered to the agent,
+    // regardless of any subscription rule that might otherwise admit them.
+    //
+    // When an agent runs `subscribe=all` (or a wildcard `Config` rule, or an
+    // `All` mode with no explicit `BUZZ_ACP_KINDS` allowlist) with no curated
+    // kind list, these events would otherwise wake the agent subprocess on
+    // every keystroke: a human composing one message emits dozens of typing
+    // indicators (kind 20002) and presence updates (kind 20001), each of
+    // which starts a model turn at cost per keystroke and flashes Desktop's
+    // "agent is typing" badge. Observer frames (kind 24200) are caller-local
+    // telemetry on the same channel and belong to the same exclusion.
+    //
+    // Per the design intent behind `SubscribeMode::All`, agents want all
+    // *actionable* kinds, not ambient per-keystroke noise — which these
+    // ephemeral events are. Failing closed here (never wake on any ephemeral
+    // kind) keeps the wildcard subscription safe to use.
+    if buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32) {
+        return None;
+    }
+
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
         if !rule.channels.matches(&channel_id) {
@@ -679,6 +699,44 @@ mod tests {
 
         let result = match_event(&event, channel_id, &rules, "").await;
         assert!(result.is_none());
+    }
+
+    /// #3649: ephemeral events (kind 20000–29999 — typing, presence, observer
+    /// frames) must never wake an agent subprocess, even when a wildcard rule
+    /// would otherwise admit them. A `subscribe=all` agent sees the whole
+    /// event stream; without a guard, each keystroke fires a model turn.
+    #[tokio::test]
+    async fn test_match_event_ephemeral_never_wakes_agent_on_wildcard() {
+        let channel_id = any_channel();
+        // A wildcard rule (empty kinds = match any kind) — the shape an
+        // `All` subscription with no curated list resolves to.
+        let rules = vec![make_rule(
+            "all-kinds",
+            ChannelScope::All("all".into()),
+            vec![], // wildcard: no kind filter
+            false,
+            None,
+            None,
+        )];
+
+        // Typing indicator (20002), presence update (20001), and observer
+        // frame (24200) — every ephemeral kind must be rejected with no match.
+        for ephemeral_kind in [20001u32, 20002, 24200] {
+            let event = make_event(ephemeral_kind, "typing...");
+            let result = match_event(&event, channel_id, &rules, "").await;
+            assert!(
+                result.is_none(),
+                "ephemeral kind {ephemeral_kind} must never match any rule"
+            );
+        }
+
+        // Control: a non-ephemeral kind (kind 9, stream message) matches the
+        // same wildcard rule — the guard only rejects ephemeral kinds.
+        let event = make_event(9, "hello");
+        let matched = match_event(&event, channel_id, &rules, "")
+            .await
+            .expect("non-ephemeral kind 9 must match the wildcard rule");
+        assert_eq!(matched.rule_index, 0);
     }
 
     #[test]
