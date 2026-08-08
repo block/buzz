@@ -65,7 +65,13 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
-fn event_replacement_lock_key(
+/// Return the stable PostgreSQL advisory-lock key for one event replacement
+/// coordinate.
+///
+/// Every writer or deleter that mutates the same replaceable/addressable
+/// coordinate must use this key in a transaction-scoped advisory lock. Hash
+/// collisions only add serialization; they cannot change stored data.
+pub fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
@@ -3739,15 +3745,26 @@ impl Db {
         workflow::delete_workflow(&self.pool, community_id, id).await
     }
 
-    /// Delete a workflow only when it belongs to the provided owner.
-    /// Returns the deleted workflow's `channel_id`.
-    pub async fn delete_workflow_for_owner(
+    /// Delete a workflow and tombstone its live kind:30620 definition atomically.
+    ///
+    /// Returns the workflow-row, cache-invalidation, and event-tombstone outcome.
+    pub async fn delete_workflow_and_definition_for_owner(
         &self,
         community_id: CommunityId,
         id: Uuid,
         owner_pubkey: &[u8],
-    ) -> Result<Option<Uuid>> {
-        workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
+        d_tag: &str,
+        deletion_created_at_secs: i64,
+    ) -> Result<workflow::WorkflowLifecycleDeleteResult> {
+        workflow::delete_workflow_and_definition_for_owner(
+            &self.pool,
+            community_id,
+            id,
+            owner_pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
     }
 
     /// Find a workflow by owner pubkey and name within a community. Used for
