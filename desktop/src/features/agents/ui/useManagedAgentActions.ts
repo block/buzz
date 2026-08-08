@@ -18,6 +18,7 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
+import { listTeams } from "@/shared/api/tauriTeams";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
@@ -257,6 +258,10 @@ export function useManagedAgentActions() {
     return result.data ?? [];
   }
 
+  async function getTeamsForAction() {
+    return listTeams();
+  }
+
   async function handleStop(pubkey: string) {
     clearFeedback();
     try {
@@ -304,12 +309,14 @@ export function useManagedAgentActions() {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
       const channels = await getChannelsForAction();
+      const teams = await getTeamsForAction();
       const result = await deleteManagedAgentWithRules({
         agent,
         channels,
         deleteManagedAgent: deleteMutation.mutateAsync,
         presenceLookup: managedPresenceQuery.data,
         relayAgents: relayAgentsQuery.data ?? [],
+        teams,
       });
       if (result.cancelled) return;
       await removeAgentFromAllChannels(pubkey);

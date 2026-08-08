@@ -1,5 +1,6 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type {
+  AgentTeam,
   Channel,
   ManagedAgent,
   PresenceLookup,
@@ -24,6 +25,7 @@ type ManagedAgentChannelContext = {
 
 type ManagedAgentActionContext = ManagedAgentChannelContext & {
   presenceLookup?: PresenceLookup | null;
+  teams: readonly AgentTeam[];
 };
 
 export type ManagedAgentActionResult = {
@@ -149,11 +151,23 @@ export async function deleteManagedAgentWithRules({
   presenceLookup,
   relayAgents,
   skipRemoteDeleteConfirm = false,
+  teams,
 }: {
   agent: ManagedAgent;
   deleteManagedAgent: DeleteManagedAgent;
   skipRemoteDeleteConfirm?: boolean;
 } & ManagedAgentActionContext): Promise<ManagedAgentActionResult> {
+  const personaId = agent.personaId;
+  const belongsToTeam =
+    personaId !== null &&
+    teams.some((team) => team.personaIds.includes(personaId));
+  if (belongsToTeam) {
+    throw new Error(
+      `Cannot remove ${agent.name}: this agent belongs to a team. ` +
+        "Remove it from every team first.",
+    );
+  }
+
   if (agent.backend.type === "provider" && agent.backendAgentId) {
     const presence = presenceLookup?.[normalizePubkey(agent.pubkey)];
     const channelId = resolveManagedAgentChannelId(agent, {
