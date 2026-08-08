@@ -104,6 +104,12 @@ struct ProjectOwnerIdentity {
     auth_tag: Option<String>,
 }
 
+impl ProjectOwnerIdentity {
+    fn git_auth_config(&self) -> Result<GitAuthConfig, String> {
+        build_git_auth_config_for_keys(&self.keys, self.auth_tag.as_deref())
+    }
+}
+
 fn project_owner_identity(
     app: &AppHandle,
     state: &AppState,
@@ -548,7 +554,7 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    let auth = owner_identity.git_auth_config()?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
@@ -684,10 +690,25 @@ mod tests {
     use super::{
         align_unborn_head_branch, build_merged_status_event, build_pull_request_status_event,
         build_review_request_event, normalize_commit, same_repository,
-        validate_merge_status_metadata,
+        validate_merge_status_metadata, ProjectOwnerIdentity,
     };
     use crate::commands::project_git_exec::{build_test_git_auth_config, run_git};
     use nostr::{Event, JsonUtil, Keys, Timestamp};
+
+    #[test]
+    fn managed_agent_owner_attestation_reaches_merge_git_auth() {
+        let identity = ProjectOwnerIdentity {
+            keys: Keys::generate(),
+            auth_tag: Some("[\"auth\",\"owner\",\"\",\"signature\"]".into()),
+        };
+
+        let auth = identity.git_auth_config().expect("build owner git auth");
+
+        assert_eq!(
+            auth.auth_tag(),
+            Some("[\"auth\",\"owner\",\"\",\"signature\"]")
+        );
+    }
 
     #[test]
     fn empty_clone_uses_requested_default_branch() {

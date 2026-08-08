@@ -48,7 +48,15 @@ pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
     credential_helper: Option<std::path::PathBuf>,
     nsec: String,
+    auth_tag: Option<String>,
     allow_file_transport: bool,
+}
+
+#[cfg(test)]
+impl GitAuthConfig {
+    pub(crate) fn auth_tag(&self) -> Option<&str> {
+        self.auth_tag.as_deref()
+    }
 }
 
 fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
@@ -139,6 +147,8 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_SSH_COMMAND",
         "GIT_EXTERNAL_DIFF",
+        "NOSTR_PRIVATE_KEY",
+        "BUZZ_AUTH_TAG",
     ] {
         command.env_remove(key);
     }
@@ -173,6 +183,9 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
             return apply_git_config(command, &entries);
         };
         command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
+        if let Some(auth_tag) = &auth.auth_tag {
+            command.env("BUZZ_AUTH_TAG", auth_tag);
+        }
         entries.push((
             "credential.helper",
             credential_helper_config_value(cred_helper),
@@ -200,7 +213,7 @@ fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
 
 pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
     let keys = state.signing_keys()?;
-    build_git_auth_config_for_keys(&keys)
+    build_git_auth_config_for_keys(&keys, None)
 }
 
 pub(crate) fn build_git_clone_auth_config(
@@ -213,13 +226,17 @@ pub(crate) fn build_git_clone_auth_config(
                 .ok_or_else(|| "git was not found on PATH".to_string())?,
             credential_helper: None,
             nsec: String::new(),
+            auth_tag: None,
             allow_file_transport: false,
         });
     }
     build_git_auth_config(state)
 }
 
-pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
+pub(crate) fn build_git_auth_config_for_keys(
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<GitAuthConfig, String> {
     let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
     let credential_helper = resolve_command("git-credential-nostr");
     let nsec = keys
@@ -230,13 +247,14 @@ pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfi
         git_path,
         credential_helper,
         nsec,
+        auth_tag: auth_tag.map(ToString::to_string),
         allow_file_transport: false,
     })
 }
 
 #[cfg(test)]
 pub(crate) fn build_test_git_auth_config() -> Result<GitAuthConfig, String> {
-    let mut auth = build_git_auth_config_for_keys(&Keys::generate())?;
+    let mut auth = build_git_auth_config_for_keys(&Keys::generate(), None)?;
     auth.allow_file_transport = true;
     Ok(auth)
 }
@@ -393,10 +411,77 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        clean_branch, clean_target_ref, configure_git_auth, credential_helper_config_value,
+        git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url, GitAuthConfig,
     };
+
+    fn command_env(command: &std::process::Command, key: &str) -> Option<String> {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == key)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn remote_git_auth_includes_managed_agent_owner_attestation() {
+        let auth = GitAuthConfig {
+            git_path: "git".into(),
+            credential_helper: Some("git-credential-nostr".into()),
+            nsec: "nsec1agent".into(),
+            auth_tag: Some("[\"auth\",\"owner\",\"\",\"signature\"]".into()),
+            allow_file_transport: false,
+        };
+        let mut command = std::process::Command::new("git");
+
+        configure_git_auth(&mut command, &auth, true);
+
+        assert_eq!(
+            command_env(&command, "BUZZ_AUTH_TAG").as_deref(),
+            Some("[\"auth\",\"owner\",\"\",\"signature\"]")
+        );
+    }
+
+    #[test]
+    fn git_auth_clears_inherited_credentials_when_not_needed() {
+        let auth = GitAuthConfig {
+            git_path: "git".into(),
+            credential_helper: Some("git-credential-nostr".into()),
+            nsec: "nsec1agent".into(),
+            auth_tag: Some("[\"auth\",\"owner\",\"\",\"signature\"]".into()),
+            allow_file_transport: false,
+        };
+        let mut command = std::process::Command::new("git");
+        command.env("NOSTR_PRIVATE_KEY", "inherited-key");
+        command.env("BUZZ_AUTH_TAG", "inherited-tag");
+
+        configure_git_auth(&mut command, &auth, false);
+
+        assert_eq!(command_env(&command, "NOSTR_PRIVATE_KEY"), None);
+        assert_eq!(command_env(&command, "BUZZ_AUTH_TAG"), None);
+    }
+
+    #[test]
+    fn direct_member_remote_git_clears_inherited_owner_attestation() {
+        let auth = GitAuthConfig {
+            git_path: "git".into(),
+            credential_helper: Some("git-credential-nostr".into()),
+            nsec: "nsec1member".into(),
+            auth_tag: None,
+            allow_file_transport: false,
+        };
+        let mut command = std::process::Command::new("git");
+        command.env("BUZZ_AUTH_TAG", "inherited-tag");
+
+        configure_git_auth(&mut command, &auth, true);
+
+        assert_eq!(command_env(&command, "BUZZ_AUTH_TAG"), None);
+        assert_eq!(
+            command_env(&command, "NOSTR_PRIVATE_KEY").as_deref(),
+            Some("nsec1member")
+        );
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
