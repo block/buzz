@@ -13,6 +13,7 @@ import {
   LayoutTemplate,
   MessagesSquare,
   MonitorCog,
+  NotebookText,
   Moon,
   ShieldAlert,
   Smartphone,
@@ -31,6 +32,7 @@ import type {
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
+import { DocumentsSettingsCard } from "@/features/documents/ui/DocumentsSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import {
   setThreadViewMode,
@@ -111,6 +113,7 @@ export type SettingsSection =
   | "custom-emoji"
   | "local-archive"
   | "mobile"
+  | "documents"
   | "updates";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
@@ -130,6 +133,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "moderation",
   "custom-emoji",
   "local-archive",
+  "documents",
   "mobile",
   "updates",
 ];
@@ -201,6 +205,12 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Channel templates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
+  },
+  {
+    value: "documents",
+    label: "Documents",
+    icon: NotebookText,
+    featureGate: "documents",
   },
   {
     value: "compute",
@@ -980,6 +990,8 @@ export function renderSettingsSection(
       return <CustomEmojiSettingsCard />;
     case "local-archive":
       return <LocalArchiveSettingsCard />;
+    case "documents":
+      return <DocumentsSettingsCard />;
     case "mobile":
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":

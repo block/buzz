@@ -1116,6 +1116,19 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    /**
+     * Writes a file into the mock vault without requiring one to be active, so
+     * specs can seed fixtures before the picker runs.
+     */
+    __BUZZ_E2E_SEED_MOCK_VAULT_FILE__?: (path: string, content: string) => void;
+    /**
+     * The mtime the mock recorded for the last write of `path`. Specs use it to
+     * emit a *matching* `vault-file-modified` event and assert the app treats
+     * it as its own echo rather than an external edit.
+     */
+    __BUZZ_E2E_GET_MOCK_VAULT_MTIME__?: (path: string) => number | null;
+    /** Sets what `pick_vault_folder` returns; `null` models a cancelled dialog. */
+    __BUZZ_E2E_SET_MOCK_VAULT_PICKER__?: (path: string | null) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -3023,6 +3036,119 @@ type MockSaveSubscriptionRow = {
   kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
 };
 let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
+
+// ---------------------------------------------------------------------------
+// Documents vault
+//
+// An in-memory vault keyed by absolute path. The real commands hold the root in
+// Rust state and validate every path against it; the mock keeps the same shape
+// (activate first, then read) so specs exercise the same call ordering.
+// ---------------------------------------------------------------------------
+
+export const MOCK_VAULT_PATH = "/mock/vault";
+
+const DEFAULT_MOCK_VAULT_FILES: ReadonlyArray<readonly [string, string]> = [
+  [
+    `${MOCK_VAULT_PATH}/Welcome.md`,
+    "# Welcome\n\nThis is a mock vault note.\n",
+  ],
+  [
+    `${MOCK_VAULT_PATH}/Notes/Meeting notes.md`,
+    "# Meeting notes\n\n- Ship Documents\n- Then wikilinks\n",
+  ],
+  [
+    `${MOCK_VAULT_PATH}/Notes/Archive/Old note.md`,
+    "# Old note\n\nArchived content.\n",
+  ],
+];
+
+let mockVaultFiles = new Map<string, string>();
+let mockActiveVaultPath: string | null = null;
+/** What `pick_vault_folder` resolves to; `null` models a cancelled dialog. */
+let mockVaultPickerResult: string | null = MOCK_VAULT_PATH;
+/** Folders that exist without (yet) containing a file. */
+let mockVaultFolders = new Set<string>();
+/** Fake mtimes, so specs can exercise watcher echo-suppression. */
+let mockVaultMtimes = new Map<string, number>();
+let mockVaultMtime = 1_000;
+
+function resetMockVault() {
+  mockVaultFiles = new Map(DEFAULT_MOCK_VAULT_FILES);
+  mockVaultFolders = new Set();
+  mockVaultMtimes = new Map();
+  mockVaultMtime = 1_000;
+  mockActiveVaultPath = null;
+  mockVaultPickerResult = MOCK_VAULT_PATH;
+}
+
+function mockVaultName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** Mirrors the Rust guard: nothing is readable until a vault is activated. */
+function requireMockVault(): string {
+  if (!mockActiveVaultPath) throw new Error("No vault folder is selected.");
+  return mockActiveVaultPath;
+}
+
+type MockVaultTreeEntry = {
+  name: string;
+  path: string;
+  is_directory: boolean;
+  children: MockVaultTreeEntry[] | null;
+};
+
+/** Rebuilds the nested tree the real `list_vault_files` returns. */
+function buildMockVaultTree(): MockVaultTreeEntry[] {
+  const root = mockActiveVaultPath ?? MOCK_VAULT_PATH;
+  const directories = new Map<string, MockVaultTreeEntry[]>([[root, []]]);
+
+  const ensureDirectory = (path: string): MockVaultTreeEntry[] => {
+    const existing = directories.get(path);
+    if (existing) return existing;
+
+    const children: MockVaultTreeEntry[] = [];
+    directories.set(path, children);
+    const parent = path.slice(0, path.lastIndexOf("/"));
+    ensureDirectory(parent).push({
+      children,
+      is_directory: true,
+      name: path.slice(path.lastIndexOf("/") + 1),
+      path,
+    });
+    return children;
+  };
+
+  for (const folderPath of [...mockVaultFolders].sort()) {
+    if (folderPath.startsWith(`${root}/`)) ensureDirectory(folderPath);
+  }
+
+  for (const filePath of [...mockVaultFiles.keys()].sort()) {
+    if (!filePath.startsWith(`${root}/`)) continue;
+    const directory = filePath.slice(0, filePath.lastIndexOf("/"));
+    ensureDirectory(directory).push({
+      children: null,
+      is_directory: false,
+      name: filePath.slice(filePath.lastIndexOf("/") + 1),
+      path: filePath,
+    });
+  }
+
+  // Directories before files, then alphabetical — matching the Rust walker.
+  const sortEntries = (entries: MockVaultTreeEntry[]) => {
+    entries.sort((a, b) => {
+      if (a.is_directory !== b.is_directory) return a.is_directory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const entry of entries) {
+      if (entry.children) sortEntries(entry.children);
+    }
+  };
+
+  const tree = directories.get(root) ?? [];
+  sortEntries(tree);
+  return tree;
+}
 
 function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
@@ -10059,6 +10185,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockUserStatuses();
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
+  resetMockVault();
   resetMockPendingCommunityDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
@@ -13044,9 +13171,136 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "pick_vault_folder":
+        return mockVaultPickerResult;
+      case "set_active_vault": {
+        const { vaultPath } = payload as { vaultPath: string };
+        if (!mockVaultFiles.has(vaultPath) && vaultPath !== MOCK_VAULT_PATH) {
+          throw new Error("That folder does not exist.");
+        }
+        mockActiveVaultPath = vaultPath;
+        return { path: vaultPath, name: mockVaultName(vaultPath) };
+      }
+      case "clear_active_vault":
+        mockActiveVaultPath = null;
+        return null;
+      case "get_active_vault":
+        return mockActiveVaultPath
+          ? {
+              path: mockActiveVaultPath,
+              name: mockVaultName(mockActiveVaultPath),
+            }
+          : null;
+      case "list_vault_files":
+        return requireMockVault() ? buildMockVaultTree() : [];
+      case "read_vault_file": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        const content = mockVaultFiles.get(path);
+        if (content === undefined)
+          throw new Error("No such file in the vault.");
+        return content;
+      }
+      case "read_vault_files": {
+        const { paths } = payload as { paths: string[] };
+        requireMockVault();
+        return paths.map((path) => ({
+          path,
+          content: mockVaultFiles.get(path) ?? null,
+        }));
+      }
+      case "vault_entry_exists": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        return mockVaultFiles.has(path);
+      }
+      case "write_vault_file": {
+        const { content, path } = payload as {
+          content: string;
+          path: string;
+        };
+        requireMockVault();
+        mockVaultFiles.set(path, content);
+        // A monotonically increasing stamp models a real mtime closely enough
+        // for echo-suppression: specs assert that a *matching* stamp is ignored
+        // and a differing one is treated as an external edit.
+        mockVaultMtime += 1;
+        mockVaultMtimes.set(path, mockVaultMtime);
+        return { modified_ms: mockVaultMtime };
+      }
+      case "create_vault_file": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        if (mockVaultFiles.has(path)) {
+          throw new Error("A file with that name already exists.");
+        }
+        mockVaultFiles.set(path, "");
+        return null;
+      }
+      case "create_vault_folder": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        mockVaultFolders.add(path);
+        return null;
+      }
+      case "rename_vault_entry": {
+        const { newPath, oldPath } = payload as {
+          newPath: string;
+          oldPath: string;
+        };
+        requireMockVault();
+        if (mockVaultFiles.has(newPath)) {
+          throw new Error("Something with that name already exists.");
+        }
+        if (newPath.startsWith(`${oldPath}/`)) {
+          throw new Error("Cannot move a folder into itself.");
+        }
+        const existing = mockVaultFiles.get(oldPath);
+        if (existing !== undefined) {
+          mockVaultFiles.delete(oldPath);
+          mockVaultFiles.set(newPath, existing);
+          return null;
+        }
+        // Folder rename: move everything beneath it.
+        for (const [path, content] of [...mockVaultFiles]) {
+          if (!path.startsWith(`${oldPath}/`)) continue;
+          mockVaultFiles.delete(path);
+          mockVaultFiles.set(
+            `${newPath}${path.slice(oldPath.length)}`,
+            content,
+          );
+        }
+        mockVaultFolders.delete(oldPath);
+        mockVaultFolders.add(newPath);
+        return null;
+      }
+      case "delete_vault_entry": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        mockVaultFiles.delete(path);
+        for (const candidate of [...mockVaultFiles.keys()]) {
+          if (candidate.startsWith(`${path}/`))
+            mockVaultFiles.delete(candidate);
+        }
+        mockVaultFolders.delete(path);
+        return null;
+      }
+      case "start_vault_watch":
+      case "stop_vault_watch":
+        // The mock has no real watcher; specs drive change events directly via
+        // __BUZZ_E2E_EMIT_TAURI_EVENT__.
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
+  };
+  window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__ = (path, content) => {
+    mockVaultFiles.set(path, content);
+  };
+  window.__BUZZ_E2E_GET_MOCK_VAULT_MTIME__ = (path) =>
+    mockVaultMtimes.get(path) ?? null;
+  window.__BUZZ_E2E_SET_MOCK_VAULT_PICKER__ = (path) => {
+    mockVaultPickerResult = path;
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
