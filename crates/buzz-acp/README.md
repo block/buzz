@@ -222,7 +222,13 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+By default, Mentions mode already subscribes to forum post and comment kinds
+(`45001`, `45003`) alongside stream chat, so `@`-mentions on forum roots and
+comments wake agents the same way chat mentions do. Forum votes (`45002`) are
+not included — they are not a summon surface.
+
+To also receive forum events that do **not** `@`-mention the agent (for
+example, summarizing every new post), widen the filter:
 
 **CLI flags:**
 ```bash
