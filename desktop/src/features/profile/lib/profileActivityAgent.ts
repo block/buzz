@@ -13,14 +13,14 @@ export function resolveProfileActivityAgent({
   managedAgent,
   profile,
   relayAgent,
-  viewerIsOwner,
+  viewerCanObserve,
 }: {
   effectivePubkey: string | null;
   isBot: boolean;
   managedAgent: ManagedAgent | undefined;
   profile: { avatarUrl?: string | null; displayName?: string | null } | null;
   relayAgent: RelayAgent | undefined;
-  viewerIsOwner: boolean;
+  viewerCanObserve: boolean;
 }): ProfileActivityAgent | null {
   if (managedAgent) {
     return {
@@ -31,7 +31,7 @@ export function resolveProfileActivityAgent({
     };
   }
 
-  if (!viewerIsOwner || !effectivePubkey || !isBot) {
+  if (!viewerCanObserve || !effectivePubkey || !isBot) {
     return null;
   }
 

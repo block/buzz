@@ -227,6 +227,9 @@ pub mod relay_members {
                 ),
                 true,
             );
+            state
+                .observer_agent_cache
+                .insert((tenant.community(), agent.to_bytes().to_vec()), true);
         }
         materialized
     }

@@ -55,6 +55,8 @@ pub struct TaskMeta {
     pub channel_id: Option<Uuid>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
+    /// Authors whose triggering events started the turn.
+    pub requester_pubkeys: Vec<String>,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
@@ -339,6 +341,9 @@ pub struct SteerRequest {
     /// `queue::native_steer_framing()` + `queue::format_event_block` so
     /// the wording cannot drift from the cancel+merge fallback path.
     pub prompt_blocks: Vec<String>,
+    /// Author of the event carried by this steer. Added to the active turn's
+    /// observer recipients only after the agent accepts the native steer.
+    pub requester_pubkey: String,
     /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
@@ -694,6 +699,24 @@ impl AgentPool {
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
+    /// Add a successful native-steer author to the in-flight turn's panic
+    /// recovery recipients.
+    pub fn add_task_requester_pubkey(&mut self, channel_id: Uuid, requester_pubkey: &str) -> bool {
+        let Some(meta) = self
+            .task_map
+            .values_mut()
+            .find(|meta| meta.channel_id == Some(channel_id))
+        else {
+            return false;
+        };
+        let requester_pubkey = requester_pubkey.to_ascii_lowercase();
+        if !meta.requester_pubkeys.contains(&requester_pubkey) {
+            meta.requester_pubkeys.push(requester_pubkey);
+            meta.requester_pubkeys.sort();
+        }
+        true
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -1375,6 +1398,21 @@ fn send_prompt_result(
     });
 }
 
+pub(crate) fn batch_requester_pubkeys(batch: Option<&FlushBatch>) -> Vec<String> {
+    let Some(batch) = batch else {
+        return Vec::new();
+    };
+    let mut pubkeys: Vec<String> = batch
+        .events
+        .iter()
+        .chain(batch.cancelled_events.iter())
+        .map(|batch_event| batch_event.event.pubkey.to_hex())
+        .collect();
+    pubkeys.sort();
+    pubkeys.dedup();
+    pubkeys
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1406,12 +1444,16 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    agent.acp.set_observer_context(observer::context_for_turn(
+    let initial_observer_context = observer::context_for_turn(
         observer_channel_id,
         None,
         turn_id.clone(),
         turn_started_at.clone(),
-    ));
+    )
+    .with_requester_pubkeys(batch_requester_pubkeys(batch.as_ref()));
+    agent
+        .acp
+        .set_observer_context(initial_observer_context.clone());
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -1434,8 +1476,7 @@ pub async fn run_prompt_task(
     let _turn_guard = TurnCompletionGuard::new(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer_channel_id,
-        turn_id.clone(),
+        initial_observer_context.clone(),
     );
 
     // Start liveness with `turn_started`, not the final session/prompt call:
@@ -1454,12 +1495,7 @@ pub async fn run_prompt_task(
     let liveness = run_turn_liveness(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer::context_for_turn(
-            observer_channel_id,
-            None,
-            turn_id.clone(),
-            turn_started_at.clone(),
-        ),
+        initial_observer_context,
         ctx.turn_liveness_interval,
         Arc::clone(&liveness_state),
     );
@@ -1696,12 +1732,9 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        Some(session_id.clone()),
-        turn_id.clone(),
-        turn_started_at,
-    ));
+    let mut resolved_observer_context = agent.acp.observer_context().clone();
+    resolved_observer_context.session_id = Some(session_id.clone());
+    agent.acp.set_observer_context(resolved_observer_context);
     // Backfill liveness's shared session ID so ticks after this point carry
     // it too, matching every other observer frame for this turn.
     liveness_guard.set_session_id(session_id.clone());
@@ -3603,22 +3636,19 @@ impl Drop for LivenessGuard {
 struct TurnCompletionGuard {
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
-    channel_id: Option<uuid::Uuid>,
-    turn_id: String,
+    context: observer::ObserverContext,
 }
 
 impl TurnCompletionGuard {
     fn new(
         observer: Option<observer::ObserverHandle>,
         agent_index: Option<usize>,
-        channel_id: Option<uuid::Uuid>,
-        turn_id: String,
+        context: observer::ObserverContext,
     ) -> Self {
         Self {
             observer,
             agent_index,
-            channel_id,
-            turn_id,
+            context,
         }
     }
 }
@@ -3626,11 +3656,10 @@ impl TurnCompletionGuard {
 impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
-            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
             observer.emit(
                 "turn_completed",
                 self.agent_index,
-                &context,
+                &self.context,
                 serde_json::json!({}),
             );
         }
@@ -5473,6 +5502,36 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         }
+    }
+
+    #[test]
+    fn batch_requesters_include_current_and_cancelled_authors_once() {
+        let requester_a = Keys::generate();
+        let requester_b = Keys::generate();
+        let make_batch_event = |keys: &Keys, content: &str| crate::queue::BatchEvent {
+            event: EventBuilder::new(Kind::Custom(9), content)
+                .sign_with_keys(keys)
+                .unwrap(),
+            prompt_tag: "test".into(),
+            received_at: std::time::Instant::now(),
+        };
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![
+                make_batch_event(&requester_b, "new"),
+                make_batch_event(&requester_a, "also new"),
+            ],
+            cancelled_events: vec![make_batch_event(&requester_a, "cancelled")],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+        let mut expected = vec![
+            requester_a.public_key().to_hex(),
+            requester_b.public_key().to_hex(),
+        ];
+        expected.sort();
+
+        assert_eq!(batch_requester_pubkeys(Some(&batch)), expected);
+        assert!(batch_requester_pubkeys(None).is_empty());
     }
 
     #[test]

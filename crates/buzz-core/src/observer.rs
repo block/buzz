@@ -1,8 +1,9 @@
 //! Agent observer frame helpers.
 //!
-//! Observer frames are transient, owner-scoped agent telemetry/control messages.
-//! They use a Buzz ephemeral event kind and carry NIP-44 encrypted JSON in the
-//! event content so relays can route frames without reading ACP internals.
+//! Observer frames are transient, recipient-scoped agent telemetry/control
+//! messages. They use a Buzz ephemeral event kind and carry NIP-44 encrypted
+//! JSON so relays can route frames without reading ACP internals. Telemetry may
+//! target an agent owner or a turn requester; controls remain owner-only.
 
 use nostr::{nips::nip44, Event, Keys, PublicKey};
 use serde::{de::DeserializeOwned, Serialize};
@@ -13,7 +14,7 @@ use zeroize::Zeroize;
 pub const OBSERVER_AGENT_TAG: &str = "agent";
 /// Tag name that identifies the cleartext frame direction.
 pub const OBSERVER_FRAME_TAG: &str = "frame";
-/// Frame value for agent-to-owner observer telemetry.
+/// Frame value for agent-to-recipient observer telemetry.
 pub const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
 /// Frame value for owner-to-agent observer control commands.
 pub const OBSERVER_FRAME_CONTROL: &str = "control";

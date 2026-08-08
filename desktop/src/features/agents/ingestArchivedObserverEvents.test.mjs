@@ -163,6 +163,42 @@ describe("ingestArchivedObserverEvents", () => {
     );
   });
 
+  it("drops owner-only frames for requester-observable agents", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY], []);
+    const ownerOnly = makeObserverEvent({
+      kind: "control_result",
+      payload: { type: "cancel_turn", status: "sent" },
+    });
+
+    await ingestArchivedObserverEvents(
+      [makeRawEvent()],
+      makeDecrypt(ownerOnly),
+    );
+
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").length,
+      0,
+    );
+  });
+
+  it("keeps owner-only frames for owner-authorized agents", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY], [AGENT_PUBKEY]);
+    const ownerOnly = makeObserverEvent({
+      kind: "control_result",
+      payload: { type: "cancel_turn", status: "sent" },
+    });
+
+    await ingestArchivedObserverEvents(
+      [makeRawEvent()],
+      makeDecrypt(ownerOnly),
+    );
+
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").length,
+      1,
+    );
+  });
+
   it("test_dedup_does_not_add_live_present_event", async () => {
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
     // Ingest the same archived event twice — the channel archive window must dedup
