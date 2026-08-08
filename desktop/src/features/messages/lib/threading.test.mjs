@@ -76,3 +76,56 @@ test("resolveReplyTargetAuthorPubkey returns the parent author from the cache", 
 test("resolveReplyTargetAuthorPubkey returns null when parent is not in cache", () => {
   assert.equal(resolveReplyTargetAuthorPubkey(PARENT_ID, []), null);
 });
+
+// The send path (hooks.ts) implements the configurable reply-mention settings
+// by (a) withholding replyTargetAuthorPubkey when autoMentionRepliedTo is off
+// and (b) pre-folding mentionPrefixPubkeys into mentionPubkeys. These tests
+// pin the buildReplyTags contract that wiring relies on.
+
+test("buildReplyTags with auto-mention off (no reply target) keeps only explicit mentions", () => {
+  // Mirrors the wiring when autoMentionRepliedTo=false: the replied-to author
+  // is never passed in, so no implicit p-tag is emitted for them.
+  const tags = buildReplyTags(
+    CHANNEL_ID,
+    SELF_PK,
+    PARENT_ID,
+    ROOT_ID,
+    [OTHER_PK],
+    undefined,
+  );
+  const pTags = tags.filter((t) => t[0] === "p").map((t) => t[1].toLowerCase());
+  assert.deepEqual(pTags.sort(), [OTHER_PK, SELF_PK].sort());
+});
+
+test("buildReplyTags folds configured prefix pubkeys into reply p-tags", () => {
+  // Mirrors the wiring pre-folding mentionPrefixPubkeys into mentionPubkeys.
+  const tags = buildReplyTags(
+    CHANNEL_ID,
+    SELF_PK,
+    PARENT_ID,
+    ROOT_ID,
+    [OTHER_PK, AGENT_PK],
+    AGENT_PK,
+  );
+  const pTags = tags.filter((t) => t[0] === "p").map((t) => t[1].toLowerCase());
+  assert.equal(pTags.includes(OTHER_PK), true);
+  // Prefix pubkey identical to the replied-to author stays deduped.
+  assert.equal(pTags.filter((p) => p === AGENT_PK).length, 1);
+});
+
+test("buildReplyTags prefix dedupes case-insensitively and excludes self", () => {
+  const tags = buildReplyTags(
+    CHANNEL_ID,
+    SELF_PK,
+    PARENT_ID,
+    ROOT_ID,
+    // Prefix set containing a case-variant duplicate and the composer itself.
+    [OTHER_PK.toUpperCase(), OTHER_PK, SELF_PK],
+    AGENT_PK,
+  );
+  const pTags = tags.filter((t) => t[0] === "p").map((t) => t[1].toLowerCase());
+  assert.equal(pTags.filter((p) => p === OTHER_PK).length, 1);
+  // Self appears exactly once (the author p-tag), never as a mention.
+  assert.equal(pTags.filter((p) => p === SELF_PK).length, 1);
+  assert.equal(pTags.includes(AGENT_PK), true);
+});
