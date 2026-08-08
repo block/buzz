@@ -1354,7 +1354,6 @@ fn format_conversation_context(
 }
 
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
-#[derive(Default)]
 pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
@@ -1377,6 +1376,31 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Whether the agent should default to replying in the current thread.
+    ///
+    /// Mirrors the `thread_replies` behavioral config from persona packs.
+    /// When false, the harness does NOT append a forced `--reply-to` anchor
+    /// for new top-level channel mentions, leaving the agent free to post flat
+    /// at the channel root. Existing thread and DM anchors are unaffected.
+    /// Defaults to `true` to preserve existing behavior.
+    pub thread_replies: bool,
+}
+
+impl<'a> Default for FormatPromptArgs<'a> {
+    fn default() -> Self {
+        Self {
+            agent_core: None,
+            channel_info: None,
+            conversation_context: None,
+            profile_lookup: None,
+            has_system_prompt_support: false,
+            base_prompt: None,
+            system_prompt: None,
+            team_instructions: None,
+            agent_canvas: None,
+            thread_replies: true,
+        }
+    }
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1469,8 +1493,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
+    //
+    // Persona-level `thread_replies: false` opts out of forced anchors only for
+    // new top-level channel mentions. Existing thread and DM anchors continue to
+    // work so the agent can still participate in an active thread or DM.
     let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
+    let reply_anchor = if !args.thread_replies && !is_dm && thread_tags.root_event_id.is_none() {
+        None
+    } else if is_dm {
         thread_tags
             .root_event_id
             .is_some()
@@ -3973,6 +4003,119 @@ mod tests {
         assert!(
             prompt.contains("new top-level message"),
             "top-level human message should use the new-thread instruction"
+        );
+    }
+
+    #[test]
+    fn test_reply_instruction_absent_for_top_level_when_thread_replies_false() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello world");
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // Top-level channel mention with thread_replies=false: the harness must
+        // NOT force a new thread anchor, so the agent can post flat at the
+        // channel root.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                thread_replies: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "thread_replies=false must suppress the new top-level reply anchor"
+        );
+        assert!(
+            !prompt.contains("new top-level message"),
+            "thread_replies=false must not emit the new-thread instruction"
+        );
+    }
+
+    #[test]
+    fn test_reply_instruction_present_for_existing_thread_when_thread_replies_false() {
+        let ch = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let event = make_event_with_tags(
+            "@bot help",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // thread_replies=false only opts out of *new* top-level threads. The
+        // agent should still anchor to the root when replying inside an
+        // existing thread.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                thread_replies: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "existing thread reply should still anchor to root when thread_replies=false"
+        );
+    }
+
+    #[test]
+    fn test_reply_instruction_present_for_dm_thread_reply_when_thread_replies_false() {
+        let ch = Uuid::new_v4();
+        let root_id = "b".repeat(64);
+        let event = make_event_with_tags(
+            "thanks",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        // DMs are always 1:1 and not governed by thread_replies.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                thread_replies: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "DM thread reply should keep its reply anchor when thread_replies=false"
         );
     }
 
