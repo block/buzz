@@ -208,14 +208,16 @@ mod tests {
 
     #[tokio::test]
     async fn deployment_url_keeps_nondefault_port_for_lookup() {
-        let r = resolver_with("localhost:3000", 42);
+        // normalize_host collapses localhost to 127.0.0.1, so the resolver
+        // must be keyed on the canonical form.
+        let r = resolver_with("127.0.0.1:3000", 42);
         let ctx = bind_deployment_community(&r, "ws://localhost:3000")
             .await
             .expect("deployment host should bind with non-default port");
         assert_eq!(ctx.community().as_uuid(), &Uuid::from_u128(42));
-        assert_eq!(ctx.host(), "localhost:3000");
+        assert_eq!(ctx.host(), "127.0.0.1:3000");
 
-        let wrong = resolver_with("localhost", 42);
+        let wrong = resolver_with("127.0.0.1", 42);
         let err = bind_deployment_community(&wrong, "ws://localhost:3000")
             .await
             .unwrap_err();
@@ -236,8 +238,11 @@ mod tests {
 
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
-        assert_eq!(relay_url_authority("wss://[::1]:443"), "[::1]");
+        // [::1] is loopback, collapses to 127.0.0.1.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
+        assert_eq!(relay_url_authority("wss://[::1]:443"), "127.0.0.1");
+        // Non-loopback IPv6 keeps brackets.
+        assert_eq!(relay_url_authority("ws://[::2]:3000"), "[::2]:3000");
     }
 
     #[tokio::test]

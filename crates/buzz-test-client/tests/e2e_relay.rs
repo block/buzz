@@ -120,7 +120,7 @@ async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
 }
 
 async fn seed_relay_owner(keys: &Keys) {
-    seed_relay_member("localhost:3000", keys, "owner").await;
+    seed_relay_member("127.0.0.1:3000", keys, "owner").await;
 }
 
 fn http_origin_for_host(host: &str) -> String {
@@ -315,7 +315,7 @@ async fn test_invite_claim_rejects_invalid_code() {
 #[ignore]
 async fn test_invite_mint_requires_owner_or_admin() {
     let member = Keys::generate();
-    seed_relay_member("localhost:3000", &member, "member").await;
+    seed_relay_member("127.0.0.1:3000", &member, "member").await;
 
     let response = invite_post(&member, "/api/invites", "{}").await;
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
