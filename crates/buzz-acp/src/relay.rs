@@ -262,6 +262,25 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Build a standalone bridge client with the same timeout policy as the
+    /// harness relay. Used by the delivery broker before the WebSocket exists.
+    pub(crate) fn new(
+        relay_url: &str,
+        keys: Keys,
+        auth_tag_json: Option<String>,
+    ) -> Result<Self, RelayError> {
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
+            base_url: relay_ws_to_http(relay_url),
+            keys,
+            auth_tag_json,
+        })
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -402,10 +421,20 @@ impl RestClient {
     pub async fn query(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
-        let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+        self.bridge_post_json("/query", &body_bytes).await
+    }
+
+    /// Query with already-validated JSON filters, preserving relay extensions
+    /// such as composite pagination fields that `nostr::Filter` does not model.
+    pub(crate) async fn query_values(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        self.bridge_post_json_bounded(
+            "/query",
+            &body_bytes,
+            buzz_core::delivery_broker::MAX_BROKER_RESULT_BYTES,
+        )
+        .await
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
@@ -415,10 +444,33 @@ impl RestClient {
     pub async fn count(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
-        let resp = self.bridge_post("/count", &body_bytes).await?;
+        self.bridge_post_json("/count", &body_bytes).await
+    }
+
+    /// Count with already-validated JSON filters for the delivery broker.
+    pub(crate) async fn count_values(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        self.bridge_post_json_bounded("/count", &body_bytes, 1024 * 1024)
+            .await
+    }
+
+    async fn bridge_post_json(&self, path: &str, body_bytes: &[u8]) -> Result<Value, RelayError> {
+        let resp = self.bridge_post(path, body_bytes).await?;
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    async fn bridge_post_json_bounded(
+        &self,
+        path: &str,
+        body_bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<Value, RelayError> {
+        let resp = self.bridge_post(path, body_bytes).await?;
+        let bytes = read_bounded_response(resp, max_bytes).await?;
+        serde_json::from_slice(&bytes).map_err(|e| RelayError::Http(e.to_string()))
     }
 
     /// Submit a signed event via the HTTP bridge: `POST /events` with NIP-98 auth.
@@ -428,15 +480,38 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(event)
             .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
         let resp = self.bridge_post("/events", &body_bytes).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))?;
-        if text.is_empty() {
+        let bytes = read_bounded_response(resp, 1024 * 1024).await?;
+        if bytes.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
+        serde_json::from_slice(&bytes).map_err(|e| RelayError::Http(e.to_string()))
     }
+}
+
+async fn read_bounded_response(
+    response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>, RelayError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(RelayError::Http(format!(
+            "relay response exceeds {max_bytes} bytes"
+        )));
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| RelayError::Http(error.to_string()))?;
+        if (bytes.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
+            return Err(RelayError::Http(format!(
+                "relay response exceeds {max_bytes} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Events the harness cares about.
@@ -4010,6 +4085,37 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_response_rejects_chunked_body_before_unbounded_buffering() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind response server");
+        let address = listener.local_addr().expect("response server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept response client");
+            let mut request = vec![0_u8; 4096];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n",
+                )
+                .await
+                .expect("write chunked response");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("get chunked response");
+        let error = read_bounded_response(response, 6)
+            .await
+            .expect_err("body must exceed bound");
+        assert!(error.to_string().contains("exceeds 6 bytes"));
+        server.await.expect("response server task");
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

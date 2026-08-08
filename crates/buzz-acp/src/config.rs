@@ -3,8 +3,9 @@
 //! CLI-first: every option is a CLI flag with env var fallback.
 //! Config file (TOML) for complex subscription rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -156,6 +157,42 @@ impl PermissionMode {
 impl std::fmt::Display for PermissionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_wire_str())
+    }
+}
+
+/// Default-off policy for session-scoped Computer Use form elicitations.
+///
+/// Construction is allowed only after the configured agent pubkey has been
+/// validated against the harness signing key. The ACP client receives this
+/// immutable value and can therefore authorize only exact bundle identifiers
+/// for the configured agent process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComputerUseElicitationPolicy {
+    agent_pubkey: nostr::PublicKey,
+    allowed_bundle_ids: BTreeSet<String>,
+}
+
+impl ComputerUseElicitationPolicy {
+    pub(crate) fn new(
+        agent_pubkey: nostr::PublicKey,
+        allowed_bundle_ids: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            agent_pubkey,
+            allowed_bundle_ids,
+        }
+    }
+
+    pub(crate) fn agent_pubkey(&self) -> &nostr::PublicKey {
+        &self.agent_pubkey
+    }
+
+    pub(crate) fn allows_bundle_id(&self, bundle_id: &str) -> bool {
+        self.allowed_bundle_ids.contains(bundle_id)
+    }
+
+    pub(crate) fn allowed_bundle_count(&self) -> usize {
+        self.allowed_bundle_ids.len()
     }
 }
 
@@ -437,6 +474,26 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Agent pubkey allowed to receive session-scoped Computer Use approvals.
+    /// Must be configured together with `--computer-use-elicitation-bundle-ids`
+    /// and must exactly match the harness signing key. Both options are absent
+    /// by default, preserving the global fail-closed behavior.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_COMPUTER_USE_ELICITATION_AGENT_PUBKEY",
+        hide_env_values = true
+    )]
+    pub computer_use_elicitation_agent_pubkey: Option<String>,
+
+    /// Exact macOS bundle identifiers eligible for session-scoped Computer Use
+    /// approval. Requires `--computer-use-elicitation-agent-pubkey`.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_COMPUTER_USE_ELICITATION_BUNDLE_IDS",
+        value_delimiter = ','
+    )]
+    pub computer_use_elicitation_bundle_ids: Option<Vec<String>>,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -532,6 +589,9 @@ pub struct Config {
     pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Identity-bound allowlist for Computer Use form elicitations. `None`
+    /// preserves the harness-wide rejection behavior.
+    pub(crate) computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
@@ -642,6 +702,86 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
     Ok(validated)
 }
 
+fn validate_computer_use_bundle_id(entry: &str) -> Result<String, ConfigError> {
+    let trimmed = entry.trim();
+    let valid = !trimmed.is_empty()
+        && trimmed.contains('.')
+        && !trimmed.starts_with('.')
+        && !trimmed.ends_with('.')
+        && !trimmed.contains("..")
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+    if !valid {
+        return Err(ConfigError::ConfigFile(format!(
+            "invalid bundle identifier in --computer-use-elicitation-bundle-ids: '{entry}'"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn build_computer_use_elicitation_policy(
+    configured_agent_pubkey: Option<String>,
+    configured_bundle_ids: Option<Vec<String>>,
+    runtime_agent_pubkey: nostr::PublicKey,
+) -> Result<Option<Arc<ComputerUseElicitationPolicy>>, ConfigError> {
+    let (configured_agent_pubkey, configured_bundle_ids) =
+        match (configured_agent_pubkey, configured_bundle_ids) {
+            (None, None) => return Ok(None),
+            (Some(_), None) => {
+                return Err(ConfigError::ConfigFile(
+                    "--computer-use-elicitation-agent-pubkey requires \
+                     --computer-use-elicitation-bundle-ids"
+                        .into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::ConfigFile(
+                    "--computer-use-elicitation-bundle-ids requires \
+                     --computer-use-elicitation-agent-pubkey"
+                        .into(),
+                ));
+            }
+            (Some(agent_pubkey), Some(bundle_ids)) => (agent_pubkey, bundle_ids),
+        };
+
+    let configured_agent_pubkey = nostr::PublicKey::from_hex(configured_agent_pubkey.trim())
+        .map_err(|error| {
+            ConfigError::ConfigFile(format!(
+                "invalid --computer-use-elicitation-agent-pubkey: {error}"
+            ))
+        })?;
+    if configured_agent_pubkey != runtime_agent_pubkey {
+        return Err(ConfigError::ConfigFile(format!(
+            "computer-use elicitation agent pubkey {} does not match runtime agent pubkey {}",
+            configured_agent_pubkey.to_hex(),
+            runtime_agent_pubkey.to_hex()
+        )));
+    }
+
+    if configured_bundle_ids.is_empty() {
+        return Err(ConfigError::ConfigFile(
+            "--computer-use-elicitation-bundle-ids must contain at least one bundle identifier"
+                .into(),
+        ));
+    }
+    let mut allowed_bundle_ids = BTreeSet::new();
+    for bundle_id in configured_bundle_ids {
+        allowed_bundle_ids.insert(validate_computer_use_bundle_id(&bundle_id)?);
+    }
+    if allowed_bundle_ids.is_empty() {
+        return Err(ConfigError::ConfigFile(
+            "--computer-use-elicitation-bundle-ids must contain at least one bundle identifier"
+                .into(),
+        ));
+    }
+
+    Ok(Some(Arc::new(ComputerUseElicitationPolicy::new(
+        runtime_agent_pubkey,
+        allowed_bundle_ids,
+    ))))
+}
+
 /// Validate the `--multiple-event-handling` / `--dedup` combination.
 ///
 /// Every mid-turn cancel mode (`Steer`, `Interrupt`, `OwnerInterrupt`) requires
@@ -683,12 +823,27 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .iter()
         .find_map(|extension| lower.strip_suffix(extension))
         .unwrap_or(&lower);
-    stem.chars()
+    let identity: String = stem
+        .chars()
         .map(|character| match character {
             ' ' | '_' => '-',
             _ => character,
         })
-        .collect()
+        .collect();
+    // Standalone codex-acp releases use platform-qualified binary names. They
+    // are the same runtime identity and must receive the generated Codex
+    // network policy, broker environment, and capability gate even when Buzz
+    // launches the downloaded artifact directly rather than through an npm
+    // shim named `codex-acp`.
+    match identity.as_str() {
+        "codex-acp-x64-linux"
+        | "codex-acp-arm64-linux"
+        | "codex-acp-x64-darwin"
+        | "codex-acp-arm64-darwin"
+        | "codex-acp-x64-windows"
+        | "codex-acp-arm64-windows" => "codex-acp".into(),
+        _ => identity,
+    }
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
@@ -729,11 +884,12 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
 /// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
 ///
-/// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
-/// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
-/// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
-/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
-/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
+/// The env var is forwarded by a compatible `@agentclientprotocol/codex-acp` adapter as
+/// both the session-level config override and the per-turn workspace-write policy. The
+/// per-turn propagation matters because Codex treats that policy as authoritative over
+/// the thread configuration. It is equivalent to the TOML override
+/// `sandbox_workspace_write.network_access = true`, which enables outbound TCP/TLS while
+/// retaining the workspace-write filesystem sandbox.
 ///
 /// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
@@ -994,6 +1150,12 @@ impl Config {
             )));
         }
 
+        let computer_use_elicitation_policy = build_computer_use_elicitation_policy(
+            args.computer_use_elicitation_agent_pubkey,
+            args.computer_use_elicitation_bundle_ids,
+            keys.public_key(),
+        )?;
+
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -1093,6 +1255,7 @@ impl Config {
                 .as_deref()
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
+            computer_use_elicitation_policy,
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
@@ -1124,8 +1287,16 @@ impl Config {
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
+        let computer_use_elicitation_detail = match &self.computer_use_elicitation_policy {
+            Some(policy) => format!(
+                " computer_use_elicitation=enabled(agent={},bundles={})",
+                policy.agent_pubkey().to_hex(),
+                policy.allowed_bundle_count()
+            ),
+            None => " computer_use_elicitation=disabled".to_string(),
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1148,6 +1319,7 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            computer_use_elicitation_detail,
         )
     }
 }
@@ -1464,6 +1636,7 @@ mod tests {
             model: None,
             session_title: None,
             permission_mode: PermissionMode::DontAsk,
+            computer_use_elicitation_policy: None,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -1475,6 +1648,96 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+        }
+    }
+
+    #[test]
+    fn computer_use_elicitation_policy_is_default_off() {
+        let runtime_keys = Keys::generate();
+        let policy = build_computer_use_elicitation_policy(None, None, runtime_keys.public_key())
+            .expect("default-off policy");
+        assert!(policy.is_none());
+    }
+
+    #[test]
+    fn computer_use_elicitation_policy_requires_both_identity_and_bundle_list() {
+        let runtime_keys = Keys::generate();
+        let runtime_pubkey = runtime_keys.public_key();
+
+        let missing_bundles = build_computer_use_elicitation_policy(
+            Some(runtime_pubkey.to_hex()),
+            None,
+            runtime_pubkey,
+        )
+        .expect_err("identity-only policy must fail closed");
+        assert!(missing_bundles.to_string().contains("requires"));
+
+        let missing_identity = build_computer_use_elicitation_policy(
+            None,
+            Some(vec!["com.apple.Photos".into()]),
+            runtime_pubkey,
+        )
+        .expect_err("bundle-only policy must fail closed");
+        assert!(missing_identity.to_string().contains("requires"));
+    }
+
+    #[test]
+    fn computer_use_elicitation_policy_rejects_wrong_runtime_identity() {
+        let runtime_pubkey = Keys::generate().public_key();
+        let other_pubkey = Keys::generate().public_key();
+        let error = build_computer_use_elicitation_policy(
+            Some(other_pubkey.to_hex()),
+            Some(vec!["com.apple.Photos".into()]),
+            runtime_pubkey,
+        )
+        .expect_err("foreign identity must fail closed");
+        assert!(error
+            .to_string()
+            .contains("does not match runtime agent pubkey"));
+    }
+
+    #[test]
+    fn computer_use_elicitation_policy_validates_and_deduplicates_exact_bundle_ids() {
+        let runtime_pubkey = Keys::generate().public_key();
+        let policy = build_computer_use_elicitation_policy(
+            Some(runtime_pubkey.to_hex()),
+            Some(vec![
+                " com.apple.Photos ".into(),
+                "com.apple.Photos".into(),
+                "com.granola.app".into(),
+            ]),
+            runtime_pubkey,
+        )
+        .expect("valid identity-bound policy")
+        .expect("policy enabled");
+
+        assert_eq!(policy.agent_pubkey(), &runtime_pubkey);
+        assert_eq!(policy.allowed_bundle_count(), 2);
+        assert!(policy.allows_bundle_id("com.apple.Photos"));
+        assert!(policy.allows_bundle_id("com.granola.app"));
+        assert!(!policy.allows_bundle_id("com.apple.photos"));
+        assert!(!policy.allows_bundle_id("Photos"));
+    }
+
+    #[test]
+    fn computer_use_elicitation_policy_rejects_empty_or_malformed_bundle_ids() {
+        let runtime_pubkey = Keys::generate().public_key();
+        for bundles in [
+            Vec::<String>::new(),
+            vec!["".into()],
+            vec!["Photos".into()],
+            vec!["com..apple.Photos".into()],
+            vec!["com.apple.Photos*".into()],
+        ] {
+            assert!(
+                build_computer_use_elicitation_policy(
+                    Some(runtime_pubkey.to_hex()),
+                    Some(bundles),
+                    runtime_pubkey,
+                )
+                .is_err(),
+                "malformed bundle list must fail closed"
+            );
         }
     }
 
@@ -1632,6 +1895,37 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn packaged_codex_acp_commands_activate_the_codex_delivery_path() {
+        let packaged_commands = [
+            "/opt/buzz/codex-acp-x64-linux",
+            "/opt/buzz/codex-acp-arm64-linux",
+            "/opt/buzz/codex-acp-x64-darwin",
+            "/opt/buzz/codex-acp-arm64-darwin",
+            r"C:\Buzz\codex-acp-x64-windows.exe",
+            r"C:\Buzz\codex-acp-arm64-windows.exe",
+        ];
+        let private_key = Keys::generate().secret_key().to_secret_hex();
+
+        for command in packaged_commands {
+            assert_eq!(normalize_agent_command_identity(command), "codex-acp");
+            assert!(codex_network_env(command, "wss://relay.example.com").is_some());
+
+            let args = CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &private_key,
+                "--agent-command",
+                command,
+            ]);
+            let config = Config::from_args(args).expect("packaged Codex config");
+            assert!(
+                config.has_generated_codex_config,
+                "packaged command did not activate Codex policy: {command}"
+            );
+        }
     }
 
     #[test]

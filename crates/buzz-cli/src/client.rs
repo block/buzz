@@ -8,6 +8,66 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
 
+fn configured_top_level_mention_policy() -> Result<Option<String>, CliError> {
+    use buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV;
+
+    match std::env::var(TOP_LEVEL_MENTION_PUBKEYS_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV} is not valid UTF-8"
+        ))),
+    }
+}
+
+async fn enforce_top_level_mention_policy(
+    client: &BuzzClient,
+    event: &nostr::Event,
+    configured: Option<&str>,
+) -> Result<(), CliError> {
+    use buzz_core::delivery_broker::{
+        evaluate_top_level_mention_policy, validate_mention_policy_reply_parent,
+        MentionPolicyDecision, TOP_LEVEL_MENTION_PUBKEYS_ENV,
+    };
+
+    let Some(configured) = configured else {
+        return Ok(());
+    };
+    let decision = evaluate_top_level_mention_policy(event, configured).map_err(|message| {
+        CliError::Usage(format!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}"))
+    })?;
+    let MentionPolicyDecision::VerifyReply(context) = decision else {
+        return Ok(());
+    };
+
+    let filter = serde_json::json!({
+        "ids": [context.parent_event_id.clone()],
+        "limit": 1
+    });
+    let raw = client.query(&filter).await?;
+    let parents: Vec<nostr::Event> = serde_json::from_str(&raw).map_err(|error| {
+        CliError::Other(format!(
+            "failed to parse mention-policy reply parent: {error}"
+        ))
+    })?;
+    let mut matching = parents
+        .into_iter()
+        .filter(|parent| parent.id.to_hex() == context.parent_event_id);
+    let parent = matching.next().ok_or_else(|| {
+        CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV}: reply parent {} was not found",
+            context.parent_event_id
+        ))
+    })?;
+    if matching.next().is_some() {
+        return Err(CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV}: relay returned duplicate reply parents"
+        )));
+    }
+    validate_mention_policy_reply_parent(&parent, &context)
+        .map_err(|message| CliError::Usage(format!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}")))
+}
+
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlobDescriptor {
@@ -210,6 +270,23 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
 /// not be blindly retried on ambiguous outcomes.
 fn is_moderation_kind(kind: u16) -> bool {
     matches!(kind, 9040..=9044)
+}
+
+fn is_broker_fallback_error(error: &CliError) -> bool {
+    match error {
+        CliError::Network(error) => {
+            error.is_connect()
+                || error.is_timeout()
+                || error.is_request()
+                || error.is_body()
+                || error.is_decode()
+        }
+        CliError::Relay {
+            status: 502..=504, ..
+        } => true,
+        CliError::DeliveryUnknown(_) => true,
+        _ => false,
+    }
 }
 
 /// Returns `true` for HTTP status codes that indicate a successful response
@@ -496,6 +573,7 @@ mod media_download_tests {
 }
 
 const QUERY_PAGE_SIZE: u32 = 500;
+const DIRECT_TRANSPORT_RETRY_COOLDOWN: Duration = Duration::from_secs(2);
 
 fn advance_query_cursor(
     filter: &mut serde_json::Value,
@@ -522,6 +600,14 @@ pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
     keys: Keys,
+    /// Harness-owned transport used only when explicitly injected by buzz-acp.
+    delivery_broker: Option<crate::delivery_broker::DeliveryBrokerClient>,
+    /// Optional exact p-tag policy captured once at client construction.
+    top_level_mention_policy: Option<String>,
+    /// Short circuit-breaker window after a direct transport failure. This
+    /// avoids repeating a DNS/connect retry budget inside one command while
+    /// still probing the direct path again after a bounded cooldown.
+    direct_transport_degraded_until: std::sync::Mutex<Option<std::time::Instant>>,
     /// Optional NIP-OA auth tag injected into every signed event.
     auth_tag: Option<Tag>,
     /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
@@ -544,6 +630,8 @@ impl BuzzClient {
         auth_tag: Option<Tag>,
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
+        let delivery_broker = crate::delivery_broker::DeliveryBrokerClient::from_env()?;
+        let top_level_mention_policy = configured_top_level_mention_policy()?;
         let http = reqwest::Client::builder()
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
@@ -553,6 +641,9 @@ impl BuzzClient {
             http,
             relay_url,
             keys,
+            delivery_broker,
+            top_level_mention_policy,
+            direct_transport_degraded_until: std::sync::Mutex::new(None),
             auth_tag,
             auth_tag_json,
         })
@@ -771,6 +862,30 @@ impl BuzzClient {
     /// Execute a one-shot query with multiple filters via the HTTP bridge.
     /// Each filter is ORed by the relay (standard Nostr REQ behavior).
     pub async fn query_multi(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
+        if self.direct_transport_is_degraded() {
+            if let Some(broker) = &self.delivery_broker {
+                return broker.query(filters).await;
+            }
+        }
+        let direct_error = match self.query_multi_direct(filters).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        if let Some(broker) = &self.delivery_broker {
+            if !is_broker_fallback_error(&direct_error) {
+                return Err(direct_error);
+            }
+            self.note_direct_transport_failure(&direct_error);
+            eprintln!("direct relay query failed; trying harness delivery broker: {direct_error}");
+            // Queries are read-only. Preserve the broker's signed error class
+            // so a Busy/503 remains safely retryable instead of being flattened
+            // into a non-retryable local error.
+            return broker.query(filters).await;
+        }
+        Err(direct_error)
+    }
+
+    async fn query_multi_direct(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
         let url = format!("{}/query", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(filters)
@@ -801,6 +916,28 @@ impl BuzzClient {
     /// Returns the count as a JSON string.
     #[allow(dead_code)]
     pub async fn count(&self, filter: &serde_json::Value) -> Result<String, CliError> {
+        if self.direct_transport_is_degraded() {
+            if let Some(broker) = &self.delivery_broker {
+                return broker.count(std::slice::from_ref(filter)).await;
+            }
+        }
+        let direct_error = match self.count_direct(filter).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        if let Some(broker) = &self.delivery_broker {
+            if !is_broker_fallback_error(&direct_error) {
+                return Err(direct_error);
+            }
+            self.note_direct_transport_failure(&direct_error);
+            eprintln!("direct relay count failed; trying harness delivery broker: {direct_error}");
+            // Counts are read-only. Preserve retryable broker overload errors.
+            return broker.count(std::slice::from_ref(filter)).await;
+        }
+        Err(direct_error)
+    }
+
+    async fn count_direct(&self, filter: &serde_json::Value) -> Result<String, CliError> {
         let url = format!("{}/count", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&[filter])
@@ -1022,6 +1159,61 @@ impl BuzzClient {
     /// Content-addressed uploads are exempt: same bytes ⇒ same hash, so outer
     /// re-run is safe regardless of the failure kind.
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        if buzz_core::delivery_broker::is_mention_policy_message_kind(event.kind.as_u16()) {
+            enforce_top_level_mention_policy(
+                self,
+                &event,
+                self.top_level_mention_policy.as_deref(),
+            )
+            .await?;
+        }
+        if buzz_core::delivery_broker::is_brokered_message_kind(event.kind.as_u16()) {
+            if let Some(broker) = &self.delivery_broker {
+                if self.direct_transport_is_degraded() {
+                    return broker.submit_message(&event).await;
+                }
+                let direct_error = match self.submit_stored_event_direct(&event).await {
+                    Ok(response) => {
+                        let receipt = validate_message_receipt(&response, &event);
+                        match self.verify_message_readback(&event).await {
+                            Ok(()) => {
+                                return Ok(mark_verified_delivery_path(
+                                    &response,
+                                    "direct",
+                                    &event,
+                                    receipt.is_err(),
+                                ));
+                            }
+                            Err(readback_error) => receipt.err().unwrap_or(readback_error),
+                        }
+                    }
+                    Err(error) => error,
+                };
+                if !is_broker_fallback_error(&direct_error) {
+                    return Err(direct_error);
+                }
+                self.note_direct_transport_failure(&direct_error);
+                eprintln!(
+                    "direct message delivery failed; trying the same signed event through the harness broker: {direct_error}"
+                );
+                return broker.submit_message(&event).await.map_err(|broker_error| {
+                    if matches!(&direct_error, CliError::Network(error) if error.is_connect())
+                        && matches!(&broker_error, CliError::Relay { .. })
+                    {
+                        broker_error
+                    } else {
+                        CliError::DeliveryUnknown(format!(
+                            "direct message delivery failed ({direct_error}); delivery broker fallback failed ({broker_error})"
+                        ))
+                    }
+                });
+            }
+        }
+
+        self.submit_stored_event_direct(&event).await
+    }
+
+    async fn submit_stored_event_direct(&self, event: &nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
             serde_json::to_vec(&event)
@@ -1063,6 +1255,58 @@ impl BuzzClient {
             }
         }
         result
+    }
+
+    fn direct_transport_is_degraded(&self) -> bool {
+        let Ok(mut degraded_until) = self.direct_transport_degraded_until.lock() else {
+            return false;
+        };
+        match *degraded_until {
+            Some(until) if std::time::Instant::now() < until => true,
+            _ => {
+                *degraded_until = None;
+                false
+            }
+        }
+    }
+
+    fn note_direct_transport_failure(&self, error: &CliError) {
+        if is_broker_fallback_error(error) {
+            if let Ok(mut degraded_until) = self.direct_transport_degraded_until.lock() {
+                *degraded_until = Some(std::time::Instant::now() + DIRECT_TRANSPORT_RETRY_COOLDOWN);
+            }
+        }
+    }
+
+    async fn verify_message_readback(&self, expected: &nostr::Event) -> Result<(), CliError> {
+        let filter = serde_json::json!({"ids": [expected.id.to_hex()], "limit": 1});
+        let delays = [50_u64, 100, 200, 400];
+        let mut last_error = None;
+        for (index, delay_ms) in delays.iter().copied().enumerate() {
+            match self.query(&filter).await {
+                Ok(raw) => match serde_json::from_str::<Vec<nostr::Event>>(&raw) {
+                    Ok(events) => {
+                        if let Some(found) = events.first() {
+                            if found.verify().is_ok() && found == expected {
+                                return Ok(());
+                            }
+                            return Err(CliError::DeliveryUnknown(
+                                "direct message readback did not exactly match the signed event"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    Err(error) => last_error = Some(error.to_string()),
+                },
+                Err(error) => last_error = Some(error.to_string()),
+            }
+            if index + 1 < delays.len() {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+        Err(CliError::DeliveryUnknown(last_error.unwrap_or_else(|| {
+            "direct message was accepted but not visible on exact readback".into()
+        })))
     }
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
@@ -1426,15 +1670,443 @@ pub fn extract_relay_response_field(resp: &str, field: &str) -> Option<String> {
 pub fn normalize_write_response(raw: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
         if v.get("event_id").is_some() || v.get("accepted").is_some() {
-            return serde_json::json!({
+            let mut normalized = serde_json::json!({
                 "event_id": v.get("event_id").and_then(|v| v.as_str()).unwrap_or(""),
                 "accepted": v.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false),
                 "message": v.get("message").and_then(|v| v.as_str()).unwrap_or(""),
-            })
-            .to_string();
+            });
+            if let Some(object) = normalized.as_object_mut() {
+                for field in ["delivery_path", "readback_verified", "reconciled"] {
+                    if let Some(value) = v.get(field) {
+                        object.insert(field.into(), value.clone());
+                    }
+                }
+            }
+            return normalized.to_string();
         }
     }
     raw.to_string()
+}
+
+fn mark_verified_delivery_path(
+    raw: &str,
+    path: &str,
+    event: &nostr::Event,
+    reconciled: bool,
+) -> String {
+    let mut object = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    object.insert("event_id".into(), serde_json::json!(event.id.to_hex()));
+    object.insert("accepted".into(), serde_json::json!(true));
+    object.insert("delivery_path".into(), serde_json::json!(path));
+    object.insert("readback_verified".into(), serde_json::json!(true));
+    object.insert("reconciled".into(), serde_json::json!(reconciled));
+    serde_json::Value::Object(object).to_string()
+}
+
+fn validate_message_receipt(raw: &str, event: &nostr::Event) -> Result<(), CliError> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        CliError::DeliveryUnknown(format!("message receipt was not valid JSON: {error}"))
+    })?;
+    let accepted = value
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            CliError::DeliveryUnknown(
+                "message receipt did not contain a boolean accepted field".into(),
+            )
+        })?;
+    if !accepted {
+        let message = value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("relay rejected the signed message");
+        Err(CliError::Relay {
+            status: 400,
+            body: message.into(),
+        })
+    } else {
+        let event_id = value
+            .get("event_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CliError::DeliveryUnknown(
+                    "accepted message receipt did not contain an event id".into(),
+                )
+            })?;
+        if event_id == event.id.to_hex() {
+            Ok(())
+        } else {
+            Err(CliError::DeliveryUnknown(
+                "message receipt did not match the signed event id".into(),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_contract_tests {
+    use super::*;
+    use axum::{body::Bytes, routing::post, Json, Router};
+    use buzz_core::delivery_broker::{
+        broker_response_digest, BrokerOperation, BrokerRequest, BrokerResponse,
+        BrokerResponseEnvelope, BROKER_RESPONSE_ATTESTATION_KIND,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn signed_message() -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), "delivery contract")
+            .tags([])
+            .sign_with_keys(&Keys::generate())
+            .expect("signed message")
+    }
+
+    #[test]
+    fn matching_receipt_and_exact_readback_marker_report_direct_path() {
+        let event = signed_message();
+        let receipt = serde_json::json!({
+            "event_id": event.id.to_hex(),
+            "accepted": true,
+            "message": "stored"
+        })
+        .to_string();
+        validate_message_receipt(&receipt, &event).expect("valid receipt");
+        let marked = mark_verified_delivery_path(&receipt, "direct", &event, false);
+        let value: serde_json::Value = serde_json::from_str(&marked).expect("marked json");
+        assert_eq!(value["event_id"], event.id.to_hex());
+        assert_eq!(value["accepted"], true);
+        assert_eq!(value["delivery_path"], "direct");
+        assert_eq!(value["readback_verified"], true);
+        assert_eq!(value["reconciled"], false);
+    }
+
+    #[test]
+    fn exact_readback_synthesizes_success_for_a_malformed_receipt() {
+        let event = signed_message();
+        let marked = mark_verified_delivery_path("not-json", "direct", &event, true);
+        let value: serde_json::Value = serde_json::from_str(&marked).expect("canonical result");
+        assert_eq!(value["event_id"], event.id.to_hex());
+        assert_eq!(value["accepted"], true);
+        assert_eq!(value["delivery_path"], "direct");
+        assert_eq!(value["readback_verified"], true);
+        assert_eq!(value["reconciled"], true);
+    }
+
+    #[test]
+    fn rejected_and_wrong_id_receipts_fail_with_distinct_outcomes() {
+        let event = signed_message();
+        let rejected = serde_json::json!({
+            "event_id": event.id.to_hex(),
+            "accepted": false,
+            "message": "denied"
+        })
+        .to_string();
+        assert!(matches!(
+            validate_message_receipt(&rejected, &event),
+            Err(CliError::Relay { status: 400, .. })
+        ));
+
+        let wrong_id = serde_json::json!({
+            "event_id": "wrong",
+            "accepted": true,
+            "message": "stored"
+        })
+        .to_string();
+        assert!(matches!(
+            validate_message_receipt(&wrong_id, &event),
+            Err(CliError::DeliveryUnknown(_))
+        ));
+    }
+
+    #[test]
+    fn fallback_decision_is_limited_to_transport_or_ambiguous_outcomes() {
+        assert!(is_broker_fallback_error(&CliError::DeliveryUnknown(
+            "ambiguous".into()
+        )));
+        assert!(is_broker_fallback_error(&CliError::Relay {
+            status: 503,
+            body: "unavailable".into()
+        }));
+        assert!(!is_broker_fallback_error(&CliError::Relay {
+            status: 400,
+            body: "denied".into()
+        }));
+        assert!(!is_broker_fallback_error(&CliError::Usage(
+            "invalid".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_rejects_before_direct_relay_submission() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let observed_posts = event_posts.clone();
+        let app = Router::new()
+            .route(
+                "/events",
+                post(move || {
+                    let observed_posts = observed_posts.clone();
+                    async move {
+                        observed_posts.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({"accepted": true}))
+                    }
+                }),
+            )
+            .route("/query", post(|| async { Json(serde_json::json!([])) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let wrong_recipient = Keys::generate().public_key();
+        let required_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(9), "wrong recipient")
+            .tags([Tag::public_key(wrong_recipient)])
+            .sign_with_keys(&keys)
+            .expect("signed message");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        let error = client
+            .submit_stored_event(event)
+            .await
+            .expect_err("policy mismatch must fail closed");
+        relay_server.abort();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert_eq!(event_posts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_allows_matching_direct_submission() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let observed_posts = event_posts.clone();
+        let app = Router::new().route(
+            "/events",
+            post(move |body: Bytes| {
+                let observed_posts = observed_posts.clone();
+                async move {
+                    observed_posts.fetch_add(1, Ordering::SeqCst);
+                    let event: nostr::Event =
+                        serde_json::from_slice(&body).expect("submitted event");
+                    Json(serde_json::json!({
+                        "accepted": true,
+                        "event_id": event.id.to_hex(),
+                        "message": "stored"
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(9), "matching recipient")
+            .tags([Tag::public_key(required_recipient)])
+            .sign_with_keys(&keys)
+            .expect("signed message");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.delivery_broker = None;
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        client
+            .submit_stored_event(event)
+            .await
+            .expect("matching message is submitted");
+        relay_server.abort();
+
+        assert_eq!(event_posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_verifies_direct_reply_parent() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let query_posts = Arc::new(AtomicUsize::new(0));
+        let observed_events = event_posts.clone();
+        let observed_queries = query_posts.clone();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let parent = EventBuilder::new(Kind::Custom(9), "parent")
+            .tags([Tag::parse(["h", &channel_id]).expect("parent channel")])
+            .sign_with_keys(&Keys::generate())
+            .expect("parent event");
+        let returned_parent = parent.clone();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move || {
+                    let observed_queries = observed_queries.clone();
+                    let returned_parent = returned_parent.clone();
+                    async move {
+                        observed_queries.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!([returned_parent]))
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                post(move |body: Bytes| {
+                    let observed_events = observed_events.clone();
+                    async move {
+                        observed_events.fetch_add(1, Ordering::SeqCst);
+                        let event: nostr::Event =
+                            serde_json::from_slice(&body).expect("submitted event");
+                        Json(serde_json::json!({
+                            "accepted": true,
+                            "event_id": event.id.to_hex(),
+                            "message": "stored"
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let reply = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags([
+                Tag::parse(["h", &channel_id]).expect("reply channel"),
+                Tag::parse(["e", &parent.id.to_hex(), "", "reply"]).expect("reply marker"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("signed reply");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.delivery_broker = None;
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        client
+            .submit_stored_event(reply)
+            .await
+            .expect("signed same-channel reply is submitted");
+        relay_server.abort();
+
+        assert_eq!(query_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(event_posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_direct_message_result_falls_back_with_the_same_signed_event() {
+        let direct_event_posts = Arc::new(AtomicUsize::new(0));
+        let event_posts = direct_event_posts.clone();
+        let app = Router::new()
+            .route(
+                "/events",
+                post(move || {
+                    let event_posts = event_posts.clone();
+                    async move {
+                        event_posts.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({"unexpected": "receipt"}))
+                    }
+                }),
+            )
+            .route("/query", post(|| async { Json(serde_json::json!([])) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("direct relay listener");
+        let direct_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let direct_server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("direct relay server")
+        });
+
+        let temp = tempfile::tempdir().expect("broker root");
+        std::fs::create_dir(temp.path().join("requests")).expect("requests");
+        std::fs::create_dir(temp.path().join("processing")).expect("processing");
+        std::fs::create_dir(temp.path().join("responses")).expect("responses");
+        let response_keys = Keys::generate();
+        let broker = crate::delivery_broker::DeliveryBrokerClient::new(
+            temp.path().to_path_buf(),
+            "secret".into(),
+            response_keys.public_key(),
+        )
+        .expect("broker client");
+
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "exact structured fallback")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("signed message");
+        let expected = event.clone();
+        let request_dir = temp.path().join("requests");
+        let response_dir = temp.path().join("responses");
+        let broker_server = tokio::spawn(async move {
+            loop {
+                if let Some(entry) = std::fs::read_dir(&request_dir)
+                    .expect("read requests")
+                    .flatten()
+                    .next()
+                {
+                    let request: BrokerRequest =
+                        serde_json::from_slice(&std::fs::read(entry.path()).expect("read request"))
+                            .expect("decode request");
+                    let BrokerOperation::SubmitStoredMessage { event } = request.operation else {
+                        panic!("expected stored-message request");
+                    };
+                    assert_eq!(*event, expected);
+                    let response = BrokerResponse::success(
+                        request.request_id,
+                        serde_json::json!({
+                            "event_id": expected.id.to_hex(),
+                            "accepted": true,
+                            "message": "stored",
+                            "delivery_path": "harness_broker",
+                            "readback_verified": true,
+                            "reconciled": false
+                        }),
+                    );
+                    let attestation = EventBuilder::new(
+                        Kind::Custom(BROKER_RESPONSE_ATTESTATION_KIND),
+                        broker_response_digest(&response).expect("response digest"),
+                    )
+                    .tags([])
+                    .sign_with_keys(&response_keys)
+                    .expect("response attestation");
+                    let envelope = BrokerResponseEnvelope {
+                        response,
+                        attestation,
+                    };
+                    crate::delivery_broker::write_atomic(
+                        &response_dir.join(format!("{}.json", request.request_id)),
+                        &serde_json::to_vec(&envelope).expect("encode response"),
+                    )
+                    .expect("write response");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let mut client = BuzzClient::new(direct_url, keys, None, None).expect("client");
+        client.delivery_broker = Some(broker);
+        let raw = client
+            .submit_stored_event(event)
+            .await
+            .expect("broker fallback delivery");
+        broker_server.await.expect("broker task");
+        direct_server.abort();
+
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("delivery result");
+        assert_eq!(direct_event_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(value["delivery_path"], "harness_broker");
+        assert_eq!(value["readback_verified"], true);
+    }
 }
 
 #[cfg(test)]

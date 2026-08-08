@@ -801,23 +801,29 @@ name = "buzz-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
  "chrono",
  "clap",
+ "dirs",
  "evalexpr",
  "futures-util",
  "hex",
  "httparse",
+ "libc",
  "nix 0.31.3",
  "nostr",
+ "rand 0.10.1",
  "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -827,6 +833,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -953,6 +960,7 @@ dependencies = [
  "dirs",
  "hex",
  "infer",
+ "libc",
  "nostr",
  "rand 0.10.1",
  "reqwest 0.13.4",
@@ -965,6 +973,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

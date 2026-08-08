@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod delivery;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -30,8 +31,8 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, ComputerUseElicitationPolicy, Config,
+    DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -1264,6 +1265,57 @@ struct SlotCircuit {
     respawn_in_flight: bool,
 }
 
+/// A heartbeat tick that arrives before a lazy agent pool is ready.
+///
+/// The timer itself must stay non-blocking while the pool initializes, so a
+/// single bit records the deferred tick. Repeated ticks coalesce, queued human
+/// events retain priority, and the deferred heartbeat is consumed only when an
+/// idle agent can actually run it.
+#[derive(Default)]
+struct DeferredHeartbeat {
+    pending: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HeartbeatTickAction {
+    Dispatch,
+    DeferForPool,
+    Coalesce,
+}
+
+impl DeferredHeartbeat {
+    fn on_tick(&mut self, pool_ready: bool) -> HeartbeatTickAction {
+        if self.pending {
+            HeartbeatTickAction::Coalesce
+        } else if !pool_ready {
+            self.pending = true;
+            HeartbeatTickAction::DeferForPool
+        } else {
+            HeartbeatTickAction::Dispatch
+        }
+    }
+
+    fn needs_pool_wake(&self) -> bool {
+        self.pending
+    }
+
+    fn is_dispatchable(
+        &self,
+        pool_ready: bool,
+        events_pending: bool,
+        heartbeat_in_flight: bool,
+        agent_idle: bool,
+    ) -> bool {
+        self.pending && pool_ready && !events_pending && !heartbeat_in_flight && agent_idle
+    }
+
+    /// Consume the deferred tick from the selected dispatch branch.
+    fn consume(&mut self) {
+        debug_assert!(self.pending);
+        self.pending = false;
+    }
+}
+
 /// Result of [`SlotCircuit::record_crash`].
 enum CrashVerdict {
     /// Respawn is allowed after sleeping for this duration (jittered backoff).
@@ -1576,6 +1628,13 @@ async fn tokio_main() -> Result<()> {
         return setup_mode::run_setup_listener(config, payload).await;
     }
 
+    // Resolve the outbound mention policy once, with harness environment taking
+    // precedence over persona configuration. Store one canonical pair so the
+    // agent child, MCP subprocesses, and harness broker all receive the same
+    // immutable policy value.
+    let top_level_mention_policy =
+        delivery::normalize_top_level_mention_policy(&mut config.persona_env_vars)?;
+
     tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
@@ -1595,6 +1654,47 @@ async fn tokio_main() -> Result<()> {
             }),
         );
     }
+
+    // Codex keeps direct relay networking as the primary path. Give its child
+    // processes a narrow filesystem fallback for bounded queries/counts and
+    // exact signed message events when that direct transport fails. The
+    // capability and path are generated per harness lifetime and are forced
+    // into the child environment below; other runtimes retain direct HTTP.
+    let _delivery_broker = if config.has_generated_codex_config {
+        let auth_tag_json = std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(&value).ok())
+            .and_then(|tag| serde_json::to_string(tag.as_slice()).ok());
+        match delivery::DeliveryBroker::start(
+            &config.relay_url,
+            config.keys.clone(),
+            auth_tag_json,
+            top_level_mention_policy.clone(),
+        )
+        .and_then(|broker| {
+            let environment = broker.environment()?;
+            Ok((broker, environment))
+        }) {
+            Ok((broker, environment)) => {
+                config.persona_env_vars.extend(environment);
+                tracing::info!("harness delivery broker enabled for Codex message transport");
+                Some(broker)
+            }
+            Err(error) => {
+                // The broker must never widen an overlapping workspace merely
+                // to start. Keep Codex's direct network path available and make
+                // the missing fallback visible instead of taking the agent
+                // completely offline.
+                tracing::warn!(
+                    "harness delivery broker disabled; Codex will use direct relay transport only: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
@@ -1862,6 +1962,7 @@ async fn tokio_main() -> Result<()> {
         None
     };
     let mut heartbeat_in_flight = false;
+    let mut deferred_heartbeat = DeferredHeartbeat::default();
 
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
@@ -2003,14 +2104,15 @@ async fn tokio_main() -> Result<()> {
     }
 
     loop {
-        // Whether buffered work is waiting on a lazy pool. Also gates the
+        // Whether buffered work or a heartbeat is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
         // unconditionally would complete instantly on every iteration — a
-        // busy spin — whenever the queued work drained after a failed wake.
+        // busy spin — whenever all wake demand drained after a failed wake.
         let mut lazy_wake_work_pending = false;
         if config.lazy_pool && !pool_ready {
-            lazy_wake_work_pending = queue.has_flushable_work();
+            lazy_wake_work_pending =
+                queue.has_flushable_work() || deferred_heartbeat.needs_pool_wake();
             if let Some(attempt) = pool_lifecycle
                 .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
             {
@@ -2059,10 +2161,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let computer_use_policy = config.computer_use_elicitation_policy.clone();
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        computer_use_policy,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -2118,6 +2230,17 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        // Keep this as a select guard rather than dispatching eagerly above:
+        // buffered relay events and shutdown must win the biased race. Computing
+        // it after respawn collection also lets a newly returned idle agent make
+        // the deferred heartbeat immediately runnable.
+        let deferred_heartbeat_dispatchable = deferred_heartbeat.is_dispatchable(
+            pool_ready,
+            queue.has_flushable_work(),
+            heartbeat_in_flight,
+            pool.any_idle(),
+        );
+
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
@@ -2149,10 +2272,10 @@ async fn tokio_main() -> Result<()> {
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
                 }
-                // Gated on pending work: with an empty queue there is nothing
-                // for the retry to dispatch, and a past `retry_at` would
+                // Gated on pending wake demand: without a queued event or
+                // deferred heartbeat there is nothing for the retry to dispatch, and a past `retry_at` would
                 // otherwise complete instantly on every iteration (busy spin).
-                // The next accepted event re-enables the arm.
+                // The next accepted event or heartbeat tick re-enables the arm.
                 _ = async {
                     match pool_lifecycle.retry_at() {
                         Some(retry_at) if lazy_wake_work_pending => {
@@ -2599,6 +2722,16 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutting down");
+                    break;
+                }
+                _ = std::future::ready(()), if deferred_heartbeat_dispatchable => {
+                    let _ = result_rx;
+                    deferred_heartbeat.consume();
+                    dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                    None
+                }
                 _ = async {
                     match heartbeat.as_mut() {
                         Some(hb) => hb.tick().await,
@@ -2606,19 +2739,27 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    if !pool_ready {
-                        tracing::debug!("heartbeat_skipped_pool_not_ready");
-                    } else if queue.has_flushable_work() {
-                        tracing::debug!("heartbeat_skipped_events");
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
-                            typing_channels.insert(channel_id, thread_tags);
+                    match deferred_heartbeat.on_tick(pool_ready) {
+                        HeartbeatTickAction::DeferForPool => {
+                            tracing::info!("heartbeat_deferred_pool_not_ready");
                         }
-                    } else if pool.any_idle() {
-                        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
-                    } else {
-                        tracing::debug!("heartbeat_skipped_busy");
+                        HeartbeatTickAction::Coalesce => {
+                            tracing::debug!("heartbeat_coalesced_deferred_tick");
+                        }
+                        HeartbeatTickAction::Dispatch if queue.has_flushable_work() => {
+                            tracing::debug!("heartbeat_skipped_events");
+                            for (channel_id, thread_tags) in
+                                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            {
+                                typing_channels.insert(channel_id, thread_tags);
+                            }
+                        }
+                        HeartbeatTickAction::Dispatch if pool.any_idle() => {
+                            dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                        }
+                        HeartbeatTickAction::Dispatch => {
+                            tracing::debug!("heartbeat_skipped_busy");
+                        }
                     }
                     None
                 }
@@ -2664,10 +2805,6 @@ async fn tokio_main() -> Result<()> {
                         }
                     }
                     None
-                }
-                _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
-                    break;
                 }
             }
         };
@@ -3840,12 +3977,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let computer_use_policy = config.computer_use_elicitation_policy.clone();
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            computer_use_policy,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4034,6 +4181,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let computer_use_policy = config.computer_use_elicitation_policy.clone();
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4045,7 +4193,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            computer_use_policy,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4061,6 +4218,35 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .unwrap_or("unknown")
         .trim()
         .to_ascii_lowercase()
+}
+
+fn validate_codex_workspace_write_capability(
+    init_result: &serde_json::Value,
+    required: bool,
+) -> Result<()> {
+    if !required {
+        return Ok(());
+    }
+    let capability = init_result.pointer("/_meta/codex/workspaceWriteConfig");
+    let supported = capability
+        .and_then(|value| value.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= 1)
+        && capability
+            .and_then(|value| value.get("networkAccess"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && capability
+            .and_then(|value| value.get("writableRoots"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if supported {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Codex adapter is incompatible: this Buzz build requires per-turn workspace-write network and writable-root configuration; update @agentclientprotocol/codex-acp"
+        )
+    }
 }
 
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
@@ -4089,6 +4275,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
@@ -4101,6 +4288,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            computer_use_elicitation_policy: config.computer_use_elicitation_policy.clone(),
             model: config.model.clone(),
             observer,
         }
@@ -4115,11 +4303,12 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
-        let spawn_result = AcpClient::spawn(
+        let spawn_result = AcpClient::spawn_with_computer_use_elicitation_policy(
             &startup.command,
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            startup.computer_use_elicitation_policy.clone(),
         )
         .await;
         match spawn_result {
@@ -4140,6 +4329,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        if let Err(error) = validate_codex_workspace_write_capability(
+                            &init_result,
+                            startup.has_generated_codex_config,
+                        ) {
+                            tracing::error!(agent = i, "agent initialize rejected: {error}");
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -4220,16 +4418,29 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    computer_use_elicitation_policy: Option<Arc<ComputerUseElicitationPolicy>>,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn_with_computer_use_elicitation_policy(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        computer_use_elicitation_policy,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
         Ok(init_result) => {
+            if let Err(error) =
+                validate_codex_workspace_write_capability(&init_result, has_generated_codex_config)
+            {
+                acp.shutdown().await;
+                return Err(error);
+            }
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(
@@ -4560,6 +4771,24 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     });
                 }
             }
+            for broker_name in [
+                buzz_core::delivery_broker::BROKER_DIR_ENV,
+                buzz_core::delivery_broker::BROKER_CAPABILITY_ENV,
+                buzz_core::delivery_broker::BROKER_RESPONSE_PUBKEY_ENV,
+                buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV,
+            ] {
+                if let Some((_, value)) = config
+                    .persona_env_vars
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == broker_name)
+                {
+                    env.push(EnvVar {
+                        name: broker_name.into(),
+                        value: value.clone(),
+                    });
+                }
+            }
             env
         },
     }]
@@ -4594,6 +4823,78 @@ mod heartbeat_base_prompt_tests {
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
         assert_eq!(composed, prompt);
+    }
+}
+
+#[cfg(test)]
+mod deferred_heartbeat_tests {
+    use super::{DeferredHeartbeat, HeartbeatTickAction, PoolLifecycle};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn lazy_tick_wakes_pool_then_dispatches_exactly_once() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert!(heartbeat.needs_pool_wake());
+        assert!(!heartbeat.is_dispatchable(false, false, false, true));
+        assert!(!heartbeat.is_dispatchable(true, true, false, true));
+        assert!(
+            heartbeat.needs_pool_wake(),
+            "human work must retain priority"
+        );
+        assert!(heartbeat.is_dispatchable(true, false, false, true));
+        heartbeat.consume();
+        assert!(!heartbeat.needs_pool_wake());
+        assert!(!heartbeat.is_dispatchable(true, false, false, true));
+    }
+
+    #[test]
+    fn lazy_ticks_coalesce_while_pool_is_waking_or_busy() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::Coalesce);
+        assert_eq!(heartbeat.on_tick(true), HeartbeatTickAction::Coalesce);
+        assert!(!heartbeat.is_dispatchable(true, false, true, true));
+        assert!(!heartbeat.is_dispatchable(true, false, false, false));
+        assert!(heartbeat.is_dispatchable(true, false, false, true));
+        heartbeat.consume();
+        assert!(!heartbeat.needs_pool_wake());
+    }
+
+    #[test]
+    fn ready_pool_tick_keeps_existing_immediate_path() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(true), HeartbeatTickAction::Dispatch);
+        assert!(!heartbeat.needs_pool_wake());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_pool_wake_retries_while_heartbeat_remains_pending() {
+        let mut heartbeat = DeferredHeartbeat::default();
+        let mut lifecycle = PoolLifecycle::<()>::listening();
+        let now = Instant::now();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now),
+            Some(1)
+        );
+        lifecycle
+            .complete_wake(1, Err("provider unavailable".into()), now)
+            .unwrap();
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now + Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now + Duration::from_secs(5)),
+            Some(2)
+        );
+        assert!(heartbeat.needs_pool_wake());
     }
 }
 
@@ -6200,6 +6501,7 @@ mod build_mcp_servers_tests {
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
+            computer_use_elicitation_policy: None,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
@@ -6231,6 +6533,26 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
         );
+    }
+
+    #[test]
+    fn session_new_mcp_server_forwards_top_level_mention_policy_once() {
+        let mut config = test_config();
+        let policy = nostr::Keys::generate().public_key().to_hex();
+        config.persona_env_vars.push((
+            buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV.into(),
+            policy.clone(),
+        ));
+
+        let servers = build_mcp_servers(&config);
+        let values = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV)
+            .map(|entry| entry.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, vec![policy.as_str()]);
     }
 
     #[test]
@@ -6422,6 +6744,7 @@ mod error_outcome_emission_tests {
             model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
+            computer_use_elicitation_policy: None,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
@@ -6450,6 +6773,36 @@ mod error_outcome_emission_tests {
             })),
             "buzz-agent"
         );
+    }
+
+    #[test]
+    fn codex_workspace_write_capability_is_required_only_for_codex_policy() {
+        let compatible = serde_json::json!({
+            "_meta": {
+                "codex": {
+                    "workspaceWriteConfig": {
+                        "version": 1,
+                        "networkAccess": true,
+                        "writableRoots": true
+                    }
+                }
+            }
+        });
+        assert!(validate_codex_workspace_write_capability(&compatible, true).is_ok());
+        assert!(validate_codex_workspace_write_capability(
+            &serde_json::json!({"agentInfo": {"name": "goose"}}),
+            false
+        )
+        .is_ok());
+
+        for incompatible in [
+            serde_json::json!({}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":0,"networkAccess":true,"writableRoots":true}}}}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":1,"networkAccess":false,"writableRoots":true}}}}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":1,"networkAccess":true,"writableRoots":false}}}}),
+        ] {
+            assert!(validate_codex_workspace_write_capability(&incompatible, true).is_err());
+        }
     }
 
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
