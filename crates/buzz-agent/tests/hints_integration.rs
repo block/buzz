@@ -263,7 +263,8 @@ async fn skills_loaded_from_agents_skills_dir() {
     .unwrap();
 
     let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
-    let mut h = Harness::spawn_with_env(&llm.url, &[]).await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_SKILLS", "test-skill")]).await;
     let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
 
     let p = h
@@ -412,7 +413,14 @@ async fn global_skills_loaded_and_project_wins() {
 
     let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
     let mut h =
-        Harness::spawn_with_env(&llm.url, &[("HOME", home_tmp.path().to_str().unwrap())]).await;
+        Harness::spawn_with_env(
+            &llm.url,
+            &[
+                ("HOME", home_tmp.path().to_str().unwrap()),
+                ("BUZZ_AGENT_SKILLS", "global-only,shared-name"),
+            ],
+        )
+        .await;
     let sid = init_session(&mut h, cwd_tmp.path().to_str().unwrap()).await;
 
     let p = h
@@ -485,7 +493,8 @@ async fn symlinked_skill_dir_is_discovered() {
     std::os::unix::fs::symlink(&real_skill_dir, skills_dir.join("symlinked-skill")).unwrap();
 
     let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
-    let mut h = Harness::spawn_with_env(&llm.url, &[]).await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_SKILLS", "symlinked-skill")]).await;
     let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
 
     let p = h
@@ -547,7 +556,8 @@ async fn load_skill_tool_returns_body() {
     let end_turn = openai_text("done");
 
     let llm = spawn_capturing_llm(vec![load_skill_call, end_turn]).await;
-    let mut h = Harness::spawn_with_env(&llm.url, &[]).await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_SKILLS", "my-skill")]).await;
     let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
 
     let p = h
