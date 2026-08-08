@@ -904,6 +904,50 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
     })
 }
 
+/// Read-only keyring probe for one agent entry. Uses `load_all_readonly`, so
+/// unlike [`SecretStore::probe`] it can never trigger `migrate_legacy_key`
+/// side effects — attestation must observe, never mutate.
+fn readonly_agent_key_probe(store: &impl KeyStore, pubkey: &str) -> KeyringProbe {
+    match store.load_all_readonly() {
+        Err(_) => KeyringProbe::Unreachable,
+        Ok(None) => KeyringProbe::ReachableButEmpty,
+        Ok(Some(blob)) => {
+            if blob.contains_key(&agent_keyring_name(pubkey)) {
+                KeyringProbe::Present
+            } else {
+                KeyringProbe::ReachableButEmpty
+            }
+        }
+    }
+}
+
+/// Collect the read-only credential-persistence observation for `pubkey`.
+///
+/// Reads the RAW persisted store, not the hydrated records: after
+/// [`hydrate_keys`] an in-memory record carries the nsec even in the normal
+/// keyring-backed case, so only the pre-hydration JSON can distinguish the
+/// inline fallback from keyring-backed storage.
+pub(crate) fn observe_agent_credential_persistence(
+    app: &AppHandle,
+    pubkey: &str,
+) -> Result<crate::managed_agents::persistence_attestation::CredentialPersistenceObservation, String>
+{
+    let records = load_agent_store(app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("unknown managed agent: {pubkey}"))?;
+    let keyring_probe = agent_secret_store().map(|store| readonly_agent_key_probe(store, pubkey));
+    Ok(
+        crate::managed_agents::persistence_attestation::CredentialPersistenceObservation {
+            inline_key_present: !record.private_key_nsec.is_empty(),
+            keyring_probe,
+            parallelism: record.parallelism,
+            auth_tag: record.auth_tag.clone(),
+        },
+    )
+}
+
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;

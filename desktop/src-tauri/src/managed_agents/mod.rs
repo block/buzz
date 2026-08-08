@@ -19,6 +19,7 @@ pub(crate) mod global_config;
 mod managed_node_paths;
 mod nest;
 pub(crate) mod parallelism;
+pub(crate) mod persistence_attestation;
 mod persona_avatars;
 pub(crate) mod persona_events;
 mod personas;

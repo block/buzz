@@ -758,6 +758,7 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
+            get_agent_persistence_attestation,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

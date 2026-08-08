@@ -830,3 +830,44 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+// ── Read-only attestation probe ────────────────────────────────────────────
+
+#[test]
+fn readonly_probe_reports_present_only_for_this_agents_entry() {
+    let store = FakeKeyStore::reachable().with_key(&agent_keyring_name("pubkey-a"), "nsec1a");
+    assert_eq!(
+        super::readonly_agent_key_probe(&store, "pubkey-a"),
+        KeyringProbe::Present
+    );
+    assert_eq!(
+        super::readonly_agent_key_probe(&store, "pubkey-b"),
+        KeyringProbe::ReachableButEmpty
+    );
+}
+
+#[test]
+fn readonly_probe_reports_unreachable_on_backend_outage() {
+    let store = FakeKeyStore::unreachable();
+    assert_eq!(
+        super::readonly_agent_key_probe(&store, "pubkey-a"),
+        KeyringProbe::Unreachable
+    );
+}
+
+#[test]
+fn readonly_probe_reports_empty_when_no_blob_exists() {
+    let store = FakeKeyStore::reachable();
+    assert_eq!(
+        super::readonly_agent_key_probe(&store, "pubkey-a"),
+        KeyringProbe::ReachableButEmpty
+    );
+}
+
+#[test]
+fn readonly_probe_never_writes() {
+    let store = FakeKeyStore::reachable().with_key(&agent_keyring_name("pubkey-a"), "nsec1a");
+    let _ = super::readonly_agent_key_probe(&store, "pubkey-a");
+    let _ = super::readonly_agent_key_probe(&store, "pubkey-b");
+    assert_eq!(*store.write_count.borrow(), 0);
+}
