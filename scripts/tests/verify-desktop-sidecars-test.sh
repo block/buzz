@@ -20,6 +20,7 @@ sidecars=(
   buzz-dev-mcp
   git-credential-nostr
   buzz
+  buzz-backend-kubernetes
 )
 
 for sidecar in "${sidecars[@]}"; do
@@ -57,11 +58,26 @@ if "${verifier}" "${test_tmp}" "${target}" >"${missing_output}" 2>&1; then
 fi
 grep -Fq "missing sidecar" "${missing_output}"
 
+printf '#!/usr/bin/env bash\nexit 0\n' >"${test_tmp}/buzz-agent-${target}"
+chmod 755 "${test_tmp}/buzz-agent-${target}"
+rm "${test_tmp}/buzz-backend-kubernetes-${target}"
+kubernetes_output="${test_tmp}/kubernetes-output"
+if "${verifier}" "${test_tmp}" "${target}" >"${kubernetes_output}" 2>&1; then
+  echo "verifier accepted a missing Kubernetes provider sidecar" >&2
+  exit 1
+fi
+grep -Fq "buzz-backend-kubernetes" "${kubernetes_output}"
+
 release_recipe=$(sed -n '/^desktop-release-build /,/^desktop-ci:/p' "${justfile}")
 grep -Fq 'cargo build --release --target "$TARGET"' <<<"${release_recipe}"
 grep -Fq './scripts/bundle-sidecars.sh "$TARGET"' <<<"${release_recipe}"
 grep -Fq './scripts/verify-desktop-sidecars.sh' <<<"${release_recipe}"
-grep -Fq '(cd {{desktop_dir}} && pnpm tauri build' <<<"${release_recipe}"
+grep -Fq 'APPLE_SIGNING_IDENTITY=- pnpm tauri build' <<<"${release_recipe}"
+grep -Fq 'codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"' <<<"${release_recipe}"
+if grep -Fq -- '-p buzz-lmstudio-agent' <<<"${release_recipe}"; then
+  echo "release recipe treats the buzz-lmstudio-agent binary as a Cargo package" >&2
+  exit 1
+fi
 if grep -Eq 'touch .*buzz-(acp|agent|dev-mcp|lmstudio-agent)' <<<"${release_recipe}"; then
   echo "release recipe still creates placeholder harness sidecars" >&2
   exit 1

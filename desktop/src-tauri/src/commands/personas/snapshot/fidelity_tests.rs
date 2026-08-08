@@ -208,3 +208,64 @@ fn import_png_placeholder_keeps_manifest_avatar_fallback() {
     assert!(decoded.profile.avatar_data_url.is_none());
     assert_eq!(decoded.profile.avatar_url, snapshot.profile.avatar_url);
 }
+
+/// An unlocked trading card imports the agent's REAL avatar, never the card.
+///
+/// Mint-shaped input: the PNG body is the generated card artwork, while the
+/// manifest inlines the source avatar (`manifest_avatar_bytes` in `card.rs`).
+/// The #3578 body-wins override must not fire when the manifest already
+/// carries inline avatar bytes — otherwise the imported agent publishes the
+/// 1500-wide card as its kind:0 picture.
+#[test]
+fn import_unlocked_card_uses_manifest_avatar_not_card_artwork() {
+    use crate::managed_agents::agent_snapshot::{decode_avatar_data_url, encode_snapshot_png};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    // The real avatar: 4×3 solid blue, inlined in the manifest at mint time.
+    let real_avatar = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        4,
+        3,
+        image::Rgba([23, 91, 177, 255]),
+    ));
+    let mut real_avatar_png = std::io::Cursor::new(Vec::new());
+    real_avatar
+        .write_to(&mut real_avatar_png, image::ImageFormat::Png)
+        .unwrap();
+
+    let mut snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    snapshot.profile.avatar_data_url = Some(format!(
+        "data:image/png;base64,{}",
+        STANDARD.encode(real_avatar_png.get_ref())
+    ));
+    snapshot.profile.avatar_url = Some("https://relay.example/media/live-kind0.png".to_string());
+
+    // The card artwork: a distinct 1500×2250 solid red "trading card" as the
+    // PNG body — the exact dimensions the minter encodes for unlocked cards.
+    // Size matters: 2250px exceeds `snapshot_avatar`'s 2048px decode limit,
+    // so reaching the body override here wouldn't just import the wrong
+    // face — it would fail the import outright.
+    let card_art = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        1500,
+        2250,
+        image::Rgba([200, 16, 16, 255]),
+    ));
+    let mut card_png = std::io::Cursor::new(Vec::new());
+    card_art
+        .write_to(&mut card_png, image::ImageFormat::Png)
+        .unwrap();
+    let file_bytes = encode_snapshot_png(&snapshot, Some(card_png.get_ref())).unwrap();
+
+    // Production import decode: the effective avatar must be the real one.
+    let decoded = decode_snapshot_from_bytes(&file_bytes).unwrap();
+    let avatar_bytes =
+        decode_avatar_data_url(decoded.profile.avatar_data_url.as_deref().unwrap()).unwrap();
+    let imported = image::load_from_memory(&avatar_bytes).unwrap();
+    assert_eq!(
+        (imported.width(), imported.height()),
+        (4, 3),
+        "imported avatar must be the source avatar, not the card artwork"
+    );
+    assert_eq!(imported.to_rgba8().get_pixel(0, 0).0, [23, 91, 177, 255]);
+    // The live kind:0 URL fallback survives untouched.
+    assert_eq!(decoded.profile.avatar_url, snapshot.profile.avatar_url);
+}

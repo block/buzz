@@ -153,6 +153,23 @@ pub fn run_lmstudio() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Runs the interactive Databricks OAuth flow used by the desktop model picker.
+pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
+    let config = auth::PkceOAuthConfig {
+        discovery_url: format!(
+            "{}/oidc/.well-known/oauth-authorization-server",
+            host.trim_end_matches('/')
+        ),
+        client_id: "databricks-cli".into(),
+        scopes: vec!["all-apis".into(), "offline_access".into()],
+        cache_namespace: "databricks".into(),
+        cache_dir_override: None,
+    };
+    auth::PkceOAuthTokenSource::new(config)?
+        .interactive_login()
+        .await
+}
+
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
 /// provider and persist the result, then exit. Today this supports Databricks
 /// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the

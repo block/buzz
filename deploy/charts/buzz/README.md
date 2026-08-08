@@ -52,6 +52,48 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## S3 URL addressing
+
+Buzz uses one URL style for both media and Git/CAS object-store requests:
+
+| `s3.addressingStyle` | Request shape | Use for |
+|---|---|---|
+| `path` (default) | `https://endpoint/bucket/key` | Bundled MinIO and endpoints whose DNS does not resolve bucket subdomains |
+| `virtual` | `https://bucket.endpoint/key` | AWS-style providers and new Railway Storage Buckets |
+
+The chart always renders `s3.addressingStyle` as
+`BUZZ_S3_ADDRESSING_STYLE`. It renders `s3.region` as `BUZZ_S3_REGION` only
+when explicitly set, preserving the relay's existing `AWS_REGION` fallback for
+upgrades. Only `path` and `virtual` addressing styles are accepted; invalid
+values fail chart rendering and relay startup. The bundled MinIO quickstart
+deliberately keeps `path` because its Service DNS resolves one endpoint
+hostname, not arbitrary `<bucket>.<service>` names.
+
+For a Railway Storage Bucket, map its variables to chart values in the service
+or generated Helm configuration:
+
+```yaml
+s3:
+  endpoint: "${{Object Storage.ENDPOINT}}"
+  bucket: "${{Object Storage.BUCKET}}"
+  region: "${{Object Storage.REGION}}"
+  addressingStyle: virtual
+```
+
+Store `BUZZ_S3_ACCESS_KEY=${{Object Storage.ACCESS_KEY_ID}}` and
+`BUZZ_S3_SECRET_KEY=${{Object Storage.SECRET_ACCESS_KEY}}` in the Secret named by
+`secrets.existingSecret`. Railway's Credentials tab is authoritative for older
+buckets, which may still require `path`. The setting changes request routing and
+SigV4 signing, so do not put the bucket into `s3.endpoint`; pass Railway's base
+`ENDPOINT` and `BUCKET` separately.
+
+Object storage is contacted during relay startup only when
+`BUZZ_GIT_CONFORMANCE_PROBE` is enabled (the relay default). A probe failure is
+startup-fatal, so Kubernetes readiness never opens. If an operator explicitly
+disables that probe through `relay.extraEnv`, `/_readiness` does not test object
+storage; configuration is still parsed strictly, but reachability and addressing
+errors surface on the first storage operation.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay

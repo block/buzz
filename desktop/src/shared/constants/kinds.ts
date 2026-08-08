@@ -46,6 +46,7 @@ export const KIND_CHANNEL_SECTIONS = 30078;
 export const KIND_CHANNEL_MUTES = 30078;
 export const KIND_CHANNEL_STARS = 30078;
 export const KIND_CHANNEL_SORT = 30078;
+export const KIND_COMMUNITY_THEME = 30078;
 // NIP-33 persona/team/managed-agent projection events (d-tag keyed). Published
 // backend-side as secrets-stripped snapshots; the inbound sync hook subscribes
 // to all three to patch local records. Mirror of buzz-core's KIND_PERSONA etc.
@@ -68,6 +69,8 @@ export const KIND_PLANNING_TASK_ARTIFACT = 30638;
 export const KIND_BATTLE_RHYTHM_REVISION = 46310;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;
+// NIP-MP: project grouping above NIP-34 repositories.
+export const KIND_PROJECT_ANNOUNCEMENT = 30621;
 export const KIND_GIT_PATCH = 1617;
 export const KIND_GIT_PULL_REQUEST = 1618;
 export const KIND_GIT_PR_UPDATE = 1619;

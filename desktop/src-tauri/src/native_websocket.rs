@@ -24,7 +24,7 @@ type Id = u32;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", content = "data")]
-enum WebSocketMessage {
+pub(crate) enum WebSocketMessage {
     Text(String),
     Binary(Vec<u8>),
     Ping(Vec<u8>),
@@ -33,7 +33,7 @@ enum WebSocketMessage {
 }
 
 #[derive(Debug, Deserialize)]
-struct CloseFramePayload {
+pub(crate) struct CloseFramePayload {
     code: u16,
     reason: String,
 }
@@ -82,7 +82,7 @@ struct ConnectionHandle {
 }
 
 #[derive(Clone)]
-struct WebSocketManager {
+pub(crate) struct WebSocketManager {
     connections: Arc<Mutex<HashMap<Id, Arc<ConnectionHandle>>>>,
     connect_cancel: Arc<Mutex<CancellationToken>>,
 }
@@ -182,11 +182,23 @@ async fn connect(
     open_connection(manager.inner(), &url, on_message).await
 }
 
-async fn send_message(
+pub(crate) async fn send_message(
     manager: &WebSocketManager,
     id: Id,
     message: WebSocketMessage,
 ) -> Result<(), String> {
+    // Egress guard: the NIP-49 local key backup must never reach a relay.
+    // This is the single choke point for all webview-originated websocket
+    // frames (see `crate::egress_guard`).
+    match &message {
+        WebSocketMessage::Text(text) => {
+            crate::egress_guard::assert_no_key_backup(text, "websocket text frame")?
+        }
+        WebSocketMessage::Binary(bytes) => {
+            crate::egress_guard::assert_no_key_backup_bytes(bytes, "websocket binary frame")?
+        }
+        _ => {}
+    }
     let handle = manager
         .connections
         .lock()

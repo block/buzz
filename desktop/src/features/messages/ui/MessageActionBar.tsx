@@ -35,17 +35,8 @@ import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
+import { DeleteMessageConfirmDialog } from "./DeleteMessageConfirmDialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -277,35 +268,11 @@ function MoreActionsMenu({
       </DropdownMenu>
 
       {onDelete ? (
-        <AlertDialog
+        <DeleteMessageConfirmDialog
+          onConfirm={() => onDelete(message)}
           onOpenChange={setIsDeleteDialogOpen}
           open={isDeleteDialogOpen}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete message?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This will permanently delete this message and cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel asChild>
-                <Button type="button" variant="outline">
-                  Cancel
-                </Button>
-              </AlertDialogCancel>
-              <AlertDialogAction asChild>
-                <Button
-                  onClick={() => onDelete(message)}
-                  type="button"
-                  variant="destructive"
-                >
-                  Delete
-                </Button>
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        />
       ) : null}
 
       {canReport ? (

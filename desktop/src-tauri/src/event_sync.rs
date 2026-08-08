@@ -165,7 +165,7 @@ fn migrate_personas_in_dir_at(
         scoped_record.shared = existing
             .as_ref()
             .and_then(|row| nostr::Event::from_json(&row.raw_event).ok())
-            .is_some_and(|event| buzz_core_pkg::kind::persona_event_is_shared(&event));
+            .is_some_and(|event| buzz_core_pkg::kind::event_is_shared(&event));
         let event = build_persona_event(&scoped_record)
             .map_err(|e| format!("failed to build event for '{}': {e}", record.display_name))?
             .custom_created_at(monotonic_created_at(

@@ -40,6 +40,8 @@ pub async fn submit_signed_event_classified(
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "classified relay event submit")
+        .map_err(|_| SignedEventSubmitError::Permanent)?;
     let auth_header = {
         let keys = state
             .signing_keys()
@@ -88,6 +90,7 @@ pub async fn submit_signed_event_at_with_keys(
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let response = state
@@ -166,5 +169,21 @@ mod tests {
                 SignedEventSubmitError::Permanent
             );
         }
+    }
+
+    #[tokio::test]
+    async fn classified_submit_rejects_key_backup_material_before_network() {
+        const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+        let state = crate::app_state::build_app_state();
+        *state.relay_url_override.lock().unwrap() = Some("ws://127.0.0.1:9".to_string());
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), NCRYPTSEC)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert!(matches!(
+            super::submit_signed_event_classified(&event, &state).await,
+            Err(SignedEventSubmitError::Permanent)
+        ));
     }
 }

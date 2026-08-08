@@ -1,12 +1,16 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
+import { RootErrorBoundary } from "@/app/RootErrorBoundary";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/wght.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
+import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
@@ -73,23 +77,29 @@ function configureDevE2eBridgeFromUrl() {
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <CommunitiesProvider>
-        <CommunityOnboardingProvider>
-          <ThemeProvider defaultTheme="buzz">
-            <TooltipProvider delayDuration={300}>
-              <EmojiBurstProvider>
-                <PoofBurstProvider>
-                  <UpdaterProvider>
-                    <App />
-                    <NostrBindConsentDialog />
-                  </UpdaterProvider>
-                  <Toaster />
-                </PoofBurstProvider>
-              </EmojiBurstProvider>
-            </TooltipProvider>
-          </ThemeProvider>
-        </CommunityOnboardingProvider>
-      </CommunitiesProvider>
+      {/* block/buzz#5078 — catch any uncaught render error so a WebKit
+          SecurityError from localStorage can't blank the whole window. */}
+      <RootErrorBoundary>
+        <CommunitiesProvider>
+          <CommunityOnboardingProvider
+            enabled={huddleWindowChannelId() === null}
+          >
+            <ThemeProvider defaultTheme="buzz">
+              <TooltipProvider delayDuration={300}>
+                <EmojiBurstProvider>
+                  <PoofBurstProvider>
+                    <UpdaterProvider>
+                      <App />
+                      <NostrBindConsentDialog />
+                    </UpdaterProvider>
+                    <Toaster />
+                  </PoofBurstProvider>
+                </EmojiBurstProvider>
+              </TooltipProvider>
+            </ThemeProvider>
+          </CommunityOnboardingProvider>
+        </CommunitiesProvider>
+      </RootErrorBoundary>
     </React.StrictMode>,
   );
 }

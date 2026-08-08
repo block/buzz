@@ -46,19 +46,20 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
-    let keys = match identity_from_env() {
+    let (keys, identity_storage) = match identity_from_env() {
         Some(keys) => {
             eprintln!(
                 "buzz-desktop: configured identity pubkey {}",
                 keys.public_key().to_hex()
             );
-            keys
+            (keys, IdentityStorage::Environment)
         }
-        None => Keys::generate(),
+        None => (Keys::generate(), IdentityStorage::Ephemeral),
     };
 
     AppState {
         keys: Mutex::new(keys),
+        identity_storage: AtomicU8::new(identity_storage as u8),
         command_brief_runtimes: tokio::sync::RwLock::new(
             crate::startup::CommandBriefRuntimeSet::default(),
         ),
@@ -87,8 +88,8 @@ pub fn build_app_state() -> AppState {
         managed_agent_processes: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
+        huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
-        audio_output_device: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),

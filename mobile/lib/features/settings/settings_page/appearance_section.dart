@@ -15,12 +15,16 @@ class _AppearanceSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = ref.watch(themeProvider);
-    final schemeName = ref.watch(schemeProvider);
-    final accentIndex = ref.watch(accentProvider);
+    final preference = ref.watch(communityThemeProvider);
+    final mode = preference.mode;
+    final schemeName = preference.theme;
+    final accentIndex = effectiveAccentIndex(
+      preference.theme,
+      preference.accent,
+    );
 
     return AppListCard(
-      label: 'Style',
+      label: 'Style · This community',
       children: [
         AppListRow(
           icon: LucideIcons.sunMoon,
@@ -38,23 +42,24 @@ class _AppearanceSection extends ConsumerWidget {
             MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
           ),
         ),
-        AppListRow(
-          icon: LucideIcons.droplet,
-          title: 'Accent color',
-          // The swatch *is* the value — naming the color as well would say the
-          // same thing twice, so it takes the chevron's place.
-          trailing: _AccentSwatch(accentIndex: accentIndex),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const AccentPickerPage()),
+        if (!isBuzzTheme(effectiveTheme(schemeName, mode)?.name ?? schemeName))
+          AppListRow(
+            icon: LucideIcons.droplet,
+            title: 'Accent color',
+            // The swatch *is* the value — naming the color as well would say the
+            // same thing twice, so it takes the chevron's place.
+            trailing: _AccentSwatch(accentIndex: accentIndex),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const AccentPickerPage()),
+            ),
           ),
-        ),
       ],
     );
   }
 }
 
 void _showAppearanceModeSheet(BuildContext context) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (_) => const _AppearanceModeSheet(),
@@ -68,7 +73,7 @@ class _AppearanceModeSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = ref.watch(themeProvider);
+    final mode = ref.watch(communityThemeProvider).mode;
 
     return SafeArea(
       child: Column(
@@ -96,15 +101,7 @@ class _AppearanceModeSheet extends ConsumerWidget {
                     )
                   : null,
               onTap: () {
-                final schemeName = ref.read(schemeProvider);
-                final compatibleScheme = schemeForAppearanceMode(
-                  schemeName,
-                  option.mode,
-                );
-                if (compatibleScheme != schemeName) {
-                  ref.read(schemeProvider.notifier).setScheme(compatibleScheme);
-                }
-                ref.read(themeProvider.notifier).setMode(option.mode);
+                ref.read(communityThemeProvider.notifier).setMode(option.mode);
                 Navigator.of(context).pop();
               },
             ),

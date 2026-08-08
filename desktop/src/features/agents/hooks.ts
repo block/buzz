@@ -33,6 +33,7 @@ import {
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
+  invokeTauri,
   listManagedAgents,
   listRelayAgents,
   saveCustomHarness,
@@ -647,6 +648,12 @@ export function useAttachManagedAgentToChannelMutation(
           pubkey: result.agent.pubkey,
         }),
       );
+      void invokeTauri("sync_agents_to_active_huddle", {
+        channelId: effectiveChannelId,
+        agentPubkeys: [result.agent.pubkey],
+      }).catch((error) => {
+        console.warn("Could not sync attached agent into Huddle:", error);
+      });
     },
     onSettled: (_data, _err, variables) => {
       // Invalidate the effective channel (the one the server actually mutated)
@@ -939,7 +946,6 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
-
 /**
  * Query safely displayable baked build env entries. The backend masks secrets,
  * so this is only used for inherited provider/model/effort labels.
