@@ -348,6 +348,9 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "relay_operators",
+            "relay_admin_actions",
+            "relay_admin_outbox",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +564,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -946,6 +949,63 @@ mod tests {
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        assert_eq!(migrations[28].version, 29);
+        let relay_operators = migrations[28].sql.as_str();
+        assert!(
+            relay_operators.contains("CREATE TABLE relay_operators"),
+            "migration 29 must create relay_operators"
+        );
+        assert!(
+            relay_operators.contains("_operator_global_tables"),
+            "migration 29 must register relay_operators in _operator_global_tables"
+        );
+        assert!(
+            relay_operators.contains("actor_authority"),
+            "migration 29 must add actor_authority to moderation_actions"
+        );
+        assert!(
+            relay_operators.contains("processing"),
+            "migration 29 must add processing status to moderation_reports"
+        );
+
+        assert_eq!(migrations[29].version, 30);
+        let relay_admin_actions = migrations[29].sql.as_str();
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
+            "migration 30 must create relay_admin_actions"
+        );
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
+            "migration 30 must create relay_admin_outbox"
+        );
+        assert!(
+            relay_admin_actions.contains("request_id"),
+            "migration 30 relay_admin_actions must include request_id for idempotency"
+        );
+        assert!(
+            relay_admin_actions.contains("step_marker"),
+            "migration 30 relay_admin_actions must include step_marker for crash recovery"
+        );
+
+        assert_eq!(migrations[30].version, 31);
+        let action_lease = migrations[30].sql.as_str();
+        assert!(
+            action_lease.contains("action_lease_token"),
+            "migration 31 must add action_lease_token to relay_admin_actions"
+        );
+        assert!(
+            action_lease.contains("action_lease_expires_at"),
+            "migration 31 must add action_lease_expires_at to relay_admin_actions"
+        );
+        assert!(
+            action_lease.contains("attempt_count"),
+            "migration 31 must add attempt_count to relay_admin_outbox"
+        );
+        assert!(
+            action_lease.contains("retry_after"),
+            "migration 31 must add retry_after to relay_admin_outbox"
+        );
     }
 
     #[test]
@@ -1188,7 +1248,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
     }
 
     #[tokio::test]

@@ -416,7 +416,11 @@ admin: bootstrap _ensure-migrations
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
+    # The relay refuses to start without a token, and never logs one. Mint a
+    # throwaway per run so no dev secret is ever committed or reused.
+    export BUZZ_ADMIN_TOKEN="${BUZZ_ADMIN_TOKEN:-$(openssl rand -hex 32)}"
     echo "Admin dashboard: http://${BUZZ_ADMIN_HOST}/reports"
+    echo "Admin token (paste into dashboard prompt): ${BUZZ_ADMIN_TOKEN}"
     cargo run -p buzz-relay
 
 # Seed deterministic reports and product feedback for local admin dashboard review
@@ -429,7 +433,7 @@ admin-check: fmt-check
     cargo test -p buzz-relay api::admin
     cargo test -p buzz-relay router::tests
     pnpm -C admin-web check
-    pnpm -C admin-web exec playwright test
+    pnpm -C admin-web test:e2e
 
 # Start the relay server in release mode
 relay-release: _ensure-migrations

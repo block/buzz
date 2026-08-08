@@ -6,7 +6,14 @@ import {
   useMemo,
   useState,
 } from "react";
-import { ApiFailure, request } from "./api";
+import {
+  type AuthMode,
+  ApiFailure,
+  probeAuthMode,
+  request,
+  requestObjectUrl,
+} from "./api";
+import { setToken, useToken } from "./token";
 import type {
   FeedbackDetail,
   FeedbackSummary,
@@ -85,9 +92,9 @@ function StateView<T>({
   return resource.data ? children(resource.data) : null;
 }
 
-function Reports() {
+function Reports({ authMode }: { authMode: AuthMode }) {
   const resource = useResource(
-    () => request<Report[]>("/reports?status=open&limit=100"),
+    () => request<Report[]>("/reports?status=open&limit=100", authMode),
     "reports",
   );
   return (
@@ -135,9 +142,9 @@ function Reports() {
   );
 }
 
-function ReportDetail({ id }: { id: string }) {
+function ReportDetail({ id, authMode }: { id: string; authMode: AuthMode }) {
   const resource = useResource(
-    () => request<ReportDetailData>(`/reports/${id}`),
+    () => request<ReportDetailData>(`/reports/${id}`, authMode),
     id,
   );
   return (
@@ -210,9 +217,9 @@ function ReportDetail({ id }: { id: string }) {
   );
 }
 
-function FeedbackList() {
+function FeedbackList({ authMode }: { authMode: AuthMode }) {
   const resource = useResource(
-    () => request<FeedbackSummary[]>("/feedback"),
+    () => request<FeedbackSummary[]>("/feedback", authMode),
     "feedback",
   );
   const [query, setQuery] = useState("");
@@ -419,9 +426,15 @@ function FeedbackResults({
   return children(results);
 }
 
-function FeedbackDetailView({ id }: { id: string }) {
+function FeedbackDetailView({
+  id,
+  authMode,
+}: {
+  id: string;
+  authMode: AuthMode;
+}) {
   const resource = useResource(
-    () => request<FeedbackDetail>(`/feedback/${id}`),
+    () => request<FeedbackDetail>(`/feedback/${id}`, authMode),
     id,
   );
   return (
@@ -460,8 +473,9 @@ function FeedbackDetailView({ id }: { id: string }) {
                     <dd className="attachments">
                       {attachments.map((attachment) => (
                         <Attachment
-                          key={`${attachment.hash}-${attachment.url}`}
+                          key={`${attachment.hash}-${attachment.path}`}
                           attachment={attachment}
+                          authMode={authMode}
                         />
                       ))}
                     </dd>
@@ -491,7 +505,7 @@ function FeedbackDetailView({ id }: { id: string }) {
 type FeedbackStatuses = Record<string, boolean>;
 
 interface FeedbackAttachment {
-  url: string;
+  path: string;
   sourceUrl: string;
   mimeType: string;
   hash: string;
@@ -551,7 +565,7 @@ function feedbackAttachments(
     const parsedSize = Number(values.get("size"));
     return [
       {
-        url: `/api/admin/v1/feedback/${encodeURIComponent(feedbackId)}/attachments/${hash}`,
+        path: `/feedback/${encodeURIComponent(feedbackId)}/attachments/${hash}`,
         sourceUrl: safeUrl,
         mimeType,
         hash,
@@ -595,8 +609,16 @@ function stripAttachmentMarkdown(
     .trim();
 }
 
-function Attachment({ attachment }: { attachment: FeedbackAttachment }) {
-  const url = attachment.url;
+function Attachment({
+  attachment,
+  authMode,
+}: {
+  attachment: FeedbackAttachment;
+  authMode: AuthMode;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string>();
+  const [failed, setFailed] = useState(false);
+  const path = attachment.path;
   const name =
     attachment.filename ?? `attachment-${attachment.hash.slice(0, 8)}`;
   const metadata = [
@@ -607,33 +629,76 @@ function Attachment({ attachment }: { attachment: FeedbackAttachment }) {
     .filter(Boolean)
     .join(" · ");
 
+  useEffect(() => {
+    // The API requires an Authorization header, so the bytes are fetched here
+    // and handed to the DOM as an object URL revoked on replacement/unmount.
+    let url: string | undefined;
+    let active = true;
+    setObjectUrl(undefined);
+    setFailed(false);
+    requestObjectUrl(path, authMode)
+      .then((created) => {
+        if (!active) {
+          URL.revokeObjectURL(created);
+          return;
+        }
+        url = created;
+        setObjectUrl(created);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [path, authMode]);
+
+  const detail = failed ? "Could not load attachment" : metadata;
+
   if (attachment.mimeType.startsWith("image/")) {
     return (
       <figure className="image-attachment">
-        <a href={url} target="_blank" rel="noreferrer">
-          <img src={url} alt={name} loading="lazy" />
-        </a>
+        {objectUrl ? (
+          <a href={objectUrl} target="_blank" rel="noreferrer">
+            <img src={objectUrl} alt={name} />
+          </a>
+        ) : (
+          <div className="attachment-placeholder">
+            {failed ? "Unavailable" : "Loading…"}
+          </div>
+        )}
         <figcaption>
           <span>{name}</span>
-          <small>{metadata}</small>
+          <small>{detail}</small>
         </figcaption>
       </figure>
     );
   }
 
+  const label = (
+    <>
+      <FileIcon />
+      <span>
+        <strong>{name}</strong>
+        <small>{detail}</small>
+      </span>
+    </>
+  );
+
+  // Until the bytes are fetched there is nothing a link could point at: the
+  // API path itself would open unauthenticated in a new tab.
+  if (!objectUrl) return <div className="file-attachment">{label}</div>;
+
   return (
     <a
       className="file-attachment"
-      href={url}
+      href={objectUrl}
       target="_blank"
       rel="noreferrer"
       download={name}
     >
-      <FileIcon />
-      <span>
-        <strong>{name}</strong>
-        <small>{metadata}</small>
-      </span>
+      {label}
       <ArrowIcon />
     </a>
   );
@@ -797,18 +862,126 @@ function ArrowIcon() {
   );
 }
 
+/// The whole dashboard is behind the credential: with no token in session
+/// storage there is nothing worth rendering, and every API call would 401.
+function TokenPrompt({ rejected }: { rejected: boolean }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="app">
+      <form
+        className="state token-prompt"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const token = value.trim();
+          if (token) setToken(token);
+        }}
+      >
+        <h2>Admin token required</h2>
+        <p>
+          {rejected
+            ? "That token was rejected. Enter the operator token for this deployment."
+            : "Enter the operator token for this deployment. It is kept for this browser session only."}
+        </p>
+        <label>
+          <span className="visually-hidden">Admin token</span>
+          <input
+            type="password"
+            name="token"
+            autoComplete="off"
+            placeholder="Admin token"
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        </label>
+        <button type="submit">Continue</button>
+      </form>
+    </div>
+  );
+}
+
+/// Shown in nip98 mode when no NIP-07 extension is available. Instructs the
+/// operator to install nos2x or Alby before continuing.
+function Nip07Screen() {
+  return (
+    <div className="app">
+      <div className="state token-prompt">
+        <h2>Nostr extension required</h2>
+        <p>
+          This relay uses NIP-98 HTTP Auth. Install a NIP-07 browser extension
+          such as{" "}
+          <a
+            href="https://github.com/fiatjaf/nos2x"
+            target="_blank"
+            rel="noreferrer"
+          >
+            nos2x
+          </a>{" "}
+          or{" "}
+          <a href="https://getalby.com" target="_blank" rel="noreferrer">
+            Alby
+          </a>
+          , then reload this page. Your Nostr key will be used to sign each
+          request.
+        </p>
+        <button type="button" onClick={() => location.reload()}>
+          Reload
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const { path } = usePath();
+  const token = useToken();
+  // Distinguishes the first visit from a token the relay just rejected.
+  const [everHadToken, setEverHadToken] = useState(token !== null);
+  useEffect(() => {
+    if (token !== null) setEverHadToken(true);
+  }, [token]);
+
+  // Probe the relay once to discover the auth mode. `null` means the probe is
+  // still in flight. Once resolved, the mode is stable for the session.
+  const [authMode, setAuthMode] = useState<AuthMode | null>(
+    // If we already have a token we know we're in token mode; skip the probe.
+    token !== null ? "token" : null,
+  );
+  useEffect(() => {
+    if (token !== null) {
+      setAuthMode("token");
+      return;
+    }
+    let active = true;
+    probeAuthMode().then((mode) => {
+      if (active) setAuthMode(mode);
+    });
+    return () => {
+      active = false;
+    };
+  }, [token]);
+
   const report = path.match(/^\/reports\/([^/]+)$/);
   const feedback = path.match(/^\/feedback\/([^/]+)$/);
+
+  // Probe still in flight — render nothing to avoid a visible flash.
+  if (authMode === null) return null;
+
+  // Token mode: show the token prompt until a valid token is stored.
+  if (authMode === "token" && !token)
+    return <TokenPrompt rejected={everHadToken} />;
+
+  // NIP-98 mode: require a NIP-07 extension.
+  if (authMode === "nip98" && !(window as Window & { nostr?: unknown }).nostr)
+    return <Nip07Screen />;
+
   const content = report ? (
-    <ReportDetail id={report[1]} />
+    <ReportDetail id={report[1]} authMode={authMode} />
   ) : feedback ? (
-    <FeedbackDetailView id={feedback[1]} />
+    <FeedbackDetailView id={feedback[1]} authMode={authMode} />
   ) : path === "/feedback" ? (
-    <FeedbackList />
+    <FeedbackList authMode={authMode} />
   ) : (
-    <Reports />
+    <Reports authMode={authMode} />
   );
   return (
     <div className="app">

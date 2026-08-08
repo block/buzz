@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking:** the relay admin moderation API (`/api/admin/v1`) now requires
+  explicit authentication configuration when `BUZZ_ADMIN_HOST` is set. Choose
+  one mode via `BUZZ_ADMIN_AUTH` (unset defaults to `token`):
+  - **`BUZZ_ADMIN_AUTH=token` (default):** set `BUZZ_ADMIN_TOKEN` to exactly
+    64 hex characters (`openssl rand -hex 32`). Every request requires
+    `Authorization: Bearer`. The dashboard prompts for the token on first load.
+  - **`BUZZ_ADMIN_AUTH=disabled`:** admin API is unauthenticated. Use only when
+    the admin API is already protected by a VPN or private ingress. The relay
+    logs a `WARN` on every startup. The dashboard skips the token prompt.
+  - **`BUZZ_ADMIN_AUTH=nip98`:** NIP-98 HTTP Auth. Every request must carry an
+    `Authorization: Nostr <base64 event>` header containing a signed kind-27235
+    event. Authorized principals resolve from `RELAY_OPERATOR_PUBKEYS`
+    (comma-separated 64-char hex pubkeys for config-backed Operators),
+    `RELAY_OWNER_PUBKEY` (implicit Operator fallback when `RELAY_OPERATOR_PUBKEYS`
+    is unset), and the `relay_operators` table (DB-managed Operator/Moderator
+    roster). The dashboard requires a NIP-07 browser extension (nos2x or Alby);
+    without one it shows an installation screen. Individual operator access is
+    revocable without rotating a shared secret.
+  - Any unrecognised value for `BUZZ_ADMIN_AUTH` is a startup error
+    (typo-proofing). `BUZZ_ADMIN_TOKEN` set alongside `disabled` or `nip98` is
+    also a startup error.
+  - `Host`/`Origin` matching is retained in all modes as defense-in-depth.
+  - **Migration from the previous `BUZZ_ADMIN_INSECURE_NO_AUTH=true`:** replace
+    with `BUZZ_ADMIN_AUTH=disabled`. The behavior is identical.
+
 ## v0.5.8
 
 ### Desktop and shared changes
@@ -13,7 +40,6 @@
 - infra: bind development services to loopback ([#4871](https://github.com/block/buzz/pull/4871)) ([`65834d68d0d3441c4e628540d6d5c8b0a2e757c9`](https://github.com/block/buzz/commit/65834d68d0d3441c4e628540d6d5c8b0a2e757c9))
 
 [Compare desktop-v0.5.7...desktop-v0.5.8](https://github.com/block/buzz/compare/desktop-v0.5.7...desktop-v0.5.8)
-
 ## v0.5.7
 
 ### Desktop and shared changes

@@ -138,6 +138,9 @@ pub struct NewAction<'a> {
     pub private_reason: Option<&'a str>,
     /// NIP-OA matched principal (`self` | `owner`) for ban enforcement audit.
     pub matched_principal: Option<&'a str>,
+    /// Deployment authority type. `'community'` for community-moderation paths;
+    /// `'relay_operator'`/`'relay_moderator'` for HTTP admin paths.
+    pub actor_authority: Option<&'a str>,
 }
 
 /// An audit row as read back for `buzz moderation audit`.
@@ -163,6 +166,8 @@ pub struct ActionRecord {
     pub private_reason: Option<String>,
     /// NIP-OA principal matched by enforcement, when relevant.
     pub matched_principal: Option<String>,
+    /// Deployment authority type for HTTP-initiated actions.
+    pub actor_authority: String,
     /// Action time.
     pub created_at: DateTime<Utc>,
 }
@@ -524,8 +529,9 @@ pub async fn insert_action(
         r#"
         INSERT INTO moderation_actions (
             community_id, actor_pubkey, action, target_pubkey, target_event_id,
-            channel_id, reason_code, public_reason, private_reason, matched_principal
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            channel_id, reason_code, public_reason, private_reason, matched_principal,
+            actor_authority
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id
         "#,
     )
@@ -539,6 +545,7 @@ pub async fn insert_action(
     .bind(action.public_reason)
     .bind(action.private_reason)
     .bind(action.matched_principal)
+    .bind(action.actor_authority.unwrap_or("community"))
     .fetch_one(pool)
     .await?;
 
@@ -554,7 +561,8 @@ pub async fn list_actions(
     let rows = sqlx::query(
         r#"
         SELECT id, actor_pubkey, action, target_pubkey, target_event_id, channel_id,
-               reason_code, public_reason, private_reason, matched_principal, created_at
+               reason_code, public_reason, private_reason, matched_principal,
+               actor_authority, created_at
         FROM moderation_actions
         WHERE community_id = $1
         ORDER BY created_at DESC
@@ -623,6 +631,7 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<ActionRecord> {
         public_reason: row.try_get("public_reason")?,
         private_reason: row.try_get("private_reason")?,
         matched_principal: row.try_get("matched_principal")?,
+        actor_authority: row.try_get("actor_authority")?,
         created_at: row.try_get("created_at")?,
     })
 }
