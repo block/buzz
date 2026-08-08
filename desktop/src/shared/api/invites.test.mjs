@@ -106,6 +106,19 @@ function setupTauriStubs(
       calls.invokeArgs.push({ command, args });
       if (command === "get_relay_http_url") return httpBase;
       if (command === "sign_event") return JSON.stringify(authEvent);
+      if (command === "post_invite_api") {
+        const payload = JSON.parse(args.body);
+        const channelId = payload.channel_id ?? null;
+        return {
+          code: channelId ? "v2.channel-guest" : "v2.abc123",
+          expires_at: 1785100000,
+          url: `https://relay.example/invite/${channelId ? "v2.channel-guest" : "v2.abc123"}`,
+          max_uses: payload.max_uses ?? null,
+          uses_remaining: payload.max_uses ?? null,
+          channel_id: channelId,
+          channel_role: channelId ? "guest" : null,
+        };
+      }
       throw new Error(`Unexpected Tauri command: ${command}`);
     },
   };
@@ -117,7 +130,7 @@ function teardownTauriStubs() {
 }
 
 test("mintInvite serializes bounded max_uses in the request body", async () => {
-  setupTauriStubs("https://relay.example");
+  const calls = setupTauriStubs("https://relay.example");
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
@@ -135,6 +148,10 @@ test("mintInvite serializes bounded max_uses in the request body", async () => {
     };
     try {
       const result = await mintInvite({ ttlSecs: 259200, maxUses: 10 });
+      capturedBody = JSON.parse(
+        calls.invokeArgs.find(({ command }) => command === "post_invite_api")
+          .args.body,
+      );
       assert.equal(capturedBody.ttl_secs, 259200);
       assert.equal(capturedBody.max_uses, 10);
       assert.equal(result.code, "v2.abc123");
@@ -151,7 +168,7 @@ test("mintInvite serializes bounded max_uses in the request body", async () => {
 });
 
 test("mintInvite omits max_uses when null (unlimited)", async () => {
-  setupTauriStubs("https://relay.example");
+  const calls = setupTauriStubs("https://relay.example");
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
@@ -169,6 +186,10 @@ test("mintInvite omits max_uses when null (unlimited)", async () => {
     };
     try {
       const result = await mintInvite({ ttlSecs: 259200, maxUses: null });
+      capturedBody = JSON.parse(
+        calls.invokeArgs.find(({ command }) => command === "post_invite_api")
+          .args.body,
+      );
       assert.equal(capturedBody.ttl_secs, 259200);
       assert.equal(Object.hasOwn(capturedBody, "max_uses"), false);
       assert.equal(result.maxUses, null);
@@ -182,7 +203,7 @@ test("mintInvite omits max_uses when null (unlimited)", async () => {
 });
 
 test("mintInvite omits max_uses when not provided (unlimited default)", async () => {
-  setupTauriStubs("https://relay.example");
+  const calls = setupTauriStubs("https://relay.example");
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
@@ -200,6 +221,10 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
     };
     try {
       await mintInvite({ ttlSecs: 86400 });
+      capturedBody = JSON.parse(
+        calls.invokeArgs.find(({ command }) => command === "post_invite_api")
+          .args.body,
+      );
       assert.equal(capturedBody.ttl_secs, 86400);
       assert.equal(Object.hasOwn(capturedBody, "max_uses"), false);
     } finally {
@@ -211,7 +236,7 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
 });
 
 test("mintInvite scopes a one-use link to a channel guest", async () => {
-  setupTauriStubs("https://relay.example");
+  const calls = setupTauriStubs("https://relay.example");
   try {
     const originalFetch = globalThis.fetch;
     let capturedBody;
@@ -234,6 +259,10 @@ test("mintInvite scopes a one-use link to a channel guest", async () => {
         channelId: "79b26b45-1b21-4dad-bf46-8c682633cbe2",
         maxUses: 1,
       });
+      capturedBody = JSON.parse(
+        calls.invokeArgs.find(({ command }) => command === "post_invite_api")
+          .args.body,
+      );
       assert.equal(
         capturedBody.channel_id,
         "79b26b45-1b21-4dad-bf46-8c682633cbe2",

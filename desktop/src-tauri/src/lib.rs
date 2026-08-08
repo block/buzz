@@ -896,6 +896,7 @@ pub fn run() {
             get_active_workspace,
             fetch_workspace_icon,
             fetch_join_policy,
+            post_invite_api,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
