@@ -1428,7 +1428,7 @@ async fn steer_rejected_on_empty_prompt() {
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
-    let p_id = h
+    let _p_id = h
         .send(
             "session/prompt",
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
@@ -1441,17 +1441,8 @@ async fn steer_rejected_on_empty_prompt() {
             json!({"sessionId": sid, "expectedRunId": run_id, "prompt": []}),
         )
         .await;
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            break;
-        }
-    }
-    assert!(saw_reject, "empty steer prompt was not rejected");
+    let v = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
     h.shutdown().await;
 }
 
