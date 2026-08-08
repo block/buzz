@@ -58,26 +58,24 @@ pub async fn update_profile(
 
     // Pull the current content as a JSON object so we can merge with
     // the caller's overrides.
-    let current: Value = prior_events
+    let current = prior_events
         .first()
-        .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
-        .unwrap_or(Value::Null);
+        .and_then(|event| {
+            serde_json::from_str::<serde_json::Value>(&event.content)
+                .ok()?
+                .as_object()
+                .cloned()
+        })
+        .unwrap_or_default();
 
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    let builder = events::build_profile_with_existing(
+        &current,
+        display_name.as_deref(),
+        None,
+        avatar_url.as_deref(),
+        about.as_deref(),
+        nip05_handle.as_deref(),
+    )?;
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
@@ -156,13 +154,19 @@ fn build_deferred_profile_event(
     let name = current.get("name").and_then(Value::as_str);
     let about = current.get("about").and_then(Value::as_str);
     let nip05 = current.get("nip05").and_then(Value::as_str);
+    let existing = current.as_object().cloned().unwrap_or_default();
 
-    Ok(
-        events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
-            .custom_created_at(monotonic_created_at(
-                prior_event.map(|event| event.created_at.as_secs() as i64),
-            )),
-    )
+    Ok(events::build_profile_with_existing(
+        &existing,
+        display_name,
+        name,
+        Some(avatar_url),
+        about,
+        nip05,
+    )?
+    .custom_created_at(monotonic_created_at(
+        prior_event.map(|event| event.created_at.as_secs() as i64),
+    )))
 }
 
 fn capture_expected_signer(state: &AppState, expected_pubkey: &str) -> Result<nostr::Keys, String> {
