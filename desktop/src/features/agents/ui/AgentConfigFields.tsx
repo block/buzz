@@ -696,7 +696,10 @@ export function AgentConfigFields({
     />
   ) : (
     <Select onValueChange={handleProviderChange} value={providerSelectValue}>
-      <SelectTrigger className={selectClassName} id="global-agent-provider">
+      <SelectTrigger
+        className={cn("w-full", selectClassName)}
+        id="global-agent-provider"
+      >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

@@ -193,7 +193,7 @@ export function CreatePullRequestDialog({
             value={repository?.id ?? ""}
           >
             <SelectTrigger
-              className="h-10 rounded-lg px-3 py-0"
+              className="h-10 w-full rounded-lg px-3 py-0"
               data-testid="create-pull-request-repository"
               id="create-pull-request-repository"
             >
@@ -221,7 +221,7 @@ export function CreatePullRequestDialog({
             value={targetBranch}
           >
             <SelectTrigger
-              className="h-10 rounded-lg px-3 py-0"
+              className="h-10 w-full rounded-lg px-3 py-0"
               data-testid="create-pull-request-base-branch"
               id="create-pull-request-base-branch"
             >
@@ -244,7 +244,7 @@ export function CreatePullRequestDialog({
             value={sourceBranch}
           >
             <SelectTrigger
-              className="h-10 rounded-lg px-3 py-0"
+              className="h-10 w-full rounded-lg px-3 py-0"
               data-testid="create-pull-request-compare-branch"
               id="create-pull-request-compare-branch"
             >

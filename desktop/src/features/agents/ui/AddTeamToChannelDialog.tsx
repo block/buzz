@@ -217,7 +217,7 @@ export function AddTeamToChannelDialog({
                 onValueChange={setChannelId}
                 value={channelId}
               >
-                <SelectTrigger id="team-channel-id">
+                <SelectTrigger className="w-full" id="team-channel-id">
                   <SelectValue
                     placeholder={
                       channels.length === 0
@@ -250,7 +250,7 @@ export function AddTeamToChannelDialog({
                 }
                 value={role}
               >
-                <SelectTrigger id="team-channel-role">
+                <SelectTrigger className="w-full" id="team-channel-role">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

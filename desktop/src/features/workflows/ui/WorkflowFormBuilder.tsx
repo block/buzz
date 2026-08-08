@@ -309,7 +309,7 @@ export function WorkflowFormBuilder({
                 }
                 value={formState.trigger.on}
               >
-                <SelectTrigger id="wf-trigger-type">
+                <SelectTrigger className="w-full" id="wf-trigger-type">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

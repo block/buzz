@@ -156,6 +156,7 @@ export function EffortSelectField({
         >
           <SelectTrigger
             className={cn(
+              "w-full",
               "disabled:cursor-not-allowed disabled:opacity-60",
               selectClassName,
             )}

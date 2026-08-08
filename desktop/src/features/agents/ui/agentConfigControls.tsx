@@ -563,6 +563,7 @@ export function AgentModelField({
       <SelectTrigger
         aria-required={isRequired}
         className={cn(
+          "w-full",
           "disabled:cursor-not-allowed disabled:opacity-60",
           selectClassName,
         )}
@@ -651,7 +652,7 @@ export function AgentProviderField({
       >
         <SelectTrigger
           aria-required={isRequired}
-          className="disabled:cursor-not-allowed disabled:opacity-60"
+          className="w-full disabled:cursor-not-allowed disabled:opacity-60"
           id="agent-provider"
         >
           <SelectValue />

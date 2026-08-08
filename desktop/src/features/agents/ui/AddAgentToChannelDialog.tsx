@@ -140,7 +140,7 @@ export function AddAgentToChannelDialog({
                 onValueChange={setChannelId}
                 value={channelId}
               >
-                <SelectTrigger id="agent-channel-id">
+                <SelectTrigger className="w-full" id="agent-channel-id">
                   <SelectValue
                     placeholder={
                       channels.length === 0
@@ -184,7 +184,7 @@ export function AddAgentToChannelDialog({
                 }
                 value={role}
               >
-                <SelectTrigger id="agent-channel-role">
+                <SelectTrigger className="w-full" id="agent-channel-role">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

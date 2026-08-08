@@ -338,6 +338,7 @@ function AddSubscriptionForm({ channels, onSaved, onCancel }: AddFormProps) {
             value={selectedChannelId}
           >
             <SelectTrigger
+              className="w-full"
               data-testid="local-archive-channel-select"
               id="local-archive-channel-select"
             >

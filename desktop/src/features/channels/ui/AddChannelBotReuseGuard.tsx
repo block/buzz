@@ -35,7 +35,7 @@ export function AddChannelBotReuseGuard({
         onValueChange={(value) => onForceNewChange(value === "new")}
         value={forceNew ? "new" : "reuse"}
       >
-        <SelectTrigger id="agent-instance-mode">
+        <SelectTrigger className="w-full" id="agent-instance-mode">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

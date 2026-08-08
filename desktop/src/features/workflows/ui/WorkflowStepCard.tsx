@@ -184,7 +184,7 @@ function StepConfigFields({
               onValueChange={(value) => onUpdate({ ...step, method: value })}
               value={step.method ?? "POST"}
             >
-              <SelectTrigger id={`${prefix}-method`}>
+              <SelectTrigger className="w-full" id={`${prefix}-method`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -384,7 +384,7 @@ export function WorkflowStepCard({
             }}
             value={step.action}
           >
-            <SelectTrigger id={`${prefix}-action`}>
+            <SelectTrigger className="w-full" id={`${prefix}-action`}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

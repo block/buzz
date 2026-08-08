@@ -98,7 +98,7 @@ export function CreateProjectIssueDialog({
           value={repository?.id ?? ""}
         >
           <SelectTrigger
-            className="h-10 rounded-lg px-3 py-0"
+            className="h-10 w-full rounded-lg px-3 py-0"
             data-testid="create-issue-repository"
             id="create-issue-repository"
           >

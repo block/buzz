@@ -229,6 +229,7 @@ export function CreateAgentRespondToField({
           value={mode}
         >
           <SelectTrigger
+            className="w-full"
             data-testid="agent-respond-to-select"
             id="agent-respond-to"
           >
