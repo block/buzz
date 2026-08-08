@@ -148,6 +148,22 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+fn workflow_message_base_tags(
+    author_pubkey_hex: &str,
+    channel_id: &str,
+) -> Result<Vec<Tag>, ActionSinkError> {
+    Ok(vec![
+        // Keep workflow ownership first: buzz-acp uses the first `p` tag as
+        // the attributed owner and later `p` tags as wake targets.
+        Tag::parse(["p", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+        Tag::parse(["h", channel_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "true"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+    ])
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -257,14 +273,7 @@ impl ActionSink for RelayActionSink {
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
-            let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["h", &channel_id_canonical])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
+            let mut tags = workflow_message_base_tags(&author_pubkey_hex, &channel_id_canonical)?;
 
             // Resolve `@Name` mentions to channel-member pubkeys and append a
             // `p` tag for each (skipping the author, already tagged above). A
@@ -375,6 +384,13 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    #[test]
+    fn workflow_owner_is_the_first_p_tag() {
+        let owner = pk('a');
+        let tags = workflow_message_base_tags(&owner, &Uuid::new_v4().to_string()).unwrap();
+        assert_eq!(tags[0].as_slice(), ["p", owner.as_str()]);
     }
 
     #[test]
