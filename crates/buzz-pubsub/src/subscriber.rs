@@ -56,9 +56,15 @@ pub(crate) async fn run_subscriber(
                 // established and ran successfully, so reset backoff to the initial
                 // value — a brief Redis restart should reconnect quickly.
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                metrics::gauge!("buzz_pubsub_connected").set(0.0);
+                metrics::counter!("buzz_pubsub_disconnects_total", "reason" => "clean")
+                    .increment(1);
                 tracing::warn!("Redis pub/sub stream ended (clean disconnect) — reconnecting in {backoff_secs}s");
             }
             Err(e) => {
+                metrics::gauge!("buzz_pubsub_connected").set(0.0);
+                metrics::counter!("buzz_pubsub_disconnects_total", "reason" => "error")
+                    .increment(1);
                 tracing::error!("Redis pub/sub error: {e} — reconnecting in {backoff_secs}s");
             }
         }
@@ -66,6 +72,7 @@ pub(crate) async fn run_subscriber(
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
 
+        metrics::counter!("buzz_pubsub_reconnect_attempts_total").increment(1);
         tracing::info!("Attempting to reconnect to Redis pub/sub...");
     }
 }
@@ -101,6 +108,9 @@ async fn connect_and_subscribe(
         topic_count = active_topics.len(),
         "Redis pub/sub subscriber connected with dynamic scoped subscriptions"
     );
+    metrics::gauge!("buzz_pubsub_connected").set(1.0);
+    metrics::counter!("buzz_pubsub_connections_total").increment(1);
+    record_topic_gauges(&desired_topics, &active_topics).await;
 
     loop {
         tokio::select! {
@@ -110,6 +120,7 @@ async fn connect_and_subscribe(
                         let channel = topic.redis_channel();
                         if active_topics.insert(channel.clone()) {
                             sink.subscribe(&channel).await?;
+                            record_topic_gauges(&desired_topics, &active_topics).await;
                         }
                     }
                     SubscriptionCommand::UnsubscribeIfIdle(topic) => {
@@ -117,6 +128,7 @@ async fn connect_and_subscribe(
                             let channel = topic.redis_channel();
                             if active_topics.remove(&channel) {
                                 sink.unsubscribe(&channel).await?;
+                                record_topic_gauges(&desired_topics, &active_topics).await;
                             }
                         }
                     }
@@ -169,6 +181,17 @@ async fn connect_and_subscribe(
             }
         }
     }
+}
+
+async fn record_topic_gauges(desired_topics: &DesiredTopics, active_topics: &HashSet<String>) {
+    let desired_count = desired_topics
+        .lock()
+        .await
+        .values()
+        .filter(|count| **count > 0)
+        .count();
+    metrics::gauge!("buzz_pubsub_topics_desired").set(desired_count as f64);
+    metrics::gauge!("buzz_pubsub_topics_active").set(active_topics.len() as f64);
 }
 
 async fn desired_refcount(desired_topics: &DesiredTopics, topic: EventTopicKey) -> usize {
