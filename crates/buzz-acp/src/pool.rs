@@ -1395,7 +1395,7 @@ pub async fn run_prompt_task(
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
 
     // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
+    // return, or panic), spawns best-effort cleanup of 🔄.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
     let reaction_ids: Vec<String> = batch
         .as_ref()
@@ -1855,17 +1855,6 @@ pub async fn run_prompt_task(
         );
         return;
     };
-
-    // 💬 — fire-and-forget so the prompt fires immediately.
-    // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
-    // A brief race where 💬 appears slightly after the agent starts is acceptable.
-    if !reaction_ids.is_empty() {
-        let rest = ctx.rest_client.clone();
-        let ids = reaction_ids.clone();
-        tokio::spawn(async move {
-            react_working(&rest, &ids).await;
-        });
-    }
 
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
@@ -3139,15 +3128,12 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 }
 
 //
-// Two-phase lifecycle visible to users:
-//   👀  "seen"    — event was queued and an agent will handle it
-//   💬  "working" — agent is actively prompting
+// Shared lifecycle visible to users:
+//   🔄  "in process" — event was accepted and the agent is handling it
 //
-// 💬 is awaited inline in `run_prompt_task` before the prompt fires, so
-// add-before-remove ordering is structural. 👀 is fire-and-forget from
-// `main.rs` at queue-push time for immediate responsiveness; on rare
-// fast-failure paths the guard's cleanup may race with the 👀 add,
-// leaving a cosmetic stale 👀 (see `ReactionGuard` docs).
+// 🔄 is fire-and-forget from the event loop at queue-push time. On rare
+// fast-failure paths the guard's cleanup may race with the add, leaving a
+// cosmetic stale 🔄 (see `ReactionGuard` docs).
 //
 // Cleanup is fire-and-forget via `ReactionGuard` (spawned on drop).
 // Failures are debug-logged and ignored — reactions are cosmetic.
@@ -3155,18 +3141,15 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 /// Drop guard that spawns reaction cleanup on any exit path.
 ///
 /// Created at the top of `run_prompt_task`. On drop — normal return, early
-/// return, or panic — spawns fire-and-forget removal of both 👀 and 💬.
+/// return, or panic — spawns fire-and-forget removal of 🔄.
 ///
 /// ## Ordering
 ///
-/// 💬 (`react_working`) is fire-and-forget (spawned before the prompt fires).
-/// A brief race where 💬 appears slightly after the agent starts is acceptable.
-///
-/// 👀 (`react_seen`) is fire-and-forget from `main.rs` at queue-push time.
+/// 🔄 is fire-and-forget from the event loop at queue-push time.
 /// On rare fast-failure paths (e.g., `session_new` error on an idle agent),
-/// the cleanup spawn may race with the 👀 add, leaving a stale 👀. This is
+/// the cleanup spawn may race with the 🔄 add, leaving a stale 🔄. This is
 /// accepted as a cosmetic edge case — the message will be retried and the
-/// stale 👀 is harmless.
+/// stale 🔄 is harmless.
 struct ReactionGuard {
     rest: Option<crate::relay::RestClient>,
     ids: Vec<String>,
@@ -3489,8 +3472,7 @@ async fn publish_agent_turn_metric(
     }
 }
 
-const REACTION_SEEN: &str = "👀";
-const REACTION_WORKING: &str = "💬";
+const REACTION_IN_PROCESS: &str = "🔄";
 
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -3676,32 +3658,16 @@ pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &
 /// Prevents unbounded parallelism when a large batch of events arrives.
 const REACTION_CONCURRENCY: usize = 10;
 
-/// Add 💬 to all events, capped at `REACTION_CONCURRENCY` concurrent requests.
-/// Awaited inline before the prompt fires.
-async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
+/// Fire-and-forget: remove 🔄 from all events. Spawned on turn complete.
+/// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
+/// unbounded HTTP fan-out on large batches.
+async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
     for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
         futures_util::future::join_all(
             chunk
                 .iter()
-                .map(|eid| reaction_add(rest, eid, REACTION_WORKING)),
+                .map(|eid| reaction_remove(&rest, eid, REACTION_IN_PROCESS)),
         )
-        .await;
-    }
-}
-
-/// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
-/// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
-/// unbounded HTTP fan-out on large batches.
-async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
-    // Each event needs two removals (👀 and 💬); pair them and chunk by
-    // REACTION_CONCURRENCY pairs so the total concurrent requests stay bounded.
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
-        futures_util::future::join_all(chunk.iter().flat_map(|eid| {
-            [
-                reaction_remove(&rest, eid, REACTION_SEEN),
-                reaction_remove(&rest, eid, REACTION_WORKING),
-            ]
-        }))
         .await;
     }
 }
@@ -4279,14 +4245,8 @@ mod tests {
 
     #[test]
     fn test_pct_encode_emoji() {
-        // 👀 = U+1F440 = F0 9F 91 80 in UTF-8
-        assert_eq!(pct_encode("👀"), "%F0%9F%91%80");
-    }
-
-    #[test]
-    fn test_pct_encode_emoji_speech_balloon() {
-        // 💬 = U+1F4AC = F0 9F 92 AC in UTF-8
-        assert_eq!(pct_encode("💬"), "%F0%9F%92%AC");
+        // 🔄 = U+1F504 = F0 9F 94 84 in UTF-8
+        assert_eq!(pct_encode("🔄"), "%F0%9F%94%84");
     }
 
     #[test]

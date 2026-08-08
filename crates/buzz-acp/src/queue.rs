@@ -621,7 +621,7 @@ impl EventQueue {
     /// Also clears any `retry_after` throttle for the channel.
     ///
     /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// any reactions (🔄) that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
         let ids = self
             .queues

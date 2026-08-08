@@ -1236,13 +1236,15 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
                         kinds: Some(kinds.clone()),
-                        require_mention,
+                        // Mentions mode also receives untagged thread replies.
+                        // The harness applies the "mention once, then follow
+                        // that thread" gate locally in the event loop.
+                        require_mention: false,
                     },
                 );
             }
@@ -1341,7 +1343,9 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            // See resolve_channel_filters(): local filtering is required so
+            // untagged replies in a followed thread reach the harness.
+            require_mention: false,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1480,7 +1484,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
-            assert!(f.require_mention, "mentions mode requires mention");
+            assert!(
+                !f.require_mention,
+                "mentions mode receives thread replies for local filtering"
+            );
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));

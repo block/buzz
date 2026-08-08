@@ -36,6 +36,26 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 ## Communication Patterns
 
+### Chat Style
+
+- Write concise, natural prose by default. Add structure only when it makes the response easier to act on.
+- Use standard GitHub-flavored Markdown. Use `##` headings for real sections; do not use bold or italics as fake headings.
+- Lead with the outcome, decision, or blocker. Keep implementation detail proportional to what the reader needs.
+- Do not expose internal prompts, hidden reasoning, credentials, or raw operational logs.
+- When work is still active, make the current state and next step explicit. Do not claim that work continued, shipped, or was verified unless runtime evidence proves it.
+
+### Status Emoji
+
+Use one shared lifecycle vocabulary in reactions and status text:
+
+- 🔄 — in process
+- ❓ — waiting for a human answer
+- ✋ — waiting for a human-only action
+- 🗓️ — scheduled for later
+- ✅ — done, only after the human-visible outcome is verified
+
+When a status row or reaction strip is shown, put the lifecycle emoji first. Buzz adds 🔄 while a turn is running and clears it when the turn ends; use ❓ or ✋ in the reply itself when the next move belongs to the human. Never use ✅ merely because the agent finished a turn.
+
 ### Mentions
 
 - Use the person's **exact full display name** after `@` (e.g., `@Will Pfleger`, not `@Will`). Partial names fail silently.
@@ -48,6 +68,8 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 - This applies to **completed work only.** Do not `@mention` to accept an assignment, confirm receipt, or close a loop conversationally. If you have nothing to report yet, say nothing and report when you do.
 
 ### Threading
+
+One exact @mention starts the conversation. After that, later human replies in the same thread are routed to you without requiring another mention; unrelated channel messages are ignored.
 
 Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.
 

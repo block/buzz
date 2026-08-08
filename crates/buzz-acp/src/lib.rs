@@ -1448,7 +1448,9 @@ async fn tokio_main() -> Result<()> {
                         KIND_STREAM_REMINDER,
                     ]
                 }),
-                require_mention: !config.no_mention_filter,
+                // Receive untagged replies so the local mention-once gate can
+                // continue conversations inside threads.
+                require_mention: false,
                 filter: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -1680,6 +1682,13 @@ async fn tokio_main() -> Result<()> {
     // causal invalidation is needed, add a monotonic epoch counter per channel
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
+
+    // In mentions mode, an explicit mention opts the agent into that one
+    // conversation. Later human replies in the same thread are accepted
+    // without another @mention; unrelated channel traffic remains ignored.
+    // This is intentionally process-local: a restarted harness asks for one
+    // fresh mention before resuming a thread.
+    let mut followed_threads: HashSet<(Uuid, String)> = HashSet::new();
 
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
@@ -1997,11 +2006,12 @@ async fn tokio_main() -> Result<()> {
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
+                                    followed_threads.retain(|(channel_id, _)| *channel_id != ch);
                                     typing_channels.remove(&ch);
-                                    // Best-effort: clean up 👀 on drained events.
+                                    // Best-effort: clean up 🔄 on drained events.
                                     // Note: the relay revokes membership before
                                     // emitting the notification, so this DELETE may
-                                    // 403 on non-open channels. Stale 👀 in that
+                                    // 403 on non-open channels. Stale 🔄 in that
                                     // case is a known limitation — fix belongs in
                                     // the relay (clean up bot reactions on removal).
                                     if !drained_ids.is_empty() {
@@ -2009,7 +2019,7 @@ async fn tokio_main() -> Result<()> {
                                         let ids = drained_ids.clone();
                                         tokio::spawn(async move {
                                             for eid in &ids {
-                                                pool::reaction_remove(&rc, eid, "👀").await;
+                                                pool::reaction_remove(&rc, eid, "🔄").await;
                                             }
                                         });
                                     }
@@ -2172,6 +2182,23 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
+                            if config.subscribe_mode == SubscribeMode::Mentions
+                                && !config.no_mention_filter
+                                && !mention_mode_accepts_event(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    &pubkey_hex,
+                                    &mut followed_threads,
+                                )
+                            {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    kind = buzz_event.event.kind.as_u16(),
+                                    "mentions mode — dropping event outside a followed thread"
+                                );
+                                continue;
+                            }
+
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
@@ -2202,16 +2229,16 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
-                            // 👀 — immediate "seen" reaction, only if the event
+                            // 🔄 — immediate "in process" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
+                            // cosmetic stale 🔄. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
-                                    pool::reaction_add(&rc, &eid, "👀").await;
+                                    pool::reaction_add(&rc, &eid, "🔄").await;
                                 });
                             }
                             // Event is already queued. If mode requires it AND
@@ -2714,6 +2741,34 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+
+/// Apply the default consumer-facing mentions policy.
+///
+/// The first explicit mention starts (or joins) a followed thread. Subsequent
+/// unmentioned stream-message replies in that thread are accepted until the
+/// process restarts. Top-level channel messages and replies in other threads
+/// remain ignored.
+fn mention_mode_accepts_event(
+    event: &nostr::Event,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    followed_threads: &mut HashSet<(Uuid, String)>,
+) -> bool {
+    let thread = queue::parse_thread_tags(event);
+    if event_mentions_agent(event, agent_pubkey_hex) {
+        let root = thread.root_event_id.unwrap_or_else(|| event.id.to_hex());
+        followed_threads.insert((channel_id, root));
+        return true;
+    }
+
+    if u32::from(event.kind.as_u16()) != KIND_STREAM_MESSAGE {
+        return false;
+    }
+
+    thread
+        .root_event_id
+        .is_some_and(|root| followed_threads.contains(&(channel_id, root)))
 }
 
 fn is_owner_control_command(
@@ -3605,6 +3660,17 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
         assert!(prompt.contains("buzz messages send ... --content -"));
     }
+
+    #[test]
+    fn shared_base_prompt_defines_neutral_chat_style_and_status_emoji() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("### Chat Style"));
+        assert!(prompt.contains("### Status Emoji"));
+        assert!(prompt.contains("🔄 — in process"));
+        assert!(prompt.contains("✅ — done, only after"));
+        assert!(prompt.contains("Never use ✅ merely because the agent finished a turn"));
+        assert!(prompt.contains("One exact @mention starts the conversation"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
@@ -4234,11 +4300,15 @@ mod owner_control_command_tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn make_event(kind: u32, content: &str, p_hex: Option<&str>) -> nostr::Event {
-        let keys = Keys::generate();
         let tags = match p_hex {
             Some(hex) => vec![Tag::parse(["p", hex]).expect("p tag")],
             None => vec![],
         };
+        make_event_with_tags(kind, content, tags)
+    }
+
+    fn make_event_with_tags(kind: u32, content: &str, tags: Vec<Tag>) -> nostr::Event {
+        let keys = Keys::generate();
         EventBuilder::new(Kind::Custom(kind as u16), content)
             .tags(tags)
             .sign_with_keys(&keys)
@@ -4274,6 +4344,56 @@ mod owner_control_command_tests {
             KIND_STREAM_MESSAGE,
             "!rotate",
             &agent
+        ));
+    }
+
+    #[test]
+    fn mentions_mode_follows_only_the_thread_started_by_an_explicit_mention() {
+        let agent = "ab".repeat(32);
+        let channel = Uuid::new_v4();
+        let mut followed = HashSet::new();
+
+        let root = make_event(KIND_STREAM_MESSAGE, "@Max hello", Some(&agent));
+        let root_id = root.id.to_hex();
+        assert!(mention_mode_accepts_event(
+            &root,
+            channel,
+            &agent,
+            &mut followed
+        ));
+        assert!(followed.contains(&(channel, root_id.clone())));
+
+        let followup = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "follow up without another mention",
+            vec![Tag::parse(["e", root_id.as_str(), "", "root"]).expect("root tag")],
+        );
+        assert!(mention_mode_accepts_event(
+            &followup,
+            channel,
+            &agent,
+            &mut followed
+        ));
+
+        let other_root = "11".repeat(32);
+        let other_thread = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "unrelated thread",
+            vec![Tag::parse(["e", other_root.as_str(), "", "root"]).expect("root tag")],
+        );
+        assert!(!mention_mode_accepts_event(
+            &other_thread,
+            channel,
+            &agent,
+            &mut followed
+        ));
+
+        let top_level = make_event(KIND_STREAM_MESSAGE, "unrelated channel message", None);
+        assert!(!mention_mode_accepts_event(
+            &top_level,
+            channel,
+            &agent,
+            &mut followed
         ));
     }
 
