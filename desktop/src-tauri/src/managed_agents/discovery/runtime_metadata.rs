@@ -122,5 +122,24 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+
+        let openclaw = known_acp_runtime_exact("openclaw").unwrap();
+        assert_eq!(openclaw.commands, &["openclaw-acp"]);
+        assert_eq!(
+            openclaw.adapter_install_commands,
+            &["npm install -g openclaw@latest"]
+        );
+        assert_eq!(
+            openclaw.auth_probe_args,
+            Some(
+                &[
+                    "openclaw",
+                    "models",
+                    "status",
+                    "--check",
+                    "--json"
+                ][..]
+            )
+        );
     }
 }
