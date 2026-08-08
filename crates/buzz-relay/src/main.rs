@@ -35,6 +35,35 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+/// `after_connect` hook applying the configured runtime timeouts to the pools
+/// the relay owns directly. The writer and replica pools get theirs from
+/// `buzz_db::Db::new`; the audit and search pools are built here, so they need
+/// the same treatment from the same config.
+fn runtime_timeout_hook(
+    db_config: &DbConfig,
+) -> impl for<'a> Fn(
+    &'a mut sqlx::PgConnection,
+    sqlx::pool::PoolConnectionMetadata,
+) -> futures_util::future::BoxFuture<'a, Result<(), sqlx::Error>>
+       + Send
+       + Sync
+       + 'static {
+    let statement_timeout = db_config.statement_timeout.clone();
+    let lock_timeout = db_config.lock_timeout.clone();
+    move |connection, _meta| {
+        let statement_timeout = statement_timeout.clone();
+        let lock_timeout = lock_timeout.clone();
+        Box::pin(async move {
+            buzz_db::apply_runtime_connection_timeouts(
+                connection,
+                &statement_timeout,
+                &lock_timeout,
+            )
+            .await
+        })
+    }
+}
+
 /// Controls how many per-community gauge series the usage poller emits.
 ///
 /// Datadog cost is proportional to the number of unique time-series.  With ~25
@@ -169,6 +198,8 @@ async fn main() -> anyhow::Result<()> {
         replica_read_max_age_ms: config.replica_read_max_age_ms,
         max_connections: config.db_pool_size,
         read_max_connections: config.db_read_pool_size,
+        statement_timeout: config.db_statement_timeout.clone(),
+        lock_timeout: config.db_lock_timeout.clone(),
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -350,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
         let audit_pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .min_connections(1)
+            .after_connect(runtime_timeout_hook(&db_config))
             .connect(&config.database_url)
             .await
             .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
@@ -404,6 +436,7 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .unwrap_or(&config.database_url);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
+        .after_connect(runtime_timeout_hook(&db_config))
         .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;

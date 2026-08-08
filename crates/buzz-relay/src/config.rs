@@ -99,6 +99,14 @@ pub struct Config {
     /// independently so reader capacity can be tuned against the replica's
     /// headroom without touching the writer pool.
     pub db_read_pool_size: Option<u32>,
+    /// Postgres `statement_timeout` for every runtime connection
+    /// (`BUZZ_DB_STATEMENT_TIMEOUT`, e.g. `45s`, `500ms`, `0` to disable).
+    /// Tunable so a backfill or an incident does not need a code change.
+    pub db_statement_timeout: String,
+    /// Postgres `lock_timeout` for every runtime connection
+    /// (`BUZZ_DB_LOCK_TIMEOUT`). Schema migrations always run with both limits
+    /// lifted — see `buzz_db::migration::run_migrations`.
+    pub db_lock_timeout: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -296,6 +304,65 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+/// Convert a Postgres timeout magnitude and unit to milliseconds, mirroring the
+/// rounding Postgres applies to sub-millisecond `us` values. `None` means the
+/// spelling is not something Postgres would accept.
+fn pg_timeout_millis(magnitude: &str, unit: &str) -> Option<u128> {
+    let value = magnitude.parse::<u128>().ok()?;
+    match unit {
+        // Round half up without the `value + 500` intermediate, which overflows
+        // for the top 500 representable microsecond values.
+        "us" => Some(value / 1_000 + u128::from(value % 1_000 >= 500)),
+        "" | "ms" => Some(value),
+        "s" => value.checked_mul(1_000),
+        "min" => value.checked_mul(60_000),
+        "h" => value.checked_mul(3_600_000),
+        "d" => value.checked_mul(86_400_000),
+        _ => None,
+    }
+}
+
+/// Postgres accepts a timeout as an integer (milliseconds) with an optional
+/// unit, bounded by `i32::MAX` ms once converted. Anything else is refused in
+/// favor of the default rather than failing the config: an unusable value would
+/// break every `after_connect`, taking all Postgres access with it, and a relay
+/// that keeps its documented default is a better outcome than one that will not
+/// start. Magnitude is range-checked, not just shape-checked — `999...9d` is a
+/// well-formed spelling that Postgres still rejects.
+fn pg_timeout_or_default(raw: Option<&str>, default: &str) -> String {
+    let candidate = raw.map(str::trim).filter(|value| !value.is_empty());
+    let Some(candidate) = candidate else {
+        return default.to_string();
+    };
+
+    let digits = candidate.chars().take_while(char::is_ascii_digit).count();
+    let (magnitude, unit) = candidate.split_at(digits);
+    let unit = unit.trim().to_ascii_lowercase();
+
+    match pg_timeout_millis(magnitude, &unit) {
+        Some(millis) if millis <= buzz_db::PG_TIMEOUT_MAX_MILLIS => candidate.to_string(),
+        Some(millis) => {
+            tracing::warn!(
+                value = candidate,
+                millis = %millis,
+                max_millis = %buzz_db::PG_TIMEOUT_MAX_MILLIS,
+                default,
+                "ignoring out-of-range Postgres timeout — Postgres stores it as int milliseconds"
+            );
+            default.to_string()
+        }
+        None => {
+            tracing::warn!(
+                value = candidate,
+                default,
+                "ignoring malformed Postgres timeout — expected an integer with an optional \
+                 us/ms/s/min/h/d unit"
+            );
+            default.to_string()
+        }
+    }
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -530,6 +597,15 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
+
+        let db_statement_timeout = pg_timeout_or_default(
+            std::env::var("BUZZ_DB_STATEMENT_TIMEOUT").ok().as_deref(),
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT,
+        );
+        let db_lock_timeout = pg_timeout_or_default(
+            std::env::var("BUZZ_DB_LOCK_TIMEOUT").ok().as_deref(),
+            buzz_db::RUNTIME_LOCK_TIMEOUT,
+        );
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -996,6 +1072,8 @@ impl Config {
             redis_pool_size,
             db_pool_size,
             db_read_pool_size,
+            db_statement_timeout,
+            db_lock_timeout,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -1262,6 +1340,129 @@ mod tests {
         assert_eq!(overridden, 80);
         assert_eq!(zero, 50, "zero must fall back to the default");
         assert_eq!(junk, 50, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn pg_timeout_accepts_postgres_spellings_and_refuses_the_rest() {
+        for accepted in ["30s", "500ms", "0", "45S", "2min", " 10s "] {
+            assert_eq!(
+                pg_timeout_or_default(Some(accepted), "30s"),
+                accepted.trim(),
+                "{accepted} is a valid Postgres timeout"
+            );
+        }
+
+        // A rejected value must not reach Postgres: `after_connect` would fail
+        // for every connection, which is worse than the documented default.
+        for rejected in ["", "   ", "soon", "30 seconds", "s30", "-5s", "30s;DROP"] {
+            assert_eq!(
+                pg_timeout_or_default(Some(rejected), "30s"),
+                "30s",
+                "{rejected:?} must fall back to the default"
+            );
+        }
+
+        assert_eq!(pg_timeout_or_default(None, "5s"), "5s");
+    }
+
+    #[test]
+    fn pg_timeout_refuses_magnitudes_postgres_cannot_store() {
+        // Well-formed spellings whose millisecond value exceeds the int GUC
+        // range. Postgres rejects these in `set_config`, which would fail every
+        // pool's `after_connect`.
+        for rejected in [
+            "2147483648",
+            "2147483648ms",
+            "2147484s",
+            "35792min",
+            "597h",
+            "25d",
+            // Wider than any integer type — must fall back, not overflow.
+            "999999999999999999999999999999999999999999d",
+            "99999999999999999999999999999999999999999999999999",
+            // Parses as u128, so unlike the two above it reaches the unit
+            // conversion — where rounding must not overflow on the way to the
+            // range check.
+            &format!("{}us", u128::MAX),
+            &format!("{}us", u128::MAX - 499),
+        ] {
+            assert_eq!(
+                pg_timeout_or_default(Some(rejected), "30s"),
+                "30s",
+                "{rejected:?} is out of range for Postgres and must fall back"
+            );
+        }
+
+        // The boundary itself, and the same instant in every unit, stay valid.
+        for accepted in [
+            "2147483647",
+            "2147483647ms",
+            "2147483647000us",
+            "2147483s",
+            "35791min",
+            "596h",
+            "24d",
+        ] {
+            assert_eq!(
+                pg_timeout_or_default(Some(accepted), "30s"),
+                accepted,
+                "{accepted} is inside the Postgres range"
+            );
+        }
+    }
+
+    #[test]
+    fn db_timeout_env_overrides_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_statement = std::env::var_os("BUZZ_DB_STATEMENT_TIMEOUT");
+        let previous_lock = std::env::var_os("BUZZ_DB_LOCK_TIMEOUT");
+
+        std::env::remove_var("BUZZ_DB_STATEMENT_TIMEOUT");
+        std::env::remove_var("BUZZ_DB_LOCK_TIMEOUT");
+        let defaults = Config::from_env().expect("config");
+        assert_eq!(
+            defaults.db_statement_timeout,
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT
+        );
+        assert_eq!(defaults.db_lock_timeout, buzz_db::RUNTIME_LOCK_TIMEOUT);
+
+        std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", "90s");
+        std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", "250ms");
+        let overridden = Config::from_env().expect("config");
+        assert_eq!(overridden.db_statement_timeout, "90s");
+        assert_eq!(overridden.db_lock_timeout, "250ms");
+
+        std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", "half a minute");
+        let junk = Config::from_env().expect("config");
+        assert_eq!(
+            junk.db_statement_timeout,
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT,
+            "a malformed value must not be handed to Postgres"
+        );
+
+        // Shape-valid but far outside the int millisecond GUC range: Postgres
+        // would reject it in every pool's `after_connect`.
+        std::env::set_var(
+            "BUZZ_DB_STATEMENT_TIMEOUT",
+            "999999999999999999999999999999999999999999d",
+        );
+        std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", "25d");
+        let out_of_range = Config::from_env().expect("config");
+        assert_eq!(
+            out_of_range.db_statement_timeout,
+            buzz_db::RUNTIME_STATEMENT_TIMEOUT,
+            "an out-of-range value must not be handed to Postgres"
+        );
+        assert_eq!(out_of_range.db_lock_timeout, buzz_db::RUNTIME_LOCK_TIMEOUT);
+
+        match previous_statement {
+            Some(value) => std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT", value),
+            None => std::env::remove_var("BUZZ_DB_STATEMENT_TIMEOUT"),
+        }
+        match previous_lock {
+            Some(value) => std::env::set_var("BUZZ_DB_LOCK_TIMEOUT", value),
+            None => std::env::remove_var("BUZZ_DB_LOCK_TIMEOUT"),
+        }
     }
 
     #[test]

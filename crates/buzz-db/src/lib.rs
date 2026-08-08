@@ -65,6 +65,39 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
+/// Default maximum time a runtime query may execute before Postgres cancels it.
+pub const RUNTIME_STATEMENT_TIMEOUT: &str = "30s";
+/// Default maximum time a runtime query may wait to acquire a lock.
+pub const RUNTIME_LOCK_TIMEOUT: &str = "5s";
+/// Postgres spelling of "no limit", used for schema migrations.
+pub const TIMEOUT_DISABLED: &str = "0";
+/// `statement_timeout` and `lock_timeout` are `int` GUCs measured in
+/// milliseconds, so Postgres refuses anything larger regardless of the unit it
+/// is spelled with. Callers building a [`DbConfig`] from operator input must
+/// range-check against this: [`apply_runtime_connection_timeouts`] runs on every
+/// pooled connection, so an unusable value fails all database access.
+/// `pg_timeout_max_millis_matches_postgres` pins it to the live server.
+pub const PG_TIMEOUT_MAX_MILLIS: u128 = i32::MAX as u128;
+
+/// Apply the runtime safety limits shared by writer, reader, audit, and search
+/// pools. Values are Postgres interval strings (`"30s"`, `"500ms"`), with
+/// [`TIMEOUT_DISABLED`] lifting a limit entirely.
+pub async fn apply_runtime_connection_timeouts(
+    connection: &mut PgConnection,
+    statement_timeout: &str,
+    lock_timeout: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, false), \
+                set_config('lock_timeout', $2, false)",
+    )
+    .bind(statement_timeout)
+    .bind(lock_timeout)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
 fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
@@ -527,6 +560,14 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Postgres `statement_timeout` applied to every runtime connection. An
+    /// operator running a backfill or working an incident can widen this without
+    /// a code change; [`TIMEOUT_DISABLED`] removes the cap.
+    pub statement_timeout: String,
+    /// Postgres `lock_timeout` applied to every runtime connection. Bounds
+    /// heavyweight and row lock waits only — advisory-lock waits are bounded by
+    /// [`Self::statement_timeout`] instead.
+    pub lock_timeout: String,
 }
 
 impl Default for DbConfig {
@@ -544,6 +585,8 @@ impl Default for DbConfig {
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            statement_timeout: RUNTIME_STATEMENT_TIMEOUT.to_string(),
+            lock_timeout: RUNTIME_LOCK_TIMEOUT.to_string(),
         }
     }
 }
@@ -682,18 +725,23 @@ impl Db {
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
-        if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
-                Box::pin(async move {
+        let statement_timeout = config.statement_timeout.clone();
+        let lock_timeout = config.lock_timeout.clone();
+        options = options.after_connect(move |conn, _meta| {
+            let statement_timeout = statement_timeout.clone();
+            let lock_timeout = lock_timeout.clone();
+            Box::pin(async move {
+                apply_runtime_connection_timeouts(conn, &statement_timeout, &lock_timeout).await?;
+                if arm_floor_guard {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
                         .execute(conn)
                         .await?;
-                    Ok(())
-                })
-            });
-        }
+                }
+                Ok(())
+            })
+        });
         Ok(options.connect(url).await?)
     }
 
@@ -721,12 +769,22 @@ impl Db {
     /// No floor guard: replica sessions are read-only, the trigger never
     /// fires there (see [`Db::connect_pool`]).
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        let statement_timeout = config.statement_timeout.clone();
+        let lock_timeout = config.lock_timeout.clone();
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(0)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(move |connection, _meta| {
+                let statement_timeout = statement_timeout.clone();
+                let lock_timeout = lock_timeout.clone();
+                Box::pin(async move {
+                    apply_runtime_connection_timeouts(connection, &statement_timeout, &lock_timeout)
+                        .await
+                })
+            })
             .connect_lazy(url)?)
     }
 
@@ -6511,6 +6569,65 @@ mod tests {
         .await;
     }
 
+    /// Migrations must outlive the runtime caps — an index build or an
+    /// `ACCESS EXCLUSIVE` wait routinely exceeds them, and startup treats a
+    /// migration failure as fatal — and the relaxed session must not survive
+    /// into the pool afterwards.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrations_ignore_runtime_timeouts_and_leak_no_relaxed_session() {
+        const TIGHT: &str = "50ms";
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let name = format!("migration_timeouts_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+
+        // Far shorter than the migration suite needs, ample for a pooled query.
+        let db = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 2,
+            min_connections: 2,
+            statement_timeout: TIGHT.to_string(),
+            lock_timeout: TIGHT.to_string(),
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect Db against the unmigrated scratch db");
+
+        db.migrate()
+            .await
+            .expect("migrations must not inherit the runtime caps");
+
+        // Hold every connection at once so a leaked relaxed session cannot hide
+        // behind a freshly dialed one.
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let mut connection = db.pool.acquire().await.expect("acquire pooled connection");
+            let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("SHOW statement_timeout");
+            let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("SHOW lock_timeout");
+            assert_eq!(statement_timeout, TIGHT);
+            assert_eq!(lock_timeout, TIGHT);
+            held.push(connection);
+        }
+        drop(held);
+
+        drop_scratch_db(&admin, db.pool.clone(), &name).await;
+    }
+
     /// Insert identical community + channel rows into a database so the same
     /// (community, channel) ids resolve in both writer and replica.
     async fn seed_community_channel(
@@ -8317,7 +8434,8 @@ mod tests {
         let idx = base.rfind('/').expect("db url has a path segment");
         let scratch_url = format!("{}/{}", &base[..idx], name);
         let db = Db::new(&DbConfig {
-            database_url: scratch_url,
+            database_url: scratch_url.clone(),
+            read_database_url: Some(scratch_url),
             max_connections: 2,
             ..DbConfig::default()
         })
@@ -8325,7 +8443,30 @@ mod tests {
         .expect("connect armed Db");
         let cid = CommunityId::from_uuid(community);
 
-        // Perci nit: assert the effective session value, not the intent.
+        // Assert the effective session values, not only pool-builder intent.
+        let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW statement_timeout");
+        let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW lock_timeout");
+        assert_eq!(statement_timeout, RUNTIME_STATEMENT_TIMEOUT);
+        assert_eq!(lock_timeout, RUNTIME_LOCK_TIMEOUT);
+
+        let read_pool = db.read_pool.as_ref().expect("read pool configured");
+        let reader_statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(read_pool)
+            .await
+            .expect("SHOW reader statement_timeout");
+        let reader_lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+            .fetch_one(read_pool)
+            .await
+            .expect("SHOW reader lock_timeout");
+        assert_eq!(reader_statement_timeout, RUNTIME_STATEMENT_TIMEOUT);
+        assert_eq!(reader_lock_timeout, RUNTIME_LOCK_TIMEOUT);
+
         let effective: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
             .fetch_one(&db.pool)
             .await
@@ -8386,6 +8527,67 @@ mod tests {
         drop_scratch_db(&admin, seed_pool, &name).await;
         // db pool still holds connections to the dropped DB; close it.
         db.pool.close().await;
+    }
+
+    /// [`PG_TIMEOUT_MAX_MILLIS`] is the bound callers range-check operator input
+    /// against, so it must be the server's real bound: too high and an accepted
+    /// value still fails every `after_connect`; too low and we reject settings
+    /// Postgres would have taken.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pg_timeout_max_millis_matches_postgres() {
+        let mut conn = PgConnection::connect(&admin_url().await)
+            .await
+            .expect("connect");
+
+        let boundary = PG_TIMEOUT_MAX_MILLIS.to_string();
+        apply_runtime_connection_timeouts(&mut conn, &boundary, &boundary)
+            .await
+            .expect("PG_TIMEOUT_MAX_MILLIS must be settable");
+
+        // Same instant spelled in a coarser unit — the conversion the caller's
+        // range check performs must land inside the range too.
+        let in_seconds = (PG_TIMEOUT_MAX_MILLIS / 1_000).to_string();
+        apply_runtime_connection_timeouts(
+            &mut conn,
+            &format!("{in_seconds}s"),
+            &format!("{in_seconds}s"),
+        )
+        .await
+        .expect("the boundary in seconds must be settable");
+
+        for over in [
+            (PG_TIMEOUT_MAX_MILLIS + 1).to_string(),
+            format!("{}ms", PG_TIMEOUT_MAX_MILLIS + 1),
+            format!("{}s", PG_TIMEOUT_MAX_MILLIS / 1_000 + 1),
+            "999999999999999999999999999999999999999999d".to_string(),
+        ] {
+            let err = apply_runtime_connection_timeouts(&mut conn, &over, RUNTIME_LOCK_TIMEOUT)
+                .await
+                .expect_err(&format!("{over} must be rejected by Postgres"));
+            let code = match &err {
+                sqlx::Error::Database(db) => db.code().map(|c| c.to_string()),
+                other => panic!("expected a database error, got {other:?}"),
+            };
+            assert_eq!(
+                code.as_deref(),
+                Some("22023"),
+                "{over}: expected invalid_parameter_value"
+            );
+        }
+
+        // A rejected `set_config` leaves the session usable, so the failure mode
+        // is a poisoned pool of unbounded sessions only if the caller ignores it.
+        let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut conn)
+            .await
+            .expect("SHOW statement_timeout");
+        assert_ne!(
+            statement_timeout, "0",
+            "a rejected value must not silently disable the limit"
+        );
+
+        conn.close().await.expect("close");
     }
 
     /// `spawn_fence_probe` must verify the floor guard before letting the
