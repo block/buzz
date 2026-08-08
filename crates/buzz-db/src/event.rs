@@ -70,6 +70,10 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with a `t` tag matching any of these values.
+    /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
+    /// Multiple values use OR semantics (same as NIP-01 #t filter semantics).
+    pub t_tags: Option<Vec<String>>,
     /// Restrict results to events in any of these channels, while retaining
     /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
     /// historical pages have exact exhaustion semantics.
@@ -121,6 +125,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            t_tags: None,
             channel_ids: None,
             max_limit: None,
             shared_gated_reader: None,
@@ -478,6 +483,26 @@ pub(crate) async fn query_events_on(
                 }
                 // Build the JSONB literal: [["e","<hex>"]]
                 let containment = serde_json::json!([["e", hex_id]]);
+                qb.push(format!("{col_prefix}tags @> "));
+                qb.push_bind(containment);
+            }
+            qb.push(")");
+        }
+    }
+
+    // t-tag pushdown via JSONB containment: tags @> '[["t","<value>"]]'.
+    // Multiple t-tags use OR semantics (NIP-01 filter semantics for #t).
+    // #t is a free-form string, not a hex ID — exact containment means the
+    // whole tag must match (`["t","value"]`); a subset like `["t"]` would
+    // still match but that's correct since it's the tag's identity.
+    if let Some(ref t_tags) = q.t_tags {
+        if !t_tags.is_empty() {
+            qb.push(" AND (");
+            for (i, value) in t_tags.iter().enumerate() {
+                if i > 0 {
+                    qb.push(" OR ");
+                }
+                let containment = serde_json::json!([["t", value]]);
                 qb.push(format!("{col_prefix}tags @> "));
                 qb.push_bind(containment);
             }

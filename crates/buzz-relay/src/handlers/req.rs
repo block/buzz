@@ -824,8 +824,16 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
             "e" => {
                 // #e is fully pushed (any count) via JSONB containment.
             }
+            "t" => {
+                // #t is pushed into SQL via JSONB containment
+                // (filter_to_query_params / EventQuery::t_tags).
+                // OR semantics are preserved by `filter_fully_pushable`'s
+                // doc comment's contract: the DB pushdown produces the same
+                // result set as post-filtering (matching event's tags must
+                // contain at least one complete #t value).
+            }
             _ => {
-                // Any other generic tag (#t, #a, etc.) is not pushed.
+                // Any other generic tag (#a, etc.) is not pushed.
                 if !tag_values.is_empty() {
                     return false;
                 }
@@ -940,6 +948,20 @@ fn filter_to_query_params(
         }
     });
 
+    // Push #t tag filter into SQL via JSONB containment. NIP-01 semantics for
+    // multi-value #t are OR; containment `tags @> '[["t","value"]]'` matches
+    // the exact tag. Seen through `filter_fully_pushable`, #t is NOT pushed
+    // by the legacy path; this pushdown ensures a short page truly implies
+    // exhaustion for tag-constrained REQs.
+    let t_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+    let t_tags = filter.generic_tags.get(&t_tag_key).and_then(|values| {
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.iter().map(|v| v.to_string()).collect::<Vec<_>>())
+        }
+    });
+
     // Push single-value #p tag into SQL via event_mentions join.
     // This is critical for gift-wrap (kind:1059) and membership notification
     // queries where >500 events for other recipients would otherwise push
@@ -998,6 +1020,7 @@ fn filter_to_query_params(
         authors,
         ids,
         e_tags,
+        t_tags,
         ..EventQuery::for_community(community)
     }
 }
@@ -2086,5 +2109,52 @@ mod tests {
         ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
+    }
+
+    // Regression for block/buzz#3959: NIP-01 `#t` multi-value filters must be
+    // fully pushed into SQL so a short page implies exhaustion (not a dangling
+    // post-filter). Before this fix, `filter_fully_pushable` returned false for
+    // `#t`-tagged queries, falling back to a COUNT path that post-filters after
+    // the DB LIMIT — so a page smaller than the LIMIT could NOT be trusted as
+    // result-set exhaustion.
+    #[test]
+    fn t_tag_multi_value_is_fully_pushable() {
+        let t_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+        let mut filter = nostr::Filter::new();
+        filter
+            .generic_tags
+            .insert(t_key, ["agent".to_string(), "buzz".to_string()].into_iter().collect());
+        // Must OR-match: either "agent" or "buzz" satisfies.
+        assert!(filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn t_tag_empty_values_still_pushable() {
+        let t_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+        let mut filter = nostr::Filter::new();
+        // Empty values → no SQL constraint emitted, filter is vacuously
+        // pushable (identity — the SQL pushdown yields zero matches).
+        filter
+            .generic_tags
+            .insert(t_key, std::collections::BTreeSet::new());
+        assert!(filter_fully_pushable(&filter));
+    }
+
+    #[test]
+    fn filter_to_query_params_populates_t_tags() {
+        let t_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+        let mut filter = nostr::Filter::new();
+        filter
+            .generic_tags
+            .insert(t_key, ["release".to_string(), "v0.6".to_string()].into_iter().collect());
+        let query = filter_to_query_params(
+            &filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+        );
+        assert_eq!(
+            query.t_tags,
+            Some(vec!["release".to_string(), "v0.6".to_string()])
+        );
     }
 }
