@@ -158,7 +158,7 @@ Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.r
 | Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
-Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max historical results per filter: 500.
+Max frame size: 524,288 bytes (512 KiB) — `DEFAULT_MAX_FRAME_BYTES` in `crates/buzz-relay/src/config.rs`, env-overridable. Max subscriptions per connection: 1024. Max historical results per filter: 1,000 — `DEFAULT_MAX_PAGE_LIMIT` in `crates/buzz-db/src/event.rs`, advertised as NIP-11 `max_limit` (`crates/buzz-relay/src/nip11.rs`). NIP-11 `max_content_len` is a separate value (the per-event content size, not the frame size).
 
 ---
 
@@ -232,12 +232,11 @@ When the relay receives `["EVENT", <event>]`, the handler in `handlers/event.rs`
 7. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING — idempotent)
 8. REDIS PUBLISH     — pubsub.publish_event (if channel-scoped)
 9. FAN-OUT           — sub_registry.fan_out → conn_manager.send_to
-10. SEARCH INDEX     — search_index_tx.send (bounded worker queue, non-blocking)
-11. AUDIT LOG        — audit.log (spawned async, non-blocking)
-12. WORKFLOW TRIGGER — wf.on_event (spawned async, excludes kinds 46001–46012)
+10. AUDIT LOG        — audit.log (spawned async, non-blocking)
+11. WORKFLOW TRIGGER — wf.on_event (spawned async, excludes kinds 46001–46012)
 ```
 
-Steps 10–12 are fire-and-forget. Search indexing is sent to a bounded worker queue (`search_index_tx`, capacity 1000); audit and workflow triggers are spawned as independent async tasks. A failure in any of these does not fail the event submission. The client receives `["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
+Steps 10–11 are fire-and-forget: audit and workflow triggers are spawned as independent async tasks. (Search indexing is no longer a separate pipeline step — the `events.search_tsv` generated `tsvector` column is populated on insert, so there is no out-of-band index to feed. The legacy Typesense `search_index_tx` mpsc was removed with the Typesense backend; see `crates/buzz-relay/src/handlers/event.rs:502-506`.) A failure in any of these does not fail the event submission. The client receives `["OK", <id>, true, ""]` at the end of the pipeline, not immediately after DB insert.
 
 Step 9 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
 
@@ -323,7 +322,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 1,000 per filter, hard cap — `DEFAULT_MAX_PAGE_LIMIT` in `crates/buzz-db/src/event.rs`, clamped to the NIP-11-advertised `max_limit`). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
 ---
 
@@ -387,7 +386,7 @@ pub trait RateLimiter: Send + Sync { ... }
 - NIP-42 timestamp tolerance: ±60 seconds.
 - Dev-only key derivation: `SHA-256("buzz-test-key:{username}")` — gated behind `#[cfg(any(test, feature = "dev"))]`. The `dev` feature must not be enabled in production relay deployments.
 
-**Does NOT:** implement `RateLimiter` beyond a test stub (`AlwaysAllowRateLimiter`, gated behind `#[cfg(any(test, feature = "test-utils"))]`). No Redis-backed rate limiter exists anywhere in the codebase — rate limiting is not currently enforced. `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) as a design target.
+**Does NOT:** persist rate-limit state itself — the [`RedisRateLimiter`](crates/buzz-pubsub/src/rate_limiter.rs) lives in `buzz-pubsub` and uses Redis. `AlwaysAllowRateLimiter` exists as a test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`. Defines the `RateLimiter` trait, `RateLimitConfig` (4 tiers — human, agent-standard, agent-elevated, agent-platform), `LimitType`, and the per-pubkey / per-IP key derivations.
 
 ---
 
@@ -457,7 +456,7 @@ EXPIRE buzz:typing:{channel_id} 60
 ```
 5-second activity window. 60-second key TTL prevents orphaned empty sets.
 
-**Does NOT:** implement the rate limiter. Does NOT store events. `PubSubManager` is not `Clone` — callers use `Arc<PubSubManager>`.
+**Does NOT:** store events. `PubSubManager` is not `Clone` — callers use `Arc<PubSubManager>`.
 
 ---
 
@@ -591,8 +590,7 @@ pub struct AppState {
     pub handler_semaphore: Arc<Semaphore>,    // 1024 concurrent handlers
     pub relay_keypair: nostr::Keys,           // relay identity
     pub local_event_ids: moka::sync::Cache,   // local-echo dedup
-    pub search_index_tx: mpsc::Sender,        // bounded search worker queue
-    // + config, redis_pool, membership_cache, media_storage, shutdown state
+    // + config, redis_pool, admission_rate_limiter, membership_cache, media_storage, shutdown state
 }
 ```
 
@@ -632,9 +630,9 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `MAX_FRAME_BYTES` | 65,536 | Max WebSocket frame size |
+| `DEFAULT_MAX_FRAME_BYTES` | 524,288 (512 KiB) | Max WebSocket frame size — `crates/buzz-relay/src/config.rs`, env-overridable |
 | `MAX_SUBSCRIPTIONS` | 1024 | Per-connection subscription limit |
-| `MAX_HISTORICAL_LIMIT` | 500 | Per-filter historical query cap |
+| `DEFAULT_MAX_PAGE_LIMIT` | 1,000 | Per-filter historical query cap — `crates/buzz-db/src/event.rs`, advertised as NIP-11 `max_limit` |
 | `handler_semaphore` capacity | 1024 | Concurrent EVENT/REQ handlers |
 
 **Does NOT:** implement business logic — delegates to the appropriate crate for every operation.
@@ -730,7 +728,7 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 |---------|-----------|
 | Schnorr signatures | `verify_event()` in `buzz-core` — every event verified before storage |
 | Event ID | SHA-256 of canonical serialization verified independently of signature |
-| Frame size | `MAX_FRAME_BYTES = 65,536` — oversized frames rejected, connection closed |
+| Frame size | `DEFAULT_MAX_FRAME_BYTES = 524,288` (512 KiB) — oversized frames rejected, connection closed; env-overridable |
 | Search event IDs | 64-char hex validation before URL construction — prevents path injection |
 | Workflow step IDs | Alphanumeric + underscore only — prevents evalexpr variable injection |
 | Partition names | Allowlist of table names + strict suffix/date validators — prevents DDL injection |
@@ -805,8 +803,13 @@ Docker Compose provides the full local development stack. All services include h
 Search runs over the `events.search_tsv` generated `tsvector` column on the
 `events` table (no separate collection or service). The column is populated on
 insert — `to_tsvector('simple', content)` — and excludes privacy-sensitive
-kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
-storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
+kinds. The shape of the exclusion has evolved: **fresh installs** use a
+positive allowlist from migration `0008_fresh_install_search_allowlist.sql`
+(`kind IN (0, 9, 40002, 45001, 45003)`); **existing installations** keep the
+negative exclusion expression their migrations built, with later migrations
+extending the list (`0005` added 44200 agent-turn metrics; `0014` added 30350
+push leases). Either shape yields `NULL::tsvector` for excluded rows, which
+never matches `@@`, so the rows are storage-level unsearchable. A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
 fenced to its `community_id`.
@@ -820,8 +823,7 @@ These are verified gaps in the current implementation — not design aspirations
 | # | Limitation | Detail |
 |---|-----------|--------|
 | 1 | **No sqlx offline query cache** | Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time). No `.sqlx/` directory. Queries are not validated at compile time. |
-| 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
-| 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
-| 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
-| 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
-| 6 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |
+| 2 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
+| 3 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
+| 4 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
+| 5 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |
