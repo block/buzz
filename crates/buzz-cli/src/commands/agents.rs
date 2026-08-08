@@ -163,6 +163,29 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             Ok(())
         }
 
+        AgentsCmd::Publish {
+            agent_pubkey,
+            content,
+        } => {
+            let raw = crate::validate::read_or_stdin(&content)?;
+            let body = crate::managed_agent_publish::validate_managed_agent_content(&raw)?;
+            let builder =
+                crate::managed_agent_publish::build_managed_agent_event(&agent_pubkey, &body)?;
+            let event = client.sign_event(builder)?;
+            let event_id = event.id.to_hex();
+            client.submit_event(event).await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "event_id": event_id,
+                    "kind": 30177,
+                    "d": agent_pubkey,
+                    "action": "publish",
+                })
+            );
+            Ok(())
+        }
         AgentsCmd::Archived => cmd_archived(client).await,
     }
 }
