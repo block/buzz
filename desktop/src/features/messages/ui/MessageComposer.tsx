@@ -59,6 +59,13 @@ import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import type { MessageComposerProps } from "./MessageComposer.types";
+import {
+  clampComposerMaxHeight,
+  DEFAULT_COMPOSER_MAX_HEIGHT_PX,
+  readStoredComposerMaxHeight,
+  writeStoredComposerMaxHeight,
+} from "./composerMaxHeight";
+
 function MessageComposerImpl({
   audienceContext = null,
   channelId = null,
@@ -107,11 +114,77 @@ function MessageComposerImpl({
   } = useComposerLinkPreviews(deferredPreviewContent);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
+  const [composerMaxHeightPx, setComposerMaxHeightPx] = React.useState(
+    readStoredComposerMaxHeight,
+  );
+  const formShellRef = React.useRef<HTMLFormElement | null>(null);
+  const resizeDragRef = React.useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+  } | null>(null);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
     Set<string>
   >(() => new Set());
   const spoileredAttachmentUrlsRef = React.useRef(spoileredAttachmentUrls);
   spoileredAttachmentUrlsRef.current = spoileredAttachmentUrls;
+
+  const applyComposerMaxHeight = React.useCallback((next: number) => {
+    // Prefer the channel column (footer's flex parent) over the viewport so
+    // split-thread layouts don't let the composer claim most of the window.
+    const form = formShellRef.current;
+    const pane =
+      form?.parentElement?.parentElement ?? form?.parentElement ?? null;
+    const paneHeightPx = pane?.clientHeight ?? globalThis.innerHeight ?? 800;
+    const clamped = clampComposerMaxHeight(next, paneHeightPx);
+    setComposerMaxHeightPx(clamped);
+    writeStoredComposerMaxHeight(clamped);
+    return clamped;
+  }, []);
+
+  const handleResizePointerDown = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const target = event.currentTarget;
+      target.setPointerCapture(event.pointerId);
+      resizeDragRef.current = {
+        pointerId: event.pointerId,
+        startY: event.clientY,
+        startHeight: composerMaxHeightPx,
+      };
+    },
+    [composerMaxHeightPx],
+  );
+
+  const handleResizePointerMove = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      const drag = resizeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      // Dragging the top edge upward increases the max height.
+      const delta = drag.startY - event.clientY;
+      applyComposerMaxHeight(drag.startHeight + delta);
+    },
+    [applyComposerMaxHeight],
+  );
+
+  const handleResizePointerUp = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      const drag = resizeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      resizeDragRef.current = null;
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Capture may already be released.
+      }
+    },
+    [],
+  );
+
+  const handleResizeDoubleClick = React.useCallback(() => {
+    applyComposerMaxHeight(DEFAULT_COMPOSER_MAX_HEIGHT_PX);
+  }, [applyComposerMaxHeight]);
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
     setIsFormattingOpen(pressed);
@@ -888,6 +961,7 @@ function MessageComposerImpl({
             />
           ) : null}
           <form
+            ref={formShellRef}
             className={cn(
               "relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:supports-[backdrop-filter]:bg-background/55 sm:px-4",
               layoutMode === "standalone" &&
@@ -912,6 +986,23 @@ function MessageComposerImpl({
               handleSubmit(event);
             }}
           >
+            {/* Drag handle: raise the max height above the default 128px cap. */}
+            <button
+              type="button"
+              aria-label="Resize message composer. Drag up to grow, double-click to reset."
+              data-testid="composer-resize-handle"
+              className="absolute inset-x-0 top-0 z-20 flex h-3 -translate-y-1/2 cursor-ns-resize items-center justify-center touch-none border-0 bg-transparent p-0"
+              onPointerDown={handleResizePointerDown}
+              onPointerMove={handleResizePointerMove}
+              onPointerUp={handleResizePointerUp}
+              onPointerCancel={handleResizePointerUp}
+              onDoubleClick={handleResizeDoubleClick}
+            >
+              <span
+                aria-hidden
+                className="h-1 w-10 rounded-full bg-border/80 transition-colors hover:bg-muted-foreground/50"
+              />
+            </button>
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
@@ -976,9 +1067,10 @@ function MessageComposerImpl({
 
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
-              className="rich-text-composer relative max-h-32 overflow-y-auto"
+              className="rich-text-composer relative overflow-y-auto"
               data-testid="message-input-scroll"
               ref={composerScrollRef}
+              style={{ maxHeight: composerMaxHeightPx }}
               onKeyDown={handleEditorKeyDown}
             >
               <EditorContent editor={richText.editor} />
