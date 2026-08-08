@@ -95,6 +95,44 @@ fn normalizes_buzz_agent_args_to_empty() {
 }
 
 #[test]
+fn repairs_stale_kimi_acp_flag_to_subcommand() {
+    // Records created when the Kimi preset used `--acp` pin that stale flag in
+    // `agent_args`; at spawn, instance args win over the preset definition, so
+    // the agent still launches `kimi --acp` and the CLI rejects the unknown
+    // option. Normalization must rewrite the sole `--acp` to the `acp`
+    // subcommand for the Kimi command — and leave every other shape alone.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--acp".into()]),
+        vec!["acp".to_string()]
+    );
+    // Path-pinned commands resolve to the same identity.
+    assert_eq!(
+        normalize_agent_args("/Users/a/.kimi-code/bin/kimi", vec!["--acp".into()]),
+        vec!["acp".to_string()]
+    );
+    // Other commands keep the flag verbatim — this is not a blanket strip.
+    assert_eq!(
+        normalize_agent_args("goose", vec!["--acp".into()]),
+        vec!["--acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("custom-agent", vec!["--acp".into()]),
+        vec!["--acp".to_string()]
+    );
+    // Kimi with additional args is not a stale pin — left untouched.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["--acp".into(), "--verbose".into()]),
+        vec!["--acp".to_string(), "--verbose".to_string()]
+    );
+    // Already-correct shapes are idempotent.
+    assert_eq!(
+        normalize_agent_args("kimi", vec!["acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(normalize_agent_args("kimi", Vec::new()), Vec::<String>::new());
+}
+
+#[test]
 fn login_shell_lookup_treats_command_as_data() {
     let marker =
         std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
