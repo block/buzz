@@ -3825,6 +3825,16 @@ impl Db {
         workflow::create_approval(&self.pool, params).await
     }
 
+    /// Atomically suspend a workflow run and create its pending approval.
+    pub async fn suspend_workflow_run_for_approval(
+        &self,
+        params: workflow::CreateApprovalParams<'_>,
+        current_step: i32,
+        trace: &serde_json::Value,
+    ) -> Result<workflow::ApprovalRecord> {
+        workflow::suspend_workflow_run_for_approval(&self.pool, params, current_step, trace).await
+    }
+
     /// Fetch an approval by raw token.
     pub async fn get_approval(
         &self,

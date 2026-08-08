@@ -189,16 +189,37 @@ fn workflow_wire_serializes_with_snake_case_keys() {
 }
 
 #[test]
-fn runs_and_approvals_serialize_to_bare_empty_array() {
-    // Regression guard for the crash class this fix closed. The frontend
-    // wrappers `getWorkflowRuns` / `getRunApprovals` do `raw.map(...)`, so the
-    // Rust side MUST return a bare JSON array. A wrapped `{ runs: [...] }` /
-    // `{ approvals: [...] }` shape would make `.map()` throw and crash the
-    // detail panel — the same TypeError class as the original page bug.
-    //
-    // The commands take `State<AppState>`, so we can't invoke them directly in
-    // a unit test; instead we pin the exact value they return (`Vec::new()` of
-    // their `Vec<Value>` element type) and assert its serialized shape.
+fn lifecycle_run_payload_reads_waiting_approval_snapshot() {
+    let keys = Keys::generate();
+    let event = EventBuilder::new(
+        Kind::Custom(46010),
+        serde_json::json!({
+            "token": "a".repeat(64),
+            "workflow_id": WF,
+            "run_id": "33333333-3333-3333-3333-333333333333",
+            "run": {
+                "id": "33333333-3333-3333-3333-333333333333",
+                "workflow_id": WF,
+                "status": "waiting_approval",
+                "current_step": 0,
+                "execution_trace": [{"step_id": "gate", "status": "waiting_approval"}],
+                "created_at": 100
+            }
+        }).to_string(),
+    )
+    .tags([Tag::parse(["d", WF]).expect("tag")])
+    .sign_with_keys(&keys)
+    .expect("sign");
+
+    let run = lifecycle_run_payload(&event).expect("run payload");
+    assert_eq!(run.get("status").and_then(Value::as_str), Some("waiting_approval"));
+    assert_eq!(run.get("workflow_id").and_then(Value::as_str), Some(WF));
+}
+
+#[test]
+fn lifecycle_commands_return_bare_arrays_for_frontend_mapping() {
+    // The frontend wrappers `getWorkflowRuns` / `getRunApprovals` do
+    // `raw.map(...)`; a wrapped object would crash the detail panel.
     let runs: Vec<Value> = Vec::new();
     let approvals: Vec<Value> = Vec::new();
     assert_eq!(serde_json::to_string(&runs).expect("serialize runs"), "[]");

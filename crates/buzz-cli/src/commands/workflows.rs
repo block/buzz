@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sha2::{Digest, Sha256};
 
 use crate::client::{
@@ -8,6 +10,16 @@ use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
+
+fn lifecycle_precedence(kind: u64) -> u8 {
+    match kind {
+        46005..=46007 => 4,
+        46011..=46012 => 3,
+        46010 => 2,
+        46001 => 1,
+        _ => 0,
+    }
+}
 
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
@@ -57,12 +69,7 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     Ok(())
 }
 
-/// Get workflow run history — query kinds [46001, 46002, 46003].
-///
-/// NOTE: The relay does not currently emit workflow execution events (46001-46003).
-/// Run history is stored in the workflow_runs DB table, not as Nostr events.
-/// This command will return an empty array until the relay adds event emission
-/// or a dedicated REST endpoint for run history.
+/// Get workflow run history from durable lifecycle events.
 pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
@@ -71,24 +78,51 @@ pub async fn cmd_get_workflow_runs(
     validate_uuid(workflow_id)?;
     let limit = limit.unwrap_or(20).min(100);
     let filter = serde_json::json!({
-        "kinds": [46001, 46002, 46003],
+        "kinds": [46001, 46005, 46006, 46007, 46010, 46011, 46012],
         "#d": [workflow_id],
-        "limit": limit
+        "limit": (limit * 10).min(500)
     });
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let normalized: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "event_id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
+    let mut latest: HashMap<String, (u64, u8, serde_json::Value)> = HashMap::new();
+    for event in events {
+        let Some(content) = event.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(content) else {
+            continue;
+        };
+        let kind = event.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+        let run = if (46010..=46012).contains(&kind) {
+            payload.get("run").cloned().unwrap_or(payload)
+        } else {
+            payload
+        };
+        if run.get("workflow_id").and_then(|v| v.as_str()) != Some(workflow_id) {
+            continue;
+        }
+        let Some(run_id) = run.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let created_at = event
+            .get("created_at")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let precedence = lifecycle_precedence(kind);
+        if latest
+            .get(run_id)
+            .is_none_or(|(seen_at, seen_precedence, _)| {
+                (created_at, precedence) >= (*seen_at, *seen_precedence)
             })
-        })
-        .collect();
+        {
+            latest.insert(run_id.to_owned(), (created_at, precedence, run));
+        }
+    }
+    let mut normalized: Vec<(u64, u8, serde_json::Value)> = latest.into_values().collect();
+    normalized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    normalized.truncate(limit as usize);
+    let normalized: Vec<serde_json::Value> =
+        normalized.into_iter().map(|(_, _, run)| run).collect();
     let output = serde_json::to_string(&normalized).unwrap_or_default();
     println!("{output}");
     Ok(())
@@ -196,12 +230,18 @@ pub async fn cmd_approve_step(
     approved: bool,
     note: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_uuid(approval_token)?;
-
     let content = note.unwrap_or("");
 
     // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
-    let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
+    // Desktop approval cards already expose the stored hash, so accept either
+    // that 64-character hash or the original raw UUID for CLI compatibility.
+    let token_hash =
+        if approval_token.len() == 64 && approval_token.chars().all(|c| c.is_ascii_hexdigit()) {
+            approval_token.to_ascii_lowercase()
+        } else {
+            validate_uuid(approval_token)?;
+            hex::encode(Sha256::digest(approval_token.as_bytes()))
+        };
     let builder =
         buzz_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;

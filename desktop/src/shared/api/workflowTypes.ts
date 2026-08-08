@@ -58,6 +58,7 @@ export type WorkflowApproval = {
   stepId: string;
   stepIndex: number;
   approverSpec: string;
+  message: string | null;
   status: WorkflowApprovalStatus;
   approverPubkey: string | null;
   note: string | null;
