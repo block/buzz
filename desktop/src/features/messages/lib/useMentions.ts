@@ -17,7 +17,6 @@ import {
   filterCachedAgentSuggestions,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
@@ -255,9 +254,9 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
-        return;
-      }
+      // Keep this as the single agent admission gate. It deliberately admits
+      // channel members whose relay-directory policy is missing, while an
+      // explicit directory entry can still exclude an unauthorized viewer.
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
