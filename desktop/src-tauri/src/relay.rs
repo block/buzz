@@ -479,6 +479,62 @@ pub async fn sync_managed_agent_profile(
     Ok(())
 }
 
+/// Publish an agent's kind:10100 directory record, signed by the agent's own
+/// key.
+///
+/// The signature is the point: `agents_from_events` overwrites the pubkey in
+/// the content with the event author, so a record can only speak for the
+/// identity that signed it. That is why this can run only on the machine
+/// holding the agent's key, and why one agent cannot publish a directory entry
+/// impersonating another.
+///
+/// kind:10100 is replaceable and keyed by pubkey, so refreshing is a plain
+/// re-publish with no tombstone.
+pub async fn publish_agent_directory_record(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &Keys,
+    content: &serde_json::Value,
+    auth_tag: Option<&str>,
+) -> Result<(), String> {
+    crate::relay_admission::wait_for_rate_limit().await;
+
+    let event = EventBuilder::new(
+        Kind::Custom(buzz_sdk_pkg::kind::KIND_AGENT_PROFILE as u16),
+        content.to_string(),
+    )
+    .tags([])
+    .sign_with_keys(agent_keys)
+    .map_err(|e| format!("failed to sign agent directory event: {e}"))?;
+
+    let body_bytes = event.as_json().into_bytes();
+    let url = format!("{}/events", relay_http_base_url(relay_url));
+    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
+
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+    let response = request
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| classify_request_error(&e))?;
+
+    if !response.status().is_success() {
+        let msg = relay_error_message(response).await;
+        return Err(format!(
+            "Could not publish the agent directory record: {msg}"
+        ));
+    }
+
+    Ok(())
+}
+
 // ── Agent profile query ─────────────────────────────────────────────────────
 
 /// Query the relay for an agent's kind:0 profile event.
