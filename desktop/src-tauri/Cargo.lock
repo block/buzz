@@ -1186,10 +1186,14 @@ dependencies = [
 name = "buzz-persona"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
+ "unicode-casefold",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -11624,6 +11628,12 @@ name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-ident"
