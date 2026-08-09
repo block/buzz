@@ -508,7 +508,7 @@ export function MobilePairingCard({
                 "flex min-h-[266px] w-[266px] max-w-full items-center justify-center rounded-lg border",
                 step === "sas" || step === "transferring" || step === "done"
                   ? "border-transparent bg-transparent p-0"
-                  : "border-border/70 bg-background p-3",
+                  : "border-border/70 bg-background p-1",
               )}
               data-testid="mobile-pairing-qr-container"
             >
@@ -531,10 +531,9 @@ export function MobilePairingCard({
                 </div>
               ) : step === "qr" && qrUri ? (
                 <StyledQrCode
-                  animate
-                  centerImageSrc="/app-icon@2x.png"
+                  cameraSafe
                   data-testid="mobile-pairing-qr"
-                  size={240}
+                  size={256}
                   title="Mobile pairing QR code"
                   value={qrUri}
                 />

@@ -59,6 +59,7 @@ async fn enforce_http_admission(
 ///
 /// Returns the authenticated public key and an event ID for replay detection.
 /// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
+#[cfg(test)]
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
@@ -66,13 +67,48 @@ pub(crate) fn verify_bridge_auth(
     body: Option<&[u8]>,
     require_auth_token: bool,
 ) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
-    verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
+    verify_bridge_auth_for_urls_with_options(
+        headers,
+        method,
+        &[url.to_string()],
+        body,
+        require_auth_token,
+        false,
+    )
 }
 
 pub(crate) fn verify_bridge_auth_with_options(
     headers: &HeaderMap,
     method: &str,
     url: &str,
+    body: Option<&[u8]>,
+    require_auth_token: bool,
+    require_payload: bool,
+) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+    verify_bridge_auth_for_urls_with_options(
+        headers,
+        method,
+        &[url.to_string()],
+        body,
+        require_auth_token,
+        require_payload,
+    )
+}
+
+pub(crate) fn verify_bridge_auth_for_urls(
+    headers: &HeaderMap,
+    method: &str,
+    urls: &[String],
+    body: Option<&[u8]>,
+    require_auth_token: bool,
+) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+    verify_bridge_auth_for_urls_with_options(headers, method, urls, body, require_auth_token, false)
+}
+
+pub(crate) fn verify_bridge_auth_for_urls_with_options(
+    headers: &HeaderMap,
+    method: &str,
+    urls: &[String],
     body: Option<&[u8]>,
     require_auth_token: bool,
     require_payload: bool,
@@ -108,8 +144,23 @@ pub(crate) fn verify_bridge_auth_with_options(
             ));
         }
 
-        let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
-            .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
+        let mut last_error = "no accepted relay URL configured".to_string();
+        let mut verified_pubkey = None;
+        for url in urls {
+            match buzz_auth::verify_nip98_event(&event_json, url, method, body) {
+                Ok(pubkey) => {
+                    verified_pubkey = Some(pubkey);
+                    break;
+                }
+                Err(error) => last_error = error.to_string(),
+            }
+        }
+        let Some(pubkey) = verified_pubkey else {
+            return Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                &format!("NIP-98: {last_error}"),
+            ));
+        };
 
         return Ok((pubkey, event_id_bytes));
     }
@@ -229,6 +280,57 @@ pub(crate) fn nip42_expected_relay_url(config_relay_url: &str, tenant: &TenantCo
         "ws"
     };
     format!("{scheme}://{}", tenant.host())
+}
+
+/// Return the exact NIP-42 relay origins accepted for this connection.
+///
+/// A deployment may expose its canonical local community through one explicit
+/// private proxy origin. The alias is deliberately limited to the community
+/// selected by `config_relay_url`; other tenant hosts never inherit it.
+pub(crate) fn nip42_accepted_relay_urls(
+    config_relay_url: &str,
+    relay_url_alias: Option<&str>,
+    tenant: &TenantContext,
+) -> Vec<String> {
+    let canonical = nip42_expected_relay_url(config_relay_url, tenant);
+    let mut accepted = vec![canonical.clone()];
+    if tenant.host() == buzz_core::tenant::relay_url_authority(config_relay_url) {
+        if let Some(alias) = relay_url_alias {
+            if alias != canonical {
+                accepted.push(alias.to_string());
+            }
+        }
+    }
+    accepted
+}
+
+/// Return NIP-98 request URLs accepted for this tenant and path.
+///
+/// Like the NIP-42 alias, the additional URL is available only to the
+/// deployment community selected by `config_relay_url`.
+pub(crate) fn nip98_accepted_urls(
+    config_relay_url: &str,
+    relay_url_alias: Option<&str>,
+    tenant: &TenantContext,
+    path: &str,
+) -> Vec<String> {
+    let canonical = nip98_expected_url(config_relay_url, tenant, path);
+    let mut accepted = vec![canonical.clone()];
+    if tenant.host() == buzz_core::tenant::relay_url_authority(config_relay_url) {
+        if let Some(alias) = relay_url_alias {
+            let http_alias = if let Some(authority) = alias.strip_prefix("wss://") {
+                format!("https://{authority}{path}")
+            } else if let Some(authority) = alias.strip_prefix("ws://") {
+                format!("http://{authority}{path}")
+            } else {
+                String::new()
+            };
+            if !http_alias.is_empty() && http_alias != canonical {
+                accepted.push(http_alias);
+            }
+        }
+    }
+    accepted
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
@@ -636,11 +738,16 @@ pub async fn submit_event(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let urls = nip98_accepted_urls(
+        &state.config.relay_url,
+        state.config.relay_url_alias.as_deref(),
+        &tenant,
+        "/events",
+    );
+    let (pubkey, event_id_bytes) = verify_bridge_auth_for_urls(
         &headers,
         "POST",
-        &url,
+        &urls,
         Some(&body),
         state.config.require_auth_token,
     )?;
@@ -904,11 +1011,16 @@ pub async fn query_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let urls = nip98_accepted_urls(
+        &state.config.relay_url,
+        state.config.relay_url_alias.as_deref(),
+        &tenant,
+        "/query",
+    );
+    let (pubkey, event_id_bytes) = verify_bridge_auth_for_urls(
         &headers,
         "POST",
-        &url,
+        &urls,
         Some(&body),
         state.config.require_auth_token,
     )?;
@@ -1347,11 +1459,16 @@ pub async fn count_events(
             )
         })?;
 
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let urls = nip98_accepted_urls(
+        &state.config.relay_url,
+        state.config.relay_url_alias.as_deref(),
+        &tenant,
+        "/count",
+    );
+    let (pubkey, event_id_bytes) = verify_bridge_auth_for_urls(
         &headers,
         "POST",
-        &url,
+        &urls,
         Some(&body),
         state.config.require_auth_token,
     )?;
@@ -2086,9 +2203,14 @@ async fn authorize_moderation_read(
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
         _ => path.to_string(),
     };
-    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let urls = nip98_accepted_urls(
+        &state.config.relay_url,
+        state.config.relay_url_alias.as_deref(),
+        &tenant,
+        &path_with_query,
+    );
     let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+        verify_bridge_auth_for_urls(headers, "GET", &urls, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -2533,6 +2655,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verify_bridge_auth_accepts_explicit_deployment_alias() {
+        let keys = Keys::generate();
+        let signed_url = "https://private-relay.example/query";
+        let event_json = build_nip98_event_json(&keys, signed_url, "POST");
+        let headers = nip98_auth_headers(&event_json);
+        let urls = vec![
+            "http://localhost:3000/query".to_string(),
+            signed_url.to_string(),
+        ];
+
+        let (pubkey, _) = verify_bridge_auth_for_urls(&headers, "POST", &urls, Some(b""), true)
+            .expect("explicit deployment alias should authenticate");
+
+        assert_eq!(pubkey, keys.public_key());
+    }
+
     /// Positive control for the cross-host test: a NIP-98 event signed for
     /// host A MUST be accepted at a request whose tenant resolved to host A.
     /// Without this, the cross-host test could be passing vacuously (e.g. if
@@ -2844,6 +2983,60 @@ mod tests {
             nip42_expected_relay_url("ws://config.example", &tenant),
             "ws://host-a.example:3100",
             "ws:// dev config → ws:// URL"
+        );
+    }
+
+    #[test]
+    fn nip42_alias_is_available_only_to_the_deployment_tenant() {
+        let deployment = fresh_tenant("localhost:3000");
+        let other = fresh_tenant("other.example");
+
+        assert_eq!(
+            nip42_accepted_relay_urls(
+                "ws://localhost:3000",
+                Some("wss://private-relay.example"),
+                &deployment,
+            ),
+            vec![
+                "ws://localhost:3000".to_string(),
+                "wss://private-relay.example".to_string(),
+            ]
+        );
+        assert_eq!(
+            nip42_accepted_relay_urls(
+                "ws://localhost:3000",
+                Some("wss://private-relay.example"),
+                &other,
+            ),
+            vec!["ws://other.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn nip98_alias_is_available_only_to_the_deployment_tenant() {
+        let deployment = fresh_tenant("localhost:3000");
+        let other = fresh_tenant("other.example");
+
+        assert_eq!(
+            nip98_accepted_urls(
+                "ws://localhost:3000",
+                Some("wss://private-relay.example"),
+                &deployment,
+                "/query",
+            ),
+            vec![
+                "http://localhost:3000/query".to_string(),
+                "https://private-relay.example/query".to_string(),
+            ]
+        );
+        assert_eq!(
+            nip98_accepted_urls(
+                "ws://localhost:3000",
+                Some("wss://private-relay.example"),
+                &other,
+                "/query",
+            ),
+            vec!["http://other.example/query".to_string()]
         );
     }
 

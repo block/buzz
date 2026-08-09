@@ -174,32 +174,18 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
     page.getByText("Securely transfer your identity via NIP-AB protocol"),
   ).toHaveCount(0);
   await expect(qrCode).toHaveAttribute("data-qr-matrix-size", "57");
-  await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(3);
-  expect(await qrCode.locator("circle").count()).toBeGreaterThan(100);
-  expect(await qrCode.locator(".buzz-qr-cell-reveal").count()).toBeGreaterThan(
+  await expect(qrCode).toHaveAttribute("data-qr-camera-safe", "true");
+  await expect(qrCode).toHaveAttribute("width", "256");
+  await expect(qrCode).toHaveAttribute("height", "256");
+  await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(0);
+  await expect(qrCode.locator("circle")).toHaveCount(0);
+  expect(await qrCode.locator("[data-qr-cell-row]").count()).toBeGreaterThan(
     100,
   );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-name",
-    "buzz-qr-cell-reveal",
-  );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-duration",
-    "0.058s",
-  );
-  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
-    "animation-timing-function",
-    "linear",
-  );
-  await expect(
-    qrCode.locator('[data-qr-cell-row="56"].buzz-qr-cell-reveal').first(),
-  ).toHaveCSS("animation-delay", "0.189s");
+  await expect(qrCode.locator(".buzz-qr-cell-reveal")).toHaveCount(0);
   await expect(copyButton).toHaveCSS("animation-name", "enter");
   await expect(copyButton).toHaveCSS("animation-duration", "0.25s");
-  await expect(qrCode.locator("image")).toHaveAttribute(
-    "href",
-    "/app-icon@2x.png",
-  );
+  await expect(qrCode.locator("image")).toHaveCount(0);
   await waitForAnimations(page);
   const qrBox = await qrContainer.boundingBox();
   const copyBox = await copyButton.boundingBox();

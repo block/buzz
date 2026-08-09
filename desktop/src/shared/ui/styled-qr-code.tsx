@@ -23,6 +23,7 @@ type StyledQrCodeProps = Omit<
 > & {
   animate?: boolean;
   backgroundColor?: string;
+  cameraSafe?: boolean;
   centerImageSrc?: string;
   foregroundColor?: string;
   size?: number;
@@ -89,6 +90,7 @@ function FinderPattern({
 export function StyledQrCode({
   animate = false,
   backgroundColor = "#ffffff",
+  cameraSafe = false,
   centerImageSrc,
   foregroundColor = "#000000",
   size = 240,
@@ -104,7 +106,8 @@ export function StyledQrCode({
   const viewBoxSize = matrix.size + QUIET_ZONE_SIZE * 2;
   const dataCellSize = 1 - CELL_SPACING_RATIO;
   const dataCellRadius = dataCellSize / 2;
-  const centerAreaSize = centerImageSrc ? getCenterAreaSize(matrix.size) : 0;
+  const centerAreaSize =
+    centerImageSrc && !cameraSafe ? getCenterAreaSize(matrix.size) : 0;
   const centerAreaStart = (matrix.size - centerAreaSize) / 2;
   const centerAreaEnd = centerAreaStart + centerAreaSize;
   const centerImageSize = centerAreaSize * CENTER_ICON_SIZE_RATIO;
@@ -120,11 +123,26 @@ export function StyledQrCode({
         column >= centerAreaStart &&
         column < centerAreaEnd;
 
-      if (
-        !matrix.get(row, column) ||
-        isFinderCell(row, column, matrix.size) ||
-        isCenterCell
-      ) {
+      if (!matrix.get(row, column)) {
+        continue;
+      }
+
+      if (cameraSafe) {
+        cells.push(
+          <rect
+            data-qr-cell-row={row}
+            fill={foregroundColor}
+            height={1}
+            key={`${row}-${column}`}
+            width={1}
+            x={column}
+            y={row}
+          />,
+        );
+        continue;
+      }
+
+      if (isFinderCell(row, column, matrix.size) || isCenterCell) {
         continue;
       }
 
@@ -155,6 +173,7 @@ export function StyledQrCode({
     <svg
       {...svgProps}
       aria-label={title}
+      data-qr-camera-safe={cameraSafe ? "true" : undefined}
       data-qr-matrix-size={matrix.size}
       height={size}
       role="img"
@@ -171,25 +190,29 @@ export function StyledQrCode({
         y={-QUIET_ZONE_SIZE}
       />
       <g data-qr-data-cells="">{cells}</g>
-      <FinderPattern
-        backgroundColor={backgroundColor}
-        foregroundColor={foregroundColor}
-        x={0}
-        y={0}
-      />
-      <FinderPattern
-        backgroundColor={backgroundColor}
-        foregroundColor={foregroundColor}
-        x={matrix.size - FINDER_PATTERN_SIZE}
-        y={0}
-      />
-      <FinderPattern
-        backgroundColor={backgroundColor}
-        foregroundColor={foregroundColor}
-        x={0}
-        y={matrix.size - FINDER_PATTERN_SIZE}
-      />
-      {centerImageSrc ? (
+      {!cameraSafe ? (
+        <>
+          <FinderPattern
+            backgroundColor={backgroundColor}
+            foregroundColor={foregroundColor}
+            x={0}
+            y={0}
+          />
+          <FinderPattern
+            backgroundColor={backgroundColor}
+            foregroundColor={foregroundColor}
+            x={matrix.size - FINDER_PATTERN_SIZE}
+            y={0}
+          />
+          <FinderPattern
+            backgroundColor={backgroundColor}
+            foregroundColor={foregroundColor}
+            x={0}
+            y={matrix.size - FINDER_PATTERN_SIZE}
+          />
+        </>
+      ) : null}
+      {centerImageSrc && !cameraSafe ? (
         <>
           <defs>
             <clipPath id={clipId}>
