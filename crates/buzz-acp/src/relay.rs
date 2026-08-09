@@ -161,66 +161,173 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
     }
 }
 
-/// Build the discovered-channel subscribe set from the membership UUIDs and the
-/// kind:39000 metadata events, **skipping any channel flagged `archived=true`**.
-///
-/// Archived channels (e.g. auto-archived by the ephemeral-channel reaper) are
-/// unusable: re-offering one on reconnect draws a `CLOSED restricted` and would
-/// re-form the reconnect loop. Dropping them here is the defense-in-depth
-/// backstop to the relay-side live-subscription eviction — it covers a client
-/// that was offline when the channel was reaped and so missed the CLOSED.
-/// A channel with no metadata event is preserved as `unknown`; security
-/// consumers must lazy-resolve it or fail closed rather than assuming stream.
+/// Require exactly one raw `h` occurrence with the canonical expected UUID.
+/// Malformed or duplicate same-name tags fail closed rather than being filtered
+/// out before cardinality is checked.
+pub(crate) fn has_exact_channel_binding(event: &Event, channel_id: Uuid) -> bool {
+    let mut h_tags = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"));
+    let Some(tag) = h_tags.next() else {
+        return false;
+    };
+    if h_tags.next().is_some() {
+        return false;
+    }
+    let expected = channel_id.to_string();
+    tag.as_slice().get(1).map(String::as_str) == Some(expected.as_str())
+}
+
+/// Verify one relay-authored NIP-29 replaceable event and return its exact
+/// canonical channel binding. Invalid, attacker-signed, wrong-kind, duplicate,
+/// or malformed `d` tags fail closed.
+fn verified_relay_group_event(
+    value: &serde_json::Value,
+    expected_kind: u32,
+    trusted_relay_pubkey: &nostr::PublicKey,
+) -> Option<(Event, Uuid)> {
+    let event: Event = serde_json::from_value(value.clone()).ok()?;
+    if event.verify().is_err()
+        || event.pubkey != *trusted_relay_pubkey
+        || event.kind.as_u16() as u32 != expected_kind
+    {
+        return None;
+    }
+
+    let d_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+        .collect();
+    let value = d_tags.first()?.as_slice().get(1)?;
+    if d_tags.len() != 1 {
+        return None;
+    }
+    let channel_id = Uuid::parse_str(value).ok()?;
+    (value == &channel_id.to_string()).then_some((event, channel_id))
+}
+
+/// Extract channels from verified relay-authored membership list events.
+fn verified_membership_channels(
+    events: &serde_json::Value,
+    trusted_relay_pubkey: &nostr::PublicKey,
+    agent_pubkey: &nostr::PublicKey,
+) -> Vec<Uuid> {
+    let mut channels = std::collections::HashSet::new();
+    let Some(events) = events.as_array() else {
+        return Vec::new();
+    };
+    let agent_hex = agent_pubkey.to_hex();
+    for value in events {
+        let Some((event, channel_id)) = verified_relay_group_event(
+            value,
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS,
+            trusted_relay_pubkey,
+        ) else {
+            continue;
+        };
+        let addressed = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let parts = tag.as_slice();
+                parts.first().map(String::as_str) == Some("p")
+                    && parts.get(1).map(String::as_str) == Some(agent_hex.as_str())
+            })
+            .count();
+        if addressed == 1 {
+            channels.insert(channel_id);
+        }
+    }
+    let mut channels: Vec<_> = channels.into_iter().collect();
+    channels.sort_unstable_by_key(Uuid::as_u128);
+    channels
+}
+
+/// Select the newest verified relay-authored metadata revision per channel.
+/// `None` means the newest revision is archived; missing map entries are
+/// unknown/unverified and must remain fail-closed for authorization.
+pub(crate) fn newest_verified_channel_info(
+    meta_events: &serde_json::Value,
+    trusted_relay_pubkey: &nostr::PublicKey,
+) -> HashMap<Uuid, Option<ChannelInfo>> {
+    let mut newest: HashMap<Uuid, (u64, String, Option<ChannelInfo>)> = HashMap::new();
+    let Some(events) = meta_events.as_array() else {
+        return HashMap::new();
+    };
+    for value in events {
+        let Some((event, channel_id)) = verified_relay_group_event(
+            value,
+            buzz_core::kind::KIND_NIP29_GROUP_METADATA,
+            trusted_relay_pubkey,
+        ) else {
+            continue;
+        };
+        let Some(tags) = value.get("tags").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let name = tags
+            .iter()
+            .find_map(|tag| {
+                let parts = tag.as_array()?;
+                if parts.first()?.as_str()? != "name" {
+                    return None;
+                }
+                parts.get(1)?.as_str()
+            })
+            .unwrap_or("unknown")
+            .to_string();
+        let archived = tags.iter().any(|tag| {
+            tag.as_array().is_some_and(|parts| {
+                parts.first().and_then(serde_json::Value::as_str) == Some("archived")
+                    && parts.get(1).and_then(serde_json::Value::as_str) == Some("true")
+            })
+        });
+        let info = (!archived).then(|| ChannelInfo {
+            name,
+            channel_type: channel_type_from_tags(tags),
+        });
+        let ordering = (event.created_at.as_secs(), event.id.to_hex());
+        if newest
+            .get(&channel_id)
+            .is_none_or(|current| ordering > (current.0, current.1.clone()))
+        {
+            newest.insert(channel_id, (ordering.0, ordering.1, info));
+        }
+    }
+    newest
+        .into_iter()
+        .map(|(channel_id, (_, _, info))| (channel_id, info))
+        .collect()
+}
+
+/// Build the discovered-channel subscribe set from verified membership UUIDs
+/// and relay-authored kind:39000 metadata, skipping channels whose newest
+/// verified revision is archived. Missing or invalid metadata stays `unknown`.
 pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
+    trusted_relay_pubkey: &nostr::PublicKey,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
-    let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
-    if let Some(arr) = meta_events.as_array() {
-        for ev in arr {
-            let tags = match ev.get("tags").and_then(|t| t.as_array()) {
-                Some(t) => t,
-                None => continue,
-            };
-            let mut d_val = None;
-            let mut name = None;
-            let mut is_archived = false;
-            for tag in tags {
-                if let Some(arr) = tag.as_array() {
-                    match arr.first().and_then(|v| v.as_str()) {
-                        Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
-                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                        Some("archived") => {
-                            is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if let Some(d) = d_val {
-                if let Ok(uuid) = d.parse::<Uuid>() {
-                    if is_archived {
-                        archived.insert(uuid);
-                        continue;
-                    }
-                    let ch_name = name.unwrap_or("unknown").to_string();
-                    let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
-                }
-            }
-        }
-    }
-
+    let mut metadata = newest_verified_channel_info(meta_events, trusted_relay_pubkey);
     let mut map = HashMap::with_capacity(channel_uuids.len());
     for uuid in channel_uuids {
-        if archived.contains(&uuid) {
-            continue;
+        match metadata.remove(&uuid) {
+            Some(Some(info)) => {
+                map.insert(uuid, info);
+            }
+            Some(None) => {}
+            None => {
+                map.insert(
+                    uuid,
+                    ChannelInfo {
+                        name: "unknown".to_string(),
+                        channel_type: "unknown".to_string(),
+                    },
+                );
+            }
         }
-        let (name, channel_type) = meta_map
-            .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
     }
     map
 }
@@ -237,6 +344,9 @@ pub struct RestClient {
     pub http: reqwest::Client,
     pub base_url: String,
     pub keys: Keys,
+    /// HTTPS-authenticated NIP-11 `self` identity used to authorize relay
+    /// control-plane and group metadata events returned by `/query`.
+    pub trusted_relay_pubkey: nostr::PublicKey,
     /// Optional NIP-OA auth tag JSON for `x-auth-tag` header (relay membership delegation).
     pub auth_tag_json: Option<String>,
 }
@@ -560,6 +670,8 @@ pub struct HarnessRelay {
     relay_url: String,
     /// Keys used for NIP-42 signing and NIP-98 HTTP auth.
     keys: Keys,
+    /// HTTPS-authenticated NIP-11 `self` identity pinned for this process.
+    trusted_relay_pubkey: nostr::PublicKey,
     /// Optional NIP-OA auth tag for relay membership delegation.
     auth_tag: Option<nostr::Tag>,
     /// Handle to the background task (for clean shutdown).
@@ -615,6 +727,14 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?;
+        let trusted_relay_pubkey = fetch_relay_self(&http, relay_url).await?;
+
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
         // jittered backoff. A terminal error (bad URL, bad auth tag,
@@ -644,6 +764,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                trusted_relay_pubkey,
             )
             .await;
         });
@@ -652,13 +773,10 @@ impl HarnessRelay {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .build()
-                .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
+            http,
             relay_url: relay_url.to_string(),
             keys: keys.clone(),
+            trusted_relay_pubkey,
             auth_tag,
             bg_handle: Some(bg_handle),
         })
@@ -684,27 +802,11 @@ impl HarnessRelay {
             .custom_tags(p_tag, [pk_hex.as_str()]);
         let member_events = rest.query(&[member_filter]).await?;
 
-        let member_arr = member_events
-            .as_array()
-            .ok_or_else(|| RelayError::Http("expected JSON array from /query (members)".into()))?;
-
-        // Extract channel UUIDs from #d tags.
-        let mut channel_uuids: Vec<Uuid> = Vec::new();
-        for ev in member_arr {
-            if let Some(tags) = ev.get("tags").and_then(|t| t.as_array()) {
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        if arr.first().and_then(|v| v.as_str()) == Some("d") {
-                            if let Some(d_val) = arr.get(1).and_then(|v| v.as_str()) {
-                                if let Ok(uuid) = d_val.parse::<Uuid>() {
-                                    channel_uuids.push(uuid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let channel_uuids = verified_membership_channels(
+            &member_events,
+            &self.trusted_relay_pubkey,
+            &self.keys.public_key(),
+        );
 
         if channel_uuids.is_empty() {
             debug!("discovered 0 channel(s)");
@@ -722,7 +824,8 @@ impl HarnessRelay {
         let meta_events = rest.query(&[meta_filter]).await?;
 
         // Step 3: Build the final subscribe set, skipping archived channels.
-        let map = merge_discovered_channels(channel_uuids, &meta_events);
+        let map =
+            merge_discovered_channels(channel_uuids, &meta_events, &self.trusted_relay_pubkey);
 
         debug!("discovered {} channel(s)", map.len());
         Ok(map)
@@ -737,6 +840,7 @@ impl HarnessRelay {
             http: self.http.clone(),
             base_url: relay_ws_to_http(&self.relay_url),
             keys: self.keys.clone(),
+            trusted_relay_pubkey: self.trusted_relay_pubkey,
             auth_tag_json: self
                 .auth_tag
                 .as_ref()
@@ -990,6 +1094,9 @@ impl TwoGenDedup {
 
 /// State maintained by the background WebSocket task.
 struct BgState {
+    /// HTTPS-authenticated NIP-11 `self` identity pinned for this process.
+    /// Membership notifications are relay-authored and fail closed without it.
+    trusted_relay_pubkey: Option<nostr::PublicKey>,
     /// Active subscriptions: channel_id → subscription_id string.
     active_subscriptions: HashMap<Uuid, String>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
@@ -1078,6 +1185,7 @@ struct BgState {
 impl BgState {
     fn new() -> Self {
         Self {
+            trusted_relay_pubkey: None,
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
@@ -1557,8 +1665,10 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    trusted_relay_pubkey: nostr::PublicKey,
 ) {
     let mut state = BgState::new();
+    state.trusted_relay_pubkey = Some(trusted_relay_pubkey);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -2091,11 +2201,21 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        // Membership notification — extract channel UUID from h tag.
-                        let channel_uuid = match extract_h_tag_uuid(&event) {
-                            Some(uuid) => uuid,
-                            None => {
-                                warn!("membership notification missing h tag — dropping");
+                        // Membership notifications are privileged relay-authored
+                        // control events. Validate signer, target and exact channel
+                        // tags before dedup or any replay/subscription state changes.
+                        let Some(relay_pubkey) = state.trusted_relay_pubkey.as_ref() else {
+                            warn!("membership notification dropped without pinned relay identity");
+                            return true;
+                        };
+                        let channel_uuid = match validate_membership_notification(
+                            &event,
+                            relay_pubkey,
+                            &keys.public_key(),
+                        ) {
+                            Ok(uuid) => uuid,
+                            Err(error) => {
+                                warn!(%error, "untrusted membership notification — dropping");
                                 return true;
                             }
                         };
@@ -2153,6 +2273,45 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                        // A parseable `ch-<uuid>` string is not proof that this
+                        // subscription is current. Reject stale/fabricated routes
+                        // before transport bookkeeping or application delivery.
+                        if state
+                            .active_subscriptions
+                            .get(&channel_id)
+                            .map(String::as_str)
+                            != Some(subscription_id.as_str())
+                        {
+                            warn!(
+                                %subscription_id,
+                                %channel_id,
+                                "event received on inactive or fabricated channel subscription — dropping"
+                            );
+                            return true;
+                        }
+                        let kind = event.kind.as_u16() as u32;
+                        if matches!(
+                            kind,
+                            KIND_MEMBER_ADDED_NOTIFICATION | KIND_MEMBER_REMOVED_NOTIFICATION
+                        ) {
+                            warn!(
+                                %subscription_id,
+                                %channel_id,
+                                kind,
+                                "privileged membership event received on ordinary subscription — dropping"
+                            );
+                            return true;
+                        }
+                        if event.verify().is_err() || !has_exact_channel_binding(&event, channel_id)
+                        {
+                            warn!(
+                                %subscription_id,
+                                %channel_id,
+                                event_id = %event.id.to_hex(),
+                                "invalid signature or channel binding — dropping before replay bookkeeping"
+                            );
+                            return true;
+                        }
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
@@ -3430,16 +3589,79 @@ async fn dns_flat_sleep(
     }
 }
 
-/// Extract a channel UUID from the h tag of a Nostr event.
-fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
-    event.tags.iter().find_map(|tag| {
-        let tag_vec = tag.as_slice();
-        if tag_vec.len() >= 2 && tag_vec[0] == "h" {
-            tag_vec[1].parse::<Uuid>().ok()
-        } else {
-            None
-        }
-    })
+/// Validate a relay-authored membership notification before it can mutate
+/// subscriptions, queue state, or session retirement barriers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum MembershipNotificationError {
+    #[error("invalid Nostr event id or signature")]
+    InvalidSignature,
+    #[error("membership notification kind is not supported")]
+    WrongKind,
+    #[error("membership notification signer does not match NIP-11 relay identity")]
+    WrongSigner,
+    #[error("membership notification must contain exactly one target p tag")]
+    InvalidTarget,
+    #[error("membership notification must contain exactly one canonical channel h tag")]
+    InvalidChannel,
+}
+
+fn validate_membership_notification(
+    event: &Event,
+    relay_pubkey: &nostr::PublicKey,
+    agent_pubkey: &nostr::PublicKey,
+) -> Result<Uuid, MembershipNotificationError> {
+    event
+        .verify()
+        .map_err(|_| MembershipNotificationError::InvalidSignature)?;
+
+    let kind = event.kind.as_u16() as u32;
+    if !matches!(
+        kind,
+        KIND_MEMBER_ADDED_NOTIFICATION | KIND_MEMBER_REMOVED_NOTIFICATION
+    ) {
+        return Err(MembershipNotificationError::WrongKind);
+    }
+    if event.pubkey != *relay_pubkey {
+        return Err(MembershipNotificationError::WrongSigner);
+    }
+
+    let p_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+        .collect();
+    let p_value = p_tags
+        .first()
+        .and_then(|tag| tag.as_slice().get(1))
+        .map(String::as_str);
+    if p_tags.len() != 1
+        || p_value
+            .and_then(|p| nostr::PublicKey::parse(p).ok())
+            .as_ref()
+            != Some(agent_pubkey)
+    {
+        return Err(MembershipNotificationError::InvalidTarget);
+    }
+
+    let h_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+        .collect();
+    if h_tags.len() != 1 {
+        return Err(MembershipNotificationError::InvalidChannel);
+    }
+    let h_value = h_tags[0]
+        .as_slice()
+        .get(1)
+        .ok_or(MembershipNotificationError::InvalidChannel)?;
+    let channel_id = h_value
+        .parse::<Uuid>()
+        .map_err(|_| MembershipNotificationError::InvalidChannel)?;
+    if h_value != &channel_id.to_string() {
+        return Err(MembershipNotificationError::InvalidChannel);
+    }
+    Ok(channel_id)
 }
 
 /// Build and send a NIP-42 AUTH response event.
@@ -3488,6 +3710,40 @@ pub(crate) fn relay_ws_to_http(url: &str) -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+fn parse_nip11_relay_self(info: &Value) -> Result<nostr::PublicKey, RelayError> {
+    let value = info
+        .get("self")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| RelayError::AuthFailed("NIP-11 document has no relay self key".into()))?;
+    nostr::PublicKey::parse(value)
+        .map_err(|_| RelayError::AuthFailed("NIP-11 relay self key is invalid".into()))
+}
+
+async fn fetch_relay_self(
+    http: &reqwest::Client,
+    relay_url: &str,
+) -> Result<nostr::PublicKey, RelayError> {
+    let info_url = format!("{}/info", relay_ws_to_http(relay_url));
+    let response = http
+        .get(&info_url)
+        .header(reqwest::header::ACCEPT, "application/nostr+json")
+        .send()
+        .await
+        .map_err(|e| RelayError::Http(format!("NIP-11 identity fetch failed: {e}")))?;
+    if !response.status().is_success() {
+        return Err(RelayError::AuthFailed(format!(
+            "NIP-11 identity fetch returned HTTP {}",
+            response.status()
+        )));
+    }
+    let info = response
+        .json::<Value>()
+        .await
+        .map_err(|e| RelayError::AuthFailed(format!("invalid NIP-11 identity document: {e}")))?;
+    parse_nip11_relay_self(&info)
 }
 
 /// Build the subscription ID for a channel: `ch-<uuid>`.
@@ -4052,6 +4308,259 @@ mod tests {
     }
 
     #[test]
+    fn nip11_relay_identity_parser_fails_closed() {
+        let relay = Keys::generate();
+        let valid = serde_json::json!({"self": relay.public_key().to_hex()});
+        assert_eq!(parse_nip11_relay_self(&valid).unwrap(), relay.public_key());
+        assert!(parse_nip11_relay_self(&serde_json::json!({"self": null})).is_err());
+        assert!(parse_nip11_relay_self(&serde_json::json!({"self": "not-a-key"})).is_err());
+    }
+
+    #[test]
+    fn membership_notifications_require_relay_signature_exact_target_and_channel() {
+        fn signed_notification(
+            signer: &Keys,
+            target: &Keys,
+            channel_id: Uuid,
+            kind: u32,
+            extra_tags: Vec<Tag>,
+        ) -> Event {
+            let mut tags = vec![
+                Tag::parse(["p", &target.public_key().to_hex()]).unwrap(),
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            ];
+            tags.extend(extra_tags);
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .sign_with_keys(signer)
+                .unwrap()
+        }
+
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let agent = Keys::generate();
+        let other_agent = Keys::generate();
+        let channel_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let valid = signed_notification(
+            &relay,
+            &agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![],
+        );
+
+        assert_eq!(
+            validate_membership_notification(&valid, &relay.public_key(), &agent.public_key()),
+            Ok(channel_id)
+        );
+
+        let forged = signed_notification(
+            &attacker,
+            &agent,
+            channel_id,
+            KIND_MEMBER_REMOVED_NOTIFICATION,
+            vec![],
+        );
+        assert!(validate_membership_notification(
+            &forged,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let wrong_target = signed_notification(
+            &relay,
+            &other_agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![],
+        );
+        assert!(validate_membership_notification(
+            &wrong_target,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let duplicate_target = signed_notification(
+            &relay,
+            &agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![Tag::parse(["p", &agent.public_key().to_hex()]).unwrap()],
+        );
+        assert!(validate_membership_notification(
+            &duplicate_target,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let duplicate_channel = signed_notification(
+            &relay,
+            &agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![Tag::parse(["h", &channel_id.to_string()]).unwrap()],
+        );
+        assert!(validate_membership_notification(
+            &duplicate_channel,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let wrong_kind = signed_notification(&relay, &agent, channel_id, 9, vec![]);
+        assert!(validate_membership_notification(
+            &wrong_kind,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let malformed_target = signed_notification(
+            &relay,
+            &agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![Tag::parse(["p"]).unwrap()],
+        );
+        assert!(validate_membership_notification(
+            &malformed_target,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let malformed_channel = signed_notification(
+            &relay,
+            &agent,
+            channel_id,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            vec![Tag::parse(["h"]).unwrap()],
+        );
+        assert!(validate_membership_notification(
+            &malformed_channel,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let noncanonical_channel =
+            EventBuilder::new(Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16), "")
+                .tags(vec![
+                    Tag::parse(["p", &agent.public_key().to_hex()]).unwrap(),
+                    Tag::parse(["h", &channel_id.to_string().to_ascii_uppercase()]).unwrap(),
+                ])
+                .sign_with_keys(&relay)
+                .unwrap();
+        assert!(validate_membership_notification(
+            &noncanonical_channel,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+
+        let mut tampered_json = serde_json::to_value(&valid).unwrap();
+        tampered_json["content"] = serde_json::Value::String("tampered".into());
+        let tampered: Event = serde_json::from_value(tampered_json).unwrap();
+        assert!(validate_membership_notification(
+            &tampered,
+            &relay.public_key(),
+            &agent.public_key()
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn ordinary_subscription_rejects_privileged_membership_before_bookkeeping() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(KIND_MEMBER_REMOVED_NOTIFICATION as u16), "")
+            .tags([
+                Tag::parse(["p", &agent.public_key().to_hex()]).unwrap(),
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            ])
+            .custom_created_at(nostr::Timestamp::from(9_999_999_999u64))
+            .sign_with_keys(&attacker)
+            .unwrap();
+        let event_id = event.id.to_hex();
+
+        let mut state = BgState::new();
+        state.trusted_relay_pubkey = Some(relay.public_key());
+        seed_test_subscription(&mut state, channel_id);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_tx, _observer_rx) = mpsc::channel(4);
+        let frame = json!(["EVENT", channel_sub_id(channel_id), event]);
+
+        assert!(
+            handle_ws_message(
+                Message::Text(frame.to_string().into()),
+                &mut ws,
+                &event_tx,
+                &observer_tx,
+                &mut state,
+                &agent,
+                "wss://relay.example",
+                &agent.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!state.seen_ids.contains(&event_id));
+        assert!(!state.last_seen.contains_key(&channel_id));
+    }
+
+    #[tokio::test]
+    async fn wrong_channel_event_cannot_poison_replay_state_before_admission() {
+        let (mut ws, _server) = test_ws_pair().await;
+        let agent = Keys::generate();
+        let author = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let wrong_channel = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::TextNote, "wrong scope")
+            .tags([Tag::parse(["h", &wrong_channel.to_string()]).unwrap()])
+            .custom_created_at(nostr::Timestamp::from(9_999_999_999u64))
+            .sign_with_keys(&author)
+            .unwrap();
+        let event_id = event.id.to_hex();
+
+        let mut state = BgState::new();
+        seed_test_subscription(&mut state, channel_id);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_tx, _observer_rx) = mpsc::channel(4);
+        let frame = json!(["EVENT", channel_sub_id(channel_id), event]);
+
+        assert!(
+            handle_ws_message(
+                Message::Text(frame.to_string().into()),
+                &mut ws,
+                &event_tx,
+                &observer_tx,
+                &mut state,
+                &agent,
+                "wss://relay.example",
+                &agent.public_key().to_hex(),
+                None,
+            )
+            .await
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!state.seen_ids.contains(&event_id));
+        assert!(!state.last_seen.contains_key(&channel_id));
+    }
+
+    #[test]
     fn channel_sub_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         assert_eq!(
@@ -4083,47 +4592,117 @@ mod tests {
         assert!(channel_id_from_sub_id("").is_none());
     }
 
-    fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
+    fn meta_event(keys: &Keys, uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
         let mut tags = vec![
-            serde_json::json!(["d", uuid.to_string()]),
-            serde_json::json!(["name", name]),
+            Tag::parse(vec!["d".to_string(), uuid.to_string()]).unwrap(),
+            Tag::parse(vec!["name".to_string(), name.to_string()]).unwrap(),
         ];
         // `extra` is a flat list of single-value tag names (e.g. archived=true).
         for pair in extra.chunks(2) {
             match pair {
-                [k, v] => tags.push(serde_json::json!([k, v])),
-                [k] => tags.push(serde_json::json!([k])),
+                [k, v] => tags.push(Tag::parse(vec![(*k).to_string(), (*v).to_string()]).unwrap()),
+                [k] => tags.push(Tag::parse(vec![(*k).to_string()]).unwrap()),
                 _ => {}
             }
         }
-        serde_json::json!({ "tags": tags })
+        serde_json::to_value(
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+                "",
+            )
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn merge_discovered_channels_preserves_missing_metadata_as_unknown() {
         let channel = Uuid::new_v4();
-        let map = merge_discovered_channels(vec![channel], &serde_json::json!([]));
+        let relay = Keys::generate();
+        let map =
+            merge_discovered_channels(vec![channel], &serde_json::json!([]), &relay.public_key());
         assert_eq!(map[&channel].channel_type, "unknown");
     }
 
     #[test]
     fn merge_discovered_channels_uses_declared_dm_type_without_hidden_hint() {
         let channel = Uuid::new_v4();
-        let meta = serde_json::json!([meta_event(channel, "dm", &["t", "dm"])]);
-        let map = merge_discovered_channels(vec![channel], &meta);
+        let relay = Keys::generate();
+        let meta = serde_json::json!([meta_event(&relay, channel, "dm", &["t", "dm"])]);
+        let map = merge_discovered_channels(vec![channel], &meta, &relay.public_key());
         assert_eq!(map[&channel].channel_type, "dm");
+    }
+
+    #[test]
+    fn attacker_signed_metadata_cannot_downgrade_dm_authorization() {
+        let channel = Uuid::new_v4();
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let trusted_dm = meta_event(&relay, channel, "DM", &["t", "dm"]);
+        let forged_stream = meta_event(&attacker, channel, "public", &["t", "stream"]);
+
+        let map = merge_discovered_channels(
+            vec![channel],
+            &serde_json::json!([forged_stream, trusted_dm]),
+            &relay.public_key(),
+        );
+
+        assert_eq!(map[&channel].channel_type, "dm");
+        assert_eq!(map[&channel].name, "DM");
+    }
+
+    #[test]
+    fn membership_discovery_requires_relay_signature_exact_target_and_channel() {
+        let channel = Uuid::new_v4();
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let agent = Keys::generate();
+        let other = Keys::generate();
+        let member_event = |signer: &Keys, target: nostr::PublicKey, duplicate_d: bool| {
+            let mut tags = vec![
+                Tag::parse(vec!["d".to_string(), channel.to_string()]).unwrap(),
+                Tag::parse(vec!["p".to_string(), target.to_hex()]).unwrap(),
+            ];
+            if duplicate_d {
+                tags.push(Tag::parse(vec!["d".to_string(), channel.to_string()]).unwrap());
+            }
+            serde_json::to_value(
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16),
+                    "",
+                )
+                .tags(tags)
+                .sign_with_keys(signer)
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let events = serde_json::json!([
+            member_event(&attacker, agent.public_key(), false),
+            member_event(&relay, other.public_key(), false),
+            member_event(&relay, agent.public_key(), true),
+            member_event(&relay, agent.public_key(), false),
+        ]);
+
+        assert_eq!(
+            verified_membership_channels(&events, &relay.public_key(), &agent.public_key()),
+            vec![channel]
+        );
     }
 
     #[test]
     fn merge_discovered_channels_skips_archived_metadata() {
         let live = Uuid::new_v4();
         let archived = Uuid::new_v4();
+        let relay = Keys::generate();
         let meta = serde_json::json!([
-            meta_event(live, "live", &[]),
-            meta_event(archived, "dead", &["archived", "true"]),
+            meta_event(&relay, live, "live", &[]),
+            meta_event(&relay, archived, "dead", &["archived", "true"]),
         ]);
 
-        let map = merge_discovered_channels(vec![live, archived], &meta);
+        let map = merge_discovered_channels(vec![live, archived], &meta, &relay.public_key());
 
         assert!(map.contains_key(&live), "non-archived channel is kept");
         assert!(
@@ -4142,9 +4721,10 @@ mod tests {
         // client skip re-subscribing on reconnect — proving (b) closes the loop
         // independently of the relay-side eviction.
         let reaped = Uuid::new_v4();
-        let meta = serde_json::json!([meta_event(reaped, "reaped", &["archived", "true"])]);
+        let relay = Keys::generate();
+        let meta = serde_json::json!([meta_event(&relay, reaped, "reaped", &["archived", "true"])]);
 
-        let map = merge_discovered_channels(vec![reaped], &meta);
+        let map = merge_discovered_channels(vec![reaped], &meta, &relay.public_key());
 
         assert!(
             map.is_empty(),
@@ -4156,9 +4736,10 @@ mod tests {
     fn merge_discovered_channels_archived_false_is_kept() {
         // An explicit archived=false (e.g. after unarchive) must NOT be skipped.
         let ch = Uuid::new_v4();
-        let meta = serde_json::json!([meta_event(ch, "back", &["archived", "false"])]);
+        let relay = Keys::generate();
+        let meta = serde_json::json!([meta_event(&relay, ch, "back", &["archived", "false"])]);
 
-        let map = merge_discovered_channels(vec![ch], &meta);
+        let map = merge_discovered_channels(vec![ch], &meta, &relay.public_key());
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
     }
