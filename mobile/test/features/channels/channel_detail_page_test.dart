@@ -3995,6 +3995,124 @@ void main() {
       expect(oldestReplyY, lessThan(newestReplyY));
     });
 
+    testWidgets('thread opens scrolled to the newest reply', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply number $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The newest reply is on screen; the head and oldest replies are not.
+      expect(find.text('Reply number 39'), findsOneWidget);
+      expect(find.text('Thread root'), findsNothing);
+      expect(find.text('Reply number 0'), findsNothing);
+    });
+
+    testWidgets('thread deep link still lands on the linked reply', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply number $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-2',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The deep-link target wins over the tail jump.
+      expect(find.text('Reply number 2'), findsOneWidget);
+      expect(find.text('Reply number 39'), findsNothing);
+    });
+
     testWidgets('thread keeps its tail above a growing composer dock', (
       tester,
     ) async {
@@ -4086,7 +4204,7 @@ void main() {
     });
 
     testWidgets(
-      'initial thread hydration keeps the head visible instead of following the tail',
+      'initial thread hydration lands on the newest reply',
       (tester) async {
         final rootEvent = _textMsg(
           id: 'thread-root',
@@ -4143,11 +4261,11 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
           findsOneWidget,
         );
         expect(
-          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
           findsNothing,
         );
       },

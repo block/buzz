@@ -117,6 +117,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final didJumpToInitialMessage = useRef(false);
+    final didJumpToThreadTail = useRef(false);
     final followsThreadTail = useRef(false);
     final pendingTailAlignment = useRef<double?>(null);
     final tailRealignmentQueued = useRef(false);
@@ -172,6 +173,44 @@ class ThreadDetailPage extends HookConsumerWidget {
       });
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
+
+    // Without a deep-link target, opening a thread lands on the newest reply
+    // (matching desktop's thread panel) instead of the head. Wait for the
+    // authoritative thread query so the jump measures the full reply list,
+    // and leave short threads alone when the tail is already on screen.
+    useEffect(() {
+      if (initialMessageId != null ||
+          fetchedReplies == null ||
+          didJumpToThreadTail.value) {
+        return null;
+      }
+      didJumpToThreadTail.value = true;
+      if (replies.isEmpty) return null;
+      final lastIndex = indexForReply(replies.length - 1);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        followsThreadTail.value = true;
+        if (threadTailIsVisible()) return;
+        // Render the tail first, then align its trailing edge with the
+        // viewport bottom once its extent is measurable.
+        itemScrollController.jumpTo(index: lastIndex);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted || !itemScrollController.isAttached) return;
+          final lastPosition = itemPositionsListener.itemPositions.value
+              .where((position) => position.index == lastIndex)
+              .firstOrNull;
+          if (lastPosition == null) return;
+          final targetAlignment =
+              1.0 -
+              (lastPosition.itemTrailingEdge - lastPosition.itemLeadingEdge);
+          itemScrollController.jumpTo(
+            index: lastIndex,
+            alignment: targetAlignment,
+          );
+        });
+      });
+      return null;
+    }, [initialMessageId, fetchedReplies == null, replies.length]);
 
     // A top-anchored list doesn't stick to the newest item the way the old
     // reversed one did, so follow the tail explicitly: when a reply arrives
