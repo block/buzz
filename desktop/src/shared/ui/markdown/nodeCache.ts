@@ -91,9 +91,11 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
   const rehypePlugins: any[] = [rehypeImageGallery];
   if (!disableMath) {
-    // `throwOnError: false` (plus `strict: false`) renders malformed input as
-    // its source text instead of throwing / surfacing a red error.
-    rehypePlugins.push([rehypeKatex, { throwOnError: false, strict: false }]);
+    // `throwOnError: false` makes KaTeX degrade malformed input gracefully.
+    // (Note: we deliberately pass NO `strict` option here — rehype-katex's
+    // internal error-fallback overrides it to `strict: 'ignore'` anyway, so
+    // setting it is misleading.)
+    rehypePlugins.push([rehypeKatex, { throwOnError: false }]);
   }
   if (input.searchQuery && input.searchQuery.trim().length >= 2) {
     rehypePlugins.push([rehypeSearchHighlight, { query: input.searchQuery }]);

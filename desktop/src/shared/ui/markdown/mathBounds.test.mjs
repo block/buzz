@@ -64,10 +64,11 @@ test("an oversized display formula is neutralised on its own", () => {
   const { content, disableMath } = applyMathBounds(src);
   assert.equal(disableMath, false);
   assert.ok(
-    content.startsWith("before \\$$"),
+    content.startsWith("before \\$\\$"),
     "opening display delimiter escaped",
   );
-  assert.ok(content.endsWith("$$ after"));
+  assert.ok(content.endsWith("\\$\\$ after"));
+  assert.ok(!/\\$\\$/.test(content), "no contiguous $$ left to tokenise");
 });
 
 test("only the oversized formula is neutralised; siblings untouched", () => {

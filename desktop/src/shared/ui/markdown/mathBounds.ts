@@ -115,18 +115,36 @@ export function applyMathBounds(markdown: string): MathBounds {
   if (!anyOversized) {
     return { content: markdown, disableMath: false };
   }
-  // Neutralise oversized formulas by escaping their opening delimiter, so
-  // remark-math does not tokenise them and they render as literal text while
-  // the well-formed formulas in the same message keep rendering.
+  // Neutralise oversized formulas so remark-math does not tokenise them and
+  // they render as literal text, while the well-formed formulas in the same
+  // message keep rendering.
   let out = markdown;
   let shift = 0;
   for (const span of spans) {
     if (!span.oversized) continue;
-    // Insert one backslash before the opening delimiter, at the span's current
-    // (post-insertion) offset.
-    out =
-      out.slice(0, span.start + shift) + "\\" + out.slice(span.start + shift);
-    shift += 1;
+    if (span.display) {
+      // Display `$$...$$` is finicky: remark-math still reads a `$$` that has
+      // only one preceding backslash, and a lone *unescaped* trailing `$$` is
+      // itself tokenised back into that same display span. So a single escape
+      // of the opener is not enough. Neutralise by breaking BOTH delimiters
+      // into `\$ \$` (backslash-dollar backslash-dollar) -- with no contiguous
+      // `$$` left anywhere, remark-math has nothing to latch onto and the
+      // whole span renders literally (no katex, no red error).
+      const openAt = span.start + shift;
+      out = out.slice(0, openAt) + "\\$\\$" + out.slice(openAt + 2);
+      shift += 2;
+      const closeAt = span.end + shift - 2;
+      out = out.slice(0, closeAt) + "\\$\\$" + out.slice(closeAt + 2);
+      shift += 2;
+    } else {
+      // Inline `$...$`: escape the opening delimiter. (Escaping the closing
+      // `$` too would yield `$...\$`, which KaTeX mis-reads and red-highlights
+      // -- so we leave the closing lone `$` alone; a lone `$` never starts
+      // math.) Insert at the span's current (post-insertion) offset.
+      const at = span.start + shift;
+      out = out.slice(0, at) + "\\" + out.slice(at);
+      shift += 1;
+    }
   }
   return { content: out, disableMath: false };
 }

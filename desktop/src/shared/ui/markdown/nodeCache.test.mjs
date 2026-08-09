@@ -184,3 +184,36 @@ test("a single oversized formula is neutralised; sibling math still renders", ()
   const html = renderToStaticMarkup(el);
   assert.match(html, /katex/, "healthy sibling formula still renders as math");
 });
+
+// Review-driven (审查员 clean-clone regression): the oversized **display**
+// `$$...$$` path was verified manually but not cemented by a unit test.
+
+test("oversized display math degrades to literal with no stray partial math", () => {
+  clearMarkdownNodeCache();
+  const huge = "b".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `only $$\n${huge}\n$$ here`,
+  });
+  const html = renderToStaticMarkup(el);
+  // Escaping the opening `$$` must not leave a stray `$` that remark-math
+  // re-reads as a (partial) inline formula: expect zero katex output.
+  assert.equal(
+    (html.match(/katex/g) ?? []).length,
+    0,
+    "fully literal degradation, no katex",
+  );
+  assert.ok(html.includes("b".repeat(64)), "oversized source preserved literally");
+});
+
+test("oversized display formula is neutralised; sibling math still renders", () => {
+  clearMarkdownNodeCache();
+  const huge = "c".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `lead $y=1$ then $$\n${huge}\n$$ and $keep$`,
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/, "healthy sibling formulas still render as math");
+  assert.ok(html.includes("c".repeat(64)), "oversized display preserved literally");
+});
