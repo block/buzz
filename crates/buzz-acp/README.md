@@ -159,9 +159,7 @@ Use `!cancel` to stop only the current turn; it is a no-op when the channel is i
 
 Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
 
-Because the command never reaches the agent, the harness publishes the outcome back into the channel as a kind:40099 system message — the grey row clients render beside "X joined the channel", since a cancelled turn or a rotated session is a lifecycle event rather than the agent speaking. It lands in the thread the command was typed in, and it is published for the no-op outcomes too (`!cancel` with no turn in flight, `!rotate` with no cached session), so a command that changed nothing stays distinguishable from one that was never received.
-
-The payload is `{"type": …, "actor": <owner>, "target": <agent>}`. Clients switch on `type` and silently drop an unknown one, so a client older than this contract shows no row at all.
+Because the command never reaches the agent, the harness posts the outcome back into the channel as a kind:9 notice — including when the command was a no-op (`!cancel` with no turn in flight, `!rotate` with no cached session), so a command that changed nothing is distinguishable from one that was never received.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 

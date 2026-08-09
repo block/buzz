@@ -433,9 +433,7 @@ pub const KIND_STREAM_REMINDER: u32 = 40007;
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
-/// System message for channel state changes (join, leave, rename, etc.),
-/// and for the outcome of an owner control command consumed by the ACP
-/// harness. Relay-signed for channel state; agent-signed for the latter.
+/// System message for channel state changes (join, leave, rename, etc.).
 pub const KIND_SYSTEM_MESSAGE: u32 = 40099;
 
 // Relay-only sidecar kinds (never client-submitted)

@@ -1,4 +1,4 @@
-//! Typed event builder functions (39 builders).
+//! Typed event builder functions (38 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -235,35 +235,6 @@ pub fn build_message(
     }
     imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
-}
-
-/// Build a system message (kind 40099) for a channel.
-///
-/// System messages carry a JSON payload whose `type` field clients switch on to
-/// render a system row — a channel lifecycle event such as a membership change,
-/// or the outcome of an owner control command consumed by the harness — instead
-/// of a message in the conversation. Unknown `type` values are dropped by the
-/// clients, so a new one needs matching cases in the renderers.
-///
-/// `thread_ref` places the row in the thread that triggered it; `None` posts it
-/// at channel level. Thread placement is derived from NIP-10 `e` tags and is
-/// kind-agnostic on the client, so this threads exactly like [`build_message`].
-pub fn build_system_message(
-    channel_id: Uuid,
-    payload: &serde_json::Value,
-    thread_ref: Option<&ThreadRef>,
-) -> Result<EventBuilder, SdkError> {
-    let content = payload.to_string();
-    check_content(&content, 64 * 1024)?;
-    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
-    if let Some(tr) = thread_ref {
-        thread_tags(tr, &mut tags)?;
-    }
-    Ok(EventBuilder::new(
-        Kind::Custom(buzz_core::kind::KIND_SYSTEM_MESSAGE as u16),
-        content,
-    )
-    .tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).

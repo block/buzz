@@ -17,16 +17,6 @@ enum SystemEventType {
   channelUnarchived,
   huddleStarted,
   huddleEnded,
-
-  /// Owner control commands consumed by the ACP harness. The command never
-  /// reaches the agent, so the row is the only signal it took effect —
-  /// including the no-op outcomes, which is why they are distinct values.
-  agentShutdown,
-  agentTurnCancelled,
-  agentTurnCancelNoop,
-  agentSessionRotatedInFlight,
-  agentSessionRotated,
-  agentSessionRotateNoop,
 }
 
 @immutable
@@ -68,13 +58,6 @@ class SystemEvent {
       'channel_created' => SystemEventType.channelCreated,
       'channel_archived' => SystemEventType.channelArchived,
       'channel_unarchived' => SystemEventType.channelUnarchived,
-      'agent_shutdown' => SystemEventType.agentShutdown,
-      'agent_turn_cancelled' => SystemEventType.agentTurnCancelled,
-      'agent_turn_cancel_noop' => SystemEventType.agentTurnCancelNoop,
-      'agent_session_rotated_in_flight' =>
-        SystemEventType.agentSessionRotatedInFlight,
-      'agent_session_rotated' => SystemEventType.agentSessionRotated,
-      'agent_session_rotate_noop' => SystemEventType.agentSessionRotateNoop,
       _ => null,
     };
 
@@ -126,18 +109,6 @@ class SystemEvent {
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
       SystemEventType.huddleStarted => '$actor started a huddle',
       SystemEventType.huddleEnded => '$actor ended the huddle',
-      SystemEventType.agentShutdown =>
-        '$actor shut down ${resolveLabel(targetPubkey)}',
-      SystemEventType.agentTurnCancelled =>
-        "$actor cancelled ${resolveLabel(targetPubkey)}'s current turn",
-      SystemEventType.agentTurnCancelNoop =>
-        "$actor tried to cancel ${resolveLabel(targetPubkey)}'s turn — nothing was running",
-      SystemEventType.agentSessionRotatedInFlight =>
-        "$actor cancelled ${resolveLabel(targetPubkey)}'s turn and rotated its session",
-      SystemEventType.agentSessionRotated =>
-        "$actor rotated ${resolveLabel(targetPubkey)}'s session",
-      SystemEventType.agentSessionRotateNoop =>
-        "$actor rotated ${resolveLabel(targetPubkey)}'s session — it was already fresh",
     };
   }
 }

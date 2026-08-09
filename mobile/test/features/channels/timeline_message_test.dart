@@ -172,13 +172,6 @@ void main() {
         'channel_created': SystemEventType.channelCreated,
         'channel_archived': SystemEventType.channelArchived,
         'channel_unarchived': SystemEventType.channelUnarchived,
-        'agent_shutdown': SystemEventType.agentShutdown,
-        'agent_turn_cancelled': SystemEventType.agentTurnCancelled,
-        'agent_turn_cancel_noop': SystemEventType.agentTurnCancelNoop,
-        'agent_session_rotated_in_flight':
-            SystemEventType.agentSessionRotatedInFlight,
-        'agent_session_rotated': SystemEventType.agentSessionRotated,
-        'agent_session_rotate_noop': SystemEventType.agentSessionRotateNoop,
       };
 
       for (final entry in types.entries) {
@@ -259,33 +252,6 @@ void main() {
         actorPubkey: 'pk1',
       );
       expect(event.describe(resolve), 'Alice left the channel');
-    });
-
-    // Commandes owner consommées par le harness ACP. `actor` est l'owner qui
-    // lance la commande, `target` l'agent visé : les intervertir attribuerait
-    // la commande à la mauvaise partie dans l'historique du canal.
-    test('agent control outcomes name the owner then the agent', () {
-      final cases = {
-        SystemEventType.agentShutdown: 'Alice shut down Bob',
-        SystemEventType.agentTurnCancelled:
-            "Alice cancelled Bob's current turn",
-        SystemEventType.agentTurnCancelNoop:
-            "Alice tried to cancel Bob's turn — nothing was running",
-        SystemEventType.agentSessionRotatedInFlight:
-            "Alice cancelled Bob's turn and rotated its session",
-        SystemEventType.agentSessionRotated: "Alice rotated Bob's session",
-        SystemEventType.agentSessionRotateNoop:
-            "Alice rotated Bob's session — it was already fresh",
-      };
-
-      for (final entry in cases.entries) {
-        final event = SystemEvent(
-          type: entry.key,
-          actorPubkey: 'pk1',
-          targetPubkey: 'pk2',
-        );
-        expect(event.describe(resolve), entry.value, reason: '${entry.key}');
-      }
     });
 
     test('member_removed', () {

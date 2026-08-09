@@ -574,53 +574,6 @@ function describeSystemEvent(
         ),
       };
     }
-    // Owner control commands consumed by the ACP harness (`!shutdown`,
-    // `!cancel`, `!rotate`). The command never reaches the agent, so this row
-    // is the only signal it took effect — including when it changed nothing,
-    // which is why the no-op outcomes get their own wording instead of being
-    // dropped. Published by the harness, not the relay; see `buzz-acp`.
-    case "agent_shutdown":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: <>shut down {targetName}</>,
-      };
-    case "agent_turn_cancelled":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: <>cancelled {targetName}&rsquo;s current turn</>,
-      };
-    case "agent_turn_cancel_noop":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: (
-          <>tried to cancel {targetName}&rsquo;s turn — nothing was running</>
-        ),
-      };
-    case "agent_session_rotated_in_flight":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: (
-          <>cancelled {targetName}&rsquo;s turn and rotated its session</>
-        ),
-      };
-    case "agent_session_rotated":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: <>rotated {targetName}&rsquo;s session</>,
-      };
-    case "agent_session_rotate_noop":
-      if (!payload.actor || !payload.target) return null;
-      return {
-        title: actorName,
-        action: (
-          <>rotated {targetName}&rsquo;s session — it was already fresh</>
-        ),
-      };
     case "member_left":
       return {
         title: actorName,

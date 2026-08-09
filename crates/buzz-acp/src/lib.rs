@@ -2047,15 +2047,11 @@ async fn tokio_main() -> Result<()> {
                                         // Awaited, not spawned: the harness is
                                         // about to exit, and a spawned task
                                         // would race the shutdown.
-                                        pool::post_system_notice(
+                                        pool::post_notice(
                                             &ctx.rest_client,
                                             buzz_event.channel_id,
                                             &queue::parse_thread_tags(&buzz_event.event),
-                                            &control_notice_payload(
-                                                NOTICE_SHUTDOWN,
-                                                owner,
-                                                &pubkey_hex,
-                                            ),
+                                            "Shutting down.",
                                         )
                                         .await;
                                         let _ = shutdown_tx.send(());
@@ -2099,12 +2095,10 @@ async fn tokio_main() -> Result<()> {
                                             &buzz_event.event,
                                             buzz_event.channel_id,
                                             if fired {
-                                                NOTICE_TURN_CANCELLED
+                                                "Cancelled the current turn."
                                             } else {
-                                                NOTICE_TURN_CANCEL_NOOP
+                                                "Nothing to cancel — no turn in flight."
                                             },
-                                            owner,
-                                            &pubkey_hex,
                                         );
                                         continue; // consume event — do NOT push to queue
                                     }
@@ -2143,7 +2137,7 @@ async fn tokio_main() -> Result<()> {
                                                 channel_id = %buzz_event.channel_id,
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
-                                            NOTICE_SESSION_ROTATED_IN_FLIGHT
+                                            "Cancelled the current turn — the next one starts from a fresh session."
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
                                             tracing::info!(
@@ -2151,15 +2145,13 @@ async fn tokio_main() -> Result<()> {
                                                 invalidated,
                                                 "!rotate received — invalidated idle channel session(s)"
                                             );
-                                            rotate_idle_notice_type(invalidated)
+                                            rotate_idle_notice(invalidated)
                                         };
                                         spawn_control_notice(
                                             &ctx.rest_client,
                                             &buzz_event.event,
                                             buzz_event.channel_id,
                                             notice,
-                                            owner,
-                                            &pubkey_hex,
                                         );
                                         continue; // consume event — do NOT push to queue
                                     }
@@ -3082,44 +3074,13 @@ fn spawn_failure_notice(
         let rest = rest.clone();
         let channel_id = batch.channel_id;
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            pool::post_notice(&rest, channel_id, &thread_tags, &content).await;
         });
     }
 }
 
-/// `type` values of the kind:40099 system message reporting the outcome of a
-/// consumed owner control command.
-///
-/// The renderers switch on these strings and drop an unknown one silently
-/// (`describeSystemEvent` in `SystemMessageRow.tsx`, `SystemEvent.fromContent`
-/// in `timeline_message.dart`), so adding a variant here means adding a case in
-/// both.
-const NOTICE_SHUTDOWN: &str = "agent_shutdown";
-const NOTICE_TURN_CANCELLED: &str = "agent_turn_cancelled";
-const NOTICE_TURN_CANCEL_NOOP: &str = "agent_turn_cancel_noop";
-const NOTICE_SESSION_ROTATED_IN_FLIGHT: &str = "agent_session_rotated_in_flight";
-const NOTICE_SESSION_ROTATED: &str = "agent_session_rotated";
-const NOTICE_SESSION_ROTATE_NOOP: &str = "agent_session_rotate_noop";
-
-/// Build the system-message payload for a consumed owner control command.
-///
-/// `actor` is the owner who issued the command, `target` the agent it acted on
-/// — the same two fields every other system message uses, so the clients
-/// resolve both to profile names and prefetch their profiles.
-fn control_notice_payload(
-    notice_type: &str,
-    owner_hex: &str,
-    agent_hex: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "type": notice_type,
-        "actor": owner_hex,
-        "target": agent_hex,
-    })
-}
-
-/// Spawn a task that publishes the outcome of a consumed owner control command
-/// into the channel it came from.
+/// Spawn a task that posts the outcome of a consumed owner control command
+/// back into the channel it came from.
 ///
 /// Control commands are consumed by the harness and never reach the agent, so
 /// this notice is the only signal the owner gets. Without it a successful
@@ -3129,28 +3090,25 @@ fn spawn_control_notice(
     rest_client: &relay::RestClient,
     event: &nostr::Event,
     channel_id: Uuid,
-    notice_type: &'static str,
-    owner_hex: &str,
-    agent_hex: &str,
+    content: &'static str,
 ) {
     let thread_tags = queue::parse_thread_tags(event);
-    let payload = control_notice_payload(notice_type, owner_hex, agent_hex);
     let rest = rest_client.clone();
     tokio::spawn(async move {
-        pool::post_system_notice(&rest, channel_id, &thread_tags, &payload).await;
+        pool::post_notice(&rest, channel_id, &thread_tags, content).await;
     });
 }
 
-/// Notice type for a `!rotate` that found no turn in flight.
+/// Notice for a `!rotate` that found no turn in flight.
 ///
 /// `invalidated` is how many cached sessions were dropped. Zero means there was
 /// nothing to rotate — the next turn was already going to start fresh. Saying
 /// so explicitly is the point: a silent no-op reads as a broken command.
-fn rotate_idle_notice_type(invalidated: usize) -> &'static str {
+fn rotate_idle_notice(invalidated: usize) -> &'static str {
     if invalidated > 0 {
-        NOTICE_SESSION_ROTATED
+        "Session rotated — the next turn starts fresh."
     } else {
-        NOTICE_SESSION_ROTATE_NOOP
+        "No session to rotate — the next turn already starts fresh."
     }
 }
 
@@ -4448,43 +4406,17 @@ mod owner_control_command_tests {
 
     #[test]
     fn rotate_idle_notice_distinguishes_a_rotation_from_a_no_op() {
-        // The no-op is the case worth distinguishing: nothing was cached, so
-        // the command changed nothing, and the row has to say that rather than
-        // claim a rotation that did not happen.
-        assert_eq!(rotate_idle_notice_type(0), NOTICE_SESSION_ROTATE_NOOP);
+        // The no-op is the case worth wording carefully: nothing was cached, so
+        // the command changed nothing, and the notice has to say that rather
+        // than claim a rotation that did not happen.
+        assert_eq!(
+            rotate_idle_notice(0),
+            "No session to rotate — the next turn already starts fresh."
+        );
 
-        let rotated = rotate_idle_notice_type(1);
-        assert_eq!(rotated, NOTICE_SESSION_ROTATED);
-        assert_eq!(rotate_idle_notice_type(3), rotated);
-    }
-
-    #[test]
-    fn control_notice_payload_names_the_owner_and_the_agent() {
-        // `actor` and `target` are the fields every other system message uses,
-        // and both renderers resolve them to profile names — swapping them
-        // would credit the wrong party for the command in the channel history.
-        let owner = "ab".repeat(32);
-        let agent = "cd".repeat(32);
-        let payload = control_notice_payload(NOTICE_TURN_CANCELLED, &owner, &agent);
-
-        assert_eq!(payload["type"], NOTICE_TURN_CANCELLED);
-        assert_eq!(payload["actor"], owner);
-        assert_eq!(payload["target"], agent);
-    }
-
-    #[test]
-    fn control_notice_types_are_distinct() {
-        // A duplicate would make two different outcomes render the same row.
-        let all = [
-            NOTICE_SHUTDOWN,
-            NOTICE_TURN_CANCELLED,
-            NOTICE_TURN_CANCEL_NOOP,
-            NOTICE_SESSION_ROTATED_IN_FLIGHT,
-            NOTICE_SESSION_ROTATED,
-            NOTICE_SESSION_ROTATE_NOOP,
-        ];
-        let unique: std::collections::HashSet<&str> = all.iter().copied().collect();
-        assert_eq!(unique.len(), all.len());
+        let rotated = rotate_idle_notice(1);
+        assert_eq!(rotated, "Session rotated — the next turn starts fresh.");
+        assert_eq!(rotate_idle_notice(3), rotated);
     }
 
     #[test]

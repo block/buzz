@@ -3635,51 +3635,11 @@ pub(crate) fn thread_ref_from_tags(thread_tags: &ThreadTags) -> Option<buzz_sdk:
     })
 }
 
-/// Best-effort: publish a kind:40099 system message into `channel_id`, signed
-/// with the agent's own key.
-///
-/// Carries the outcome of an owner control command the harness consumed. A
-/// cancelled turn or a rotated session is a lifecycle event, not the agent
-/// speaking, so it renders as a system row beside "X joined the channel"
-/// instead of as a message in the conversation. It still lands in the thread
-/// the command was typed in — thread placement is derived from NIP-10 `e` tags
-/// and is kind-agnostic on the client.
-///
-/// Errors are logged and swallowed: the notice must never take down the main
-/// loop, and must never block the command it reports on.
-pub(crate) async fn post_system_notice(
-    rest: &crate::relay::RestClient,
-    channel_id: Uuid,
-    thread_tags: &ThreadTags,
-    payload: &serde_json::Value,
-) {
-    let thread_ref = thread_ref_from_tags(thread_tags);
-    let builder = match buzz_sdk::build_system_message(channel_id, payload, thread_ref.as_ref()) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(channel = %channel_id, "system notice: build failed: {e}");
-            return;
-        }
-    };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(channel = %channel_id, "system notice: sign failed: {e}");
-            return;
-        }
-    };
-    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "system notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "system notice timed out"),
-    }
-}
-
-/// Best-effort: post a visible failure notice (kind:9) to a channel after a
-/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
-/// triggering event was threaded. Errors are logged and swallowed — the
-/// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+/// Best-effort: post a visible notice (kind:9) to a channel — a dead-letter
+/// warning, or the outcome of a consumed owner control command. Replies into
+/// the thread of `thread_tags` when the triggering event was threaded. Errors
+/// are logged and swallowed — the notice must never take down the main loop.
+pub(crate) async fn post_notice(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
@@ -3690,21 +3650,21 @@ pub(crate) async fn post_failure_notice(
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                tracing::warn!(channel = %channel_id, "notice: build failed: {e}");
                 return;
             }
         };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, "notice: sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "notice timed out"),
     }
 }
 
