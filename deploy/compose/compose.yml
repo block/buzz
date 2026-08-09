@@ -21,7 +21,7 @@ services:
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
     ports:
-      - "${BUZZ_HTTP_PORT:-3000}:3000"
+      - "${BUZZ_HTTP_PORT:-127.0.0.1:3000}:3000"
     volumes:
       - buzz-git-data:/data/git
     depends_on:
@@ -49,7 +49,7 @@ services:
       - buzz-net
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.10-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-buzz}
       POSTGRES_USER: ${POSTGRES_USER:-buzz}
@@ -68,7 +68,7 @@ services:
       - buzz-net
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.10-alpine
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}

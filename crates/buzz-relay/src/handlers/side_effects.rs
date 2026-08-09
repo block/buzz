@@ -1019,6 +1019,7 @@ async fn emit_addressable_discovery_event(
     let ts = now.max(min_ts);
 
     let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+        .allow_self_tagging()
         .tags(tags)
         .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)

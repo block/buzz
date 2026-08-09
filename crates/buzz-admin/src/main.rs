@@ -20,15 +20,17 @@
 //! newest timestamp and collide on the bumped second. run.sh serialization is
 //! the guard against parallel adds (e.g. `xargs -P`).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
+use buzz_core::StoredEvent;
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use tracing::warn;
 
 #[derive(Parser)]
@@ -81,7 +83,7 @@ enum Command {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
     },
-    /// Emit kind:39000/39002 events for channels missing them.
+    /// Emit kind:39000/39001/39002 events for channels missing them.
     ///
     /// Channels created via direct SQL (seed scripts, pre-migration data) won't
     /// have Nostr discovery events. This command creates them so pure-nostr
@@ -459,7 +461,9 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
 }
 
 async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
-    use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
+    use buzz_core::kind::{
+        KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    };
     use buzz_db::event::EventQuery;
 
     let db = connect_db().await?;
@@ -494,23 +498,43 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
     for channel in &channels {
         let channel_id_str = channel.id.to_string();
 
-        // Check if kind:39000 already exists
-        let existing = db
+        let discovery_events = db
             .query_events(&EventQuery {
-                kinds: Some(vec![39000]),
+                kinds: Some(vec![
+                    KIND_NIP29_GROUP_METADATA as i32,
+                    KIND_NIP29_GROUP_ADMINS as i32,
+                    KIND_NIP29_GROUP_MEMBERS as i32,
+                ]),
                 d_tag: Some(channel_id_str.clone()),
-                limit: Some(1),
+                limit: Some(100),
                 ..EventQuery::for_community(tenant.community())
             })
             .await
             .unwrap_or_default();
 
-        if !existing.is_empty() {
+        let members = db.get_members(tenant.community(), channel.id).await?;
+        let (admin_roles, member_roles) = discovery_role_maps(
+            members
+                .iter()
+                .map(|member| (hex::encode(&member.pubkey), member.role.clone())),
+            hex::encode(&channel.created_by),
+        );
+        if std::env::var("BUZZ_ADMIN_RECONCILE_DEBUG").as_deref() == Ok("1") {
+            eprintln!(
+                "reconcile-debug channel={} creator={} admins={:?} members={:?}",
+                channel.name,
+                short_hex(&channel.created_by),
+                prefixed_roles(&admin_roles),
+                prefixed_roles(&member_roles)
+            );
+        }
+        let admin_pubkeys: BTreeSet<String> = admin_roles.keys().cloned().collect();
+        let member_pubkeys: BTreeSet<String> = member_roles.keys().cloned().collect();
+
+        if discovery_events_are_complete(&discovery_events, &admin_pubkeys, &member_pubkeys) {
             skipped += 1;
             continue;
         }
-
-        let members = db.get_members(tenant.community(), channel.id).await?;
 
         // kind:39000 — channel metadata
         {
@@ -532,7 +556,8 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
             tags.push(Tag::parse(["closed"])?);
             tags.push(Tag::parse(["t", &channel.channel_type])?);
 
-            let event = EventBuilder::new(Kind::Custom(39000), "")
+            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_METADATA as u16), "")
+                .allow_self_tagging()
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
@@ -543,14 +568,11 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         // kind:39001 — admins
         {
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
-            {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, &m.role])?);
+            for (pk, role) in &admin_roles {
+                tags.push(Tag::parse(["p", pk, role])?);
             }
             let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
+                .allow_self_tagging()
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
@@ -561,11 +583,11 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         // kind:39002 — members
         {
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in &members {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, "", &m.role])?);
+            for (pk, role) in &member_roles {
+                tags.push(Tag::parse(["p", pk, "", role])?);
             }
-            let event = EventBuilder::new(Kind::Custom(39002), "")
+            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+                .allow_self_tagging()
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
@@ -581,4 +603,259 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         channels.len()
     );
     Ok(())
+}
+
+fn discovery_role_maps<I>(
+    members: I,
+    channel_creator_pubkey: String,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>)
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut admin_roles = BTreeMap::new();
+    let mut member_roles = BTreeMap::new();
+
+    for (pubkey, role) in members {
+        let pubkey = pubkey.to_ascii_lowercase();
+        if role == "owner" || role == "admin" {
+            admin_roles.insert(pubkey.clone(), role.clone());
+        }
+        member_roles.insert(pubkey, role);
+    }
+
+    if admin_roles.is_empty() && !channel_creator_pubkey.is_empty() {
+        let pubkey = channel_creator_pubkey.to_ascii_lowercase();
+        admin_roles.insert(pubkey.clone(), "owner".to_string());
+        member_roles
+            .entry(pubkey)
+            .or_insert_with(|| "owner".to_string());
+    }
+
+    (admin_roles, member_roles)
+}
+
+fn short_hex(bytes: &[u8]) -> String {
+    hex::encode(bytes).chars().take(8).collect()
+}
+
+fn prefixed_roles(roles: &BTreeMap<String, String>) -> Vec<String> {
+    roles
+        .iter()
+        .map(|(pubkey, role)| format!("{}:{role}", pubkey.chars().take(8).collect::<String>()))
+        .collect()
+}
+
+fn p_tag_pubkeys(event: &Event) -> BTreeSet<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.len() >= 2 && parts[0] == "p" {
+                Some(parts[1].to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn discovery_event_for_kind(events: &[StoredEvent], kind: u32) -> Option<&Event> {
+    // EventQuery returns newest first, so the first matching addressable head is
+    // the one clients will resolve. If that head is malformed, reconcile.
+    events
+        .iter()
+        .find(|event| event.event.kind.as_u16() as u32 == kind)
+        .map(|event| &event.event)
+}
+
+fn discovery_event_has_exact_p_tags(event: Option<&Event>, expected: &BTreeSet<String>) -> bool {
+    event.is_some_and(|event| p_tag_pubkeys(event) == *expected)
+}
+
+fn discovery_events_are_complete(
+    events: &[StoredEvent],
+    admin_pubkeys: &BTreeSet<String>,
+    member_pubkeys: &BTreeSet<String>,
+) -> bool {
+    discovery_event_for_kind(events, buzz_core::kind::KIND_NIP29_GROUP_METADATA).is_some()
+        && discovery_event_has_exact_p_tags(
+            discovery_event_for_kind(events, buzz_core::kind::KIND_NIP29_GROUP_ADMINS),
+            admin_pubkeys,
+        )
+        && discovery_event_has_exact_p_tags(
+            discovery_event_for_kind(events, buzz_core::kind::KIND_NIP29_GROUP_MEMBERS),
+            member_pubkeys,
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_core::kind::{
+        KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    };
+
+    fn signed_stored_event(kind: u32, tags: Vec<Tag>) -> StoredEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        StoredEvent::new(event, None)
+    }
+
+    fn p_tag(pubkey: &str, role: &str) -> Tag {
+        Tag::parse(["p", pubkey, "", role]).expect("p tag")
+    }
+
+    fn d_tag(channel_id: &str) -> Tag {
+        Tag::parse(["d", channel_id]).expect("d tag")
+    }
+
+    #[test]
+    fn discovery_role_maps_preserve_explicit_owner_and_members() {
+        let owner = "a".repeat(64);
+        let member = "b".repeat(64);
+
+        let (admin_roles, member_roles) = discovery_role_maps(
+            vec![
+                (owner.clone(), "owner".to_string()),
+                (member.clone(), "member".to_string()),
+            ],
+            "c".repeat(64),
+        );
+
+        assert_eq!(admin_roles.get(&owner).map(String::as_str), Some("owner"));
+        assert_eq!(member_roles.get(&owner).map(String::as_str), Some("owner"));
+        assert_eq!(
+            member_roles.get(&member).map(String::as_str),
+            Some("member")
+        );
+        assert_eq!(admin_roles.len(), 1);
+    }
+
+    #[test]
+    fn discovery_role_maps_fall_back_to_creator_when_no_admin_role_exists() {
+        let creator = "a".repeat(64);
+        let member = "b".repeat(64);
+
+        let (admin_roles, member_roles) = discovery_role_maps(
+            vec![(member.clone(), "member".to_string())],
+            creator.clone(),
+        );
+
+        assert_eq!(admin_roles.get(&creator).map(String::as_str), Some("owner"));
+        assert_eq!(
+            member_roles.get(&creator).map(String::as_str),
+            Some("owner")
+        );
+        assert_eq!(
+            member_roles.get(&member).map(String::as_str),
+            Some("member")
+        );
+    }
+
+    #[test]
+    fn discovery_complete_requires_exact_admin_and_member_p_tags() {
+        let owner = "a".repeat(64);
+        let member = "b".repeat(64);
+        let channel_id = "channel-1";
+
+        let events = vec![
+            signed_stored_event(KIND_NIP29_GROUP_METADATA, vec![d_tag(channel_id)]),
+            signed_stored_event(
+                KIND_NIP29_GROUP_ADMINS,
+                vec![d_tag(channel_id), p_tag(&owner, "owner")],
+            ),
+            signed_stored_event(
+                KIND_NIP29_GROUP_MEMBERS,
+                vec![
+                    d_tag(channel_id),
+                    p_tag(&owner, "owner"),
+                    p_tag(&member, "member"),
+                ],
+            ),
+        ];
+
+        let admin_pubkeys = BTreeSet::from([owner.clone()]);
+        let member_pubkeys = BTreeSet::from([owner, member]);
+
+        assert!(discovery_events_are_complete(
+            &events,
+            &admin_pubkeys,
+            &member_pubkeys
+        ));
+    }
+
+    #[test]
+    fn discovery_incomplete_when_owner_p_tag_is_missing() {
+        let owner = "a".repeat(64);
+        let member = "b".repeat(64);
+        let channel_id = "channel-1";
+
+        let events = vec![
+            signed_stored_event(KIND_NIP29_GROUP_METADATA, vec![d_tag(channel_id)]),
+            signed_stored_event(KIND_NIP29_GROUP_ADMINS, vec![d_tag(channel_id)]),
+            signed_stored_event(
+                KIND_NIP29_GROUP_MEMBERS,
+                vec![d_tag(channel_id), p_tag(&member, "member")],
+            ),
+        ];
+
+        let admin_pubkeys = BTreeSet::from([owner.clone()]);
+        let member_pubkeys = BTreeSet::from([owner, member]);
+
+        assert!(!discovery_events_are_complete(
+            &events,
+            &admin_pubkeys,
+            &member_pubkeys
+        ));
+    }
+
+    #[test]
+    fn discovery_incomplete_when_newest_head_is_malformed() {
+        let owner = "a".repeat(64);
+        let member = "b".repeat(64);
+        let channel_id = "channel-1";
+
+        let events = vec![
+            signed_stored_event(KIND_NIP29_GROUP_METADATA, vec![d_tag(channel_id)]),
+            signed_stored_event(KIND_NIP29_GROUP_ADMINS, vec![d_tag(channel_id)]),
+            signed_stored_event(
+                KIND_NIP29_GROUP_ADMINS,
+                vec![d_tag(channel_id), p_tag(&owner, "owner")],
+            ),
+            signed_stored_event(
+                KIND_NIP29_GROUP_MEMBERS,
+                vec![
+                    d_tag(channel_id),
+                    p_tag(&owner, "owner"),
+                    p_tag(&member, "member"),
+                ],
+            ),
+        ];
+
+        let admin_pubkeys = BTreeSet::from([owner.clone()]);
+        let member_pubkeys = BTreeSet::from([owner, member]);
+
+        assert!(!discovery_events_are_complete(
+            &events,
+            &admin_pubkeys,
+            &member_pubkeys
+        ));
+    }
+
+    #[test]
+    fn discovery_p_tags_preserve_signer_self_reference() {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+            .allow_self_tagging()
+            .tags(vec![d_tag("channel-1"), p_tag(&owner, "owner")])
+            .sign_with_keys(&keys)
+            .expect("sign event");
+
+        assert_eq!(p_tag_pubkeys(&event), BTreeSet::from([owner]));
+    }
 }
