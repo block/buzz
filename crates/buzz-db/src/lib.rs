@@ -57,7 +57,10 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use event::{
+    EventQuery, IdempotentMessageInsertOutcome, MessageIdempotencyParams,
+    ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT,
+};
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -2241,6 +2244,26 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Atomically persist a channel message and its caller-idempotency receipt.
+    pub async fn insert_idempotent_message_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        idempotency: event::MessageIdempotencyParams<'_>,
+    ) -> Result<event::IdempotentMessageInsertOutcome> {
+        event::insert_idempotent_message_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            idempotency,
+        )
+        .await
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.

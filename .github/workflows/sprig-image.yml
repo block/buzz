@@ -77,6 +77,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify immutable tagged source
+        if: startsWith(github.ref, 'refs/tags/sprig-v')
+        run: |
+          set -euo pipefail
+          scripts/verify-release-ref.sh sprig-v "${GITHUB_REF#refs/tags/sprig-v}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
         with:

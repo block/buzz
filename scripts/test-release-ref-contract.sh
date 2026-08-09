@@ -43,6 +43,12 @@ git -C "$tmp" tag -m "relay release" relay-v2.0.0
   GITHUB_REF=refs/tags/relay-v2.0.0 "$verify" relay-v 2.0.0
 )
 
+git -C "$tmp" tag -m "sprig release" sprig-v3.0.0
+(
+  cd "$tmp"
+  GITHUB_REF=refs/tags/sprig-v3.0.0 "$verify" sprig-v 3.0.0
+)
+
 if grep -q 'inputs\.ref' \
   "$repo_root/.github/workflows/release.yml" \
   "$repo_root/.github/workflows/docker.yml"; then
@@ -52,6 +58,9 @@ fi
 
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/release.yml"
 grep -q 'verify-release-ref\.sh' "$repo_root/.github/workflows/docker.yml"
+grep -Fq 'scripts/verify-release-ref.sh sprig-v' "$repo_root/.github/workflows/sprig.yml"
+grep -Fq 'scripts/verify-release-ref.sh sprig-v' "$repo_root/.github/workflows/sprig-image.yml"
+grep -Fq 'COMMANDS=(buzz buzz-acp buzz-agent buzz-dev-mcp)' "$repo_root/scripts/build-sprig.sh"
 grep -q 'test-release-ref-contract\.sh' "$repo_root/.github/workflows/ci.yml"
 "$repo_root/scripts/test-signed-canary-contract.sh"
 "$repo_root/scripts/test-desktop-release-cache-key.sh"

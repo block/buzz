@@ -7,6 +7,7 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 |------|-------------|----------|
 | Desktop | `just release-desktop <version>` | Packaged desktop app (signed/notarized macOS, unsigned Windows, and Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
+| Sprig | protected `sprig-v*` tag | Static Linux agent bundle and `ghcr.io/block/buzz-sprig` |
 | Mobile | `scripts/mobile-release.sh candidate X.Y.Z` | Exact `mobile-vX.Y.Z-rc.N` source identity |
 
 The lanes version independently. Desktop reads its manifests, relay reads its
@@ -88,6 +89,18 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 
 Every push to `main` continues to publish the rolling relay `:main` and
 `:sha-<7>` tags, plus matching `:debug-main` and `:debug-sha-<7>` variants.
+
+### Sprig (headless Buzz CLI)
+
+Sprig is the supported headless Linux distribution for `buzz-cli`: its static
+tarball includes the `buzz` command, a SHA-256 sidecar, and a source/binary
+manifest. A protected `sprig-v<version>` tag publishes immutable versioned
+assets and a multi-architecture `ghcr.io/block/buzz-sprig:<version>` image
+with provenance. Consumers pin the OCI manifest digest or the versioned
+tarball plus its SHA-256; never use `sprig-latest` or `:main` as a production
+boundary. Tagged workflows verify the checked-out source is exactly the tag
+before packaging or publishing. The image's default entrypoint remains
+`buzz-acp`; invoke the CLI with `--entrypoint buzz`.
 
 ### Mobile
 

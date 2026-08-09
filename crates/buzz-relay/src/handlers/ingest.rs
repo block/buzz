@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -295,6 +296,8 @@ pub enum IngestError {
     Rejected(String),
     /// Auth/scope error — WS: OK false, HTTP: 401/403.
     AuthFailed(String),
+    /// A caller reused an idempotency key for a different message payload.
+    Conflict(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
 }
@@ -315,6 +318,86 @@ fn map_serving_fence_state(active: Result<bool, buzz_db::DbError>) -> Result<(),
             "error: checking community write fence: {error}"
         ))),
     }
+}
+
+const MESSAGE_IDEMPOTENCY_TAG: &str = "buzz-idempotency";
+
+#[derive(Debug, Clone)]
+struct MessageIdempotency {
+    key: [u8; 32],
+    semantic_digest: [u8; 32],
+}
+
+/// Read Buzz's message idempotency tag and derive the payload digest used by
+/// the durable receipt. The tag carries a SHA-256 digest of the caller's raw
+/// key, so the key itself is never persisted in the public Nostr event.
+fn message_idempotency(
+    event: &Event,
+    channel_id: Uuid,
+) -> Result<Option<MessageIdempotency>, IngestError> {
+    let tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == MESSAGE_IDEMPOTENCY_TAG)
+        .collect();
+    if tags.is_empty() {
+        return Ok(None);
+    }
+    if !matches!(
+        event_kind_u32(event),
+        KIND_STREAM_MESSAGE | KIND_FORUM_POST | KIND_FORUM_COMMENT
+    ) {
+        return Err(IngestError::Rejected(format!(
+            "invalid: {MESSAGE_IDEMPOTENCY_TAG} is only supported for channel messages"
+        )));
+    }
+    if tags.len() != 1 {
+        return Err(IngestError::Rejected(format!(
+            "invalid: exactly one {MESSAGE_IDEMPOTENCY_TAG} tag is allowed"
+        )));
+    }
+    let parts = tags[0].as_slice();
+    let Some(key_hex) = parts.get(1) else {
+        return Err(IngestError::Rejected(format!(
+            "invalid: {MESSAGE_IDEMPOTENCY_TAG} tag requires a key digest"
+        )));
+    };
+    if parts.len() != 2 || key_hex.len() != 64 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(IngestError::Rejected(format!(
+            "invalid: {MESSAGE_IDEMPOTENCY_TAG} key digest must be 64 hexadecimal characters"
+        )));
+    }
+    let key: [u8; 32] = hex::decode(key_hex)
+        .map_err(|_| IngestError::Rejected("invalid: malformed idempotency key digest".into()))?
+        .try_into()
+        .map_err(|_| IngestError::Rejected("invalid: malformed idempotency key digest".into()))?;
+
+    // `created_at`, event ID, signature, idempotency tag, and NIP-OA auth are
+    // transport/authentication details. Excluding them lets a caller safely
+    // re-sign the same user-visible message after an ambiguous response.
+    let semantic_tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            match parts.first().map(String::as_str) {
+                Some(MESSAGE_IDEMPOTENCY_TAG | "auth") => None,
+                _ => Some(parts.to_vec()),
+            }
+        })
+        .collect();
+    let semantic = serde_json::json!({
+        "channel_id": channel_id,
+        "content": event.content,
+        "kind": event_kind_u32(event),
+        "tags": semantic_tags,
+    });
+    let semantic_bytes = serde_json::to_vec(&semantic)
+        .map_err(|e| IngestError::Internal(format!("error: serialize idempotency payload: {e}")))?;
+    Ok(Some(MessageIdempotency {
+        key,
+        semantic_digest: Sha256::digest(semantic_bytes).into(),
+    }))
 }
 
 fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestError {
@@ -2909,7 +2992,65 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let message_idempotency = if let Some(ch_id) = channel_id {
+        message_idempotency(&event, ch_id)?
+    } else {
+        None
+    };
+    let is_idempotent_message = message_idempotency.is_some();
+
+    let (stored_event, was_inserted) = if let Some(idempotency) = message_idempotency.as_ref() {
+        let ch_id = channel_id.expect("idempotent messages have a channel");
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        match state
+            .db
+            .insert_idempotent_message_with_thread_metadata(
+                tenant.community(),
+                &event,
+                ch_id,
+                thread_params,
+                buzz_db::MessageIdempotencyParams {
+                    author_pubkey: auth.pubkey().as_bytes(),
+                    key: &idempotency.key,
+                    semantic_digest: &idempotency.semantic_digest,
+                },
+            )
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: database error: {e}")))?
+        {
+            buzz_db::IdempotentMessageInsertOutcome::Created {
+                stored_event,
+                event_was_inserted,
+            } => (*stored_event, event_was_inserted),
+            buzz_db::IdempotentMessageInsertOutcome::Replay { event_id } => {
+                if event_id.len() != 32 {
+                    return Err(IngestError::Internal(
+                        "error: idempotency receipt contains an invalid event id".into(),
+                    ));
+                }
+                let canonical_event_id = hex::encode(event_id);
+                emit(
+                    tracer,
+                    TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(ch_id),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                return Ok(IngestResult {
+                    event_id: canonical_event_id,
+                    accepted: true,
+                    message: "idempotency-replay".into(),
+                });
+            }
+            buzz_db::IdempotentMessageInsertOutcome::Conflict => {
+                return Err(IngestError::Conflict(
+                    "idempotency key was already used for a different message payload".into(),
+                ));
+            }
+        }
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3049,7 +3190,11 @@ async fn ingest_event_inner(
     Ok(IngestResult {
         event_id: event_id_hex,
         accepted: true,
-        message: String::new(),
+        message: if is_idempotent_message {
+            "idempotency-created".into()
+        } else {
+            String::new()
+        },
     })
 }
 
@@ -3065,6 +3210,49 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn message_idempotency_digest_ignores_retry_and_auth_envelope_fields() {
+        let key_digest = "a".repeat(64);
+        let channel = Uuid::new_v4();
+        let tags = [
+            nostr::Tag::parse(["h", &channel.to_string()]).expect("channel tag"),
+            nostr::Tag::parse([MESSAGE_IDEMPOTENCY_TAG, &key_digest]).expect("idempotency tag"),
+        ];
+        let first = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "same message")
+            .tags(tags.clone())
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign first");
+        let retry = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "same message")
+            .tags([
+                tags[0].clone(),
+                tags[1].clone(),
+                nostr::Tag::parse(["auth", "rotated-auth", "conditions", "signature"])
+                    .expect("auth tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign retry");
+        let changed = EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "different message",
+        )
+        .tags(tags)
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign changed");
+
+        let first = message_idempotency(&first, channel)
+            .expect("first digest")
+            .expect("first tag");
+        let retry = message_idempotency(&retry, channel)
+            .expect("retry digest")
+            .expect("retry tag");
+        let changed = message_idempotency(&changed, channel)
+            .expect("changed digest")
+            .expect("changed tag");
+        assert_eq!(first.key, retry.key);
+        assert_eq!(first.semantic_digest, retry.semantic_digest);
+        assert_ne!(first.semantic_digest, changed.semantic_digest);
+    }
 
     #[test]
     fn reaction_validation_accepts_wrapped_max_shortcode() {
