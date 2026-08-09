@@ -904,6 +904,11 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::shepherd::import_shepherd_evidence,
+            archive::shepherd::read_shepherd_evidence,
+            normalize_shepherd_trace,
+            shepherd_adapter_status,
+            settle_shepherd_run,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

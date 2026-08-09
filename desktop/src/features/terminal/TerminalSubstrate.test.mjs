@@ -404,6 +404,18 @@ test("later reveals do not replay a consumed splash", async () => {
   await expectWelcome(subject.view, false);
 });
 
+test("a hidden dock clears its inline height without an important CSS override", async () => {
+  const subject = fixture({ mode: "docked", visible: true });
+  await ready(subject.view);
+  const substrate = subject.view.container.querySelector(
+    ".buzz-terminal-substrate",
+  );
+  assert.equal(substrate.style.height, "320px");
+
+  subject.rerender({ mode: "docked", visible: false });
+  assert.equal(substrate.style.height, "0px");
+});
+
 test("a consumed splash stays absent after substrate remount", async () => {
   const first = fixture({
     frame: EMPTY_FRAME,
