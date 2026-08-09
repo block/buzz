@@ -409,6 +409,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
+    /// Publish the ACP agent's generated text as a Buzz reply after each
+    /// successful channel turn. Disabled by default to preserve tool-driven
+    /// agents that publish their own messages.
+    #[arg(long, env = "BUZZ_ACP_PUBLISH_AGENT_OUTPUT", default_value_t = false)]
+    pub publish_agent_output: bool,
+
     /// Path to a custom base prompt file. Overrides the compiled-in default.
     /// Mutually exclusive with --no-base-prompt.
     #[arg(
@@ -564,6 +570,8 @@ pub struct Config {
     pub agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
+    /// Publish ACP `agent_message_chunk` text as a Buzz reply on success.
+    pub publish_agent_output: bool,
     /// Resolved content from `--base-prompt-file`, read and validated in
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
@@ -1109,6 +1117,7 @@ impl Config {
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
+            publish_agent_output: args.publish_agent_output,
             base_prompt_content,
         };
 
@@ -1480,6 +1489,7 @@ mod tests {
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
+            publish_agent_output: false,
             base_prompt_content: None,
         }
     }
