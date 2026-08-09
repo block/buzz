@@ -885,6 +885,7 @@ pub fn run() {
             apply_workspace,
             validate_repos_dir,
             get_active_workspace,
+            open_workspace_file,
             fetch_workspace_icon,
             fetch_join_policy,
             set_prevent_sleep_active,

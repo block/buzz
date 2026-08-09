@@ -1,7 +1,9 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Pencil, Unlink } from "lucide-react";
+import { toast } from "sonner";
 
+import { invokeTauri } from "@/shared/api/tauri";
 import {
   Dialog,
   DialogContent,
@@ -244,7 +246,8 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
     closeCard();
   }, [cardState, openDialogFromInfo, closeCard]);
 
-  // Card URL click: route `buzz://message?…` deep-links in-app (matching the
+  // Card URL click: route `buzz://message?…` deep-links in-app and
+  // `buzz://file?…` links to the artifact on disk (matching the
   // rendered-message link path), everything else to the OS opener.
   const openCardUrl = React.useCallback(
     (event: React.MouseEvent<HTMLAnchorElement>) => {
@@ -258,6 +261,17 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             messageId: link.messageId,
             threadRootId: link.threadRootId,
           }),
+        openFileLink: (link) => {
+          void invokeTauri("open_workspace_file", {
+            path: link.path,
+            root: link.root,
+            reveal: link.reveal,
+          }).catch((err: unknown) => {
+            toast.error(
+              err instanceof Error ? err.message : "Cannot open file",
+            );
+          });
+        },
       });
     },
     [cardState, goChannel],

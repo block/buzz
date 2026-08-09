@@ -63,6 +63,7 @@ mod window_chrome;
 mod window_vibrancy;
 mod workflows;
 mod workspace;
+mod workspace_file;
 
 pub use agent_access::*;
 pub use agent_auth::*;
@@ -116,3 +117,4 @@ pub use window_chrome::*;
 pub use window_vibrancy::*;
 pub use workflows::*;
 pub use workspace::*;
+pub use workspace_file::*;

@@ -527,28 +527,25 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 // deep links and delegates everything else to `defaultUrlTransform`.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
-// and asserts the link href survives to the rendered DOM. Mirrors the
-// `markdown.tsx` source — keep in sync if either changes.
+// and asserts the link href survives to the rendered DOM.
+//
+// It imports the REAL `buzzDeepLinkUrlTransform` rather than re-declaring it.
+// An inlined copy lived here previously and silently drifted: it had no
+// `buzz://file` branch, so every file-link case passed against a transform the
+// app does not ship. Importing the real one is what makes these assertions mean
+// anything.
 
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown from "react-markdown";
 
-import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
-import { parseEntityLink } from "../lib/entityLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
+import { buzzDeepLinkUrlTransform } from "./markdown/utils.ts";
 
 const OWNER_HEX =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
 const EVENT_HEX =
   "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
-
-function buzzDeepLinkUrlTransform(value, key) {
-  if (key !== "href") return defaultUrlTransform(value);
-  if (isMessageLink(value)) return value;
-  if (parseEntityLink(value).ok) return value;
-  return defaultUrlTransform(value);
-}
 
 function renderMarkdown(content) {
   return renderToStaticMarkup(
@@ -643,6 +640,30 @@ test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () 
   const html = renderMarkdown(
     `[link](buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world&extra=ignored)`,
   );
+  assert.match(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://file href", () => {
+  const html = renderMarkdown("[runbook](buzz://file?path=docs%2FP.md)");
+  assert.match(html, /href="buzz:\/\/file\?path=docs%2FP\.md"/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://file autolink href", () => {
+  const html = renderMarkdown("<buzz://file?path=workspace%2FP.md&root=repos>");
+  assert.match(html, /href="buzz:\/\/file\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips buzz://file that escapes its root", () => {
+  // The transform is the last line of defense in the renderer: a link the
+  // strict parser rejects must never reach the `a` override with a live href.
+  const html = renderMarkdown("[oops](buzz://file?path=..%2F..%2Fsecrets)");
+  assert.match(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips buzz://file with an unknown root", () => {
+  const html = renderMarkdown("[oops](buzz://file?path=a.md&root=home)");
   assert.match(html, /href=""/);
 });
 

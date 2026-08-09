@@ -22,6 +22,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
+import { isFileLink, parseFileLink } from "@/shared/lib/fileLink";
 import {
   extractSupportedLinkPreviews,
   parseSupportedLinkPreview,
@@ -65,6 +66,7 @@ import {
 } from "./markdown/entityLinks";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
+import { FileLinkPill } from "./markdown/FileLinkPill";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import {
@@ -1390,6 +1392,15 @@ function createMarkdownComponents(
       }
       // Malformed message deep link — fall through to the default
       // anchor (renders as a normal external link).
+    }
+
+    // `buzz://file?…` links open an artifact on disk; malformed ones fall
+    // through to the default anchor.
+    if (isFileLink(href)) {
+      const fileLink = parseFileLink(href ?? "");
+      if (fileLink.ok) {
+        return <FileLinkPill interactive={interactive} link={fileLink.value} />;
+      }
     }
 
     // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
