@@ -33,16 +33,16 @@ each capability.
 | V4 Living Ship | Complete and merged | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), merged as `865569bb4` after installed-app acceptance | Included in the v0.5.2 integration line; retain its real-user journey in every release regression |
 | Upstream Buzz refresh | Complete and accepted | [PR #16](https://github.com/NavigatorRAN/buzz/pull/16), merged into the integration line as `f09c3a1ea`; pinned `desktop-v0.5.8` at `f3de86057` | Preserve as the accepted product baseline |
 | Repository baseline promotion | Complete | [PR #17](https://github.com/NavigatorRAN/buzz/pull/17), merged to `main` as `d8dca6d49` | Retain as the authoritative v0.5.8 downstream baseline |
-| V2 Keeper | Compatibility freeze active | `codex/phase-v2-v3-compatibility-freeze`; repository specification and Memory MCP entity `buzz-keeper` | Merge the bounded specification, then start typed-memory MVP |
-| V3 native remote access | Compatibility freeze active; implementation deferred until after Keeper MVP | `codex/phase-v2-v3-compatibility-freeze`; repository specification and Memory MCP entity `native-buzz-remote-access-pilot` | Preserve the basic private Tailscale pilot and defer push/wake hardening |
+| V2 Keeper | Typed-memory MVP active | `codex/phase-keeper-typed-memory-mvp`; repository specification and Memory MCP entity `buzz-keeper` | Deliver the typed DM-to-encrypted-engram loop and installed-app acceptance |
+| V3 native remote access | Compatibility freeze complete; implementation deferred until after Keeper MVP | [PR #18](https://github.com/NavigatorRAN/buzz/pull/18), merged as `473bcfefd`; repository specification and Memory MCP entity `native-buzz-remote-access-pilot` | Preserve the basic private Tailscale pilot and defer push/wake hardening |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
 tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17
 placed the accepted product on `main`; PRs #2-13 were closed as superseded and
 PR #1 is retained as merged history. The synchronized application passed
 installed-app acceptance, including live adviser turns and substantive doctrine
-RAG retrieval. The active phase is the short V2/V3 compatibility freeze before
-Keeper typed-memory implementation.
+RAG retrieval. PR #18 completed the V2/V3 compatibility freeze. The active
+phase is now Keeper typed-memory implementation.
 
 ## Execution sequence
 
@@ -145,6 +145,10 @@ Keeper reuses managed personas, signed DMs, NIP-AE engrams, structured model
 completion, and Living Ship. The remote pilot reuses native mobile pairing and
 relay messaging over Tailscale; APNs, wake, and durable outbox work remain
 deferred.
+
+Completion record: PR #18 merged as `473bcfefd`. The Keeper implementation
+plan is `docs/superpowers/plans/2026-08-09-keeper-typed-memory-mvp.md`; native
+private remote access remains deliberately deferred until after the Keeper MVP.
 
 ### 3. Implement V2 Keeper
 
