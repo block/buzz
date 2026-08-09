@@ -14,14 +14,45 @@ test("content without a dollar sign is a zero-cost no-op", () => {
   assert.equal(disableMath, false);
 });
 
-test("currency / plain dollar text is not treated as math", () => {
-  // remark-math rejects `$5 and $10` (content ends on whitespace); our
-  // scanner may over-detect but must never disable math for a benign message
-  // nor mutate it.
+test("currency / plain dollar text is neutralised to literal", () => {
+  // remark-math (micromark-extension-math@3) accepts `$5 and $10` as math —
+  // content may contain spaces — so the guard must actively escape the opener
+  // to keep currency literal. The rendered output shows `$5 and $10` as text.
   const src = "The price is $5 and $10 today.";
+  const { content, disableMath } = applyMathBounds(src);
+  assert.equal(disableMath, false);
+  assert.equal(content, "The price is \\$5 and $10 today.");
+});
+
+test("CJK currency text is neutralised to literal", () => {
+  const src = "价格在 $5 到 $10 之间";
+  const { content, disableMath } = applyMathBounds(src);
+  assert.equal(disableMath, false);
+  assert.equal(content, "价格在 \\$5 到 $10 之间");
+});
+
+test("loose inline span with whitespace inside a delimiter is neutralised", () => {
+  const { content, disableMath } = applyMathBounds("loose $ x$ here");
+  assert.equal(disableMath, false);
+  assert.equal(content, "loose \\$ x$ here");
+});
+
+test("genuine math starting with a digit still renders", () => {
+  // The digit rule guards the *closing* delimiter only (`$5 and $10`), so
+  // real formulas like `$2^x$` are untouched.
+  const src = "see $2^x$ done";
   const { content, disableMath } = applyMathBounds(src);
   assert.equal(content, src);
   assert.equal(disableMath, false);
+});
+
+test("a neutralised currency opener does not swallow a later real formula", () => {
+  // After escaping `$5 ...`, scanning must resume at the would-be closing `$`
+  // so the genuine `$x=1$` right after still counts as math.
+  const src = "pay $5 and $x=1$ end";
+  const { content, disableMath } = applyMathBounds(src);
+  assert.equal(disableMath, false);
+  assert.equal(content, "pay \\$5 and $x=1$ end");
 });
 
 test("well-formed inline math is kept as-is", () => {

@@ -223,3 +223,39 @@ test("oversized display formula is neutralised; sibling math still renders", () 
     "oversized display preserved literally",
   );
 });
+
+// Field-tested (邱仲普 manual run): remark-math@6 accepts `$5 and $10` as math
+// (content may contain spaces), so currency was mangled into a formula until
+// mathBounds learned pandoc-style tightness rules.
+
+test("currency dollar amounts render literally, no katex", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "The price is $5 and $10 today.",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "currency must not become math");
+  assert.match(html, /\$5 and \$10/);
+});
+
+test("CJK currency sentence renders literally, no katex", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "价格在 $5 到 $10 之间",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "currency must not become math");
+});
+
+test("currency stays literal while a real formula in the same message renders", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "pay $5 and $10, see $E=mc^2$",
+  });
+  const html = renderToStaticMarkup(el);
+  // Exactly one formula (`$E=mc^2$`) renders; the currency pair does not.
+  assert.equal((html.match(/class="katex"/g) ?? []).length, 1);
+});
