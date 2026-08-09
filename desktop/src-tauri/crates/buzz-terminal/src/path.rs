@@ -41,6 +41,9 @@
 //! Windows process, so there is no build toolchain to fence out of the
 //! inherited value.
 
+#[cfg(any(windows, test))]
+use crate::shell::validated_windows_system_root;
+
 /// The default user `PATH` for a spawned shell.
 ///
 /// This intentionally does not consult Buzz's own `PATH`. A login shell reads
@@ -98,10 +101,9 @@ fn windows_system_directories(system_root: &str) -> [String; 4] {
 /// itself in every `echo %PATH%` from then on.
 #[cfg(any(windows, test))]
 pub fn windows_shell_path(inherited: Option<&str>, system_root: Option<&str>) -> String {
-    // `SystemRoot` is set by the OS for every process; the literal default
-    // only covers a hand-stripped environment, where `C:\Windows` is the
-    // least-wrong guess. Same fallback as the shell resolver, deliberately.
-    let root = system_root.unwrap_or(r"C:\Windows");
+    // Use the shell resolver's validation so a relative process-environment
+    // value cannot add current-directory-relative entries to the child PATH.
+    let root = validated_windows_system_root(system_root);
     let mut entries: Vec<String> = Vec::new();
     for entry in inherited
         .unwrap_or_default()

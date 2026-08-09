@@ -177,11 +177,22 @@ pub fn pick_windows_shell(
             return candidate.to_owned();
         }
     }
-    // Last-resort shell, absolute by construction. `SystemRoot` is set by the
-    // OS for every process; the literal default only covers a hand-stripped
-    // environment, where `C:\Windows` is the least-wrong guess.
-    let root = system_root.unwrap_or(r"C:\Windows");
+    // Last-resort shell, absolute by construction. The process environment is
+    // mutable, so merely having a `SystemRoot` value does not make it rooted:
+    // a relative value would recreate the current-directory hijack rejected
+    // above for `ComSpec`. Fall back to the stock root in that case as well as
+    // when the variable is absent.
+    let root = validated_windows_system_root(system_root);
     format!(r"{root}\System32\cmd.exe")
+}
+
+/// Returns a rooted Windows system directory, rejecting environment values
+/// that `CreateProcessW` or `PATH` lookup would resolve against the current
+/// drive or directory.
+pub(crate) fn validated_windows_system_root(system_root: Option<&str>) -> &str {
+    system_root
+        .filter(|candidate| has_windows_root(candidate))
+        .unwrap_or(r"C:\Windows")
 }
 
 /// True if `candidate` is anchored to a drive (`C:\...`, `C:/...`) or a UNC

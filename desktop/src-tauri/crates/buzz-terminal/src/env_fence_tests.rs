@@ -427,6 +427,20 @@ fn windows_shell_survives_an_empty_environment() {
     );
 }
 
+/// `SystemRoot` comes from the mutable process environment, so presence alone
+/// does not make the fallback absolute. A relative or empty value must not
+/// recreate the same current-directory hijack rejected for `ComSpec`.
+#[test]
+fn windows_shell_rejects_an_unrooted_system_root() {
+    for system_root in ["", "Windows", r"\Windows", "C:Windows"] {
+        assert_eq!(
+            pick_windows_shell(None, Some(system_root), |_| false),
+            r"C:\Windows\System32\cmd.exe",
+            "{system_root:?}: an unrooted SystemRoot must use the absolute fallback"
+        );
+    }
+}
+
 /// The user's own entries survive, in their own order, ahead of the system
 /// directories we guarantee. This is the regression that stripped `ssh`,
 /// `git`, and every other installed tool from the Windows terminal.
@@ -496,6 +510,22 @@ fn windows_path_survives_an_empty_environment() {
             path,
             r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0",
             "an empty inherited PATH falls back to the system directories alone"
+        );
+    }
+}
+
+/// The system directories appended to PATH obey the same rootedness rule as
+/// the shell fallback; otherwise an invalid `SystemRoot` would still add
+/// current-directory-relative command lookup locations.
+#[test]
+fn windows_path_rejects_an_unrooted_system_root() {
+    let expected = r"C:\tools;C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0";
+
+    for system_root in ["", "Windows", r"\Windows", "C:Windows"] {
+        assert_eq!(
+            windows_shell_path(Some(r"C:\tools"), Some(system_root)),
+            expected,
+            "{system_root:?}: PATH must append only rooted system directories"
         );
     }
 }
