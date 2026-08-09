@@ -162,7 +162,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
             .await
             .map_err(|_| MediaError::NotFound)?;
 
@@ -481,7 +481,7 @@ async fn bind_media_read_tenant(
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    crate::tenant::bind_community(&state.db, raw_host)
+    crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| MediaError::NotFound)
 }

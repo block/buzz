@@ -80,7 +80,11 @@ pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
 /// no-op on it): lowercase, no default port, no trailing dot. Requiring the
 /// caller to send the normalized form keeps the stored `communities.host`
 /// value byte-identical to what request-time host resolution will look up.
-fn validate_host(host: &str) -> Result<(), String> {
+///
+/// `pub(crate)` so `crate::config`'s `BUZZ_HOST_ALIASES` parser can validate
+/// both sides of an alias pair against this exact same grammar instead of
+/// duplicating it.
+pub(crate) fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("host is empty".to_string());
     }

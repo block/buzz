@@ -297,7 +297,13 @@ async fn nip11_or_ws_handler(
     // tenant. NIP-11 above is served before binding and stays fail-open: an
     // unmapped host still gets the document (with host-scoped fields like
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
-    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+    let tenant = match crate::tenant::bind_community(
+        &state.db,
+        raw_host,
+        &state.config.host_aliases,
+    )
+    .await
+    {
         Ok(ctx) => ctx,
         Err(_) => {
             // Generic rejection: do not distinguish "unmapped" from "lookup

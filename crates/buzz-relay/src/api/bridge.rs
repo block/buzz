@@ -627,7 +627,7 @@ pub async fn submit_event(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| {
             api_error(
@@ -895,7 +895,7 @@ pub async fn query_events(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| {
             api_error(
@@ -1338,7 +1338,7 @@ pub async fn count_events(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| {
             api_error(
@@ -1818,7 +1818,7 @@ pub async fn workflow_webhook(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| not_found("workflow not found"))?;
     let community_id = tenant.community();
@@ -2073,7 +2073,7 @@ async fn authorize_moderation_read(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .map_err(|_| {
             api_error(
@@ -2557,6 +2557,78 @@ mod tests {
             pubkey,
             keys.public_key(),
             "returned pubkey must be the signer's"
+        );
+    }
+
+    /// T12 (`BUZZ_HOST_ALIASES` row-zero composition): once `bind_community`
+    /// has bound a request through an alias, `tenant.host()` IS the alias
+    /// (see `crate::tenant::bind_community`'s doc — the context always
+    /// carries the arrival host). A NIP-98 event the client signed against
+    /// that alias address must verify. This proves the alias design composes
+    /// with NIP-98 verification with ZERO changes needed to
+    /// `nip98_expected_url` or `verify_bridge_auth`: both already read
+    /// `tenant.host()`, which is the alias regardless of whether resolution
+    /// went through `communities.host` directly or through `host_aliases`.
+    #[test]
+    fn verify_bridge_auth_accepts_nip98_event_signed_for_alias_bound_tenant() {
+        let keys = Keys::generate();
+        // Client reaches the relay on the alias address and signs against it.
+        let signed_url = "https://internal.tailnet.example/events";
+        let event_json = build_nip98_event_json(&keys, signed_url, "POST");
+        let headers = nip98_auth_headers(&event_json);
+
+        // Stands in for what `bind_community` returns when a request arrives
+        // on the alias and resolves through `host_aliases` to the canonical
+        // community: `TenantContext::resolved` carries the ARRIVAL host, not
+        // the canonical `chat.example.com`.
+        let config_relay_url = "wss://chat.example.com"; // scheme source only.
+        let alias_bound_tenant = fresh_tenant("internal.tailnet.example");
+        let expected_url = nip98_expected_url(config_relay_url, &alias_bound_tenant, "/events");
+
+        let (pubkey, _event_id_bytes) =
+            verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true).expect(
+                "NIP-98 event signed for the alias must verify against an alias-bound tenant",
+            );
+        assert_eq!(
+            pubkey,
+            keys.public_key(),
+            "returned pubkey must be the signer's"
+        );
+    }
+
+    /// T13: the mirror negative case. An event signed for the CANONICAL host
+    /// must be REJECTED at a request bound through the alias — the same
+    /// exact-match property as the plain cross-host test above, proving the
+    /// alias path does not loosen `nip98_expected_url` into accepting either
+    /// address for one tenant. Row 44 ("the `u` URL host must match
+    /// req.community") holds regardless of which resolution path bound the
+    /// tenant.
+    #[test]
+    fn verify_bridge_auth_rejects_nip98_event_signed_for_canonical_when_tenant_bound_via_alias() {
+        let keys = Keys::generate();
+        // Client signs for the CANONICAL host — the alias-unaware address.
+        let signed_url = "https://chat.example.com/events";
+        let event_json = build_nip98_event_json(&keys, signed_url, "POST");
+        let headers = nip98_auth_headers(&event_json);
+
+        let config_relay_url = "wss://chat.example.com";
+        let alias_bound_tenant = fresh_tenant("internal.tailnet.example");
+        let expected_url = nip98_expected_url(config_relay_url, &alias_bound_tenant, "/events");
+
+        let (status, body) = verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
+            .expect_err(
+                "an event signed for the canonical host must be rejected on an \
+                 alias-bound tenant — exact-match binding must hold regardless of \
+                 resolution path",
+            );
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("URL mismatch"),
+            "rejection must carry the URL-mismatch signal; got body = {body:?}"
         );
     }
 

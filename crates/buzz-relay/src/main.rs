@@ -583,6 +583,7 @@ async fn main() -> anyhow::Result<()> {
             let tenant = match buzz_relay::tenant::bind_deployment_community(
                 &reconcile_state.db,
                 &reconcile_state.config.relay_url,
+                &reconcile_state.config.host_aliases,
             )
             .await
             {

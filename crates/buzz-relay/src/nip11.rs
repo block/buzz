@@ -248,7 +248,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.pairing_relay_url.as_deref(),
     );
     let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
-        crate::tenant::bind_community(&state.db, raw_host)
+        crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
             .await
             .ok()
             .map(|tenant| tenant.host().to_owned())
@@ -280,7 +280,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
 /// `None` (no `icon` field): NIP-11 is intentionally served to unmapped hosts
 /// too, and an icon lookup failure must not break that.
 async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str) -> Option<String> {
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&state.db, raw_host, &state.config.host_aliases)
         .await
         .ok()?;
     state

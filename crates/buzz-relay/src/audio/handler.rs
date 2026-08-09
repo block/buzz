@@ -76,7 +76,13 @@ pub async fn ws_audio_handler(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+    let tenant = match crate::tenant::bind_community(
+        &state.db,
+        raw_host,
+        &state.config.host_aliases,
+    )
+    .await
+    {
         Ok(ctx) => ctx,
         Err(_) => {
             return (
