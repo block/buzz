@@ -6635,6 +6635,78 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
+    async fn in_flight_stale_native_steer_ack_cannot_update_replacement_session() {
+        let channel_id = Uuid::new_v4();
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "replacement-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, Default::default());
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([
+                    crate::pool::SuccessfulSteerDelivery {
+                        event_id: "stale-event".into(),
+                        session_id: "old-session".into(),
+                    },
+                ]),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
+        assert!(returned.state.deliveries[&channel_id]
+            .delivered_event_ids
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn successful_native_steer_ack_after_task_return_updates_matching_live_session() {
         let channel_id = Uuid::new_v4();
         let steer_event_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

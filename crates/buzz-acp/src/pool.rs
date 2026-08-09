@@ -2584,7 +2584,6 @@ pub async fn run_prompt_task(
         } else {
             None
         };
-        let conversation_context_was_fetched = conversation_context.is_some();
         let triggering_ids: HashSet<String> = b
             .events
             .iter()
@@ -2597,6 +2596,12 @@ pub async fn run_prompt_task(
             .map(|delivery| &delivery.delivered_event_ids)
             .cloned()
             .unwrap_or_default();
+        let conversation_context_had_delivered_events =
+            conversation_context.as_ref().is_some_and(|context| {
+                conversation_context_event_ids(Some(context))
+                    .iter()
+                    .any(|event_id| delivered_ids.contains(event_id))
+            });
         let conversation_context =
             conversation_context_delta(conversation_context, &delivered_ids, &triggering_ids);
         pending_delivered_event_ids.extend(triggering_ids);
@@ -2629,7 +2634,7 @@ pub async fn run_prompt_task(
                 agent_core: standing.agent_core,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
-                conversation_context_was_fetched,
+                conversation_context_had_delivered_events,
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: standing.base_prompt,
@@ -6308,6 +6313,124 @@ done"#
             prompt_text(2),
             "heartbeat-3",
             "turn after ACP success must omit standing context"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_prompt_commits_delivery_state_only_after_acp_success() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-channel-delivery-lifecycle-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"retry me"}}}}'
+  else
+    printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$((count - 1)),\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  fi
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn channel lifecycle ACP script");
+        let channel_id = Uuid::new_v4();
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, ChannelDeliveryState::default());
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("standing-once");
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 1..=3 {
+            let event = EventBuilder::new(Kind::Custom(9), format!("channel-{turn}"))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let event_id = event.id.to_hex();
+            let batch = FlushBatch {
+                channel_id,
+                events: vec![crate::queue::BatchEvent {
+                    event,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            match turn {
+                1 => assert!(matches!(result.outcome, PromptOutcome::Error(_))),
+                _ => assert!(matches!(
+                    result.outcome,
+                    PromptOutcome::Ok(StopReason::EndTurn)
+                )),
+            }
+            let delivery = &result.agent.state.deliveries[&channel_id];
+            assert_eq!(
+                delivery.standing_context_sent,
+                turn >= 2,
+                "failed channel delivery must not commit; first success must commit"
+            );
+            assert_eq!(
+                delivery.delivered_event_ids.contains(&event_id),
+                turn >= 2,
+                "channel event IDs must commit only after ACP success"
+            );
+            agent = result.agent;
+        }
+        agent.acp.shutdown().await;
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured ACP requests")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        std::fs::remove_file(&capture).expect("remove ACP capture");
+        let prompt_text = |index: usize| {
+            requests[index]["params"]["prompt"][0]["text"]
+                .as_str()
+                .expect("text prompt")
+        };
+        assert!(prompt_text(0).contains("[Base]\nstanding-once"));
+        assert!(
+            prompt_text(1).contains("[Base]\nstanding-once"),
+            "retry after channel ACP failure must resend standing context"
+        );
+        assert!(
+            !prompt_text(2).contains("[Base]\nstanding-once"),
+            "turn after channel ACP success must omit standing context"
         );
     }
 

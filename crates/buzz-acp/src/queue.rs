@@ -1244,7 +1244,7 @@ fn format_context_hints(
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
-    conversation_context_was_fetched: bool,
+    conversation_context_had_delivered_events: bool,
     reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
@@ -1262,9 +1262,9 @@ fn format_context_hints(
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
-        } else if conversation_context_was_fetched && is_reply {
+        } else if conversation_context_had_delivered_events && is_reply {
             "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read the reply chain."
-        } else if conversation_context_was_fetched {
+        } else if conversation_context_had_delivered_events {
             "Earlier conversation context was already delivered in this session. Use `buzz messages get --channel <UUID>` to re-read it."
         } else if is_reply {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch the reply chain."
@@ -1293,7 +1293,7 @@ fn format_context_hints(
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
-        } else if conversation_context_was_fetched {
+        } else if conversation_context_had_delivered_events {
             "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
         } else {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
@@ -1369,9 +1369,9 @@ pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
-    /// True when context was fetched even if delivery-delta filtering removed
-    /// every message. Keeps thread/DM retrieval hints stable on later turns.
-    pub conversation_context_was_fetched: bool,
+    /// True when delivery-delta filtering removed at least one event that this
+    /// live session had already received. Trigger-only context does not set it.
+    pub conversation_context_had_delivered_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
@@ -1551,7 +1551,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         &thread_tags,
         is_dm,
         args.conversation_context.is_some(),
-        args.conversation_context_was_fetched,
+        args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
     ));
 
@@ -3542,7 +3542,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_prompt_empty_thread_delta_says_context_was_delivered_earlier() {
+    fn test_format_prompt_empty_thread_delta_distinguishes_trigger_only_from_delivered() {
         let ch = Uuid::new_v4();
         let event = make_event_with_tags(
             "follow up",
@@ -3564,11 +3564,14 @@ mod tests {
             cancel_reason: None,
         };
 
+        let trigger_only_prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(trigger_only_prompt.contains("fetch thread context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
         let prompt = format_prompt(
             &batch,
             &FormatPromptArgs {
-                conversation_context_was_fetched: true,
-                conversation_context: None,
+                conversation_context_had_delivered_events: true,
                 ..Default::default()
             },
         )
@@ -3581,7 +3584,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_prompt_empty_dm_delta_says_context_was_delivered_earlier() {
+    fn test_format_prompt_empty_dm_delta_distinguishes_trigger_only_from_delivered() {
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
             channel_id: ch,
@@ -3598,12 +3601,22 @@ mod tests {
             channel_type: "dm".into(),
         };
 
+        let trigger_only_prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(trigger_only_prompt.contains("for conversation context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
         let prompt = format_prompt(
             &batch,
             &FormatPromptArgs {
                 channel_info: Some(&ci),
-                conversation_context_was_fetched: true,
-                conversation_context: None,
+                conversation_context_had_delivered_events: true,
                 ..Default::default()
             },
         )
