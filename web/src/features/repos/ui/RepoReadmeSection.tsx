@@ -1,6 +1,8 @@
 import { BookOpen } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import type { ReadmeResult } from "../git-client";
 
 export function RepoReadmeSection({
@@ -35,7 +37,14 @@ export function RepoReadmeSection({
         {readme.filename}
       </h2>
       <div className="prose prose-sm dark:prose-invert max-w-none rounded-lg border border-black/10 bg-white/50 p-4 dark:border-white/10 dark:bg-white/5">
-        <Markdown remarkPlugins={[remarkGfm]}>{readme.content}</Markdown>
+        <Markdown
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[
+            [rehypeKatex, { throwOnError: false, strict: false }],
+          ]}
+        >
+          {readme.content}
+        </Markdown>
       </div>
     </div>
   );

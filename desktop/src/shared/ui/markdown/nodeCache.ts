@@ -2,6 +2,8 @@ import type * as React from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
@@ -13,6 +15,7 @@ import remarkCustomEmoji, {
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 
+import { applyMathBounds } from "./mathBounds";
 import { buzzDeepLinkUrlTransform } from "./utils";
 
 /**
@@ -82,8 +85,16 @@ function listSegment(values: readonly string[] | undefined): string {
 
 function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   markdownParseCount += 1;
+  // Apply formula-bounds guardrail first: hostile/malformed math messages are
+  // neutralised before reaching KaTeX (see mathBounds.ts for the exact rules).
+  const { content, disableMath } = applyMathBounds(input.content);
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
   const rehypePlugins: any[] = [rehypeImageGallery];
+  if (!disableMath) {
+    // `throwOnError: false` (plus `strict: false`) renders malformed input as
+    // its source text instead of throwing / surfacing a red error.
+    rehypePlugins.push([rehypeKatex, { throwOnError: false, strict: false }]);
+  }
   if (input.searchQuery && input.searchQuery.trim().length >= 2) {
     rehypePlugins.push([rehypeSearchHighlight, { query: input.searchQuery }]);
   }
@@ -91,19 +102,23 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   // react-markdown's `Markdown` is synchronous and hook-free (the hook
   // variant is `MarkdownHooks`), so this returns the parsed element tree
   // directly, which is what lets it live in a module-level cache.
+  // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
+  const remarkPlugins: any[] = [
+    remarkGfm,
+    remarkBreaks,
+    remarkSpoilers,
+    remarkMessageLinks,
+    [remarkMentions, { mentionNames: input.mentionNames }],
+    [remarkChannelLinks, { channelNames: input.channelNames }],
+    [remarkCustomEmoji, { customEmoji: input.customEmoji }],
+  ];
+  if (!disableMath) {
+    remarkPlugins.push(remarkMath);
+  }
   return ReactMarkdown({
-    children: input.content,
+    children: content,
     components: input.components,
-    remarkPlugins: [
-      remarkGfm,
-      remarkBreaks,
-      remarkSpoilers,
-      remarkMessageLinks,
-      [remarkMentions, { mentionNames: input.mentionNames }],
-      [remarkChannelLinks, { channelNames: input.channelNames }],
-      [remarkCustomEmoji, { customEmoji: input.customEmoji }],
-      // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-    ] as any[],
+    remarkPlugins,
     rehypePlugins,
     urlTransform: buzzDeepLinkUrlTransform,
   });

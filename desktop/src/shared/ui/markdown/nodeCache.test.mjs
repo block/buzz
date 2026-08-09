@@ -115,3 +115,72 @@ test("active search queries bypass the cache", () => {
   const second = renderCachedMarkdown({ ...BASE, searchQuery: "bold" });
   assert.notEqual(first, second);
 });
+
+// --- KaTeX math rendering (M1) ---
+
+test("inline math renders through KaTeX", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({ ...BASE, content: "Energy $E=mc^2$!" });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/);
+});
+
+test("display math renders through KaTeX as a block", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "$$\n\\int_0^1 x^2\\, dx\n$$",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex-display/);
+});
+
+test("same math parse inputs return the identical cached element", () => {
+  clearMarkdownNodeCache();
+  const first = renderCachedMarkdown({ ...BASE, content: "$E=mc^2$" });
+  const second = renderCachedMarkdown({ ...BASE, content: "$E=mc^2$" });
+  assert.equal(first, second);
+  // Cache hit means the KaTeX output tree is reused, never re-parsed.
+});
+
+test("non-math messages still render and produce no katex (regression)", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({ ...BASE });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /<strong>bold<\/strong>/);
+  assert.ok(!/katex/.test(html), "pure text produces no katex output");
+});
+
+test("KaTeX parse failure degrades to source without throwing", () => {
+  clearMarkdownNodeCache();
+  // throwOnError:false must swallow invalid LaTeX rather than raise.
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "bad $\\notarealcommand{}$",
+  });
+  assert.doesNotThrow(() => renderToStaticMarkup(el));
+});
+
+test("formula-bomb message is math-disabled and renders literally", () => {
+  clearMarkdownNodeCache();
+  // > 50 formulas trips the per-message cap => math off, literal `$...$`.
+  const many = Array.from({ length: 51 }, (_, i) => `$x_{${i}}$`).join(" ");
+  const el = renderCachedMarkdown({ ...BASE, content: many });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "math disabled => no katex output");
+  assert.match(html, /\$x_\{0\}\$/);
+});
+
+test("a single oversized formula is neutralised; sibling math still renders", () => {
+  clearMarkdownNodeCache();
+  // Only the >2KB formula trips the per-formula cap => that one is escaped to
+  // literal while the healthy `$y=1$` sibling still renders via KaTeX. This is
+  // the end-to-end check that the backslash-escape is honoured by remark-math.
+  const huge = "a".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `$y=1$ plus $${huge}$`,
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/, "healthy sibling formula still renders as math");
+});
