@@ -1,0 +1,21 @@
+{
+  "app": {
+    "enableGTKAppId": true,
+    "windows": [
+      {
+        "title": "Buzz",
+        "width": 1200,
+        "height": 800,
+        "center": true,
+        "maximized": false,
+        "visible": false,
+        "transparent": false,
+        "decorations": false,
+        "dragDropEnabled": false,
+        "backgroundThrottling": "disabled",
+        "minWidth": 800,
+        "minHeight": 500
+      }
+    ]
+  }
+}
