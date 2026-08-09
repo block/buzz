@@ -297,6 +297,17 @@ impl Session {
                 reader.begin_closing();
                 let _ = self.child.kill();
                 let _ = self.child.wait();
+                // ConPTY inverts the Unix EOF contract this teardown was
+                // written against: the output pipe does not EOF when the child
+                // dies — only when the pseudo console itself is closed. The
+                // reader is blocked in read(), so stop()'s flag alone can
+                // never wake it; joining here deadlocks the closing thread
+                // (the app's main thread for a sync command) — the
+                // AppHangB1 behind #4930. Dropping the master runs
+                // ClosePseudoConsole while the reader is still draining,
+                // which is also the order ConPTY requires: the close blocks
+                // until pending output is consumed, then EOFs the reader.
+                drop(self.master.take());
                 reader.stop();
                 reader.join();
             }
