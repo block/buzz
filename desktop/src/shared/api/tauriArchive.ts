@@ -88,23 +88,22 @@ function decodeRawSubscription(raw: RawSaveSubscription): SaveSubscription {
 // ── API wrappers ─────────────────────────────────────────────────────────────
 
 /**
- * Returns `true` when observer-feed archive policy is enforced.
+ * Returns `true` when observer-feed archive is enabled by default.
  *
- * Internal builds set `BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT` at build time;
- * OSS builds never set it, so this returns `false`.  The frontend calls this
- * every startup to decide whether to reconcile the `owner_p` subscription.
+ * Always returns `true` — archive defaults to enabled for all builds.
+ * The frontend calls this every startup to decide whether to reconcile
+ * the `owner_p` subscription for kind 24200 (observer frames).
  */
 export async function observerArchiveDefaultEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("observer_archive_default_enabled");
 }
 
 /**
- * Returns `true` when the build has agent-turn-metric archive default-on.
+ * Returns `true` when agent-turn-metric archive is enabled by default.
  *
- * Internal builds set `BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT` at build time;
- * OSS builds never set it, so this returns `false`.  The frontend calls this
- * once at startup to decide whether to auto-seed an `owner_p` [44200]
- * subscription.
+ * Always returns `true` — archive defaults to enabled for all builds.
+ * The frontend calls this once at startup to decide whether to auto-seed
+ * an `owner_p` [44200] subscription for new identities.
  */
 export async function agentMetricArchiveDefaultEnabled(): Promise<boolean> {
   return invokeTauri<boolean>("agent_metric_archive_default_enabled");

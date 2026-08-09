@@ -1131,23 +1131,23 @@ fn n2_prefetch_status_instruction(succeeded: usize, requested: usize) -> String 
     if succeeded == requested {
         return format!(
             "All {requested} current-run evidence calls succeeded. Use the immediately preceding \
-             World Monitor and doctrine tool results as the evidence for this answer. Disregard \
+             World Monitor and doctrine tool results as the evidence for this answer; disregard \
              earlier conversation messages that reported tool or connection failures; they \
-             describe older runs. Answer the user's current question now, distinguish reported \
+             describe older runs. Use the successful evidence to answer now; distinguish reported \
              information from assessment, and state any gaps in what the successful evidence \
              actually supports."
         );
     }
     if succeeded == 0 {
         return format!(
-            "All {requested} current-run evidence calls failed. Disregard earlier promises to \
-             investigate later. Continue with other available information, identify the current \
+            "All {requested} current-run evidence calls failed; disregard earlier promises to \
+             investigate later and continue with other available information. Identify the current \
              source failure briefly, and answer the user's current question as far as the \
              available evidence permits."
         );
     }
     format!(
-        "{succeeded} of {requested} current-run evidence calls succeeded. Use the successful \
+        "{succeeded} of {requested} current-run evidence calls succeeded; use the successful \
          results, disregard earlier conversation messages that report a different connection \
          state, identify only the evidence that is currently missing, and answer the user's \
          current question now."

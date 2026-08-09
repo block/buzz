@@ -37,10 +37,13 @@ import {
   Dialog,
   DialogClose,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { Separator } from "@/shared/ui/separator";
 import { Spinner } from "@/shared/ui/spinner";
+import { Switch } from "@/shared/ui/switch";
 
 import {
   formatShareRecipientName,
@@ -63,7 +66,7 @@ type PersonaShareDialogProps = {
 };
 
 type SnapshotShareDialogProps = {
-  afterLink?: React.ReactNode;
+  beforeExport?: React.ReactNode;
   displayName: string;
   encodeSnapshot: (
     memoryLevel: SnapshotMemoryLevel,
@@ -198,7 +201,6 @@ function MemoryShareConfirmation({
 function ShareLevelControl({
   ariaLabel,
   disabled,
-  hasMemoryOptions,
   testId,
   value,
   options,
@@ -206,27 +208,11 @@ function ShareLevelControl({
 }: {
   ariaLabel: string;
   disabled: boolean;
-  hasMemoryOptions: boolean;
   testId: string;
   value: SnapshotMemoryLevel;
   options: { value: SnapshotMemoryLevel; label: string }[];
   onChange: (level: SnapshotMemoryLevel) => void;
 }) {
-  if (!hasMemoryOptions) {
-    // Nothing to choose from, so there is no dropdown to open. State the
-    // outcome rather than naming the sole option: the memory-level labels
-    // ("Agent only", "+ core memory", …) are comparative and only make sense
-    // when the alternatives are actually offered.
-    return (
-      <span
-        className="inline-flex h-8 w-auto shrink-0 items-center justify-end px-2 text-sm text-muted-foreground"
-        data-testid={testId}
-      >
-        No memories included
-      </span>
-    );
-  }
-
   return (
     <SnapshotOptionMenu
       ariaLabel={ariaLabel}
@@ -240,7 +226,7 @@ function ShareLevelControl({
 }
 
 export function SnapshotShareDialog({
-  afterLink,
+  beforeExport,
   displayName,
   encodeSnapshot,
   hasMemoryOptions,
@@ -452,7 +438,6 @@ export function SnapshotShareDialog({
   return (
     <Dialog onOpenChange={handleDialogOpenChange} open={open}>
       <DialogContent
-        aria-describedby={undefined}
         className="max-w-xl gap-3 bg-transparent p-0 shadow-none"
         data-testid={`${testIdPrefix}-dialog`}
         showCloseButton={false}
@@ -461,10 +446,16 @@ export function SnapshotShareDialog({
           className="relative rounded-2xl bg-background p-6 pb-4 shadow-2xl"
           data-testid={`${testIdPrefix}-main-card`}
         >
-          <DialogHeader className="space-y-0">
+          <DialogHeader>
             <DialogTitle className="min-w-0 truncate pr-10">
               Share {displayName}
             </DialogTitle>
+            <DialogDescription
+              data-testid={`${testIdPrefix}-share-description`}
+            >
+              Anyone you share this {itemLabel} with will receive a copy they
+              can add and use. Changes you make later won’t sync.
+            </DialogDescription>
           </DialogHeader>
           <DialogClose
             className="absolute right-4 top-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-100"
@@ -521,34 +512,44 @@ export function SnapshotShareDialog({
                   ) : null}
                 </AnimatePresence>
               </div>
-              <p
-                className="text-xs text-secondary-foreground/75"
-                data-testid={`${testIdPrefix}-send-description`}
-              >
-                They’ll receive a copy they can add and use. Changes you make
-                later won’t sync.
-              </p>
             </div>
 
+            {hasMemoryOptions ? (
+              <section
+                className="space-y-2"
+                data-testid={`${testIdPrefix}-link-settings`}
+              >
+                <h3 className="text-xs font-medium text-secondary-foreground/75">
+                  Share settings
+                </h3>
+                <div
+                  className="flex items-center gap-3"
+                  data-testid={`${testIdPrefix}-share-level-row`}
+                >
+                  <h4 className="min-w-0 flex-1 text-sm font-medium">
+                    What’s included
+                  </h4>
+                  <ShareLevelControl
+                    ariaLabel="What to include"
+                    disabled={isInterfacePending}
+                    onChange={setShareLevel}
+                    options={shareLevels}
+                    testId={`${testIdPrefix}-share-level`}
+                    value={shareLevel}
+                  />
+                </div>
+              </section>
+            ) : null}
+
+            <Separator
+              className="bg-input/40"
+              data-testid={`${testIdPrefix}-link-divider`}
+            />
+
             <div
-              className="flex items-center gap-3 pt-2"
+              className="flex justify-end"
               data-testid={`${testIdPrefix}-link-row`}
             >
-              <span
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
-                data-testid={`${testIdPrefix}-link-icon`}
-              >
-                <Link2 className="h-4 w-4" />
-              </span>
-              <div
-                className="min-w-0 flex-1"
-                data-testid={`${testIdPrefix}-link-copy`}
-              >
-                <h3 className="text-sm font-medium">Share with a link</h3>
-                <p className="text-xs text-secondary-foreground/75">
-                  Anyone with the link can add and use a copy.
-                </p>
-              </div>
               <Button
                 asChild
                 className="shrink-0 border-border shadow-none disabled:opacity-100"
@@ -622,24 +623,6 @@ export function SnapshotShareDialog({
               </Button>
             </div>
 
-            <div
-              className="flex items-center gap-3"
-              data-testid={`${testIdPrefix}-share-level-row`}
-            >
-              <h3 className="min-w-0 flex-1 text-sm font-medium">
-                What’s included
-              </h3>
-              <ShareLevelControl
-                ariaLabel="What to include"
-                disabled={isInterfacePending}
-                hasMemoryOptions={hasMemoryOptions}
-                onChange={setShareLevel}
-                options={shareLevels}
-                testId={`${testIdPrefix}-share-level`}
-                value={shareLevel}
-              />
-            </div>
-
             <AnimatePresence initial={false}>
               {showMemoryWarning ? (
                 <motion.div
@@ -664,10 +647,9 @@ export function SnapshotShareDialog({
                 </motion.div>
               ) : null}
             </AnimatePresence>
-
-            {afterLink}
           </div>
         </div>
+        {beforeExport}
         <button
           className="relative flex min-h-14 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 text-left text-sm font-medium shadow-2xl outline-hidden transition-colors hover:bg-muted focus-visible:bg-muted disabled:cursor-default disabled:opacity-100"
           data-testid={`${testIdPrefix}-export`}
@@ -703,13 +685,6 @@ export function PersonaShareDialog({
   persona,
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
-  const catalogShareLevels = React.useMemo(
-    () => [
-      { value: "not-shared", label: "Not shared" },
-      { value: "none", label: "Shared" },
-    ],
-    [],
-  );
   const encodeSnapshot = React.useCallback(
     async (memoryLevel: SnapshotMemoryLevel) =>
       encodeSnapshotMutation.mutateAsync({
@@ -729,15 +704,13 @@ export function PersonaShareDialog({
 
   return (
     <SnapshotShareDialog
-      afterLink={
+      beforeExport={
         persona.isBuiltIn ? null : (
           <section
-            className="flex min-h-16 w-full items-center gap-3"
+            className="relative flex min-h-16 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 shadow-2xl"
             data-testid="persona-share-catalog"
           >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-              <BookUser className="h-4 w-4" />
-            </span>
+            <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
               <h3 className="text-sm font-medium">Share to catalog</h3>
               <p className="text-xs text-secondary-foreground/75">
@@ -746,20 +719,16 @@ export function PersonaShareDialog({
                 included.
               </p>
             </div>
-            <div className="flex shrink-0 items-center">
-              <SnapshotOptionMenu
-                ariaLabel="What to share in the catalog"
-                disabled={isPending}
-                onValueChange={(nextValue) =>
-                  onCatalogShareLevelChange(
-                    nextValue as CatalogPersonaShareLevel,
-                  )
-                }
-                options={catalogShareLevels}
-                testId="persona-share-catalog-access"
-                value={catalogShareLevel}
-              />
-            </div>
+            <Switch
+              aria-label="Share to catalog"
+              checked={catalogShareLevel !== "not-shared"}
+              data-testid="persona-share-catalog-access"
+              disabled={isPending}
+              onCheckedChange={(checked) =>
+                onCatalogShareLevelChange(checked ? "none" : "not-shared")
+              }
+              style={{ cursor: "default" }}
+            />
           </section>
         )
       }

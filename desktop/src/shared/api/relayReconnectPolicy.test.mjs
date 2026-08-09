@@ -6,6 +6,7 @@ import {
   isWebSocketClose,
   shouldRefuseConnect,
   shouldScheduleReconnect,
+  shouldWaitForScheduledReconnect,
 } from "./relayReconnectPolicy.ts";
 
 // The "happy" baseline that *should* schedule a reconnect: not terminal,
@@ -76,6 +77,17 @@ test("keep-alive alone is enough to schedule", () => {
       keepAliveRequested: true,
     }),
     true,
+  );
+});
+
+test("ordinary operations wait for a scheduled reconnect instead of bypassing backoff", () => {
+  assert.equal(
+    shouldWaitForScheduledReconnect({ hasPendingReconnect: true }),
+    true,
+  );
+  assert.equal(
+    shouldWaitForScheduledReconnect({ hasPendingReconnect: false }),
+    false,
   );
 });
 

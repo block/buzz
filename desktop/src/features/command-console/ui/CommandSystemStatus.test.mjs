@@ -103,3 +103,29 @@ test("renders live knowledge facts, permissions, and actionable diagnostics", ()
   );
   assert.doesNotMatch(html, /Later capabilities|intentionally not connected/i);
 });
+
+test("offers an in-app Reminders permission request while access is not determined", () => {
+  const permissionStatus = {
+    degradedSections: ["apple-reminders"],
+    liveServices: [
+      {
+        detail: "Some read-only Apple input sections are unavailable.",
+        facts: [
+          { label: "Calendar", value: "Authorized" },
+          { label: "Reminders", value: "Not Determined" },
+        ],
+        id: "apple-inputs",
+        label: "Apple inputs",
+        state: "degraded",
+        statusLabel: "Degraded",
+      },
+    ],
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(CommandSystemStatus, { status: permissionStatus }),
+  );
+
+  assert.match(html, /data-testid="allow-apple-reminders"/);
+  assert.match(html, />Allow Reminders</);
+});

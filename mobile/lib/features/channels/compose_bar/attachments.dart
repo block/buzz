@@ -60,6 +60,7 @@ class _AttachmentSurfacePanel extends HookWidget {
   final Future<void> Function(XFile image) onCapture;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
 
   const _AttachmentSurfacePanel({
     super.key,
@@ -73,6 +74,7 @@ class _AttachmentSurfacePanel extends HookWidget {
     required this.onCapture,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
   });
 
   @override
@@ -150,6 +152,7 @@ class _AttachmentSurfacePanel extends HookWidget {
           onBack: onBack,
           onPickAllPhotos: onPickAllPhotos,
           onChoosePhotos: onChoosePhotos,
+          onChooseAllPhotos: onChooseAllPhotos,
         ),
       ),
       _AttachmentSurface.closed ||
@@ -177,7 +180,7 @@ class _AttachmentSurfacePanel extends HookWidget {
         final height =
             menuLayout.height +
             ((expandedHeight - menuLayout.height) * sizeProgress);
-        final baseColor = context.colors.surfaceContainerHighest;
+        final baseColor = appPopoverColor(context);
         final expandedColor =
             visibleExpandedSurface == _AttachmentSurface.camera
             ? Colors.black
@@ -189,57 +192,51 @@ class _AttachmentSurfacePanel extends HookWidget {
           child: SizedBox(
             width: width,
             height: height,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Color.lerp(baseColor, expandedColor, sizeProgress),
-                borderRadius: BorderRadius.circular(Radii.dialog),
-                border: Border.all(
-                  color: Colors.black.withValues(alpha: 0.04),
-                  width: 1,
-                ),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(Radii.dialog),
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: Stack(
-                    clipBehavior: Clip.hardEdge,
-                    children: [
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        width: _attachmentMenuWidth,
-                        height: menuLayout.height,
-                        child: IgnorePointer(
-                          ignoring: surface != _AttachmentSurface.menu,
-                          child: Opacity(
-                            opacity: menuOpacity,
-                            child: _AttachmentMenu(
-                              layout: menuLayout,
-                              onCamera: onCamera,
-                              onPhotos: onPhotos,
-                              onVideo: onVideo,
-                              onFiles: onFiles,
-                            ),
-                          ),
+            child: Material(
+              key: const ValueKey('attachment-surface-popover'),
+              type: MaterialType.card,
+              color: Color.lerp(baseColor, expandedColor, sizeProgress),
+              surfaceTintColor: Colors.transparent,
+              elevation: appPopoverElevation,
+              shadowColor: appPopoverShadowColor(context),
+              shape: appPopoverShape(context),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(
+                clipBehavior: Clip.hardEdge,
+                children: [
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: _attachmentMenuWidth,
+                    height: menuLayout.height,
+                    child: IgnorePointer(
+                      ignoring: surface != _AttachmentSurface.menu,
+                      child: Opacity(
+                        opacity: menuOpacity,
+                        child: _AttachmentMenu(
+                          layout: menuLayout,
+                          onCamera: onCamera,
+                          onPhotos: onPhotos,
+                          onVideo: onVideo,
+                          onFiles: onFiles,
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        top: 0,
-                        width: expandedWidth,
-                        height: expandedHeight,
-                        child: IgnorePointer(
-                          ignoring: !isExpanded,
-                          child: Opacity(
-                            opacity: expandedOpacity,
-                            child: expandedContent,
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: expandedWidth,
+                    height: expandedHeight,
+                    child: IgnorePointer(
+                      ignoring: !isExpanded,
+                      child: Opacity(
+                        opacity: expandedOpacity,
+                        child: expandedContent,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -271,6 +268,101 @@ class _ComposeDraftPayload {
     return _ComposeDraftPayload(content: content, mediaTags: mediaTags);
   }
 }
+
+enum _PendingAttachmentKind { image, video, file }
+
+@immutable
+class _PendingAttachment {
+  static var _nextId = 0;
+
+  final int id;
+  final XFile file;
+  final _PendingAttachmentKind kind;
+  final bool deleteAfterUse;
+
+  _PendingAttachment({
+    required this.file,
+    required this.kind,
+    this.deleteAfterUse = false,
+  }) : id = _nextId++;
+}
+
+Future<void> _deleteXFile(XFile file) async {
+  final path = file.path;
+  if (path.isEmpty) return;
+  try {
+    await File(path).delete();
+  } on FileSystemException {
+    // Temporary files may already have been removed by the operating system.
+  }
+}
+
+Future<void> _deleteOwnedAttachments(
+  Iterable<_PendingAttachment> attachments,
+) async {
+  for (final attachment in attachments) {
+    if (attachment.deleteAfterUse) await _deleteXFile(attachment.file);
+  }
+}
+
+void _useOwnedAttachmentCleanup(
+  ValueNotifier<List<_PendingAttachment>> attachments,
+) {
+  useEffect(
+    () =>
+        () => unawaited(_deleteOwnedAttachments(attachments.value)),
+    [attachments],
+  );
+}
+
+void _removePendingAttachment(
+  ValueNotifier<List<_PendingAttachment>> attachments,
+  ObjectRef<int> draftRevision,
+  int id,
+) {
+  draftRevision.value += 1;
+  final removed = attachments.value.where((attachment) => attachment.id == id);
+  attachments.value = _withoutAttachment(attachments.value, id);
+  unawaited(_deleteOwnedAttachments(removed));
+}
+
+Future<void> _retainAndQueueImages(
+  BuildContext context,
+  List<XFile> images,
+  void Function(List<XFile>, {bool deleteAfterUse}) queueImages,
+) async {
+  final retained = await retainTemporaryImages(images);
+  if (!context.mounted) {
+    for (final image in retained) {
+      await _deleteXFile(image);
+    }
+    return;
+  }
+  queueImages(retained, deleteAfterUse: true);
+}
+
+Future<BlobDescriptor> _uploadPendingAttachment(
+  MediaUploadService service,
+  _PendingAttachment attachment, {
+  ValueChanged<double>? onProgress,
+  UploadCancellationToken? cancellationToken,
+}) => switch (attachment.kind) {
+  _PendingAttachmentKind.image => service.uploadImage(
+    attachment.file,
+    onProgress: onProgress,
+    cancellationToken: cancellationToken,
+  ),
+  _PendingAttachmentKind.video => service.uploadVideo(
+    attachment.file,
+    onProgress: onProgress,
+    cancellationToken: cancellationToken,
+  ),
+  _PendingAttachmentKind.file => service.uploadFile(
+    attachment.file,
+    onProgress: onProgress,
+    cancellationToken: cancellationToken,
+  ),
+};
 
 class _AttachmentTrigger extends StatelessWidget {
   final _AttachmentSurface surface;
@@ -308,7 +400,7 @@ class _AttachmentTrigger extends StatelessWidget {
             _AttachmentSurface.camera ||
             _AttachmentSurface.photos => 'Back to attachment options',
           },
-          onPressed: () => onTap(context),
+          onPressed: () => _runComposerAction(() => onTap(context)),
           padding: EdgeInsets.zero,
           visualDensity: VisualDensity.compact,
           icon: AnimatedRotation(
@@ -417,7 +509,7 @@ class _AttachmentMenuItem extends StatelessWidget {
       child: Tooltip(
         message: label,
         child: InkWell(
-          onTap: onTap,
+          onTap: () => _runComposerAction(onTap),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
             child: Row(
@@ -457,26 +549,21 @@ class _AttachmentMenuItem extends StatelessWidget {
   }
 }
 
-List<BlobDescriptor> _withoutAttachment(
-  List<BlobDescriptor> attachments,
-  String url,
+List<_PendingAttachment> _withoutAttachment(
+  List<_PendingAttachment> attachments,
+  int id,
 ) {
   return [
     for (final attachment in attachments)
-      if (attachment.url != url) attachment,
+      if (attachment.id != id) attachment,
   ];
 }
 
 class _AttachmentStrip extends StatelessWidget {
-  final List<BlobDescriptor> attachments;
-  final int uploadingCount;
-  final void Function(String url) onRemove;
+  final List<_PendingAttachment> attachments;
+  final ValueChanged<int> onRemove;
 
-  const _AttachmentStrip({
-    required this.attachments,
-    required this.uploadingCount,
-    required this.onRemove,
-  });
+  const _AttachmentStrip({required this.attachments, required this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -487,70 +574,12 @@ class _AttachmentStrip extends StatelessWidget {
       height: thumbHeight,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        itemCount: attachments.length + (uploadingCount > 0 ? 1 : 0),
+        itemCount: attachments.length,
         separatorBuilder: (_, _) => const SizedBox(width: Grid.half),
         itemBuilder: (context, index) {
-          if (index == attachments.length) {
-            final label = uploadingCount == 1
-                ? 'Uploading attachment…'
-                : 'Uploading $uploadingCount attachments…';
-            return Semantics(
-              excludeSemantics: true,
-              liveRegion: true,
-              label: label,
-              child: Container(
-                key: const ValueKey('compose-upload-progress'),
-                width: thumbWidth,
-                decoration: BoxDecoration(
-                  color: context.colors.surface,
-                  borderRadius: BorderRadius.circular(Radii.md),
-                  border: Border.all(color: context.colors.outlineVariant),
-                ),
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    BuzzLoadingIndicator(
-                      size: 34,
-                      color: context.colors.primary,
-                      semanticLabel: label,
-                    ),
-                    if (uploadingCount > 1)
-                      PositionedDirectional(
-                        top: Grid.quarter,
-                        end: Grid.quarter,
-                        child: Container(
-                          key: const ValueKey('compose-upload-count'),
-                          constraints: const BoxConstraints(
-                            minWidth: 22,
-                            minHeight: 22,
-                          ),
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: context.colors.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          padding: const EdgeInsets.all(3),
-                          child: Text(
-                            '$uploadingCount',
-                            style: context.textTheme.labelSmall?.copyWith(
-                              color: context.colors.onPrimary,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            );
-          }
-
           final attachment = attachments[index];
-          final isVideo = attachment.type.startsWith('video/');
-          final isImage = attachment.type.startsWith('image/');
-          final previewUrl = attachment.thumb ?? attachment.url;
           return Container(
-            key: ValueKey('compose-attachment:${attachment.url}'),
+            key: ValueKey('compose-attachment:${attachment.id}'),
             width: thumbWidth,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(Radii.md),
@@ -561,7 +590,7 @@ class _AttachmentStrip extends StatelessWidget {
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(Radii.md),
-                  child: isVideo
+                  child: attachment.kind == _PendingAttachmentKind.video
                       ? ColoredBox(
                           color: Colors.black,
                           child: Center(
@@ -572,9 +601,10 @@ class _AttachmentStrip extends StatelessWidget {
                             ),
                           ),
                         )
-                      : isImage
-                      ? MediaImage(
-                          url: previewUrl,
+                      : attachment.kind == _PendingAttachmentKind.image &&
+                            attachment.file.path.isNotEmpty
+                      ? Image.file(
+                          File(attachment.file.path),
                           fit: BoxFit.cover,
                           errorBuilder: (_, _, _) => ColoredBox(
                             color: context.colors.surface,
@@ -584,6 +614,8 @@ class _AttachmentStrip extends StatelessWidget {
                             ),
                           ),
                         )
+                      : attachment.kind == _PendingAttachmentKind.image
+                      ? _MemoryAttachmentImage(file: attachment.file)
                       : ColoredBox(
                           color: context.colors.surface,
                           child: Padding(
@@ -597,7 +629,9 @@ class _AttachmentStrip extends StatelessWidget {
                                 ),
                                 const SizedBox(height: Grid.quarter),
                                 Text(
-                                  attachment.filename ?? 'File',
+                                  attachment.file.name.isEmpty
+                                      ? 'File'
+                                      : attachment.file.name,
                                   maxLines: 2,
                                   textAlign: TextAlign.center,
                                   overflow: TextOverflow.ellipsis,
@@ -617,7 +651,8 @@ class _AttachmentStrip extends StatelessWidget {
                     width: 24,
                     height: 24,
                     child: IconButton(
-                      onPressed: () => onRemove(attachment.url),
+                      onPressed: () =>
+                          _runComposerAction(() => onRemove(attachment.id)),
                       tooltip: 'Remove attachment',
                       visualDensity: VisualDensity.compact,
                       style: IconButton.styleFrom(
@@ -641,6 +676,34 @@ class _AttachmentStrip extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class _MemoryAttachmentImage extends HookConsumerWidget {
+  final XFile file;
+
+  const _MemoryAttachmentImage({required this.file});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bytes = useFuture(useMemoized(() => file.readAsBytes(), [file]));
+    final data = bytes.data;
+
+    if (data == null || data.isEmpty) {
+      return ColoredBox(
+        color: context.colors.surface,
+        child: Icon(LucideIcons.image, color: context.colors.onSurfaceVariant),
+      );
+    }
+
+    return Image.memory(
+      data,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => ColoredBox(
+        color: context.colors.surface,
+        child: Icon(LucideIcons.image, color: context.colors.onSurfaceVariant),
       ),
     );
   }

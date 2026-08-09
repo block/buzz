@@ -212,7 +212,7 @@ case "$*" in
   *"pg_dump --format=custom"*)
     printf 'mock-custom-format-dump'
     ;;
-  *"tar -C /source/current -czf /backup/memory-vault.tar.gz"*)
+  *"memory-vault.tar.gz"*)
     [[ ! -e "$MOCK_MEMORY_RUNNING_FILE" ]] ||
       { printf 'Memory writer still active during snapshot\n' >&2; exit 44; }
     for argument in "$@"; do
@@ -357,6 +357,31 @@ chmod 600 "$BUZZ_COMMAND_BRIEF_STORE_PATH"
 
 [[ -x "$backup_script" ]] || fail "backup script exists and is executable"
 [[ -x "$restore_script" ]] || fail "restore script exists and is executable"
+
+assert_contains "$backup_script" '{ IFS= read -r user; IFS= read -r password; }' \
+  "backup reads MinIO credentials with POSIX shell builtins"
+assert_contains "$restore_script" '{ IFS= read -r user; IFS= read -r password; }' \
+  "restore reads MinIO credentials with POSIX shell builtins"
+assert_contains "$backup_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
+  "backup uses a writable transient MinIO client config"
+assert_contains "$restore_script" 'export MC_CONFIG_DIR=/tmp/mc-config' \
+  "restore uses a writable transient MinIO client config"
+assert_contains "$backup_script" \
+  'for entry in /source/.[!.]* /source/..?* /source/*; do' \
+  "backup distinguishes an empty uninitialized Memory volume"
+assert_contains "$backup_script" '.empty-vault' \
+  "backup represents an uninitialized Memory vault explicitly"
+assert_contains "$backup_script" \
+  'memory_tools_image="$(local_workspace_tools_image)"' \
+  "backup selects the dedicated pinned Memory tools image"
+assert_contains "$restore_script" \
+  'memory_tools_image="$(local_workspace_tools_image)"' \
+  "restore selects the dedicated pinned Memory tools image"
+if grep -Fq 'sed -n "1p" /run/minio-credentials' \
+  "$backup_script" "$restore_script"; then
+  fail "MinIO helpers must not depend on sed in the minimal mc image"
+fi
+printf 'ok - MinIO credential helpers avoid optional image utilities\n'
 
 assert_fails "backup rejects a relative target" "$backup_script" relative/path
 assert_fails "backup rejects a repository-contained target" \

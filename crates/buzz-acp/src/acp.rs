@@ -619,29 +619,46 @@ impl AcpClient {
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
-    /// `system_prompt` is included in the request when `Some` — agents that
-    /// support the field will use it; others ignore unknown fields per JSON-RPC.
+    ///
+    /// `system_prompt` controls how the prompt text is delivered:
+    ///
+    /// - `None` — no system-prompt field in the request (legacy framing).
+    /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
+    ///   (ACP protocol v2, buzz-agent, goose unused).
+    /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
+    ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
+    ///
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one.
+    /// member from a null one. When both `ClaudeMeta` and `session_title` are
+    /// present the two `_meta` members are merged into a single object.
+    ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
-        if let Some(sp) = system_prompt {
-            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        match system_prompt {
+            Some(SystemPromptTransport::Field(sp)) => {
+                params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
+            Some(SystemPromptTransport::ClaudeMeta(sp)) => {
+                // Merge into _meta so sessionTitle (set below) is not clobbered.
+                params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
+            }
+            None => {}
         }
         if let Some(title) = session_title {
-            params["_meta"] = serde_json::json!({ "sessionTitle": title });
+            // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
+            params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -663,7 +680,7 @@ impl AcpClient {
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
@@ -2038,6 +2055,22 @@ pub struct SessionNewResponse {
     pub raw: serde_json::Value,
 }
 
+/// How to deliver a system prompt on `session/new`.
+///
+/// The two variants match the two mechanisms supported by current adapters:
+///
+/// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
+///   `claude-agent-acp` to append to the adapter's own native system prompt
+///   while keeping its tool-use preset intact.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SystemPromptTransport<'a> {
+    /// Deliver as a bare top-level `systemPrompt` field.
+    Field(&'a str),
+    /// Deliver as `_meta.systemPrompt: {"append": text}`.
+    ClaudeMeta(&'a str),
+}
+
 /// How to switch to a particular model on a session.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "type")]
@@ -3271,7 +3304,12 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None)
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::Field("Custom system prompt")),
+                None,
+            )
             .await
             .expect("session_new_full should succeed");
 
@@ -3420,6 +3458,87 @@ mod tests {
         assert!(
             received["params"].get("_meta").is_none(),
             "_meta should be absent entirely, not an empty object or null"
+        );
+    }
+
+    // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
+
+    #[tokio::test]
+    async fn session_new_full_sends_claude_meta_system_prompt_when_claude_meta_transport() {
+        // When ClaudeMeta transport is requested, the prompt must appear as
+        // _meta.systemPrompt: {"append": text} — never as a bare systemPrompt field.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                None,
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"].get("systemPrompt").is_none(),
+            "bare systemPrompt must not be present for ClaudeMeta transport"
+        );
+        assert_eq!(
+            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
+            Some("Be concise"),
+            "_meta.systemPrompt.append must carry the prompt text"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_merges_claude_meta_and_session_title_into_single_meta_object() {
+        // Both ClaudeMeta prompt and session_title must coexist under _meta —
+        // the prompt must not clobber sessionTitle or vice versa.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_merged","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                Some("Fizz · #buzz-dev"),
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
+            Some("Be concise"),
+            "_meta.systemPrompt.append must be present"
+        );
+        assert_eq!(
+            received["params"]["_meta"]["sessionTitle"].as_str(),
+            Some("Fizz · #buzz-dev"),
+            "_meta.sessionTitle must be present alongside systemPrompt"
         );
     }
 

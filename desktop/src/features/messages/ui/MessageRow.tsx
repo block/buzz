@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AlertTriangle } from "lucide-react";
 
 import {
   depthGuideActionsEqual,
@@ -39,7 +40,13 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { useOpenVideoReviewAt } from "@/shared/ui/VideoReviewNavigation";
+import { parseVideoReviewTimecode } from "@/shared/ui/videoReviewTimecode";
+import { VideoReviewTimecodeButton } from "@/shared/ui/VideoReviewTimecodeButton";
 import { MessageActionBar } from "./MessageActionBar";
+import { editMessage } from "@/shared/api/tauri";
+import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
+import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -69,6 +76,7 @@ export const MessageRow = React.memo(
     hoverBackground = true,
     huddleMemberPubkeys,
     huddleMemberPubkeysPending = false,
+    hideAgentAccessBadge = false,
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
@@ -93,6 +101,7 @@ export const MessageRow = React.memo(
     profiles,
     searchQuery,
     showDepthGuides = true,
+    videoReviewCommentRootId,
     videoReviewContext,
   }: {
     channelId?: string | null;
@@ -106,6 +115,7 @@ export const MessageRow = React.memo(
     hoverBackground?: boolean;
     huddleMemberPubkeys?: readonly string[];
     huddleMemberPubkeysPending?: boolean;
+    hideAgentAccessBadge?: boolean;
     actionBarPlacement?: "floating" | "inside";
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
@@ -140,11 +150,38 @@ export const MessageRow = React.memo(
     profiles?: UserProfileLookup;
     searchQuery?: string;
     showDepthGuides?: boolean;
+    videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
+    // Keep the transient send state with its timestamp rather than collapsing
+    // it into a grouped message row with no header.
+    const isDisplayedAsContinuation = isContinuation && !message.pending;
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
     );
+    const linkPreviewsSuppressed = hasLinkPreviewSuppression(message.tags);
+    const removeLinkPreviewsForEveryone =
+      channelId && onEdit && !message.pending && !linkPreviewsSuppressed
+        ? async () => {
+            const tags = message.tags ?? [];
+            try {
+              await editMessage(
+                channelId,
+                message.id,
+                message.body,
+                tags.filter((tag) => tag[0] === "imeta"),
+                tags.filter((tag) => tag[0] === "emoji"),
+                undefined,
+                true,
+              );
+            } catch (error) {
+              toast.error(
+                `Failed to remove previews: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              throw error;
+            }
+          }
+        : undefined;
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
     );
@@ -238,6 +275,7 @@ export const MessageRow = React.memo(
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
+    const openVideoReviewAt = useOpenVideoReviewAt();
 
     const indentRem = getThreadReplyIndentRem(message.depth);
     const descendantGuideOffsetRem = connectDescendants
@@ -330,26 +368,28 @@ export const MessageRow = React.memo(
           return (
             <HuddleAttachment
               channelId={channelId}
+              className="mt-2"
               message={message}
-              onOpenThread={onReply}
             />
           );
-        default:
-          {
-            const waveMessage = parseWaveMessageContent(message.body);
-            if (waveMessage) {
-              return (
-                <WaveMessageAttachment
-                  channelId={channelId}
-                  fallbackText={waveMessage.fallbackText}
-                  huddleMemberPubkeys={huddleMemberPubkeys}
-                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                />
-              );
-            }
+        default: {
+          const waveMessage = parseWaveMessageContent(message.body);
+          if (waveMessage) {
+            return (
+              <WaveMessageAttachment
+                channelId={channelId}
+                fallbackText={waveMessage.fallbackText}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              />
+            );
           }
 
-          return (
+          const reviewRootEventId = videoReviewCommentRootId;
+          const reviewTimecode = reviewRootEventId
+            ? parseVideoReviewTimecode(message.body)
+            : null;
+          const markdown = (
             <Markdown
               channelNames={channelNames}
               className={cn(
@@ -365,7 +405,11 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
-              content={message.body}
+              content={reviewTimecode?.text ?? message.body}
+              messageId={message.id}
+              linkPreviewsSuppressed={linkPreviewsSuppressed}
+              linkPreviewTags={message.tags}
+              onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               agentMentionPubkeysByName={agentMentionPubkeysByName}
@@ -376,6 +420,24 @@ export const MessageRow = React.memo(
               videoReviewContext={videoReviewContext}
             />
           );
+          if (!reviewRootEventId || !reviewTimecode || !openVideoReviewAt) {
+            return markdown;
+          }
+
+          return (
+            <div className="flex min-w-0 items-start gap-1.5">
+              <VideoReviewTimecodeButton
+                surface="message"
+                timecode={reviewTimecode.timecode}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openVideoReviewAt(reviewRootEventId, reviewTimecode.seconds);
+                }}
+              />
+              <div className="min-w-0 flex-1">{markdown}</div>
+            </div>
+          );
+        }
       }
     };
 
@@ -383,12 +445,8 @@ export const MessageRow = React.memo(
     const guideBleedRem = isThreadReplyLayout ? 0.25 : 0;
     const avatarButtonRadiusClass = "rounded-full";
 
-    const respondToDotColor =
-      message.respondTo === "anyone"
-        ? "bg-emerald-500"
-        : message.respondTo === "allowlist"
-          ? "bg-amber-500"
-          : null;
+    const showRespondToIndicator =
+      message.respondTo === "anyone" || message.respondTo === "allowlist";
 
     const avatarNode = (
       <div className="relative shrink-0">
@@ -399,18 +457,33 @@ export const MessageRow = React.memo(
           displayName={message.author}
           testId="message-avatar"
         />
-        {respondToDotColor && !isThreadReplyLayout ? (
+        {showRespondToIndicator &&
+        !hideAgentAccessBadge &&
+        !isThreadReplyLayout ? (
           <span
             className={cn(
               "absolute -bottom-0.5 -right-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-background",
             )}
+            role="img"
+            aria-label={
+              message.respondTo === "anyone"
+                ? "Anyone can send instructions to this agent"
+                : "Selected people can send instructions to this agent"
+            }
             title={
               message.respondTo === "anyone"
-                ? "Responds to anyone"
-                : "Responds to allowlist"
+                ? "Anyone can send instructions to this agent"
+                : "Selected people can send instructions to this agent"
             }
           >
-            <span className={cn("h-2 w-2 rounded-full", respondToDotColor)} />
+            {message.respondTo === "anyone" ? (
+              <AlertTriangle
+                aria-hidden="true"
+                className="h-2.5 w-2.5 fill-background text-amber-500"
+              />
+            ) : (
+              <span className="h-2 w-2 rounded-full bg-blue-500" />
+            )}
           </span>
         ) : null}
       </div>
@@ -420,8 +493,8 @@ export const MessageRow = React.memo(
       <div
         aria-hidden="true"
         className={cn(
-          "flex w-9 shrink-0 items-start justify-end pt-0.5",
-          isThreadReplyLayout ? "min-h-9 self-start" : "self-stretch",
+          "flex w-9 shrink-0 justify-end items-start pt-0.5",
+          isThreadReplyLayout ? "self-start" : "self-stretch",
         )}
       >
         <MessageTimestamp
@@ -433,7 +506,7 @@ export const MessageRow = React.memo(
       </div>
     );
 
-    const avatarGutterNode = isContinuation ? (
+    const avatarGutterNode = isDisplayedAsContinuation ? (
       continuationTimestampGutter
     ) : message.pubkey ? (
       <UserProfilePopover
@@ -472,7 +545,9 @@ export const MessageRow = React.memo(
         className={cn(
           "absolute right-2 top-1 z-10 sm:pointer-events-none",
           actionBarPlacement === "floating"
-            ? "sm:top-0 sm:-translate-y-1/2"
+            ? isContinuation
+              ? "sm:-top-3 sm:-translate-y-1/2"
+              : "sm:top-0 sm:-translate-y-1/2"
             : "sm:top-1 sm:translate-y-0",
         )}
       >
@@ -505,7 +580,12 @@ export const MessageRow = React.memo(
       message.pending || message.edited ? (
         <>
           {message.pending ? (
-            <p className="font-medium text-primary/80">Sending</p>
+            <p
+              className="font-normal text-muted-foreground/70"
+              data-testid="message-send-status"
+            >
+              Sending…
+            </p>
           ) : null}
           {message.edited ? (
             <Tooltip>
@@ -526,13 +606,13 @@ export const MessageRow = React.memo(
     );
 
     const continuationMetadataNode =
-      isContinuation && statusMetadataNode ? (
+      isDisplayedAsContinuation && statusMetadataNode ? (
         <div className="mt-0.5 flex items-baseline gap-2 text-xs">
           {statusMetadataNode}
         </div>
       ) : null;
 
-    const headerNode = isContinuation ? null : (
+    const headerNode = isDisplayedAsContinuation ? null : (
       <MessageHeaderRow>
         {message.pubkey ? (
           <UserProfilePopover
@@ -560,7 +640,9 @@ export const MessageRow = React.memo(
         ) : null}
       </MessageHeaderRow>
     );
-    const bodyContainerClass = isContinuation ? "mt-0" : bodyOffsetClass;
+    const bodyContainerClass = isDisplayedAsContinuation
+      ? "mt-0"
+      : bodyOffsetClass;
 
     const messageBodyNode = (
       <>
@@ -778,7 +860,7 @@ export const MessageRow = React.memo(
                 ? "mx-1 px-2"
                 : "px-2",
             "flex gap-2.5",
-            isContinuation ? "items-center" : "items-start",
+            isDisplayedAsContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -852,6 +934,7 @@ export const MessageRow = React.memo(
     prev.hoverBackground === next.hoverBackground &&
     prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
     prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
+    prev.hideAgentAccessBadge === next.hideAgentAccessBadge &&
     prev.isContinuation === next.isContinuation &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
@@ -866,6 +949,7 @@ export const MessageRow = React.memo(
     prev.playEntrance === next.playEntrance &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
+    prev.videoReviewCommentRootId === next.videoReviewCommentRootId &&
     prev.videoReviewContext === next.videoReviewContext,
 );
 

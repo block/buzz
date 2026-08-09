@@ -7,6 +7,10 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/battle-rhythm-acceptance";
 
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-07-29T12:00:00+10:00"));
+});
+
 test("Battle Rhythm calendar views and import review are visually distinct", async ({
   page,
 }) => {

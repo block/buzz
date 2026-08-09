@@ -58,14 +58,16 @@ const settingsNavGroups: Array<{
       "profile",
       "appearance",
       "notifications",
+      "voice",
       "shortcuts",
       "custom-emoji",
       "local-archive",
+      "channel-templates",
     ],
   },
   {
     label: "Communities",
-    sections: ["hosted-communities", "channel-templates", "community-members"],
+    sections: ["hosted-communities", "community-members"],
   },
   {
     label: "App",

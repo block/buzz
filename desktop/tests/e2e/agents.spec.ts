@@ -67,9 +67,6 @@ async function gotoApp(page: import("@playwright/test").Page) {
 
 async function openPersonaCatalog(page: import("@playwright/test").Page) {
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Discover agents" })
-    .click();
 }
 
 async function getCatalogOrder(page: import("@playwright/test").Page) {
@@ -93,10 +90,10 @@ async function sharePersonaToCatalog(
 ) {
   await page.getByLabel(`Open actions for ${displayName}`).click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  await page.getByTestId("persona-share-catalog-access").click();
-  await page
-    .getByRole("menuitemradio", { name: "Shared", exact: true })
-    .click();
+  const catalogToggle = page.getByTestId("persona-share-catalog-access");
+  await expect(catalogToggle).not.toBeChecked();
+  await catalogToggle.click();
+  await expect(catalogToggle).toBeChecked();
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
@@ -239,10 +236,8 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(page.getByTestId("persona-catalog-dialog-body")).toBeVisible();
-  const emptyState = page.getByTestId("persona-catalog-empty-state");
-  await expect(emptyState).toContainText("No agents are being shared");
   await expect(
-    emptyState.getByTestId("persona-catalog-empty-agent-artwork"),
+    page.getByText("No shared agents", { exact: true }),
   ).toBeVisible();
   await expect(
     page.locator('[data-testid^="persona-catalog-list-item-"]'),
@@ -267,7 +262,9 @@ test("catalog empty state remains available after reopening", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toBeVisible();
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 
   await page
     .getByTestId("persona-catalog-dialog")
@@ -275,9 +272,9 @@ test("catalog empty state remains available after reopening", async ({
     .click();
   await expect(page.getByTestId("persona-catalog-dialog")).not.toBeVisible();
   await openPersonaCatalog(page);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toContainText(
-    "No agents are being shared",
-  );
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 });
 
 test("built-in persona edits persist", async ({ page }) => {
@@ -319,9 +316,6 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -346,9 +340,6 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -385,7 +376,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
     .toBeGreaterThan(before);
 });
 
-test("the new agent card offers create, discover, and import", async ({
+test("the new agent card opens unified create, catalog, and import flows", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -395,6 +386,11 @@ test("the new agent card offers create, discover, and import", async ({
         id: "custom:code-reviewer",
         displayName: "Code Reviewer",
         systemPrompt: "Review code changes.",
+      },
+      {
+        id: "custom:layout-auditor",
+        displayName: "Layout Auditor",
+        systemPrompt: "Review responsive layouts.",
       },
     ],
   });
@@ -416,44 +412,36 @@ test("the new agent card offers create, discover, and import", async ({
   const cardBoxes = await agentCards.evaluateAll((cards) =>
     cards.map((card) => {
       const box = card.getBoundingClientRect();
-      return { right: box.right, top: box.top };
+      return { left: box.left, right: box.right, top: box.top };
     }),
   );
   const firstRowTop = Math.min(...cardBoxes.map(({ top }) => top));
+  expect(
+    cardBoxes.filter(({ top }) => Math.abs(top - firstRowTop) < 1),
+  ).toHaveLength(5);
   const rightmostFirstRowCard = Math.max(
     ...cardBoxes
       .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
       .map(({ right }) => right),
   );
+  const leftmostFirstRowCard = Math.min(
+    ...cardBoxes
+      .filter(({ top }) => Math.abs(top - firstRowTop) < 1)
+      .map(({ left }) => left),
+  );
   expect(headerBox).not.toBeNull();
-  expect(
-    Math.abs(
-      (headerBox?.x ?? 0) + (headerBox?.width ?? 0) - rightmostFirstRowCard,
-    ),
-  ).toBeLessThan(1);
+  expect(Math.abs((headerBox?.x ?? 0) - leftmostFirstRowCard)).toBeLessThan(1);
+  expect(rightmostFirstRowCard).toBeLessThanOrEqual(
+    (headerBox?.x ?? 0) + (headerBox?.width ?? 0) + 1,
+  );
 
   await newAgentCard.click();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Create agent" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Discover agents" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Import" }),
-  ).toBeVisible();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Discover agents" })
-    .click();
-  await expect(page.getByTestId("persona-catalog-dialog")).toBeVisible();
-  await page
-    .getByTestId("persona-catalog-dialog")
-    .getByRole("button", { name: "Close" })
-    .click();
-  await newAgentCard.click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
+  const catalogDialog = page.getByTestId("persona-catalog-dialog");
+  await expect(catalogDialog).toBeVisible();
+  await expect(page.getByTestId("agent-catalog-create")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
 
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible();
@@ -462,10 +450,10 @@ test("the new agent card offers create, discover, and import", async ({
   ).toHaveCount(0);
   await expect(dialog).not.toContainText("Enter a name for this agent.");
 
-  await dialog.getByRole("button", { name: "Cancel" }).click();
-  await newAgentCard.click();
+  await page.getByTestId("agent-catalog-import").click();
+  await expect(page.getByTestId("agent-catalog-import-dropzone")).toBeVisible();
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("menuitem", { exact: true, name: "Import" }).click();
+  await page.getByTestId("agent-catalog-import-dropzone").click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles({
     buffer: Buffer.from("{}"),
@@ -473,6 +461,31 @@ test("the new agent card offers create, discover, and import", async ({
     name: "imported.agent.json",
   });
   await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
+});
+
+test("embedded create keeps its draft when discard is cancelled", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+
+  const dialog = page.getByTestId("persona-dialog");
+  const name = dialog.locator("#persona-display-name");
+  const instructions = dialog.locator("#persona-system-prompt");
+  await name.fill("Draft Keeper");
+  await instructions.fill("Preserve this draft through confirmation.");
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  const discardDialog = page.getByTestId("discard-create-agent-dialog");
+  await expect(discardDialog).toBeVisible();
+  await discardDialog.getByRole("button", { name: "Keep editing" }).click();
+
+  await expect(dialog).toBeVisible();
+  await expect(name).toHaveValue("Draft Keeper");
+  await expect(instructions).toHaveValue(
+    "Preserve this draft through confirmation.",
+  );
 });
 
 test("the new team card offers create and import", async ({ page }) => {
@@ -490,6 +503,63 @@ test("the new team card offers create and import", async ({ page }) => {
   await expect(
     page.getByRole("menuitem", { exact: true, name: "Import" }),
   ).toBeVisible();
+});
+
+test("team cards follow the agents grid alignment at compact widths", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:team-layout",
+        displayName: "Team layout agent",
+        systemPrompt: "A test agent for team layout alignment.",
+      },
+    ],
+    teams: [
+      {
+        id: "team-layout",
+        name: "Team layout",
+        personaIds: ["custom:team-layout"],
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const agentsContent = page.getByTestId("agents-page-content");
+  const firstAgentCard = page.getByTestId(
+    "persona-agent-row-custom:team-layout",
+  );
+  const firstTeamCard = page.getByTestId("team-card-team-layout");
+  const agentGrid = firstAgentCard.locator("xpath=..");
+  const teamGrid = firstTeamCard.locator("xpath=..");
+  const firstAgentGridCard = agentGrid.locator(":scope > *").first();
+  const firstTeamGridCard = teamGrid.locator(":scope > *").first();
+
+  await agentsContent.evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+  const wideAgentBox = await firstAgentGridCard.boundingBox();
+  const wideTeamBox = await firstTeamGridCard.boundingBox();
+  expect(wideAgentBox).not.toBeNull();
+  expect(wideTeamBox).not.toBeNull();
+  expect(Math.abs((wideAgentBox?.x ?? 0) - (wideTeamBox?.x ?? 0))).toBeLessThan(
+    1,
+  );
+
+  await agentsContent.evaluate((element) => {
+    (element as HTMLElement).style.width = "600px";
+  });
+  const compactAgentBox = await firstAgentGridCard.boundingBox();
+  const compactTeamBox = await firstTeamGridCard.boundingBox();
+  expect(compactAgentBox?.width ?? 0).toBeLessThan(wideAgentBox?.width ?? 0);
+  expect(
+    Math.abs((compactAgentBox?.width ?? 0) - (compactTeamBox?.width ?? 0)),
+  ).toBeLessThan(1);
+  expect(
+    Math.abs((compactAgentBox?.x ?? 0) - (compactTeamBox?.x ?? 0)),
+  ).toBeLessThan(1);
 });
 
 test("team cards use the thread-style overlapping avatar stack", async ({
@@ -632,6 +702,62 @@ test("unconfigured agent defaults use the setup label", async ({ page }) => {
   await expect(page.getByTestId("agent-defaults-button")).toHaveText(
     "Set agent defaults",
   );
+});
+
+test("moves agent actions into an overflow menu in a narrow view", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:compact-actions",
+        displayName: "Compact actions agent",
+        isActive: true,
+        systemPrompt: "A test agent for compact header actions.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Compact actions instance",
+        personaId: "custom:compact-actions",
+        pubkey: "cd".repeat(32),
+        status: "running",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+
+  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  await expect(
+    page.getByText("Set up and manage your agents.", { exact: true }),
+  ).toHaveJSProperty("scrollHeight", 24);
+
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "600px";
+  });
+  await expect(page.getByTestId("agent-defaults-button")).toBeHidden();
+  await page.getByTestId("agent-actions-menu-trigger").click();
+  await expect(
+    page.getByRole("menuitem", { name: "Set agent defaults" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop running agents" }),
+  ).toBeVisible();
+
+  await page.getByRole("menuitem", { name: "Set agent defaults" }).click();
+  await expect(page.getByTestId("agent-ai-defaults-dialog")).toBeVisible();
+
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "650px";
+  });
+  await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("agent-ai-defaults-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("agent-defaults-button")).toBeFocused();
 });
 
 test("agent catalog chooser order stays stable when selection changes", async ({
@@ -862,21 +988,27 @@ test("custom personas share with people and keep export separate", async ({
     page.getByRole("heading", { name: "Share Animation Auditor" }),
   ).toBeVisible();
   await expect(shareDialog.getByText("Added by You")).toHaveCount(0);
-  const sendDescription = shareDialog.getByTestId(
-    "persona-share-send-description",
+  const shareDescription = shareDialog.getByTestId(
+    "persona-share-share-description",
   );
-  await expect(sendDescription).toHaveText(
-    "They’ll receive a copy they can add and use. Changes you make later won’t sync.",
+  await expect(shareDescription).toHaveText(
+    "Anyone you share this agent with will receive a copy they can add and use. Changes you make later won’t sync.",
   );
-  await expect(sendDescription).toHaveClass(
-    /text-xs.*text-secondary-foreground\/75/,
+  await expect(shareDescription).toHaveClass(/text-sm.*text-muted-foreground/);
+  const shareDescriptionId = await shareDescription.getAttribute("id");
+  expect(shareDescriptionId).toBeTruthy();
+  await expect(shareDialog).toHaveAttribute(
+    "aria-describedby",
+    shareDescriptionId ?? "",
   );
-  const sendDescriptionMetrics = await sendDescription.evaluate((element) => ({
-    height: element.getBoundingClientRect().height,
-    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
-  }));
-  expect(sendDescriptionMetrics.height).toBeLessThanOrEqual(
-    sendDescriptionMetrics.lineHeight + 1,
+  const shareDescriptionMetrics = await shareDescription.evaluate(
+    (element) => ({
+      height: element.getBoundingClientRect().height,
+      lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+    }),
+  );
+  expect(shareDescriptionMetrics.height).toBeLessThanOrEqual(
+    shareDescriptionMetrics.lineHeight * 2 + 1,
   );
   await expect(
     shareDialog.getByRole("heading", { name: "Who has access" }),
@@ -884,57 +1016,49 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog.getByText("Owner", { exact: true })).toHaveCount(0);
   await expect(shareDialog.getByText("(You)", { exact: true })).toHaveCount(0);
   const linkRow = page.getByTestId("persona-share-link-row");
+  await expect(page.getByTestId("persona-share-copy-link")).toBeVisible();
   await expect(
-    linkRow.getByRole("heading", { name: "Share with a link" }),
-  ).toBeVisible();
+    shareDialog.getByRole("heading", { name: "Share with a link" }),
+  ).toHaveCount(0);
   await expect(
-    linkRow.getByText("Anyone with the link can add and use a copy."),
-  ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
+    shareDialog.getByText("Anyone with the link can add and use a copy."),
+  ).toHaveCount(0);
   await expect(page.getByTestId("persona-share-send")).toHaveCount(0);
   const copyLinkButton = page.getByTestId("persona-share-copy-link");
-  const linkIcon = page.getByTestId("persona-share-link-icon");
-  const linkCopy = page.getByTestId("persona-share-link-copy");
   const catalogSection = page.getByTestId("persona-share-catalog");
-  const staticShareLevel = page.getByTestId("persona-share-share-level");
-  const shareLevelRow = page.getByTestId("persona-share-share-level-row");
+  const shareMainCard = page.getByTestId("persona-share-main-card");
+  const exportAgentRow = page.getByTestId("persona-share-export");
   await waitForAnimations(page);
   const [
     linkRowBox,
     initialCopyLinkButtonBox,
-    linkIconBox,
-    linkCopyBox,
     catalogSectionBox,
-    staticShareLevelBox,
-    shareLevelRowBox,
+    shareMainCardBox,
+    exportAgentRowBox,
   ] = await Promise.all([
     linkRow.boundingBox(),
     copyLinkButton.boundingBox(),
-    linkIcon.boundingBox(),
-    linkCopy.boundingBox(),
     catalogSection.boundingBox(),
-    staticShareLevel.boundingBox(),
-    shareLevelRow.boundingBox(),
+    shareMainCard.boundingBox(),
+    exportAgentRow.boundingBox(),
   ]);
-  const sendDescriptionBox = await sendDescription.boundingBox();
+  const shareDescriptionBox = await shareDescription.boundingBox();
   const recipientFieldBox = await page
     .getByTestId("persona-share-recipient-field")
     .boundingBox();
-  // Reading order: who → how it goes out → what's included → catalog.
-  expect(sendDescriptionBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (recipientFieldBox?.y ?? 0) + (recipientFieldBox?.height ?? 0),
+  // Without memories, the recipient field flows directly into the link action.
+  expect(recipientFieldBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (shareDescriptionBox?.y ?? 0) + (shareDescriptionBox?.height ?? 0),
+  );
+  await expect(page.getByTestId("persona-share-link-settings")).toHaveCount(0);
+  await expect(page.getByTestId("persona-share-share-level-row")).toHaveCount(
+    0,
   );
   expect(linkRowBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (sendDescriptionBox?.y ?? 0) + (sendDescriptionBox?.height ?? 0),
+    (recipientFieldBox?.y ?? 0) + (recipientFieldBox?.height ?? 0),
   );
-  expect(shareLevelRowBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0),
-  );
-  expect(catalogSectionBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (shareLevelRowBox?.y ?? 0) + (shareLevelRowBox?.height ?? 0),
-  );
-  // Copy link is the link row's own action, not a stranded footer button, so
-  // it rides on that row, vertically centred with the link icon and flush to
-  // the row's right edge.
+  // Copy link stays inside the main card, after the shared settings divider, while catalog and
+  // export are separate rows below it.
   expect(initialCopyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
     linkRowBox?.y ?? 0,
   );
@@ -942,40 +1066,15 @@ test("custom personas share with people and keep export separate", async ({
     (initialCopyLinkButtonBox?.y ?? 0) +
       (initialCopyLinkButtonBox?.height ?? 0),
   ).toBeLessThanOrEqual((linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0) + 1);
-  expect(
-    Math.abs(
-      (initialCopyLinkButtonBox?.y ?? 0) +
-        (initialCopyLinkButtonBox?.height ?? 0) / 2 -
-        ((linkIconBox?.y ?? 0) + (linkIconBox?.height ?? 0) / 2),
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(
-      (linkRowBox?.x ?? 0) +
-        (linkRowBox?.width ?? 0) -
-        ((initialCopyLinkButtonBox?.x ?? 0) +
-          (initialCopyLinkButtonBox?.width ?? 0)),
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(
-      (linkCopyBox?.y ?? 0) +
-        (linkCopyBox?.height ?? 0) / 2 -
-        ((linkIconBox?.y ?? 0) + (linkIconBox?.height ?? 0) / 2),
-    ),
-  ).toBeLessThanOrEqual(1);
-  await expect(page.getByTestId("persona-share-link-divider")).toHaveCount(0);
-  await expect(page.getByTestId("persona-share-copy-link-footer")).toHaveCount(
-    0,
+  await expect(page.getByTestId("persona-share-link-divider")).toHaveClass(
+    /bg-input\/40/,
   );
-  expect(
-    Math.abs(
-      (shareLevelRowBox?.y ?? 0) +
-        (shareLevelRowBox?.height ?? 0) / 2 -
-        ((staticShareLevelBox?.y ?? 0) +
-          (staticShareLevelBox?.height ?? 0) / 2),
-    ),
-  ).toBeLessThanOrEqual(1);
+  expect(catalogSectionBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0) + 12,
+  );
+  expect(exportAgentRowBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0) + 12,
+  );
   await expect(copyLinkButton).toHaveClass(
     /border.*bg-background.*border-border/,
   );
@@ -992,12 +1091,7 @@ test("custom personas share with people and keep export separate", async ({
   await expect.poll(copyLinkHasVisibleShadow).toBe(false);
   await copyLinkButton.hover();
   await expect.poll(copyLinkHasVisibleShadow).toBe(false);
-  await expect(page.getByTestId("persona-share-share-level")).toHaveText(
-    "No memories included",
-  );
-  await expect(
-    shareDialog.getByText("No memories included", { exact: true }),
-  ).toHaveCount(1);
+  await expect(page.getByTestId("persona-share-share-level")).toHaveCount(0);
   await expect(page.getByTestId("persona-share-recipient-access")).toHaveCount(
     0,
   );
@@ -1014,20 +1108,10 @@ test("custom personas share with people and keep export separate", async ({
   await expect(
     shareDialog.getByText("File format", { exact: true }),
   ).toHaveCount(0);
-  const shareMainCard = page.getByTestId("persona-share-main-card");
-  const exportAgentRow = page.getByTestId("persona-share-export");
   await expect(exportAgentRow).toHaveText("Export agent");
   await expect(shareMainCard.getByTestId("persona-share-export")).toHaveCount(
     0,
   );
-  await waitForAnimations(page);
-  const shareMainCardBox = await shareMainCard.boundingBox();
-  const exportAgentRowBox = await exportAgentRow.boundingBox();
-  const shareCardGap =
-    (exportAgentRowBox?.y ?? 0) -
-    ((shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0));
-  expect(shareCardGap).toBeGreaterThanOrEqual(12);
-  expect(shareCardGap).toBeLessThan(16);
   const [shareMainCardStyles, exportAgentRowStyles] = await Promise.all([
     shareMainCard.evaluate((element) => ({
       borderRadius: getComputedStyle(element).borderRadius,
@@ -1411,9 +1495,9 @@ This deliberately long fenced-code example must not establish the minimum width 
   const shareMainCard = shareDialog.getByTestId("persona-share-main-card");
   const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
   const catalogSection = shareDialog.getByTestId("persona-share-catalog");
-  await expect(
-    shareMainCard.getByTestId("persona-share-catalog"),
-  ).toBeVisible();
+  await expect(shareMainCard.getByTestId("persona-share-catalog")).toHaveCount(
+    0,
+  );
   await expect(catalogSection).toContainText("Share to catalog");
   await expect(catalogSection).toContainText(
     "Anyone in this community can find and use a copy.",
@@ -1427,26 +1511,18 @@ This deliberately long fenced-code example must not establish the minimum width 
       catalogSection.boundingBox(),
       shareMainCard.boundingBox(),
     ]);
-  // Copy link belongs to the link row above, so the catalog is the section
-  // that closes the card rather than trailing an orphaned button.
+  // Catalog is its own card below the sharing controls.
   expect(
     (copyLinkButtonBox?.y ?? 0) + (copyLinkButtonBox?.height ?? 0),
-  ).toBeLessThanOrEqual(catalogSectionBox?.y ?? 0);
-  expect(
-    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0),
   ).toBeLessThanOrEqual(
     (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0),
   );
-  await expect(catalogAccess).toHaveText("Not shared");
+  expect(catalogSectionBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0),
+  );
+  await expect(catalogAccess).not.toBeChecked();
   await catalogAccess.click();
-  await expect(page.getByRole("menuitemradio")).toHaveText([
-    "Not shared",
-    "Shared",
-  ]);
-  await page
-    .getByRole("menuitemradio", { name: "Shared", exact: true })
-    .click();
-  await expect(catalogAccess).toHaveText("Shared");
+  await expect(catalogAccess).toBeChecked();
   const storedPersonas = await invokeTauri<
     Array<{ id: string; shared: boolean }>
   >(page, "list_personas");
@@ -1534,11 +1610,9 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  await expect(catalogAccess).toHaveText("Shared");
+  await expect(catalogAccess).toBeChecked();
   await catalogAccess.click();
-  await page
-    .getByRole("menuitemradio", { name: "Not shared", exact: true })
-    .click();
+  await expect(catalogAccess).not.toBeChecked();
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
@@ -1570,9 +1644,6 @@ test("a queued catalog share is not presented as relay-published", async ({
   await page.getByLabel("Open actions for Queued Catalog Agent").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await page.getByTestId("persona-share-catalog-access").click();
-  await page
-    .getByRole("menuitemradio", { name: "Shared", exact: true })
-    .click();
 
   await expect(
     page.getByText(
@@ -1613,7 +1684,9 @@ test("a foreign reader does not receive an unshared kind 30175 persona", async (
   await expect(
     page.getByTestId(`persona-catalog-list-item-${remoteCatalogId}`),
   ).toHaveCount(0);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toBeVisible();
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 });
 
 test("a catalog entry keeps the owner's emoji avatar", async ({ page }) => {
@@ -1674,8 +1747,10 @@ test("a community member can discover and add another member's catalog agent", a
   );
   await expect(remoteEntry).toContainText("Alice’s Reviewer");
   await remoteEntry.click();
+  // The detail pane resolves the publisher's display name; 'Community member'
+  // is only the fallback for an unresolvable pubkey.
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Added by Community member",
+    "Added by alice",
   );
 
   await page
@@ -1726,6 +1801,38 @@ test("a community member can discover and add another member's catalog agent", a
   await expect(addedTarget).toBeDisabled();
   await expect(addedTarget).toHaveText("Added to My Agents");
   expect(await countCommandInvocations(page, "create_persona")).toBe(1);
+});
+
+test("catalog detail shows Community member when the publisher profile cannot be resolved", async ({
+  page,
+}) => {
+  // A pubkey that is not in the mock profile registry — profile resolution
+  // will fail and the detail pane must fall back gracefully.
+  const unknownPubkey =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const personaId = "unresolvable-reviewer";
+  await installMockBridge(page, {
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: unknownPubkey,
+        sourcePersonaId: personaId,
+        displayName: "Mystery Agent",
+        systemPrompt: "Published by someone whose profile cannot be fetched.",
+      }),
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await openPersonaCatalog(page);
+
+  await page
+    .getByTestId(
+      `persona-catalog-list-item-catalog:${unknownPubkey}:${personaId}`,
+    )
+    .click();
+  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+    "Added by Community member",
+  );
 });
 
 test("one share level selector drives both the link and send paths", async ({
@@ -1801,7 +1908,7 @@ test("one share level selector drives both the link and send paths", async ({
   const shareLevel = shareDialog.getByLabel("What to include", {
     exact: true,
   });
-  const catalogAccess = shareDialog.getByLabel("What to share in the catalog");
+  const catalogAccess = shareDialog.getByLabel("Share to catalog");
   const recipientField = page.getByTestId("persona-share-recipient-field");
   const emptyRecipientFieldBox = await recipientField.boundingBox();
   await expect(shareDialog.getByTestId("persona-share-send")).toHaveCount(0);
@@ -1813,13 +1920,14 @@ test("one share level selector drives both the link and send paths", async ({
   await expect(shareLevel).toHaveCSS("text-decoration-line", "none");
   await expect(shareLevel).toHaveCSS("padding-left", "8px");
   await expect(shareLevel).toHaveCSS("padding-right", "8px");
-  await expect(catalogAccess).toHaveText("Not shared");
-  await catalogAccess.click();
-  await expect(page.getByRole("menuitemradio")).toHaveText([
-    "Not shared",
-    "Shared",
-  ]);
-  await page.keyboard.press("Escape");
+  await expect(catalogAccess).not.toBeChecked();
+  await expect(catalogAccess).toHaveCSS("cursor", "default");
+  await expect(
+    shareDialog.getByTestId("persona-share-link-settings"),
+  ).toContainText("Share settings");
+  await expect(
+    shareDialog.getByText("Share settings", { exact: true }),
+  ).toHaveClass(/text-xs.*text-secondary-foreground\/75/);
   const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
   const recipientFieldBox = await recipientField.boundingBox();
   const [shareLevelBox, copyLinkButtonBox, catalogAccessBox] =
@@ -1828,15 +1936,15 @@ test("one share level selector drives both the link and send paths", async ({
       copyLinkButton.boundingBox(),
       catalogAccess.boundingBox(),
     ]);
-  // Reading order: who → how it goes out → what's included → catalog.
-  expect(copyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
+  // Reading order: who → what's included → copy link → catalog.
+  expect(shareLevelBox?.y ?? 0).toBeGreaterThanOrEqual(
     (recipientFieldBox?.y ?? 0) + (recipientFieldBox?.height ?? 0),
   );
-  expect(shareLevelBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (copyLinkButtonBox?.y ?? 0) + (copyLinkButtonBox?.height ?? 0),
+  expect(copyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (shareLevelBox?.y ?? 0) + (shareLevelBox?.height ?? 0),
   );
   expect(catalogAccessBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (shareLevelBox?.y ?? 0) + (shareLevelBox?.height ?? 0),
+    (copyLinkButtonBox?.y ?? 0) + (copyLinkButtonBox?.height ?? 0),
   );
   // The memory choice is stated once, governing both delivery actions —
   // neither the recipients row nor the link row carries its own copy.
@@ -2338,6 +2446,100 @@ test("personas referenced by teams cannot be deleted", async ({ page }) => {
   expect(error).toBe(
     "Analyst is still referenced by a team. Remove it from those teams first.",
   );
+});
+
+test("start pill morphs into the running dot without remounting the avatar", async ({
+  page,
+}) => {
+  const personaId = "custom:motion-auditor";
+  const pubkey = "ab".repeat(32);
+  const activeDotSize = 18;
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await installMockBridge(page, {
+    personas: [
+      {
+        avatarUrl: emojiAvatarDataUrl("✨", "#7657FF"),
+        displayName: "Motion Auditor",
+        id: personaId,
+        systemPrompt: "You audit motion continuity.",
+      },
+    ],
+    managedAgents: [
+      {
+        name: "Motion Auditor",
+        personaId,
+        pubkey,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`persona-agent-row-${personaId}`);
+  const startButton = page.getByTestId(`agent-runtime-start-${pubkey}`);
+  const badge = startButton.locator("xpath=../..");
+  const initialAvatar = await card
+    .getByAltText("Motion Auditor avatar")
+    .elementHandle();
+  expect(initialAvatar).not.toBeNull();
+
+  const samplesPromise = badge.evaluate(async (element) => {
+    const samples: Array<{
+      backgroundColor: string;
+      height: number;
+      width: number;
+    }> = [];
+    const startedAt = performance.now();
+
+    while (performance.now() - startedAt < 440) {
+      const bounds = element.getBoundingClientRect();
+      samples.push({
+        backgroundColor: getComputedStyle(element).backgroundColor,
+        height: bounds.height,
+        width: bounds.width,
+      });
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    }
+
+    return samples;
+  });
+
+  await page.waitForTimeout(32);
+  await startButton.click();
+  await expect(
+    page.getByTestId(`agent-runtime-active-${pubkey}`),
+  ).toBeVisible();
+  const samples = await samplesPromise;
+  const finalAvatar = await card
+    .getByAltText("Motion Auditor avatar")
+    .elementHandle();
+
+  expect(samples[0]?.width).toBeCloseTo(56, 0);
+  expect(samples[0]?.height).toBeCloseTo(36, 0);
+  expect(
+    samples.some(
+      (sample) =>
+        sample.width > activeDotSize &&
+        sample.width < 56 &&
+        sample.height > activeDotSize &&
+        sample.height < 36,
+    ),
+  ).toBe(true);
+  expect(samples.at(-1)?.width).toBeCloseTo(activeDotSize, 0);
+  expect(samples.at(-1)?.height).toBeCloseTo(activeDotSize, 0);
+  expect(samples.at(-1)?.backgroundColor).not.toBe(samples[0]?.backgroundColor);
+  await expect(
+    page.getByTestId(`agent-runtime-active-${pubkey}`).locator("xpath=../.."),
+  ).toHaveClass(/bg-emerald-500/);
+  expect(
+    await initialAvatar?.evaluate(
+      (before, after) => before === after,
+      finalAvatar,
+    ),
+  ).toBe(true);
 });
 
 test("duplicate instances move from the agents gallery into the agent profile", async ({

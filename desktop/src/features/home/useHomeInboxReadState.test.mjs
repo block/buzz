@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getGroupedChannelReadTimestamp,
   getGroupedInboxItemIds,
+  hasRemainingChannelUnreadOverride,
   hasGroupedUnreadOverride,
   resolveInboxItemReadAt,
 } from "./useHomeInboxReadState.ts";
@@ -120,6 +121,47 @@ test("grouped unread override matches any item represented by the row", () => {
     hasGroupedUnreadOverride(
       inboxItem([rootItem, replyItem]),
       new Set(["other-event"]),
+    ),
+    false,
+  );
+});
+
+test("remaining channel unread override ignores the row being cleared", () => {
+  const firstReply = feedItem({
+    id: "first-reply",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "first-root", "", "root"],
+      ["e", "first-parent", "", "reply"],
+    ],
+  });
+  const secondReply = feedItem({
+    id: "second-reply",
+    createdAt: 300,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "second-root", "", "root"],
+      ["e", "second-parent", "", "reply"],
+    ],
+  });
+  const items = [inboxItem([firstReply]), inboxItem([secondReply])];
+
+  assert.equal(
+    hasRemainingChannelUnreadOverride(
+      items,
+      new Set(["first-reply", "second-reply"]),
+      CHANNEL_ID,
+      new Set(["first-reply"]),
+    ),
+    true,
+  );
+  assert.equal(
+    hasRemainingChannelUnreadOverride(
+      items,
+      new Set(["first-reply"]),
+      CHANNEL_ID,
+      new Set(["first-reply"]),
     ),
     false,
   );

@@ -22,6 +22,10 @@ const COMMAND_AGENTS = [
 ] as const;
 
 type LivingShipE2eWindow = Window & {
+  __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+    command: string,
+    payload?: unknown,
+  ) => Promise<unknown>;
   __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
     agentPubkey: string;
     channelId: string;
@@ -49,14 +53,10 @@ test("Living Ship shows working, collaborating, idle and not-aboard advisers", a
   await page.goto("/");
 
   const channelId = await page.evaluate(async () => {
-    const invoke = (
-      window as Window & {
-        __TAURI_INTERNALS__?: {
-          invoke: (command: string, args?: unknown) => Promise<unknown>;
-        };
-      }
-    ).__TAURI_INTERNALS__?.invoke;
-    const channels = (await invoke?.("get_channels")) as Array<{
+    const invoke = (window as LivingShipE2eWindow)
+      .__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("E2E mock command bridge is unavailable");
+    const channels = (await invoke("get_channels")) as Array<{
       id: string;
       name: string;
     }>;

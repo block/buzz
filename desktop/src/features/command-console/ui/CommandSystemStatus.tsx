@@ -1,3 +1,4 @@
+import * as React from "react";
 import { CircleGauge, PlugZap, Server, Unplug } from "lucide-react";
 
 import type {
@@ -5,7 +6,9 @@ import type {
   CommandServiceState,
   CommandServiceStatus,
 } from "@/features/command-console/hooks/useCommandConsoleStatus";
+import { readAppleInputs } from "@/shared/api/tauriAppleInputs";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
   Card,
   CardContent,
@@ -29,6 +32,10 @@ function badgeVariant(state: CommandServiceState) {
 }
 
 function ServiceCard({ service }: { service: CommandServiceStatus }) {
+  const [requestingReminders, setRequestingReminders] = React.useState(false);
+  const [remindersMessage, setRemindersMessage] = React.useState<string | null>(
+    null,
+  );
   const Icon =
     service.state === "connected"
       ? PlugZap
@@ -37,6 +44,35 @@ function ServiceCard({ service }: { service: CommandServiceStatus }) {
         : service.id === "relay"
           ? Server
           : CircleGauge;
+  const remindersPermission = service.facts?.find(
+    (fact) => fact.label === "Reminders",
+  )?.value;
+  const canRequestReminders =
+    service.id === "apple-inputs" && remindersPermission === "Not Determined";
+
+  async function requestRemindersPermission() {
+    setRequestingReminders(true);
+    setRemindersMessage(null);
+    try {
+      const result = await readAppleInputs({
+        operation: "request_permission",
+        arguments: { source: "reminders" },
+      });
+      setRemindersMessage(
+        result.permission === "authorized"
+          ? "Reminders access is authorized."
+          : (result.error ?? "Reminders access was not granted."),
+      );
+    } catch (cause) {
+      setRemindersMessage(
+        cause instanceof Error
+          ? cause.message
+          : "The Reminders permission request failed.",
+      );
+    } finally {
+      setRequestingReminders(false);
+    }
+  }
 
   return (
     <Card data-testid={`command-status-${service.id}`}>
@@ -74,6 +110,24 @@ function ServiceCard({ service }: { service: CommandServiceStatus }) {
               <li key={diagnostic}>{diagnostic}</li>
             ))}
           </ul>
+        ) : null}
+        {canRequestReminders ? (
+          <div className="space-y-2 border-t pt-3">
+            <Button
+              data-testid="allow-apple-reminders"
+              disabled={requestingReminders}
+              onClick={() => void requestRemindersPermission()}
+              size="sm"
+              type="button"
+            >
+              {requestingReminders ? "Requesting…" : "Allow Reminders"}
+            </Button>
+            {remindersMessage ? (
+              <p className="text-sm text-muted-foreground" role="status">
+                {remindersMessage}
+              </p>
+            ) : null}
+          </div>
         ) : null}
       </CardContent>
     </Card>

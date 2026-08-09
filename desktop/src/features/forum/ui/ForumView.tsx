@@ -168,6 +168,7 @@ export function ForumView({
           <ForumComposer
             autocompleteBelow
             channelId={channel.id}
+            channelType="forum"
             isSending={createPostMutation.isPending}
             onCancel={() => setIsComposerOpen(false)}
             onSubmit={async (content, mentionPubkeys, mediaTags) => {

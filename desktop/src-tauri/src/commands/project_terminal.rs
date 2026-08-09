@@ -9,7 +9,10 @@ use crate::app_state::AppState;
 
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
-use super::project_git_exec::{build_git_auth_config, run_git, validate_workspace_clone_url};
+use super::project_git_exec::{
+    build_git_auth_config, build_git_clone_auth_config, run_git,
+    validate_local_clone_url_for_workspace, validate_workspace_clone_url,
+};
 use super::project_git_workflow::clone_project_repository_blocking;
 use super::project_repo_paths::find_local_repo_dir;
 
@@ -99,9 +102,8 @@ fn launch_terminal_at(path: &std::path::Path) -> Result<(), String> {
 }
 
 /// Opens the OS terminal at the project's local checkout. When there is no
-/// local checkout yet, clones the repository from `clone_url` (authenticated
-/// with the identity key, same as push/snapshot) into the repos dir first,
-/// then opens the terminal at the fresh checkout.
+/// local checkout yet, clones the repository from `clone_url` into the repos
+/// dir first, then opens the terminal at the fresh checkout.
 #[tauri::command]
 pub async fn open_project_terminal(
     repos_dir: Option<String>,
@@ -111,11 +113,16 @@ pub async fn open_project_terminal(
     state: State<'_, AppState>,
 ) -> Result<ProjectTerminalResult, String> {
     if let Some(clone_url) = clone_url.as_deref() {
-        validate_workspace_clone_url(clone_url, &state)?;
+        validate_local_clone_url_for_workspace(clone_url, &state)?;
     }
-    // Auth is only needed for the clone path — keep the result outside the
-    // blocking task so it owns no borrowed Tauri state.
-    let auth = build_git_auth_config(&state);
+    // Public GitHub clones stay anonymous; Buzz remotes use the workspace
+    // identity. Keep the result outside the blocking task so it borrows no
+    // Tauri state.
+    let auth = if let Some(clone_url) = clone_url.as_deref() {
+        build_git_clone_auth_config(clone_url, &state)
+    } else {
+        build_git_auth_config(&state)
+    };
     tauri::async_runtime::spawn_blocking(move || {
         // An inaccessible repos root (fresh machine, nothing cloned yet) is
         // not fatal here — the clone path below creates the default root. A

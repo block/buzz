@@ -21,6 +21,7 @@ docker_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DOCKER_TIMEOUT_SECONDS:-${default
 database_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DATABASE_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 minio_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MINIO_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 memory_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MEMORY_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
+memory_tools_image="$(local_workspace_tools_image)"
 migration_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MIGRATION_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 readiness_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_READINESS_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 for timeout_pair in \
@@ -281,8 +282,8 @@ local_workspace_run_bounded \
     --volume "${credentials_file}:/run/minio-credentials:ro" \
     --volume "${backup_dir}/minio:/backup:ro" \
     minio-init -eu -c '
-      user="$(sed -n "1p" /run/minio-credentials)"
-      password="$(sed -n "2p" /run/minio-credentials)"
+      export MC_CONFIG_DIR=/tmp/mc-config
+      { IFS= read -r user; IFS= read -r password; } < /run/minio-credentials
       mc alias set destination http://minio:9000 "$user" "$password" >/dev/null
       mc mb --ignore-existing destination/buzz-media >/dev/null
       mc mirror --overwrite --remove /backup destination/buzz-media >/dev/null
@@ -298,12 +299,12 @@ run_memory_vault_action() {
   local_workspace_run_bounded \
     "${description}" \
     "${memory_timeout_seconds}" \
-    docker compose run --rm -T --no-deps \
+    docker run --rm \
       --entrypoint /bin/sh \
       --volume "buzz-memory-vault:/target" \
       --volume "${runtime_tmp}:/backup:ro" \
       --volume "${script_dir}/lib/restore-memory-vault.sh:/restore-memory-vault.sh:ro" \
-      minio-init -eu -c \
+      "${memory_tools_image}" -eu -c \
       "/bin/sh /restore-memory-vault.sh /backup/memory-vault.tar.gz /target ${action}"
 }
 

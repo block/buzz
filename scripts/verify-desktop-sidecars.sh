@@ -9,6 +9,9 @@ fi
 sidecar_dir=$1
 target=${2:-}
 sidecars=(buzz-acp buzz-agent buzz-lmstudio-agent buzz-dev-mcp git-credential-nostr buzz)
+if [[ "${target}" != *windows* ]]; then
+  sidecars+=(buzz-backend-kubernetes)
+fi
 
 if [[ ! -d "${sidecar_dir}" ]]; then
   echo "Error: sidecar directory does not exist: ${sidecar_dir}" >&2

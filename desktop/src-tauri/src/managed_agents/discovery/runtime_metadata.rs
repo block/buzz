@@ -72,6 +72,8 @@ pub(crate) struct KnownAcpRuntime {
     pub max_tokens_env_var: Option<&'static str>,
     /// Env var for normalizing `context_limit`. `None` when not applicable.
     pub context_limit_env_var: Option<&'static str>,
+    /// Env var for normalizing `max_rounds`. `None` when not applicable.
+    pub max_rounds_env_var: Option<&'static str>,
     /// Normalized field keys that must be set for this harness to function.
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
@@ -137,6 +139,7 @@ pub(super) const LM_STUDIO_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     thinking_env_var: Some("LM_STUDIO_REASONING"),
     max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
     context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+    max_rounds_env_var: None,
     required_normalized_fields: &["model"],
     login_hint: None,
     auth_probe_args: None,

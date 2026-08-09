@@ -1,8 +1,11 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -24,13 +27,42 @@ import '../profile/user_profile.dart';
 import 'recent_searches_provider.dart';
 import 'search_provider.dart';
 
+part 'search_page/motion_field.dart';
+
 enum _SearchFilter { all, messages, channels, people }
 
 const _searchFieldMinHeight = 36.0;
+const _searchIdleFieldHeight = 45.0;
+const _searchIdleTextSize = 15.0;
 const _searchFieldVerticalPadding = Grid.xxs;
-const _searchFieldHint = 'Search messages, channels, people\u2026';
-const _searchCancelEnterDuration = Duration(milliseconds: 160);
-const _searchCancelExitDuration = Duration(milliseconds: 120);
+const _searchFieldMoveDuration = Duration(milliseconds: 160);
+const _searchTitleReturnDuration = Duration(milliseconds: 80);
+const _searchCancelEnterDuration = Duration(milliseconds: 80);
+const _searchCancelExitDuration = Duration(milliseconds: 60);
+const _searchIdleFieldTopInset = Grid.half;
+const _searchActiveFieldTopOffset = 42.0;
+const _searchBottomOverlap =
+    _searchActiveFieldTopOffset + _searchIdleFieldTopInset;
+const _searchFilterChipVerticalPadding = Grid.xxs;
+const _searchFilterBarVerticalPadding = Grid.xxs;
+const _searchHeaderFiltersMinHeight = Grid.xl;
+const _searchActiveFieldRightInsetMin = 72.0;
+
+/// Reserves the Cancel action's scaled label, padding, and app-bar edge inset.
+double _searchActiveFieldRightInset(BuildContext context) {
+  final textPainter = TextPainter(
+    text: TextSpan(
+      text: 'Cancel',
+      style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w500),
+    ),
+    textScaler: MediaQuery.textScalerOf(context),
+    textDirection: Directionality.of(context),
+  )..layout();
+  final cancelWidth = textPainter.width + Grid.half * 2 + Grid.twelve;
+  return cancelWidth > _searchActiveFieldRightInsetMin
+      ? cancelWidth
+      : _searchActiveFieldRightInsetMin;
+}
 
 double _searchFieldHeight(BuildContext context) {
   const style = searchInputTextStyle;
@@ -44,8 +76,35 @@ double _searchFieldHeight(BuildContext context) {
       : _searchFieldMinHeight;
 }
 
+double _idleSearchFieldHeight(BuildContext context) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(_searchIdleTextSize);
+  final contentHeight =
+      scaledFontSize * (20 / _searchIdleTextSize) +
+      _searchFieldVerticalPadding * 2;
+  return contentHeight > _searchIdleFieldHeight
+      ? contentHeight
+      : _searchIdleFieldHeight;
+}
+
+double _searchHeaderFiltersHeight(BuildContext context) {
+  const style = filterChipTextStyle;
+  final scaledLabelHeight =
+      MediaQuery.textScalerOf(context).scale(style.fontSize ?? 15) *
+      (style.height ?? 1);
+  final chipHeight = scaledLabelHeight + _searchFilterChipVerticalPadding * 2;
+  final contentHeight = chipHeight + _searchFilterBarVerticalPadding * 2;
+  return contentHeight > _searchHeaderFiltersMinHeight
+      ? contentHeight
+      : _searchHeaderFiltersMinHeight;
+}
+
 class SearchPage extends HookConsumerWidget {
-  const SearchPage({super.key});
+  const SearchPage({this.tabReselection, super.key});
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -57,202 +116,306 @@ class SearchPage extends HookConsumerWidget {
     final activeFilter = useState(_SearchFilter.all);
     final textController = useTextEditingController();
     final focusNode = useFocusNode();
-    final isSearchFocused = useListenableSelector(
-      focusNode,
-      () => focusNode.hasFocus,
-    );
+    final isSearchEditing = useState(false);
+    final showSearchTitle = useState(true);
+    final isTabActivationInFlight = useRef(false);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final isBuzzTheme = context.appColors.topSectionGradient != null;
-    final buzzSearchColor = context.theme.brightness == Brightness.dark
-        ? Colors.white
-        : Colors.black;
-    final searchSurfaceColor = isBuzzTheme
-        ? buzzSearchColor.withValues(alpha: 0.04)
-        : context.colors.surfaceContainerHighest;
-    final searchMutedColor = isBuzzTheme
-        ? buzzSearchColor.withValues(alpha: 0.4)
-        : context.colors.onSurfaceVariant;
+    final searchSurfaceColor = navigationSearchSurface(context);
+    final searchPrimaryColor = navigationPrimaryForeground(context);
+    final searchPlaceholderColor = navigationSecondaryForeground(context);
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
       fontWeight: FontWeight.w600,
     );
-    final searchFieldHeight = _searchFieldHeight(context);
-    final searchControlHeight = searchFieldHeight > Grid.xl
-        ? searchFieldHeight
+    final compactSearchFieldHeight = _searchFieldHeight(context);
+    final idleSearchFieldHeight = _idleSearchFieldHeight(context);
+    final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
+    final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
+    // Cancel remains an accessible target without giving the text action a
+    // visual button treatment.
+    final searchControlHeight = compactSearchFieldHeight > Grid.xl
+        ? compactSearchFieldHeight
         : Grid.xl;
-    final searchHeaderBottomHeight = searchControlHeight + Grid.twelve;
+    final searchHeaderBottomHeight = isSearchEditing.value
+        ? _searchIdleFieldTopInset +
+              compactSearchFieldHeight +
+              searchHeaderFiltersHeight
+        : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      titleStyle: headerTitleStyle,
+      bottomHeight: searchHeaderBottomHeight,
+    );
+
+    void activateSearch() {
+      showSearchTitle.value = false;
+      isSearchEditing.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted && isSearchEditing.value) {
+          focusNode.requestFocus();
+        }
+      });
+    }
+
+    void deactivateSearch() {
+      if (!isSearchEditing.value) return;
+      // The field is painted above the title while it returns to its idle
+      // position. Start this fade now so the title is already there beneath it
+      // and is revealed by the field's motion instead of arriving afterward.
+      showSearchTitle.value = true;
+      isSearchEditing.value = false;
+    }
+
+    useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void reactivateSearch() {
+        // The same tab gesture can report focus loss after this callback. Keep
+        // that notification from starting a competing return animation while
+        // the normal field activation path restores focus.
+        isTabActivationInFlight.value = true;
+        activateSearch();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          isTabActivationInFlight.value = false;
+        });
+      }
+
+      tabReselection.addListener(reactivateSearch);
+      return () => tabReselection.removeListener(reactivateSearch);
+    }, [tabReselection, focusNode]);
+
+    useEffect(() {
+      void resetIdlePromptWhenFocusLeaves() {
+        if (!focusNode.hasFocus && !isTabActivationInFlight.value) {
+          deactivateSearch();
+        }
+      }
+
+      focusNode.addListener(resetIdlePromptWhenFocusLeaves);
+      return () => focusNode.removeListener(resetIdlePromptWhenFocusLeaves);
+    }, [focusNode]);
 
     void runRecentSearch(String query) {
       textController.value = TextEditingValue(
         text: query,
         selection: TextSelection.collapsed(offset: query.length),
       );
-      focusNode.requestFocus();
+      activateSearch();
       ref.read(recentSearchesProvider.notifier).record(query);
       ref.read(searchProvider.notifier).search(query);
     }
 
     return FrostedScaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: context.colors.surface,
       // Keep the empty state centered in the page rather than the portion left
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
-        gradient: context.appColors.topSectionGradient,
-        title: const Text('Search'),
+        horizontalInset: Grid.twelve,
+        showBottomDivider: true,
+        bottomDividerOpacity: 0.06,
         titleStyle: headerTitleStyle,
-        bottomHeight: searchHeaderBottomHeight,
-        bottom: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.twelve,
+        // Keep this mounted through the search-field morph so it can fade in
+        // beneath the returning field rather than popping in afterward.
+        title: IgnorePointer(
+          child: AnimatedOpacity(
+            key: const Key('search-header-title-opacity'),
+            duration: reduceMotion ? Duration.zero : _searchTitleReturnDuration,
+            curve: Curves.easeOutCubic,
+            opacity: showSearchTitle.value ? 1 : 0,
+            child: Text(
+              'Search',
+              key: const ValueKey('search-header-title'),
+              style: headerTitleStyle,
+            ),
           ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Container(
-                  key: const Key('search-field-container'),
-                  height: searchFieldHeight,
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.half),
-                  decoration: BoxDecoration(
-                    color: searchSurfaceColor,
-                    borderRadius: BorderRadius.circular(Radii.lg),
-                  ),
-                  child: TextField(
-                    key: const Key('search-field'),
-                    controller: textController,
-                    focusNode: focusNode,
-                    decoration: InputDecoration(
-                      hintText: isSearchFocused ? null : _searchFieldHint,
-                      hintStyle: searchInputTextStyle.copyWith(
-                        color: searchMutedColor,
-                      ),
-                      prefixIcon: Icon(
-                        LucideIcons.search,
-                        size: 16,
-                        color: searchMutedColor,
-                      ),
-                      prefixIconConstraints: const BoxConstraints(minWidth: 32),
-                      border: InputBorder.none,
-                      enabledBorder: InputBorder.none,
-                      focusedBorder: InputBorder.none,
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        vertical: _searchFieldVerticalPadding,
-                      ),
-                    ),
-                    style: searchInputTextStyle.copyWith(
-                      color: context.colors.onSurface,
-                    ),
-                    textInputAction: TextInputAction.search,
-                    onChanged: (value) =>
-                        ref.read(searchProvider.notifier).search(value),
-                    onSubmitted: (value) {
-                      final query = value.trim();
-                      if (query.isEmpty) return;
-                      ref.read(recentSearchesProvider.notifier).record(query);
-                    },
+        ),
+        actions: [
+          AnimatedSwitcher(
+            duration: reduceMotion ? Duration.zero : _searchCancelEnterDuration,
+            reverseDuration: reduceMotion
+                ? Duration.zero
+                : _searchCancelExitDuration,
+            transitionBuilder: (child, animation) {
+              final curvedAnimation = CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeInCubic,
+              );
+              return SizeTransition(
+                sizeFactor: curvedAnimation,
+                axis: Axis.horizontal,
+                axisAlignment: 1,
+                child: FadeTransition(
+                  opacity: curvedAnimation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.35, 0),
+                      end: Offset.zero,
+                    ).animate(curvedAnimation),
+                    child: child,
                   ),
                 ),
+              );
+            },
+            child: isSearchEditing.value
+                ? Semantics(
+                    key: const Key('search-cancel'),
+                    button: true,
+                    label: 'Cancel search',
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        textController.clear();
+                        ref.read(searchProvider.notifier).clear();
+                        deactivateSearch();
+                        focusNode.unfocus();
+                      },
+                      child: SizedBox(
+                        height: searchControlHeight,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Grid.half,
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Cancel',
+                              style: filterChipTextStyle.copyWith(
+                                color: context.colors.primary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  )
+                : const SizedBox.shrink(key: ValueKey('search-cancel-hidden')),
+          ),
+        ],
+        bottomHeight: searchHeaderBottomHeight,
+        bottomOverlap: _searchBottomOverlap,
+        bottom: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            AnimatedPositioned(
+              duration: reduceMotion ? Duration.zero : _searchFieldMoveDuration,
+              curve: Curves.easeInOutCubic,
+              left: Grid.gutter,
+              right: isSearchEditing.value
+                  ? searchActiveFieldRightInset
+                  : Grid.gutter,
+              top: isSearchEditing.value
+                  ? _searchIdleFieldTopInset
+                  : _searchBottomOverlap + _searchIdleFieldTopInset,
+              height: isSearchEditing.value
+                  ? compactSearchFieldHeight
+                  : idleSearchFieldHeight,
+              // Do not key this subtree by the visual state: replacing the
+              // TextField immediately after its first tap can detach its
+              // native input connection before the keyboard is shown.
+              child: SizedBox(
+                key: const Key('search-field-container'),
+                child: _SearchMotionField(
+                  controller: textController,
+                  focusNode: focusNode,
+                  iconColor: searchPrimaryColor,
+                  inputColor: searchPrimaryColor,
+                  placeholderColor: searchPlaceholderColor,
+                  surfaceColor: searchSurfaceColor,
+                  isSearchEditing: isSearchEditing.value,
+                  reduceMotion: reduceMotion,
+                  motionDuration: _searchFieldMoveDuration,
+                  onTap: activateSearch,
+                  onChanged: (value) =>
+                      ref.read(searchProvider.notifier).search(value),
+                  onSubmitted: (value) {
+                    final query = value.trim();
+                    if (query.isEmpty) return;
+                    ref.read(recentSearchesProvider.notifier).record(query);
+                  },
+                ),
               ),
-              AnimatedSwitcher(
+            ),
+            Positioned.fill(
+              child: AnimatedSwitcher(
                 duration: reduceMotion
                     ? Duration.zero
                     : _searchCancelEnterDuration,
-                reverseDuration: reduceMotion
-                    ? Duration.zero
-                    : _searchCancelExitDuration,
-                transitionBuilder: (child, animation) {
-                  final curvedAnimation = CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                    reverseCurve: Curves.easeInCubic,
-                  );
-                  return SizeTransition(
-                    sizeFactor: curvedAnimation,
-                    axis: Axis.horizontal,
-                    axisAlignment: 1,
-                    child: FadeTransition(
-                      opacity: curvedAnimation,
-                      child: SlideTransition(
-                        position: Tween<Offset>(
-                          begin: const Offset(0.35, 0),
-                          end: Offset.zero,
-                        ).animate(curvedAnimation),
-                        child: child,
-                      ),
-                    ),
-                  );
-                },
-                child: isSearchFocused
-                    ? Padding(
-                        key: const ValueKey('search-cancel-visible'),
-                        padding: const EdgeInsets.only(left: Grid.xxs),
-                        child: TextButton(
-                          key: const Key('search-cancel'),
-                          onPressed: () {
-                            textController.clear();
-                            ref.read(searchProvider.notifier).clear();
-                            focusNode.unfocus();
-                          },
-                          style: TextButton.styleFrom(
-                            foregroundColor: context.colors.primary,
-                            minimumSize: Size(0, searchControlHeight),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.half,
-                              vertical: Grid.xxs,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: Text(
-                            'Cancel',
-                            style: filterChipTextStyle.copyWith(
-                              color: context.colors.primary,
-                              fontWeight: FontWeight.w500,
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.2),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                ),
+                child: isSearchEditing.value
+                    ? Align(
+                        alignment: Alignment.topCenter,
+                        child: Padding(
+                          padding: EdgeInsets.only(top: _searchBottomOverlap),
+                          child: SizedBox(
+                            key: const ValueKey('search-header-filters'),
+                            height: searchHeaderFiltersHeight,
+                            child: FilterChipBar<_SearchFilter>(
+                              expandItems: true,
+                              visualDensity: const VisualDensity(
+                                horizontal: -2,
+                              ),
+                              chipVerticalPadding:
+                                  _searchFilterChipVerticalPadding,
+                              barVerticalPadding:
+                                  _searchFilterBarVerticalPadding,
+                              selected: activeFilter.value,
+                              onSelected: (f) => activeFilter.value = f,
+                              items: [
+                                for (final f in _SearchFilter.values)
+                                  FilterChipItem(id: f, label: f.label),
+                              ],
                             ),
                           ),
                         ),
                       )
                     : const SizedBox.shrink(
-                        key: ValueKey('search-cancel-hidden'),
+                        key: ValueKey('search-header-filters-hidden'),
                       ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-        actions: const [],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(
-            height: frostedAppBarHeight(
-              context,
-              bottomHeight: searchHeaderBottomHeight,
-              titleStyle: headerTitleStyle,
-            ),
-          ),
-          FilterChipBar<_SearchFilter>(
-            expandItems: true,
-            visualDensity: const VisualDensity(horizontal: -2),
-            chipVerticalPadding: Grid.xxs,
-            barVerticalPadding: Grid.twelve,
-            selected: activeFilter.value,
-            onSelected: (f) => activeFilter.value = f,
-            items: [
-              for (final f in _SearchFilter.values)
-                FilterChipItem(id: f, label: f.label),
-            ],
-          ),
+          SizedBox(height: topSectionHeight),
           Expanded(
-            child: _SearchBody(
-              state: searchState,
-              filter: activeFilter.value,
-              currentPubkey: currentPubkey,
-              onRecentSearchSelected: runRecentSearch,
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(Radii.dialog),
+              ),
+              child: ColoredBox(
+                color: context.colors.surface,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _SearchBody(
+                        state: searchState,
+                        filter: activeFilter.value,
+                        currentPubkey: currentPubkey,
+                        onRecentSearchSelected: runRecentSearch,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -597,7 +760,7 @@ class _PeopleSection extends ConsumerWidget {
   }
 }
 
-class _MessagesSection extends ConsumerWidget {
+class _MessagesSection extends HookConsumerWidget {
   final List<SearchHit> hits;
   final String? currentPubkey;
   final VoidCallback onResultSelected;
@@ -614,8 +777,15 @@ class _MessagesSection extends ConsumerWidget {
     final channels = ref.watch(channelsProvider).value ?? [];
 
     // Preload author profiles.
-    final pubkeys = hits.map((h) => h.pubkey.toLowerCase()).toSet().toList();
-    ref.read(userCacheProvider.notifier).preload(pubkeys);
+    final preloadPubkeys = {
+      for (final hit in hits) hit.pubkey.toLowerCase(),
+      for (final hit in hits) ...mentionedPubkeysFromTags(hit.tags),
+    }.toList()..sort();
+    final preloadPubkeysKey = preloadPubkeys.join('\u0000');
+    useEffect(() {
+      ref.read(userCacheProvider.notifier).preload(preloadPubkeys);
+      return null;
+    }, [preloadPubkeysKey]);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -635,7 +805,7 @@ class _MessagesSection extends ConsumerWidget {
   }
 }
 
-class _MessageTile extends StatelessWidget {
+class _MessageTile extends ConsumerWidget {
   final SearchHit hit;
   final UserProfile? authorProfile;
   final Map<String, UserProfile> userCache;
@@ -653,12 +823,34 @@ class _MessageTile extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final authorName = authorProfile?.label ?? shortPubkey(hit.pubkey);
     final timeAgo = relativeTime(hit.createdAt);
     final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
     final hasChannelName = channelName != null && channelName.isNotEmpty;
     final isDm = channel?.isDm ?? false;
+    final profileMentionNames = {
+      for (final pubkey in mentionedPubkeysFromTags(hit.tags))
+        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: userCache[pubkey]!.displayName!.trim(),
+    };
+    final mentionPubkeys = mentionedPubkeysFromTags(hit.tags);
+    final knownAgentPubkeys = channel == null
+        ? ref.watch(knownAgentPubkeysProvider)
+        : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: knownAgentPubkeys,
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
 
     return ListTile(
       key: ValueKey('search-message-row-${hit.eventId}'),
@@ -730,6 +922,8 @@ class _MessageTile extends StatelessWidget {
           MessageContent(
             key: ValueKey('search-message-body-${hit.eventId}'),
             content: hit.content,
+            mentionNames: mentionNames,
+            agentMentionPubkeys: agentMentionPubkeys,
             tags: hit.tags,
             maxLines: 2,
             baseStyle: activityPreviewTextStyle.copyWith(
