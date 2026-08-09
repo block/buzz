@@ -79,6 +79,8 @@ export function TerminalBootstrap({
     new WeakMap<TerminalConnection, TerminalViewportSize>(),
   );
   const closedSessionKeysRef = React.useRef(new Set<string>());
+  const failedAttachRef = React.useRef(false);
+  const attachRetryRequestedRef = React.useRef(false);
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   const [available, setAvailable] = React.useState(() => isTauri());
@@ -175,8 +177,11 @@ export function TerminalBootstrap({
   }, []);
 
   const retry = React.useCallback(() => {
+    const nextAvailable = isTauri();
+    attachRetryRequestedRef.current = nextAvailable && failedAttachRef.current;
+    failedAttachRef.current = false;
     setAttachError(null);
-    setAvailable(isTauri());
+    setAvailable(nextAvailable);
   }, []);
 
   const removeSession = React.useCallback((key: string) => {
@@ -265,6 +270,7 @@ export function TerminalBootstrap({
       })
       .catch((error) => {
         if (closedSessionKeysRef.current.delete(key)) return;
+        failedAttachRef.current = true;
         removeSession(key);
         fail(error);
       });
@@ -289,7 +295,10 @@ export function TerminalBootstrap({
 
   React.useEffect(() => {
     if (panel.mode === "closed" || !available || !context) return;
-    if (channelSessions.length === 0) createSession();
+    if (attachRetryRequestedRef.current) {
+      attachRetryRequestedRef.current = false;
+      createSession();
+    } else if (channelSessions.length === 0) createSession();
     else if (!channelSessions.some((session) => session.key === activeKey))
       setActiveKey(channelSessions.at(-1)?.key ?? null);
   }, [

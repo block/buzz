@@ -712,3 +712,53 @@ test("surfaces attach failures as a visible notice with a working retry", async 
   );
   view.unmount();
 });
+
+test("retry reattaches a failed new tab while another session remains", async () => {
+  const { createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: "channel-1",
+        channelName: "general",
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 1));
+
+  attachRejection = "second conpty spawn failed";
+  fireEvent.click(view.getByLabelText("New Buzz Term tab"));
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 1));
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+  assert.equal(failedAttachCount, 2);
+
+  attachRejection = null;
+  await act(async () => {
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+  });
+
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(({ command }) => command === "terminal_attach").length,
+      failedAttachCount + 1,
+    ),
+  );
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 2));
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
+  view.unmount();
+});
