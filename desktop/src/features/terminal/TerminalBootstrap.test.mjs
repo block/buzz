@@ -18,6 +18,7 @@ let channel;
 let resizeCallback;
 let canvasWidth = 840;
 let attachResolver = null;
+let attachRejection = null;
 let deferResizes = false;
 let deferClose = false;
 let closeResolver = null;
@@ -84,6 +85,7 @@ before(async () => {
     invoke(command, args) {
       calls.push({ command, args });
       if (command === "terminal_attach") {
+        if (attachRejection) return Promise.reject(attachRejection);
         channel = args.onFrame;
         const sessionNumber = calls.filter(
           ({ command }) => command === "terminal_attach",
@@ -137,6 +139,7 @@ afterEach(async () => {
   calls.length = 0;
   canvasWidth = 840;
   attachResolver = null;
+  attachRejection = null;
   deferResizes = false;
   deferClose = false;
   closeResolver = null;
@@ -651,5 +654,61 @@ test("a non-channel route closes the panel and ignores the terminal shortcut", a
     window.dispatchEvent(new KeyboardEvent("keyup", chord));
   });
   assert.equal(getTerminalPanelSnapshotForTests().mode, "closed");
+  view.unmount();
+});
+
+test("surfaces attach failures as a visible notice with a working retry", async () => {
+  const { StrictMode, createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  attachRejection = "conpty spawn failed";
+  const view = render(
+    createElement(
+      StrictMode,
+      null,
+      createElement(
+        ThemeProvider,
+        null,
+        createElement(TerminalBootstrap, {
+          channelId: "channel-1",
+          channelName: "general",
+          npub: "npub1owner",
+          relayUrl: "wss://relay.example",
+          threadId: null,
+        }),
+      ),
+    ),
+  );
+
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  assert.match(
+    view.getByTestId("terminal-notice").textContent,
+    /Terminal unavailable: conpty spawn failed/,
+  );
+
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+  assert.ok(failedAttachCount >= 1);
+
+  attachRejection = null;
+  const retryButton = view.getByRole("button", { name: "Retry" });
+  await act(async () => {
+    fireEvent.click(retryButton);
+  });
+
+  await waitFor(() =>
+    assert.ok(
+      calls.filter(({ command }) => command === "terminal_attach").length >
+        failedAttachCount,
+    ),
+  );
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
   view.unmount();
 });
