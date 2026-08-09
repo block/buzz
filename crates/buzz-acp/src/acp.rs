@@ -689,6 +689,50 @@ impl AcpClient {
             .session_id)
     }
 
+    /// Send `session/load` for an existing ACP session id.
+    ///
+    /// Used after harness restart when a durable channel→session binding is
+    /// known and the agent advertised `agentCapabilities.loadSession`.
+    /// History-replay `session/update` notifications are consumed by the
+    /// request loop without entering the observer feed, so relay observers do
+    /// not republish the loaded transcript.
+    pub async fn session_load_full(
+        &mut self,
+        cwd: &str,
+        session_id: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        let params = serde_json::json!({
+            "cwd": cwd,
+            "sessionId": session_id,
+            "mcpServers": mcp_servers,
+        });
+        let result = self
+            .send_request_with_session_update_observer("session/load", params, false)
+            .await?;
+        // Spec-compliant agents may omit sessionId on load (it is implied).
+        // Prefer the request id so callers always have a concrete binding.
+        let resolved_id = result
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(session_id)
+            .to_owned();
+        tracing::info!(target: "acp::session", "session loaded: {resolved_id}");
+        Ok(SessionNewResponse {
+            session_id: resolved_id,
+            raw: result,
+        })
+    }
+
+    /// Returns true when an initialize result advertises `loadSession`.
+    pub fn agent_supports_load_session(init_result: &serde_json::Value) -> bool {
+        init_result
+            .get("agentCapabilities")
+            .and_then(|caps| caps.get("loadSession"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     /// Send Goose's custom system-prompt request after `session/new`.
     pub async fn session_set_goose_system_prompt(
         &mut self,
@@ -1067,7 +1111,7 @@ impl AcpClient {
     /// Send a JSON-RPC request and wait for the matching response.
     ///
     /// Assigns the next available id, writes the NDJSON line to stdin,
-    /// then calls [`read_until_response`](Self::read_until_response).
+    /// then reads until the matching response arrives.
     ///
     /// The write phase is bounded by `WRITE_TIMEOUT` (30s) and the read phase
     /// by `REQUEST_TIMEOUT` (60s), so worst-case wall clock is ~90s. Non-prompt
@@ -1077,6 +1121,16 @@ impl AcpClient {
         &mut self,
         method: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_session_update_observer(method, params, true)
+            .await
+    }
+
+    async fn send_request_with_session_update_observer(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        observe_session_updates: bool,
     ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1099,7 +1153,12 @@ impl AcpClient {
             Err(_) => return Err(AcpError::Timeout(timeout)),
         }
 
-        match tokio::time::timeout(timeout, self.read_until_response(id)).await {
+        match tokio::time::timeout(
+            timeout,
+            self.read_until_response_with_session_update_observer(id, observe_session_updates),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err(AcpError::Timeout(timeout)),
         }
@@ -1109,7 +1168,7 @@ impl AcpClient {
     ///
     /// After a [`AcpError::Timeout`] from [`send_request`], the agent may
     /// eventually send the late response. That stale message will sit in the
-    /// `BufReader` buffer and be silently skipped by the next `read_until_response`
+    /// `BufReader` buffer and be silently skipped by the next response-read
     /// call (ID mismatch). However, if the caller wants a clean slate — e.g.
     /// before retrying the same method — they can call this to consume any
     /// buffered data with a short deadline.
@@ -1168,9 +1227,10 @@ impl AcpClient {
     ///
     /// Compares the incoming `id` field as a `serde_json::Value` against
     /// `json!(expected_id)` so that both numeric and string IDs work correctly.
-    async fn read_until_response(
+    async fn read_until_response_with_session_update_observer(
         &mut self,
         expected_id: u64,
+        observe_session_updates: bool,
     ) -> Result<serde_json::Value, AcpError> {
         loop {
             // LinesCodec::new_with_max_length enforces MAX_LINE_SIZE at the
@@ -1214,7 +1274,11 @@ impl AcpClient {
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            let is_session_update =
+                msg.get("method").and_then(|v| v.as_str()) == Some("session/update");
+            if observe_session_updates || !is_session_update {
+                self.observe("acp_read", msg.clone());
+            }
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1261,7 +1325,7 @@ impl AcpClient {
         }
     }
 
-    /// Idle-aware message loop: like [`read_until_response`] but resets an idle
+    /// Idle-aware message loop: like the regular response-read path but resets an idle
     /// deadline on every stdout line. Fires [`AcpError::IdleTimeout`] on silence
     /// or [`AcpError::HardTimeout`] on absolute wall-clock cap.
     ///
@@ -3214,6 +3278,57 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn session_load_suppresses_replayed_updates_from_observer_only() {
+        let script = r#"
+            read -t 2 _load
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"marker":"replayed"}}'
+            echo '{"jsonrpc":"2.0","id":0,"result":{}}'
+            read -t 2 _next
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"marker":"live"}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"worked":true}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let observer = crate::observer::ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+
+        let loaded = client
+            .session_load_full("/", "sess-existing", Vec::new())
+            .await
+            .expect("session/load should succeed");
+        assert_eq!(loaded.session_id, "sess-existing");
+
+        let next = client
+            .send_request("test/echo", serde_json::json!({}))
+            .await
+            .expect("follow-up request should succeed");
+        assert_eq!(next["worked"], serde_json::json!(true));
+
+        let observed_reads: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == "acp_read")
+            .map(|event| event.payload)
+            .collect();
+        assert!(
+            !observed_reads
+                .iter()
+                .any(|payload| payload["params"]["marker"] == "replayed"),
+            "session/load replay updates must not enter the observer feed"
+        );
+        assert!(
+            observed_reads
+                .iter()
+                .any(|payload| payload["params"]["marker"] == "live"),
+            "normal session updates must remain observable after load"
+        );
+        assert!(
+            observed_reads.iter().any(|payload| payload["id"] == 0),
+            "the session/load response itself must remain observable"
+        );
     }
 
     #[tokio::test]

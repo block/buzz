@@ -68,6 +68,11 @@ clap = { version = "4", features = ["derive", "env"] }
 # Config file
 toml = "1.0"
 
+# Durable ACP session binding store location
+dirs = "6"
+# Cross-process flock for shared session bindings
+fs2 = "0.4"
+
 # Filter expressions
 evalexpr = { workspace = true }
 
@@ -78,4 +83,5 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
 httparse = "1"

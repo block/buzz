@@ -80,6 +80,54 @@ pub struct AgentModelCapabilities {
     pub available_models_raw: Option<serde_json::Value>,
 }
 
+fn model_capabilities_from_response(
+    response: &serde_json::Value,
+) -> Option<AgentModelCapabilities> {
+    let config_options_raw = extract_model_config_options(response);
+    let available_models_raw = response
+        .get("models")
+        .filter(|models| models.is_object())
+        .cloned();
+    if config_options_raw.is_empty() && available_models_raw.is_none() {
+        None
+    } else {
+        Some(AgentModelCapabilities {
+            config_options_raw,
+            available_models_raw,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum LoadModelResolution {
+    Method(ModelSwitchMethod),
+    Unsupported,
+    Unverifiable,
+}
+
+fn resolve_load_model_switch(
+    load_response: &serde_json::Value,
+    cached: Option<&AgentModelCapabilities>,
+    desired_model: &str,
+) -> LoadModelResolution {
+    if model_capabilities_from_response(load_response).is_some() {
+        return resolve_model_switch_method(load_response, desired_model)
+            .map(LoadModelResolution::Method)
+            .unwrap_or(LoadModelResolution::Unsupported);
+    }
+
+    let Some(cached) = cached else {
+        return LoadModelResolution::Unverifiable;
+    };
+    let cached_response = serde_json::json!({
+        "configOptions": cached.config_options_raw,
+        "models": cached.available_models_raw,
+    });
+    resolve_model_switch_method(&cached_response, desired_model)
+        .map(LoadModelResolution::Method)
+        .unwrap_or(LoadModelResolution::Unsupported)
+}
+
 /// Per-channel session IDs and turn counters.
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
@@ -170,6 +218,8 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Whether the agent advertised `agentCapabilities.loadSession` at init.
+    pub supports_load_session: bool,
 }
 
 /// Package name reported by `claude-agent-acp` in its `initialize` response.
@@ -266,6 +316,25 @@ fn apply_completed_before_control_signal(
         ControlSignal::Rotate | ControlSignal::SwitchModel(_)
     ) {
         state.invalidate(source);
+    }
+}
+
+fn control_signal_discards_session(control_signal: &ControlSignal) -> bool {
+    matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    )
+}
+
+pub(crate) fn clear_durable_channel_binding(ctx: &PromptContext, channel_id: &Uuid) -> bool {
+    ctx.session_store
+        .remove(&ctx.agent_command, &ctx.agent_args, channel_id)
+}
+
+fn clear_durable_source_binding(ctx: &PromptContext, source: &PromptSource) -> bool {
+    match source {
+        PromptSource::Channel(channel_id) => clear_durable_channel_binding(ctx, channel_id),
+        PromptSource::Heartbeat => false,
     }
 }
 
@@ -564,6 +633,12 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Agent binary as configured (for durable session binding identity).
+    pub agent_command: String,
+    /// Agent args as configured (for durable session binding identity).
+    pub agent_args: Vec<String>,
+    /// Durable channel→session bindings surviving harness restarts.
+    pub session_store: std::sync::Arc<crate::session_store::SessionStore>,
 }
 
 impl AgentPool {
@@ -874,6 +949,129 @@ async fn resolve_new_session_channel_context(
     let is_dm = info.channel_type == "dm";
     let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then_some(info.name);
     (is_dm, title_channel, Some(info.channel_type))
+}
+
+/// Try to restore a durable channel session via `session/load`.
+///
+/// Returns `Some(session_id)` on success. On miss, capability absence, or load
+/// failure, clears the stale binding (when present) and returns `None` so the
+/// caller can fall through to `session/new`.
+async fn try_load_persisted_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: &Uuid,
+    _agent_core: Option<&str>,
+    _agent_canvas: Option<&str>,
+) -> Option<String> {
+    if !agent.supports_load_session {
+        return None;
+    }
+    let stored = ctx
+        .session_store
+        .get(&ctx.agent_command, &ctx.agent_args, channel_id)?;
+    match agent
+        .acp
+        .session_load_full(&ctx.cwd, &stored, ctx.mcp_servers.clone())
+        .await
+    {
+        Ok(resp) => {
+            if agent.model_capabilities.is_none() {
+                agent.model_capabilities = model_capabilities_from_response(&resp.raw);
+            }
+            // Re-apply desired model after load when present.
+            if let Some(ref desired) = agent.desired_model {
+                match resolve_load_model_switch(
+                    &resp.raw,
+                    agent.model_capabilities.as_ref(),
+                    desired,
+                ) {
+                    LoadModelResolution::Method(method) => {
+                        if let Err(e) =
+                            apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method)
+                                .await
+                        {
+                            tracing::warn!(
+                                target: "pool::session",
+                                error = %e,
+                                "model re-apply after session/load failed — continuing with loaded session"
+                            );
+                        }
+                    }
+                    LoadModelResolution::Unsupported => {
+                        tracing::warn!(
+                            target: "pool::model",
+                            "desired model {desired} is absent from the advertised model catalog after session/load"
+                        );
+                    }
+                    LoadModelResolution::Unverifiable => {
+                        tracing::debug!(
+                            target: "pool::model",
+                            "session/load returned no model catalog and none is cached — leaving desired model unverifiable"
+                        );
+                    }
+                }
+            }
+            if !ctx.permission_mode.is_default()
+                && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
+            {
+                if let Err(e) =
+                    apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode)
+                        .await
+                {
+                    tracing::warn!(
+                        target: "pool::session",
+                        error = %e,
+                        "permission mode after session/load failed — continuing"
+                    );
+                }
+            }
+            Some(resp.session_id)
+        }
+        Err(e) if load_failure_is_definitive(&e) => {
+            tracing::warn!(
+                target: "pool::session",
+                session_id = %stored,
+                channel_id = %channel_id,
+                error = %e,
+                "session/load rejected by agent — clearing stale binding (if unchanged) and creating a new session"
+            );
+            // Only drop the binding we failed to load. A concurrent process may
+            // already have written a newer session for this channel.
+            let _ = ctx.session_store.remove_if_equals(
+                &ctx.agent_command,
+                &ctx.agent_args,
+                channel_id,
+                &stored,
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "pool::session",
+                session_id = %stored,
+                channel_id = %channel_id,
+                error = %e,
+                "session/load outcome indeterminate — keeping binding and creating a new session; \
+                 the stored session may still be live on the provider"
+            );
+            None
+        }
+    }
+}
+
+/// Whether a failed `session/load` proves the stored binding is dead.
+///
+/// Only a JSON-RPC error response is definitive: the provider answered and
+/// refused, so the session is genuinely gone and the binding is safe to drop.
+///
+/// Everything else is indeterminate. A timeout, transport failure or malformed
+/// response does NOT prove the provider failed to load — it may hold the session
+/// open. Dropping the binding on those and falling through to `session/new`
+/// would fork hidden provider state: two live sessions, one unreachable. Keeping
+/// the mapping is self-healing, because a provider that has genuinely lost the
+/// session answers `AgentError` on a later attempt and that clears it then.
+fn load_failure_is_definitive(error: &AcpError) -> bool {
+    matches!(error, AcpError::AgentError { .. })
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -1597,6 +1795,24 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
+            } else if let Some(sid) = try_load_persisted_session(
+                &mut agent,
+                &ctx,
+                cid,
+                agent_core.as_deref(),
+                agent_canvas.as_deref(),
+            )
+            .await
+            {
+                tracing::info!(
+                    target: "pool::session",
+                    "loaded session {sid} for channel {cid}"
+                );
+                agent.state.sessions.insert(*cid, sid.clone());
+                if let Some((pending_cid, section)) = pending_canvas.take() {
+                    agent.state.canvas_sections.insert(pending_cid, section);
+                }
+                (sid, false)
             } else {
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
@@ -1619,6 +1835,8 @@ pub async fn run_prompt_task(
                             "created session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
+                        ctx.session_store
+                            .put(&ctx.agent_command, &ctx.agent_args, cid, &sid);
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -1996,6 +2214,8 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    let discard_durable_session =
+                        control_signal_discards_session(&control_signal);
                     // Land the model switch before any cancel/requeue work: setting
                     // `desired_model` here means the fresh session created by the
                     // requeued turn (busy) or the next turn (already-completed)
@@ -2016,6 +2236,9 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
+                                if discard_durable_session {
+                                    clear_durable_source_binding(&ctx, &source);
+                                }
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2053,6 +2276,9 @@ pub async fn run_prompt_task(
                                     agent.state.invalidate_all();
                                 } else {
                                     agent.state.invalidate(&source);
+                                }
+                                if discard_durable_session {
+                                    clear_durable_source_binding(&ctx, &source);
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2110,6 +2336,9 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        if discard_durable_session {
+                            clear_durable_source_binding(&ctx, &source);
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2169,6 +2398,7 @@ pub async fn run_prompt_task(
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
                 agent.state.invalidate(&source);
+                clear_durable_source_binding(&ctx, &source);
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -4026,6 +4256,38 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 
 #[cfg(test)]
 mod tests {
+
+    /// A `session/load` failure only clears the durable binding when the
+    /// provider actually answered and refused. Timeouts, transport failures and
+    /// malformed responses are indeterminate: the provider may hold the session
+    /// open, and clearing the binding there would fork hidden state into two
+    /// live sessions with one unreachable.
+    #[test]
+    fn only_an_agent_error_is_a_definitive_session_load_failure() {
+        use std::time::Duration;
+
+        assert!(super::load_failure_is_definitive(&AcpError::AgentError {
+            code: -32602,
+            message: "no such session".into(),
+        }));
+
+        for indeterminate in [
+            AcpError::Timeout(Duration::from_secs(1)),
+            AcpError::IdleTimeout(Duration::from_secs(1)),
+            AcpError::WriteTimeout(Duration::from_secs(1)),
+            AcpError::CancelDrainTimeout(Duration::from_secs(1)),
+            AcpError::HardTimeout {
+                silence: Duration::from_secs(1),
+            },
+            AcpError::AgentExited,
+            AcpError::Protocol("truncated frame".into()),
+        ] {
+            assert!(
+                !super::load_failure_is_definitive(&indeterminate),
+                "{indeterminate:?} must not clear the binding"
+            );
+        }
+    }
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
@@ -5280,6 +5542,62 @@ mod tests {
     }
 
     #[test]
+    fn load_without_catalog_does_not_poison_model_capabilities() {
+        let response = json!({"sessionId": "loaded"});
+        assert!(model_capabilities_from_response(&response).is_none());
+    }
+
+    #[test]
+    fn load_uses_cached_catalog_when_response_omits_it() {
+        let cached_response = json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [{"value": "model-a"}]
+            }]
+        });
+        let cached = model_capabilities_from_response(&cached_response)
+            .expect("model catalog should be captured");
+
+        assert_eq!(
+            resolve_load_model_switch(&json!({}), Some(&cached), "model-a"),
+            LoadModelResolution::Method(ModelSwitchMethod::ConfigOption {
+                config_id: "model".into(),
+                option_value: "model-a".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn advertised_load_catalog_is_authoritative_even_when_empty() {
+        let cached_response = json!({
+            "models": {
+                "availableModels": [{"modelId": "model-a"}]
+            }
+        });
+        let cached = model_capabilities_from_response(&cached_response)
+            .expect("model catalog should be captured");
+        let load_response = json!({
+            "models": {
+                "availableModels": []
+            }
+        });
+
+        assert_eq!(
+            resolve_load_model_switch(&load_response, Some(&cached), "model-a"),
+            LoadModelResolution::Unsupported
+        );
+    }
+
+    #[test]
+    fn load_without_any_catalog_is_unverifiable() {
+        assert_eq!(
+            resolve_load_model_switch(&json!({}), None, "model-a"),
+            LoadModelResolution::Unverifiable
+        );
+    }
+
+    #[test]
     fn test_rotate_after_natural_completion_invalidates_channel_state() {
         let (mut s, ch_a, ch_b) = make_state();
 
@@ -6018,6 +6336,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            supports_load_session: false,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -6076,6 +6395,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            supports_load_session: false,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
@@ -6542,7 +6862,36 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            agent_command: "goose".to_string(),
+            agent_args: vec!["acp".to_string()],
+            session_store: std::sync::Arc::new(crate::session_store::SessionStore::open(
+                std::env::temp_dir().join(format!(
+                    "buzz-acp-test-sessions-{}.json",
+                    uuid::Uuid::new_v4()
+                )),
+            )),
         }
+    }
+
+    #[test]
+    fn explicit_rotation_clears_the_durable_channel_binding() {
+        let ctx = make_prompt_context_no_owner();
+        let channel_id = Uuid::new_v4();
+        ctx.session_store.put(
+            &ctx.agent_command,
+            &ctx.agent_args,
+            &channel_id,
+            "session-before-rotate",
+        );
+
+        assert!(clear_durable_source_binding(
+            &ctx,
+            &PromptSource::Channel(channel_id)
+        ));
+        assert!(ctx
+            .session_store
+            .get(&ctx.agent_command, &ctx.agent_args, &channel_id)
+            .is_none());
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────
