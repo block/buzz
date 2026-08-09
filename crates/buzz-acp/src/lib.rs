@@ -64,11 +64,14 @@ fn is_subcommand(name: &str) -> bool {
 ///
 /// These probes are only "lightweight" once the adapter is running: a cold
 /// probe boots Node plus the vendor app server before `initialize` is answered.
-/// On Windows that routinely lands at 9-12s for both `codex-acp` and
-/// `claude-agent-acp`, so the previous 10s budget failed intermittently and
-/// surfaced as an empty model picker indistinguishable from a broken install.
+/// Measured cold probes on Windows span an order of magnitude across shipped
+/// harnesses: `codex-acp` 9-12s, `claude-agent-acp` 29-31s, `opencode acp` 58s.
+/// The previous 10s budget failed for all but the fastest, surfacing as an
+/// empty model picker indistinguishable from a broken install. The default
+/// must clear the slowest known harness with margin, because a false timeout
+/// is a worse failure than a slow success: it is silent and misdiagnosed.
 /// Override via `BUZZ_ACP_MODELS_TIMEOUT` (whole seconds).
-const DEFAULT_MODELS_TIMEOUT_SECS: u64 = 45;
+const DEFAULT_MODELS_TIMEOUT_SECS: u64 = 120;
 
 /// Parse `BUZZ_ACP_MODELS_TIMEOUT` (whole seconds), falling back to
 /// [`DEFAULT_MODELS_TIMEOUT_SECS`]. A malformed or zero value falls back
@@ -7897,9 +7900,10 @@ mod models_timeout_tests {
 
     #[test]
     fn default_clears_observed_windows_cold_start() {
-        // Cold `codex-acp` / `claude-agent-acp` probes on Windows measured
-        // 9-12s; the previous 10s budget failed intermittently.
-        assert!(DEFAULT_MODELS_TIMEOUT_SECS >= 30);
+        // Slowest measured shipped harness is `opencode acp` at 58s cold on
+        // Windows; the default must clear it with margin so a future edit
+        // cannot silently reintroduce a too-tight budget.
+        assert!(DEFAULT_MODELS_TIMEOUT_SECS >= 90);
     }
 
     #[test]
