@@ -12,6 +12,8 @@ import { Button } from "@/shared/ui/button";
 import * as React from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 
 import { InviteJoinPolicyNotice } from "./InviteJoinPolicyNotice";
 
@@ -386,7 +388,12 @@ export function InvitePage({ code }: { code: string }) {
               </button>
             </div>
             <div className="prose prose-sm max-w-none">
-              <Markdown remarkPlugins={[remarkGfm]}>
+              <Markdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[
+                  [rehypeKatex, { throwOnError: false, strict: false }],
+                ]}
+              >
                 {document.markdown}
               </Markdown>
             </div>

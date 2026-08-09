@@ -115,3 +115,147 @@ test("active search queries bypass the cache", () => {
   const second = renderCachedMarkdown({ ...BASE, searchQuery: "bold" });
   assert.notEqual(first, second);
 });
+
+// --- KaTeX math rendering (M1) ---
+
+test("inline math renders through KaTeX", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({ ...BASE, content: "Energy $E=mc^2$!" });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/);
+});
+
+test("display math renders through KaTeX as a block", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "$$\n\\int_0^1 x^2\\, dx\n$$",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex-display/);
+});
+
+test("same math parse inputs return the identical cached element", () => {
+  clearMarkdownNodeCache();
+  const first = renderCachedMarkdown({ ...BASE, content: "$E=mc^2$" });
+  const second = renderCachedMarkdown({ ...BASE, content: "$E=mc^2$" });
+  assert.equal(first, second);
+  // Cache hit means the KaTeX output tree is reused, never re-parsed.
+});
+
+test("non-math messages still render and produce no katex (regression)", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({ ...BASE });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /<strong>bold<\/strong>/);
+  assert.ok(!/katex/.test(html), "pure text produces no katex output");
+});
+
+test("KaTeX parse failure degrades to source without throwing", () => {
+  clearMarkdownNodeCache();
+  // throwOnError:false must swallow invalid LaTeX rather than raise.
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "bad $\\notarealcommand{}$",
+  });
+  assert.doesNotThrow(() => renderToStaticMarkup(el));
+});
+
+test("formula-bomb message is math-disabled and renders literally", () => {
+  clearMarkdownNodeCache();
+  // > 100 formulas trips the per-message cap => math off, literal `$...$`.
+  const many = Array.from({ length: 101 }, (_, i) => `$x_{${i}}$`).join(" ");
+  const el = renderCachedMarkdown({ ...BASE, content: many });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "math disabled => no katex output");
+  assert.match(html, /\$x_\{0\}\$/);
+});
+
+test("a single oversized formula is neutralised; sibling math still renders", () => {
+  clearMarkdownNodeCache();
+  // Only the >2KB formula trips the per-formula cap => that one is escaped to
+  // literal while the healthy `$y=1$` sibling still renders via KaTeX. This is
+  // the end-to-end check that the backslash-escape is honoured by remark-math.
+  const huge = "a".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `$y=1$ plus $${huge}$`,
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/, "healthy sibling formula still renders as math");
+});
+
+// Review-driven (审查员 clean-clone regression): the oversized **display**
+// `$$...$$` path was verified manually but not cemented by a unit test.
+
+test("oversized display math degrades to literal with no stray partial math", () => {
+  clearMarkdownNodeCache();
+  const huge = "b".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `only $$\n${huge}\n$$ here`,
+  });
+  const html = renderToStaticMarkup(el);
+  // Escaping the opening `$$` must not leave a stray `$` that remark-math
+  // re-reads as a (partial) inline formula: expect zero katex output.
+  assert.equal(
+    (html.match(/katex/g) ?? []).length,
+    0,
+    "fully literal degradation, no katex",
+  );
+  assert.ok(
+    html.includes("b".repeat(64)),
+    "oversized source preserved literally",
+  );
+});
+
+test("oversized display formula is neutralised; sibling math still renders", () => {
+  clearMarkdownNodeCache();
+  const huge = "c".repeat(2_001);
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: `lead $y=1$ then $$\n${huge}\n$$ and $keep$`,
+  });
+  const html = renderToStaticMarkup(el);
+  assert.match(html, /katex/, "healthy sibling formulas still render as math");
+  assert.ok(
+    html.includes("c".repeat(64)),
+    "oversized display preserved literally",
+  );
+});
+
+// Field-tested (邱仲普 manual run): remark-math@6 accepts `$5 and $10` as math
+// (content may contain spaces), so currency was mangled into a formula until
+// mathBounds learned pandoc-style tightness rules.
+
+test("currency dollar amounts render literally, no katex", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "The price is $5 and $10 today.",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "currency must not become math");
+  assert.match(html, /\$5 and \$10/);
+});
+
+test("CJK currency sentence renders literally, no katex", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "价格在 $5 到 $10 之间",
+  });
+  const html = renderToStaticMarkup(el);
+  assert.ok(!/katex/.test(html), "currency must not become math");
+});
+
+test("currency stays literal while a real formula in the same message renders", () => {
+  clearMarkdownNodeCache();
+  const el = renderCachedMarkdown({
+    ...BASE,
+    content: "pay $5 and $10, see $E=mc^2$",
+  });
+  const html = renderToStaticMarkup(el);
+  // Exactly one formula (`$E=mc^2$`) renders; the currency pair does not.
+  assert.equal((html.match(/class="katex"/g) ?? []).length, 1);
+});
