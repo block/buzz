@@ -331,7 +331,7 @@ test("starter matching uses persona identity rather than display name", () => {
   );
 });
 
-test("starter matching is relay scoped and normalizes trailing slashes", () => {
+test("starter matching is relay scoped and canonicalizes URL formatting", () => {
   const pollen = WELCOME_TEAM_STARTERS[2];
   const otherRelay = makeAgent({
     personaId: pollen.personaId,
@@ -340,7 +340,7 @@ test("starter matching is relay scoped and normalizes trailing slashes", () => {
   });
   const matchingRelay = makeAgent({
     personaId: pollen.personaId,
-    relayUrl: `${RELAY_A}/`,
+    relayUrl: `${RELAY_A.toUpperCase()}/`,
     pubkey: PUB_B,
   });
 

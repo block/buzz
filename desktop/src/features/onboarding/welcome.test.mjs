@@ -302,6 +302,26 @@ test("Welcome ensured marker canonicalizes relay URL differences", () => {
   }
 });
 
+test("Welcome ensured marker migrates the legacy raw relay URL key", () => {
+  const { restore } = installWindowSessionStorage();
+  try {
+    const rawRelayUrl = "WSS://Community-A.Example/";
+    const legacyKey = `buzz-welcome-channel-ensured.v2:${encodeURIComponent(rawRelayUrl)}:pubkey-a`;
+    window.localStorage.setItem(legacyKey, "true");
+
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", rawRelayUrl),
+      true,
+    );
+    assert.equal(
+      hasEnsuredWelcomeChannel("pubkey-a", "wss://community-a.example"),
+      true,
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("ensureStarterChannels reuses existing open starter channels", async () => {
   const general = makeChannel({
     id: "general-channel",
