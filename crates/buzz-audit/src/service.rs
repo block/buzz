@@ -10,8 +10,17 @@ use crate::{
     action::AuditAction,
     entry::{AuditEntry, NewAuditEntry},
     error::AuditError,
-    hash::compute_hash,
+    hash::{compute_hash, to_storage_precision},
 };
+
+/// The `created_at` stamped on a new entry.
+///
+/// Reduced to the precision Postgres round-trips before it is hashed — see
+/// [`to_storage_precision`]. Split out from [`AuditService::log_inner`] so the
+/// invariant is testable without a database.
+fn log_timestamp() -> DateTime<Utc> {
+    to_storage_precision(Utc::now())
+}
 
 /// Per-community advisory lock key. Derived in Postgres from the community UUID
 /// so two communities never serialize each other's audit writes (which would be
@@ -100,7 +109,7 @@ impl AuditService {
         };
         let seq = prev_seq + 1;
 
-        let created_at: DateTime<Utc> = Utc::now();
+        let created_at: DateTime<Utc> = log_timestamp();
 
         let mut audit_entry = AuditEntry {
             community_id,
@@ -251,6 +260,7 @@ mod tests {
     use super::*;
     use crate::action::AuditAction;
     use crate::entry::NewAuditEntry;
+    use chrono::SubsecRound;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -266,6 +276,19 @@ mod tests {
         let url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
         PgPool::connect(&url).await.ok()
+    }
+
+    /// Runs without Postgres, so a regression here is caught by `just
+    /// test-unit` rather than only by the `#[ignore]` chain tests below.
+    #[test]
+    fn log_timestamp_carries_no_sub_microsecond_digits() {
+        let ts = log_timestamp();
+        assert_eq!(
+            ts,
+            ts.trunc_subsecs(6),
+            "created_at is hashed and then stored in a TIMESTAMPTZ column; \
+             sub-microsecond digits make every entry fail verify_chain"
+        );
     }
 
     /// A `community_id` known to exist in `communities` (FK target). Inserts a

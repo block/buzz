@@ -10,19 +10,30 @@ import 'text_theme.dart';
 /// Desktop uses --radius: 0.625rem (10px) as base:
 ///   lg = 10px, md = 8px, sm = 6px
 class Radii {
+  /// Small radius for compact UI elements.
+  static const double xs = 4.0;
   static const double lg = 10.0;
   static const double md = 8.0;
   static const double sm = 6.0;
+  static const double card = 12.0; // grouped settings cards
+  static const double popover = 20.0;
   static const double dialog = 24.0; // desktop uses rounded-3xl for dialogs
+
+  /// Fully rounds pills, circles, and other capsule shapes.
+  static const double full = 999.0;
 }
 
 class AppTheme {
-  static ThemeData light({ColorScheme? colorScheme}) {
+  static ThemeData light({
+    ColorScheme? colorScheme,
+    Gradient? topSectionGradient,
+  }) {
     final scheme = colorScheme ?? lightColorScheme;
     final appColors = AppColors(
       success: const Color(0xFF40A02B), // Catppuccin Latte Green — universal
       warning: const Color(0xFFDF8E1D), // Latte Yellow
       accent: scheme.tertiary,
+      topSectionGradient: topSectionGradient,
     );
 
     return _buildTheme(
@@ -34,7 +45,10 @@ class AppTheme {
     );
   }
 
-  static ThemeData dark({ColorScheme? colorScheme}) {
+  static ThemeData dark({
+    ColorScheme? colorScheme,
+    Gradient? topSectionGradient,
+  }) {
     final scheme = colorScheme ?? darkColorScheme;
     final appColors = AppColors(
       success: const Color(
@@ -42,6 +56,7 @@ class AppTheme {
       ), // Catppuccin Macchiato Green — universal
       warning: const Color(0xFFEED49F), // Macchiato Yellow
       accent: scheme.tertiary,
+      topSectionGradient: topSectionGradient,
     );
 
     return _buildTheme(
@@ -63,6 +78,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
+      splashFactory: NoSplash.splashFactory,
       scaffoldBackgroundColor: scheme.surface,
       extensions: [appColors],
       fontFamily: 'Inter',
@@ -262,13 +278,22 @@ class AppTheme {
         labelPadding: EdgeInsets.zero,
       ),
 
-      // Popups/menus: desktop uses rounded-md (8px)
+      // Popups/menus share the elevated 20px mobile popover treatment.
       popupMenuTheme: PopupMenuThemeData(
-        color: scheme.surface,
-        elevation: 4,
+        color: scheme.surface.withValues(alpha: 0.98),
+        elevation: 8,
+        shadowColor: scheme.shadow.withValues(alpha: 0.18),
+        surfaceTintColor: Colors.transparent,
+        textStyle: textTheme.labelLarge?.copyWith(color: scheme.onSurface),
+        labelTextStyle: WidgetStatePropertyAll(
+          textTheme.labelLarge?.copyWith(color: scheme.onSurface),
+        ),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(Radii.md),
-          side: BorderSide(color: scheme.outline),
+          borderRadius: BorderRadius.circular(Radii.popover),
+          side: BorderSide(
+            color: Colors.black.withValues(alpha: 0.04),
+            width: 1,
+          ),
         ),
       ),
 

@@ -9,9 +9,7 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use rusqlite::Connection;
 use uuid::Uuid;
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-fn in_memory() -> Connection {
+pub(super) fn in_memory() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "busy_timeout", 5000).unwrap();
@@ -33,7 +31,7 @@ fn make_observer_frame(owner_keys: &Keys, agent_keys: &Keys, frame_type: &str) -
         .unwrap()
 }
 
-fn add_sub(
+pub(super) fn add_sub(
     conn: &Connection,
     identity_pk: &str,
     relay_url: &str,
@@ -55,8 +53,6 @@ fn add_sub(
 
 /// Run the full archive pipeline synchronously with a fake relay response.
 ///
-/// Calls `plan_archive` → injects fake relay events → `commit_archive`.
-/// This mirrors `archive_events` without the async relay calls.
 fn run_batch_sync(
     candidates: Vec<ArchiveCandidate>,
     identity_pk: &str,
@@ -76,7 +72,7 @@ fn run_batch_sync(
 }
 
 /// Like `run_batch_sync` but with a specific owner `Keys` for decrypt.
-fn run_batch_sync_with_keys(
+pub(super) fn run_batch_sync_with_keys(
     candidates: Vec<ArchiveCandidate>,
     identity_pk: &str,
     relay_url: &str,
@@ -115,7 +111,11 @@ fn run_batch_sync_with_keys(
     .unwrap()
 }
 
-fn candidate(event: &Event, scope_type: ScopeType, scope_value: &str) -> ArchiveCandidate {
+pub(super) fn candidate(
+    event: &Event,
+    scope_type: ScopeType,
+    scope_value: &str,
+) -> ArchiveCandidate {
     ArchiveCandidate {
         raw_event_json: event.as_json(),
         matched_scope: MatchedScope {

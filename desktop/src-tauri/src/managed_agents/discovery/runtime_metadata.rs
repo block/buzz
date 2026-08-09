@@ -1,3 +1,10 @@
+/// Native model-catalog protocol owned by a known runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeModelDiscovery {
+    /// LM Studio's native `GET /api/v1/models` contract.
+    LmStudioV1,
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -20,8 +27,10 @@ pub(crate) struct KnownAcpRuntime {
     pub cli_install_commands_windows: &'static [&'static str],
     /// Shell commands to install the ACP adapter (run sequentially, after CLI).
     pub adapter_install_commands: &'static [&'static str],
-    /// Link to docs/repo for manual instructions.
-    pub install_instructions_url: &'static str,
+    /// Official CLI installation documentation.
+    pub cli_install_instructions_url: &'static str,
+    /// ACP adapter installation documentation.
+    pub adapter_install_instructions_url: &'static str,
     /// Human-readable hint about installing the CLI binary.
     pub cli_install_hint: &'static str,
     /// Human-readable hint about installing the ACP adapter.
@@ -39,6 +48,19 @@ pub(crate) struct KnownAcpRuntime {
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Exact provider value forced when `provider_locked` is true.
+    pub locked_provider_id: Option<&'static str>,
+    /// Human-readable label for the catalog-owned locked provider.
+    pub locked_provider_label: Option<&'static str>,
+    /// Native model discovery protocol, when discovery must not spawn ACP.
+    pub native_model_discovery: Option<NativeModelDiscovery>,
+    /// Trusted runtime-policy environment keys. These are projected to the
+    /// frontend but remain enforced in Rust after every user environment layer.
+    pub base_url_env_var: Option<&'static str>,
+    pub classification_env_var: Option<&'static str>,
+    pub integrations_env_var: Option<&'static str>,
+    /// Optional OS-Keychain entry name for an API bearer token.
+    pub keychain_token_key: Option<&'static str>,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
@@ -50,6 +72,8 @@ pub(crate) struct KnownAcpRuntime {
     pub max_tokens_env_var: Option<&'static str>,
     /// Env var for normalizing `context_limit`. `None` when not applicable.
     pub context_limit_env_var: Option<&'static str>,
+    /// Env var for normalizing `max_rounds`. `None` when not applicable.
+    pub max_rounds_env_var: Option<&'static str>,
     /// Normalized field keys that must be set for this harness to function.
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
@@ -76,5 +100,74 @@ impl KnownAcpRuntime {
             }
         }
         self.cli_install_commands
+    }
+}
+
+/// Canonical capabilities for Buzz's bundled LM Studio-native ACP runtime.
+pub(super) const LM_STUDIO_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "buzz-lmstudio-agent",
+    label: "Buzz LM Studio Agent",
+    commands: &["buzz-lmstudio-agent"],
+    aliases: &[],
+    avatar_url: super::BUZZ_AGENT_AVATAR_URL,
+    mcp_command: None,
+    mcp_hooks: false,
+    underlying_cli: None,
+    cli_install_commands: &[],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    cli_install_instructions_url: "https://lmstudio.ai/docs/developer/rest",
+    adapter_install_instructions_url: "",
+    cli_install_hint: "Ships with Buzz; LM Studio must be installed separately.",
+    adapter_install_hint: "",
+    skill_dir: None,
+    supports_acp_model_switching: true,
+    model_env_var: Some("LM_STUDIO_MODEL"),
+    provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
+    provider_locked: true,
+    locked_provider_id: Some("lmstudio-native"),
+    locked_provider_label: Some("LM Studio native"),
+    native_model_discovery: Some(NativeModelDiscovery::LmStudioV1),
+    base_url_env_var: Some("LM_STUDIO_BASE_URL"),
+    classification_env_var: Some("BUZZ_AGENT_CLASSIFICATION"),
+    integrations_env_var: Some("LM_STUDIO_MCP_INTEGRATIONS"),
+    keychain_token_key: Some("lm-studio-api-token"),
+    default_env: &[],
+    config_file_path: None,
+    config_file_format: None,
+    supports_acp_native_config: false,
+    thinking_env_var: Some("LM_STUDIO_REASONING"),
+    max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+    context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+    max_rounds_env_var: None,
+    required_normalized_fields: &["model"],
+    login_hint: None,
+    auth_probe_args: None,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::super::known_acp_runtime_exact;
+
+    #[test]
+    fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
+        let goose = known_acp_runtime_exact("goose").unwrap();
+        assert_eq!(
+            goose.cli_install_instructions_url,
+            "https://goose-docs.ai/docs/getting-started/installation/"
+        );
+        assert!(goose.adapter_install_instructions_url.is_empty());
+
+        let claude = known_acp_runtime_exact("claude").unwrap();
+        assert!(claude
+            .adapter_install_instructions_url
+            .contains("claude-agent-acp"));
+
+        let codex = known_acp_runtime_exact("codex").unwrap();
+        assert_eq!(
+            codex.cli_install_instructions_url,
+            "https://developers.openai.com/codex/cli/"
+        );
+        assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
     }
 }

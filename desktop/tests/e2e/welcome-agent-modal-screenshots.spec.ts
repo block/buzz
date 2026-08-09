@@ -151,24 +151,30 @@ test.describe("welcome and channel agent entry points", () => {
       .getByRole("menuitemradio", { exact: true, name: "Anthropic" })
       .click();
     await page.locator("#persona-model").click();
-    await page
-      .getByRole("button", { name: "Custom model...", exact: true })
-      .click();
+    const customModelOption = page.getByRole("button", {
+      name: "Custom model...",
+      exact: true,
+    });
+    await expect(customModelOption).toBeVisible();
+    await waitForAnimations(page);
+    await customModelOption.evaluate((button) =>
+      (button as HTMLButtonElement).click(),
+    );
     await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
     await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
     await page.getByTestId("persona-dialog-submit").click();
 
-    const createdDialog = page.getByRole("dialog");
-    await expect(
-      createdDialog.getByRole("heading", { name: "Agent created" }),
-    ).toBeVisible({ timeout: 10_000 });
-    await expect(createdDialog).toContainText(
-      "Scout was created, but couldn’t be added to #random.",
+    const createdToast = page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Agent created" });
+    await expect(createdToast).toBeVisible({ timeout: 10_000 });
+    await expect(createdToast).toContainText(
+      "Scout couldn’t be added to #random. Relay unavailable.",
     );
-    await expect(createdDialog).toContainText("Relay unavailable.");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await waitForAnimations(page);
-    await createdDialog.screenshot({
+    await createdToast.screenshot({
       path: `${SHOTS}/05-agent-channel-attachment-failed.png`,
     });
 
@@ -179,10 +185,19 @@ test.describe("welcome and channel agent entry points", () => {
     );
     const addCount = commandCount(commandsBeforeRetry, "add_channel_members");
 
-    await createdDialog.getByRole("button", { name: "Try again" }).click();
-    await expect(createdDialog).toContainText("Scout is ready and running.");
+    await createdToast.getByRole("button", { name: "Try again" }).click();
+    await expect
+      .poll(async () => {
+        const commands = await readCommandLog(page);
+        return commandCount(commands, "add_channel_members");
+      })
+      .toEqual(addCount + 1);
+    const attachedToast = page
+      .locator("[data-sonner-toast][data-removed='false']")
+      .filter({ hasText: "Added Scout to #random" });
+    await expect(attachedToast).toBeVisible();
     await expect(
-      createdDialog.getByRole("button", { name: "Try again" }),
+      attachedToast.getByRole("button", { name: "Try again" }),
     ).toHaveCount(0);
 
     const commandsAfterRetry = await readCommandLog(page);
@@ -192,11 +207,12 @@ test.describe("welcome and channel agent entry points", () => {
     expect(commandCount(commandsAfterRetry, "add_channel_members")).toEqual(
       addCount + 1,
     );
-    await createdDialog.getByRole("button", { name: "Done" }).click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
   });
 
-  test("only Fizz is already in the channel", async ({ page }) => {
+  test("the standing command team remains available when Fizz is in the channel", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       activePersonaIds: ["builtin:fizz"],
       managedAgents: [
@@ -210,10 +226,13 @@ test.describe("welcome and channel agent entry points", () => {
       ],
     });
     const dialog = await openAgentPicker(page);
-    await expect(dialog).toContainText(
+    await expect(dialog).toContainText("Chief of Staff");
+    await expect(dialog).toContainText("Maritime N2 Adviser");
+    await expect(dialog).toContainText("Logistics Adviser");
+    await expect(dialog).not.toContainText(
       "All of your agents are already in this channel.",
     );
-    await dialog.screenshot({ path: `${SHOTS}/02-only-fizz-in-channel.png` });
+    await dialog.screenshot({ path: `${SHOTS}/02-command-team-available.png` });
   });
 
   test("some personal agents are available", async ({ page }) => {
@@ -249,7 +268,9 @@ test.describe("welcome and channel agent entry points", () => {
     await dialog.screenshot({ path: `${SHOTS}/03-agents-available.png` });
   });
 
-  test("all personal agents are already in the channel", async ({ page }) => {
+  test("the standing command team remains available when personal agents are in the channel", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       activePersonaIds: ["builtin:fizz"],
       personas: [scoutPersona, editorPersona],
@@ -278,9 +299,14 @@ test.describe("welcome and channel agent entry points", () => {
       ],
     });
     const dialog = await openAgentPicker(page);
-    await expect(dialog).toContainText(
+    await expect(dialog).toContainText("Chief of Staff");
+    await expect(dialog).toContainText("Maritime N2 Adviser");
+    await expect(dialog).toContainText("Logistics Adviser");
+    await expect(dialog).not.toContainText(
       "All of your agents are already in this channel.",
     );
-    await dialog.screenshot({ path: `${SHOTS}/04-all-agents-in-channel.png` });
+    await dialog.screenshot({
+      path: `${SHOTS}/04-command-team-remains-available.png`,
+    });
   });
 });

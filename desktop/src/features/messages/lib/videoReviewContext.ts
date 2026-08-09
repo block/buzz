@@ -93,6 +93,33 @@ export function buildVideoReviewCommentsForRoot(
   return comments;
 }
 
+export function buildVideoReviewCommentRootIdsByMessageId(
+  messages: TimelineMessage[],
+): ReadonlyMap<string, string> {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const videoMessageIds = new Set(
+    messages.filter(hasVideoAttachment).map((message) => message.id),
+  );
+  const rootIdsByMessageId = new Map<string, string>();
+
+  for (const message of messages) {
+    if (videoMessageIds.has(message.id)) continue;
+
+    let ancestorId = message.parentId ?? null;
+    const visited = new Set<string>();
+    while (ancestorId && !visited.has(ancestorId)) {
+      if (videoMessageIds.has(ancestorId)) {
+        rootIdsByMessageId.set(message.id, ancestorId);
+        break;
+      }
+      visited.add(ancestorId);
+      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
+    }
+  }
+
+  return rootIdsByMessageId;
+}
+
 export function buildVideoReviewContextForMessage({
   channelId,
   channelName,
@@ -148,3 +175,63 @@ export function buildVideoReviewContextForMessage({
     rootEventId: message.id,
   };
 }
+
+export function buildVideoReviewContextsByMessageId({
+  channelId,
+  channelName,
+  channelType,
+  isSendingVideoReviewComment = false,
+  messages,
+  onSendVideoReviewComment,
+  onToggleReaction,
+  profiles,
+}: {
+  channelId?: string | null;
+  channelName?: string;
+  channelType?: ChannelType | null;
+  isSendingVideoReviewComment?: boolean;
+  messages: TimelineMessage[];
+  onSendVideoReviewComment?: SendVideoReviewComment;
+  onToggleReaction?: ToggleMessageReaction;
+  profiles?: UserProfileLookup;
+}): ReadonlyMap<string, VideoReviewContext> {
+  const contexts = new Map<string, VideoReviewContext>();
+  if (!messages.some(hasVideoAttachment)) {
+    return contexts;
+  }
+
+  const commentsByRootId = buildVideoReviewCommentsByRootId(messages);
+  for (const message of messages) {
+    const context = buildVideoReviewContextForMessage({
+      channelId,
+      channelName,
+      channelType,
+      comments: commentsByRootId.get(message.id) ?? [],
+      isSendingVideoReviewComment,
+      message,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+    });
+    if (context) {
+      contexts.set(message.id, context);
+    }
+  }
+
+  return contexts;
+}
+
+export function buildVideoReviewPresentationByMessageId(
+  args: Parameters<typeof buildVideoReviewContextsByMessageId>[0],
+) {
+  return {
+    commentRootIdsByMessageId: buildVideoReviewCommentRootIdsByMessageId(
+      args.messages,
+    ),
+    contextsByMessageId: buildVideoReviewContextsByMessageId(args),
+  };
+}
+
+export type VideoReviewPresentation = ReturnType<
+  typeof buildVideoReviewPresentationByMessageId
+>;

@@ -23,14 +23,42 @@ class ChannelWindowThreadSummary {
   });
 }
 
+/// A thread-summary snapshot received from the live channel subscription.
+///
+/// [createdAt] is the relay event timestamp used to reject delayed snapshots
+/// after a fresher recount has already been displayed. Recounts created in the
+/// same second retain their live delivery order, because relay timestamps have
+/// second precision.
+class ChannelWindowLiveThreadSummary {
+  final ChannelWindowThreadSummary summary;
+  final int createdAt;
+
+  const ChannelWindowLiveThreadSummary({
+    required this.summary,
+    required this.createdAt,
+  });
+}
+
 class ChannelWindowRow {
   final NostrEvent event;
   final ChannelWindowThreadSummary? thread;
+  final int? threadSummaryCreatedAt;
 
-  const ChannelWindowRow({required this.event, this.thread});
+  const ChannelWindowRow({
+    required this.event,
+    this.thread,
+    this.threadSummaryCreatedAt,
+  });
 
-  ChannelWindowRow copyWith({ChannelWindowThreadSummary? thread}) =>
-      ChannelWindowRow(event: event, thread: thread ?? this.thread);
+  ChannelWindowRow copyWith({
+    ChannelWindowThreadSummary? thread,
+    int? threadSummaryCreatedAt,
+  }) => ChannelWindowRow(
+    event: event,
+    thread: thread ?? this.thread,
+    threadSummaryCreatedAt:
+        threadSummaryCreatedAt ?? this.threadSummaryCreatedAt,
+  );
 }
 
 class ChannelWindowPage {
@@ -54,8 +82,16 @@ class ChannelWindowStore {
   final List<NostrEvent> liveOverlay;
   final List<NostrEvent> liveAux;
 
+  /// Thread summaries that arrived over the live socket, keyed by root event id.
+  ///
+  /// Kept beside the pages rather than folded into [ChannelWindowRow.thread]
+  /// because a root can be in [liveOverlay] instead — a message you just sent
+  /// has no row yet, and its reply count has to land somewhere.
+  final Map<String, ChannelWindowLiveThreadSummary> liveThreadSummaries;
+
   const ChannelWindowStore({
     required this.pages,
+    required this.liveThreadSummaries,
     required this.liveOverlay,
     required this.liveAux,
   });
@@ -63,7 +99,8 @@ class ChannelWindowStore {
   const ChannelWindowStore.empty()
     : pages = const [],
       liveOverlay = const [],
-      liveAux = const [];
+      liveAux = const [],
+      liveThreadSummaries = const {};
 }
 
 ChannelWindowPage parseChannelWindowResponse(
@@ -85,17 +122,9 @@ ChannelWindowPage parseChannelWindowResponse(
     final rootId = event.getTagValue('e');
     final rowIndex = rootId == null ? null : rowIndexesById[rootId];
     if (rowIndex == null) continue;
-    final payload = _parseJsonMap(event, 'thread summary');
-    final participants = payload['participants'];
     rows[rowIndex] = rows[rowIndex].copyWith(
-      thread: ChannelWindowThreadSummary(
-        replyCount: (payload['reply_count'] as num).toInt(),
-        descendantCount: (payload['descendant_count'] as num).toInt(),
-        lastReplyAt: (payload['last_reply_at'] as num?)?.toInt(),
-        participantPubkeys: participants is List
-            ? participants.whereType<String>().toList()
-            : const [],
-      ),
+      thread: parseChannelWindowThreadSummary(event),
+      threadSummaryCreatedAt: event.createdAt,
     );
   }
 
@@ -134,8 +163,9 @@ ChannelWindowPage parseChannelWindowResponse(
 
 ChannelWindowStore replaceNewestChannelWindow(
   ChannelWindowStore current,
-  ChannelWindowPage page,
-) {
+  ChannelWindowPage page, {
+  Set<String> retainLiveSummaryRootIds = const {},
+}) {
   if (page.startCursor != null) {
     throw Exception('Newest channel page must have a null start cursor.');
   }
@@ -150,7 +180,33 @@ ChannelWindowStore replaceNewestChannelWindow(
     liveAux: current.liveAux
         .where((event) => !auxIds.contains(event.id))
         .toList(),
+    // A summary received while the page query was in flight can describe a
+    // mutation after that query's snapshot. Retain just those summaries even
+    // when the relay timestamp matches the page overlay; subscription replay
+    // received before the query still compares timestamps normally.
+    liveThreadSummaries: _retainLiveSummariesAfterPage(
+      current,
+      page.rows,
+      retainLiveSummaryRootIds: retainLiveSummaryRootIds,
+    ),
   );
+}
+
+Map<String, ChannelWindowLiveThreadSummary> _retainLiveSummariesAfterPage(
+  ChannelWindowStore current,
+  List<ChannelWindowRow> rows, {
+  required Set<String> retainLiveSummaryRootIds,
+}) {
+  final rowsById = {for (final row in rows) row.event.id: row};
+  return {
+    for (final entry in current.liveThreadSummaries.entries)
+      if (retainLiveSummaryRootIds.contains(entry.key) ||
+          rowsById[entry.key] == null ||
+          rowsById[entry.key]!.thread == null ||
+          entry.value.createdAt >
+              (rowsById[entry.key]!.threadSummaryCreatedAt ?? -1))
+        entry.key: entry.value,
+  };
 }
 
 ChannelWindowStore appendOlderChannelWindow(
@@ -186,6 +242,29 @@ ChannelWindowStore appendOlderChannelWindow(
         .where((event) => !pageIds.contains(event.id))
         .toList(),
     liveAux: current.liveAux,
+    // A live recount can arrive while this older page is in flight. Keep it
+    // when it is fresher than the page's embedded snapshot, just as a newest
+    // page replacement does.
+    liveThreadSummaries: _retainLiveSummariesAfterPage(
+      current,
+      page.rows,
+      retainLiveSummaryRootIds: const {},
+    ),
+  );
+}
+
+/// Decode a kind-39005 thread summary. Same payload whether it came down as a
+/// channel-window page overlay or over the live socket — one contract, two doors.
+ChannelWindowThreadSummary parseChannelWindowThreadSummary(NostrEvent event) {
+  final payload = _parseJsonMap(event, 'thread summary');
+  final participants = payload['participants'];
+  return ChannelWindowThreadSummary(
+    replyCount: (payload['reply_count'] as num).toInt(),
+    descendantCount: (payload['descendant_count'] as num).toInt(),
+    lastReplyAt: (payload['last_reply_at'] as num?)?.toInt(),
+    participantPubkeys: participants is List
+        ? participants.whereType<String>().toList()
+        : const [],
   );
 }
 
@@ -194,6 +273,40 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   NostrEvent event, {
   required bool isTimelineRow,
 }) {
+  // A reply doesn't reach the main timeline itself — the root's "N replies" row
+  // comes from this summary event, which the relay re-emits on every reply. It
+  // has to be merged, not stored as an aux event: it is a replaceable snapshot
+  // keyed by root, not another row in the timeline.
+  if (event.kind == EventKind.channelThreadSummary) {
+    final rootId = event.getTagValue('e');
+    if (rootId == null) return current;
+    final ChannelWindowThreadSummary summary;
+    try {
+      summary = parseChannelWindowThreadSummary(event);
+    } catch (_) {
+      return current;
+    }
+    final existing = current.liveThreadSummaries[rootId];
+    // A newer timestamp wins. Equal timestamps are ordered by live delivery:
+    // two mutations can produce relay-signed recounts in the same second, and
+    // the later delivery is the authoritative snapshot for that root.
+    if (existing != null && existing.createdAt > event.createdAt) {
+      return current;
+    }
+    return ChannelWindowStore(
+      pages: current.pages,
+      liveOverlay: current.liveOverlay,
+      liveAux: current.liveAux,
+      liveThreadSummaries: {
+        ...current.liveThreadSummaries,
+        rootId: ChannelWindowLiveThreadSummary(
+          summary: summary,
+          createdAt: event.createdAt,
+        ),
+      },
+    );
+  }
+
   if (!isTimelineRow) {
     final alreadyKnown =
         current.liveAux.any((candidate) => candidate.id == event.id) ||
@@ -205,6 +318,7 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
       pages: current.pages,
       liveOverlay: current.liveOverlay,
       liveAux: [...current.liveAux, event],
+      liveThreadSummaries: current.liveThreadSummaries,
     );
   }
 
@@ -227,6 +341,7 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
     pages: current.pages,
     liveOverlay: overlay,
     liveAux: current.liveAux,
+    liveThreadSummaries: current.liveThreadSummaries,
   );
 }
 
@@ -263,6 +378,9 @@ Map<String, ChannelWindowThreadSummary> channelWindowThreadSummaries(
     for (final page in store.pages)
       for (final row in page.rows)
         if (row.thread != null) row.event.id: row.thread!,
+    // Live entries last: they are the newer snapshot for any root they cover.
+    for (final entry in store.liveThreadSummaries.entries)
+      entry.key: entry.value.summary,
   };
 }
 

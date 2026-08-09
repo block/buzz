@@ -5,10 +5,17 @@
 //! Provides [`StoredEvent`], filter matching, kind constants, and event
 //! verification. All other Buzz crates depend on this one.
 
+/// AgentMemory's CPython-compatible canonical JSON encoder.
+pub mod agent_memory_canonical;
 /// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
 pub mod agent_turn_metric;
+/// Battle Rhythm calendar source, event, and revision wire contracts.
+pub mod battle_rhythm;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+/// NIP-CB: encrypted owner-only Daily Command Brief lifecycle events.
+pub mod command_brief;
+mod command_brief_wire;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
@@ -20,6 +27,8 @@ pub mod event;
 pub mod filter;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
 pub mod git_perms;
+/// Shared invite-link contract constants.
+pub mod invite;
 /// Buzz kind number registry — custom event type constants.
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
@@ -28,14 +37,21 @@ pub mod network;
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
+/// Command Adviser planning contracts and deterministic schedule engine.
+pub mod planning;
 /// Presence status types shared across crates.
 pub mod presence;
+/// NIP-PMA owner-encrypted private managed-agent wire codec.
+pub mod private_managed_agent;
 /// Canonical relay runtime identities.
 pub mod relay;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+
+#[cfg(test)]
+mod command_brief_tests;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

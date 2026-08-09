@@ -84,51 +84,75 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     problems = parser.add_mutually_exclusive_group()
     problems.add_argument(
-        "--dataset", "-d", default=None,
+        "--dataset",
+        "-d",
+        default=None,
         help=f"Registry dataset (default: {DEFAULT_DATASET})",
     )
     problems.add_argument(
         "--path", "-p", type=Path, help="Local task or dataset directory"
     )
     parser.add_argument(
-        "--include-task", "-i", action="append", default=[],
+        "--include-task",
+        "-i",
+        action="append",
+        default=[],
         help="Task name to include (glob, repeatable)",
     )
     parser.add_argument(
-        "--exclude-task", "-x", action="append", default=[],
+        "--exclude-task",
+        "-x",
+        action="append",
+        default=[],
         help="Task name to exclude (glob, repeatable)",
     )
     parser.add_argument(
-        "--attempts", "-k", type=int, default=DEFAULT_ATTEMPTS,
+        "--attempts",
+        "-k",
+        type=int,
+        default=DEFAULT_ATTEMPTS,
         help=f"Runs per problem (default: {DEFAULT_ATTEMPTS}, the leaderboard requirement)",
     )
     parser.add_argument(
-        "--manifest", type=Path, default=DEFAULT_MANIFEST,
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST,
         help=f"Team manifest YAML (default: {DEFAULT_MANIFEST.name})",
     )
     parser.add_argument(
-        "--endpoint-config", type=Path, default=DEFAULT_ENDPOINTS,
+        "--endpoint-config",
+        type=Path,
+        default=DEFAULT_ENDPOINTS,
         help=f"Endpoint provider/API-key mapping (default: {DEFAULT_ENDPOINTS.name})",
     )
-    parser.add_argument("--n-concurrent", "-n", type=int, default=4, help="Concurrent trials")
+    parser.add_argument(
+        "--n-concurrent", "-n", type=int, default=4, help="Concurrent trials"
+    )
     parser.add_argument(
         "--jobs-dir", type=Path, default=PACKAGE_ROOT / "jobs", help="Job output root"
     )
-    parser.add_argument("--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)")
     parser.add_argument(
-        "--upload", action="store_true", help="Upload to Harbor Hub when the job finishes"
+        "--job-name", default=None, help="Job name (default: lb-<condition>-<UTC>)"
     )
     parser.add_argument(
-        "--gui", action="store_true",
+        "--upload",
+        action="store_true",
+        help="Upload to Harbor Hub when the job finishes",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
         help="Open the Buzz desktop app as the benchmark user to watch the run live",
     )
     parser.add_argument(
-        "--fresh", action="store_true",
+        "--fresh",
+        action="store_true",
         help="Reset first: drop the stack's Docker volumes and the benchmark "
-             "GUI's app state (keys in state.json are kept)",
+        "GUI's app state (keys in state.json are kept)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print the underlying harbor command and exit (no stack bring-up)",
     )
     return parser.parse_args(argv)
@@ -153,7 +177,6 @@ def load_state() -> dict[str, str]:
             "user_secret_key": user.secret_key,
             "postgres_password": secrets.token_urlsafe(24),
             "redis_password": secrets.token_urlsafe(24),
-            "typesense_api_key": secrets.token_hex(16),
             "s3_access_key": secrets.token_hex(10),
             "s3_secret_key": secrets.token_hex(20),
             "git_hook_hmac_secret": secrets.token_hex(32),
@@ -202,7 +225,6 @@ def write_env_file(state: dict[str, str]) -> Path:
         "POSTGRES_USER": "buzz",
         "POSTGRES_PASSWORD": state["postgres_password"],
         "REDIS_PASSWORD": state["redis_password"],
-        "TYPESENSE_API_KEY": state["typesense_api_key"],
         "BUZZ_S3_ACCESS_KEY": state["s3_access_key"],
         "BUZZ_S3_SECRET_KEY": state["s3_secret_key"],
         "BUZZ_S3_BUCKET": "buzz-media",
@@ -217,14 +239,11 @@ def write_env_file(state: dict[str, str]) -> Path:
 
 def postgres_dsn(state: dict[str, str]) -> str:
     return (
-        f"postgresql://buzz:{state['postgres_password']}"
-        f"@127.0.0.1:{PG_HOST_PORT}/buzz"
+        f"postgresql://buzz:{state['postgres_password']}@127.0.0.1:{PG_HOST_PORT}/buzz"
     )
 
 
-def write_provisioner_config(
-    state: dict[str, str], endpoint_config: Path
-) -> Path:
+def write_provisioner_config(state: dict[str, str], endpoint_config: Path) -> Path:
     """Resolve per-endpoint API keys from the environment and write the
     provisioner config: pinned user, keep-channels teardown."""
     endpoints = json.loads(endpoint_config.read_text())
@@ -262,10 +281,14 @@ def write_provisioner_config(
 
 def compose_command(*args: str) -> list[str]:
     command = [
-        "docker", "compose",
-        "--project-name", COMPOSE_PROJECT,
-        "--project-directory", str(STATE_DIR),
-        "--env-file", str(STATE_DIR / ".env"),
+        "docker",
+        "compose",
+        "--project-name",
+        COMPOSE_PROJECT,
+        "--project-directory",
+        str(STATE_DIR),
+        "--env-file",
+        str(STATE_DIR / ".env"),
     ]
     for file in COMPOSE_FILES:
         command += ["-f", str(file)]
@@ -360,7 +383,9 @@ def linux_triple() -> str:
     """The musl triple matching the Docker engine that runs task containers."""
     arch = subprocess.run(
         ["docker", "version", "--format", "{{.Server.Arch}}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     try:
         return {
@@ -385,22 +410,32 @@ def ensure_agent_binaries() -> Path:
     targets = AGENT_BINARIES + (FORWARDER_BINARY,)
     if all((bin_dir / name).is_file() for name in targets):
         return bin_dir
-    print(f"Linux agent binaries missing — cross-building for {triple} "
-          f"in {RUST_IMAGE} (first run only, ~2 min)...")
+    print(
+        f"Linux agent binaries missing — cross-building for {triple} "
+        f"in {RUST_IMAGE} (first run only, ~2 min)..."
+    )
     LINUX_TARGET_DIR.mkdir(parents=True, exist_ok=True)
     (STATE_DIR / "cargo-registry").mkdir(exist_ok=True)
     packages = [arg for name in AGENT_BINARIES for arg in ("-p", name)]
     forwarder_src = FORWARDER_SOURCE.relative_to(REPO_ROOT)
     subprocess.run(
         [
-            "docker", "run", "--rm",
-            "-v", f"{REPO_ROOT}:/src:ro",
-            "-v", f"{LINUX_TARGET_DIR}:/target",
-            "-v", f"{STATE_DIR / 'cargo-registry'}:/usr/local/cargo/registry",
-            "-e", "CARGO_TARGET_DIR=/target",
-            "-w", "/src",
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{REPO_ROOT}:/src:ro",
+            "-v",
+            f"{LINUX_TARGET_DIR}:/target",
+            "-v",
+            f"{STATE_DIR / 'cargo-registry'}:/usr/local/cargo/registry",
+            "-e",
+            "CARGO_TARGET_DIR=/target",
+            "-w",
+            "/src",
             RUST_IMAGE,
-            "sh", "-c",
+            "sh",
+            "-c",
             "apk add --no-cache musl-dev >/dev/null && "
             f"cargo build --release --locked --target {triple} "
             + " ".join(packages)
@@ -429,8 +464,13 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
     """
     subprocess.run(
         compose_command(
-            "exec", "-T", "relay",
-            "buzz-admin", "add-member", "--pubkey", state["user_pubkey"],
+            "exec",
+            "-T",
+            "relay",
+            "buzz-admin",
+            "add-member",
+            "--pubkey",
+            state["user_pubkey"],
         ),
         check=True,
     )
@@ -445,12 +485,20 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
         ["rustc", "-vV"], capture_output=True, text=True, check=True
     ).stdout
     triple = next(
-        line.split(": ", 1)[1] for line in target.splitlines() if line.startswith("host: ")
+        line.split(": ", 1)[1]
+        for line in target.splitlines()
+        if line.startswith("host: ")
     )
     sidecar_dir = desktop_dir / "src-tauri" / "binaries"
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     binaries = ensure_binaries()
-    for name in ("buzz-acp", "buzz-agent", "buzz-dev-mcp", "git-credential-nostr", "buzz"):
+    for name in (
+        "buzz-acp",
+        "buzz-agent",
+        "buzz-dev-mcp",
+        "git-credential-nostr",
+        "buzz",
+    ):
         stub = sidecar_dir / f"{name}-{triple}"
         if not stub.exists():
             stub.touch()
@@ -498,21 +546,30 @@ def leaderboard_argv(
     for pattern in args.exclude_task:
         argv += ["--exclude-task", pattern]
     argv += [
-        "--attempts", str(args.attempts),
-        "--manifest", str(args.manifest),
-        "--endpoint-config", str(args.endpoint_config),
-        "--provisioner-config", str(provisioner_config),
-        "--agent-bin-dir", str(agent_bin_dir),
+        "--attempts",
+        str(args.attempts),
+        "--manifest",
+        str(args.manifest),
+        "--endpoint-config",
+        str(args.endpoint_config),
+        "--provisioner-config",
+        str(provisioner_config),
+        "--agent-bin-dir",
+        str(agent_bin_dir),
         # The relay as reachable from inside a task container: Docker's
         # host alias, bridged to the canonical localhost address by the
         # uploaded forwarder. Override the alias with
         # BUZZ_BENCHMARK_DOCKER_HOST if your engine exposes the host
         # differently.
         "--relay-gateway",
-        f"{os.environ.get('BUZZ_BENCHMARK_DOCKER_HOST', 'host.docker.internal')}"
-        f":{RELAY_HTTP_PORT}",
-        "--n-concurrent", str(args.n_concurrent),
-        "--jobs-dir", str(args.jobs_dir),
+        (
+            f"{os.environ.get('BUZZ_BENCHMARK_DOCKER_HOST', 'host.docker.internal')}"
+            f":{RELAY_HTTP_PORT}"
+        ),
+        "--n-concurrent",
+        str(args.n_concurrent),
+        "--jobs-dir",
+        str(args.jobs_dir),
     ]
     if args.job_name:
         argv += ["--job-name", args.job_name]

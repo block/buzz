@@ -10,7 +10,7 @@ services:
       POSTGRES_DB: buzz
       PGDATA: /var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -34,7 +34,7 @@ services:
     image: redis:7-alpine
     container_name: buzz-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     networks:
       - buzz-net
     healthcheck:
@@ -56,7 +56,7 @@ services:
     image: adminer:latest
     container_name: buzz-adminer
     ports:
-      - "8082:8080"
+      - "127.0.0.1:8082:8080"
     networks:
       - buzz-net
     depends_on:
@@ -79,14 +79,21 @@ services:
     command: start-dev --http-port=8080
     environment:
       KC_DB: dev-mem
+      KC_HEALTH_ENABLED: "true"
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
     ports:
-      - "8180:8080"
+      - "127.0.0.1:8180:8080"
     networks:
       - buzz-net
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000",
+        ]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -108,8 +115,8 @@ services:
       MINIO_ROOT_USER: buzz_dev
       MINIO_ROOT_PASSWORD: buzz_dev_secret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
     networks:
@@ -148,11 +155,70 @@ services:
       com.buzz.env: "dev"
     restart: "no"
 
+  # Phase 3 Mac-local command Memory authority. This profile is deliberately
+  # opt-in: Buzz does not claim the companion AgentMemory image is built or
+  # deployed merely because the topology is present.
+  memory:
+    image: ${BUZZ_MEMORY_MCP_IMAGE:-memory-mcp:local}
+    pull_policy: never
+    profiles: ["command-memory"]
+    container_name: buzz-memory
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        export MEMORY_REPLICATION_TOKENS="$$(cat /run/secrets/memory-replication-tokens)"
+        export MEMORY_ATTESTATION_SECRET="$$(cat /run/secrets/memory-attestation-secret)"
+        exec memory-mcp
+    environment:
+      MEMORY_HOST: 0.0.0.0
+      MEMORY_PORT: "8006"
+      MEMORY_VAULT_ROOT: /data/current
+      MEMORY_INDEX_ROOT: /data/index
+      MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}
+      MEMORY_MCP_REQUIRE_AUTH: "true"
+      MEMORY_REPLICATION_MAX_ITEMS: "200"
+      MEMORY_REPLICATION_MAX_BYTES: "2097152"
+    ports:
+      - "127.0.0.1:${BUZZ_MEMORY_PORT:-18006}:8006"
+    volumes:
+      - memory-vault:/data
+      - memory-index:/data/index
+    secrets:
+      - memory-replication-tokens
+      - memory-attestation-secret
+    networks:
+      - buzz-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c 'import json,urllib.request; tokens=json.load(open(\"/run/secrets/memory-replication-tokens\", encoding=\"utf-8\")); t=next(k for k,v in tokens.items() if \"read\" in v); q=urllib.request.Request(\"http://127.0.0.1:8006/replication/readiness\", headers={\"Authorization\":\"Bearer \"+t,\"Accept\":\"application/json\"}); r=urllib.request.build_opener(urllib.request.ProxyHandler({})).open(q, timeout=3); v=json.load(r); assert v[\"status\"]==\"ready\" and v[\"node_id\"]==\"${BUZZ_MEMORY_NODE_ID:-node:macbook-command}\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    labels:
+      com.buzz.service: "memory"
+      com.buzz.env: "command-memory"
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: buzz-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -182,6 +248,16 @@ volumes:
     name: buzz-prometheus-data
     labels:
       com.buzz.volume: "prometheus"
+  memory-vault:
+    name: buzz-memory-vault
+    labels:
+      com.buzz.volume: "memory-vault"
+      com.buzz.backup: "canonical"
+  memory-index:
+    name: buzz-memory-index
+    labels:
+      com.buzz.volume: "memory-index"
+      com.buzz.backup: "rebuildable"
 
 networks:
   buzz-net:
@@ -189,3 +265,9 @@ networks:
     driver: bridge
     labels:
       com.buzz.network: "dev"
+
+secrets:
+  memory-replication-tokens:
+    file: ${BUZZ_MEMORY_REPLICATION_TOKENS_FILE:-.local/memory-replication-tokens.json}
+  memory-attestation-secret:
+    file: ${BUZZ_MEMORY_ATTESTATION_SECRET_FILE:-.local/memory-attestation-secret}

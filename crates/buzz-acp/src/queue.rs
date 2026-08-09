@@ -646,6 +646,11 @@ impl EventQueue {
         self.in_flight_channels.contains(&channel_id)
     }
 
+    /// Whether any channel currently has a turn in flight.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight_channels.is_empty()
+    }
+
     // ── Goose-native steer withhold (side table) ──────────────────────────
     //
     // While a goose-native `_goose/unstable/session/steer` write is in flight

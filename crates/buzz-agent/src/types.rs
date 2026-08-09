@@ -117,6 +117,36 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// Provider that executed a native LM Studio MCP tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutedToolProvider {
+    /// An ephemeral MCP server identified by its per-request label.
+    EphemeralMcp {
+        /// Label supplied in the native LM Studio integration.
+        server_label: String,
+    },
+    /// A preconfigured LM Studio MCP plugin.
+    Plugin {
+        /// Plugin identifier reported by LM Studio.
+        plugin_id: String,
+    },
+}
+
+/// Evidence of a tool call that LM Studio has already executed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutedToolCall {
+    /// Stable synthetic ACP call identifier.
+    pub provider_id: String,
+    /// Native tool name.
+    pub name: String,
+    /// Object-shaped arguments sent to the tool.
+    pub arguments: Value,
+    /// String result returned by the MCP integration.
+    pub output: String,
+    /// MCP provider that executed the tool.
+    pub provider: ExecutedToolProvider,
+}
+
 impl ToolResult {
     pub fn text(&self) -> String {
         self.content

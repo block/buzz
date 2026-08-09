@@ -7,9 +7,13 @@ export type AppView =
   | "channel"
   | "messages"
   | "agents"
+  | "console"
+  | "ship"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "plans"
+  | "projects"
+  | "battleRhythm";
 
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const TAURI_DRAG_REGION_ATTR = "data-tauri-drag-region";
@@ -86,6 +90,41 @@ export function shouldBounceForChannelNotification(tags: string[][]): boolean {
   return !isThreadReply(tags);
 }
 
+export function markAllReadSources({
+  activeChannelId,
+  channelActivityItems,
+  markAllChannelReadMarkers,
+  markActiveChannelRead,
+  undoUnreadFeedItem,
+  unreadFeedItemIds,
+}: {
+  activeChannelId: string | null;
+  channelActivityItems: ReadonlyArray<{
+    channelId: string | null;
+    createdAt: number;
+  }>;
+  markAllChannelReadMarkers: () => void;
+  markActiveChannelRead: (channelId: string, createdAt: number) => void;
+  undoUnreadFeedItem: (itemId: string) => void;
+  unreadFeedItemIds: ReadonlySet<string>;
+}) {
+  for (const itemId of unreadFeedItemIds) {
+    undoUnreadFeedItem(itemId);
+  }
+  markAllChannelReadMarkers();
+
+  if (!activeChannelId) return;
+
+  let latestActivityAt: number | null = null;
+  for (const item of channelActivityItems) {
+    if (item.channelId !== activeChannelId) continue;
+    latestActivityAt = Math.max(latestActivityAt ?? 0, item.createdAt);
+  }
+  if (latestActivityAt !== null) {
+    markActiveChannelRead(activeChannelId, latestActivityAt);
+  }
+}
+
 export function toSearchHit(
   target: DesktopNotificationTarget,
 ): SearchHit | null {
@@ -130,6 +169,25 @@ export function deriveShellRoute(pathname: string): {
       selectedChannelId: null,
       selectedView: "agents",
     };
+  }
+
+  if (pathname === "/console") {
+    return {
+      selectedChannelId: null,
+      selectedView: "console",
+    };
+  }
+  if (pathname === "/ship") {
+    return {
+      selectedChannelId: null,
+      selectedView: "ship",
+    };
+  }
+  if (pathname === "/battle-rhythm") {
+    return { selectedChannelId: null, selectedView: "battleRhythm" };
+  }
+  if (pathname === "/plans" || pathname.startsWith("/plans/")) {
+    return { selectedChannelId: null, selectedView: "plans" };
   }
 
   if (pathname === "/workflows" || pathname.startsWith("/workflows/")) {

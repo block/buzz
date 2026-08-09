@@ -5,8 +5,8 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   MessageSquare,
+  TriangleAlert,
   UserPlus,
-  X,
 } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -73,10 +73,11 @@ export const PROJECT_EVENT_VISUALS: Record<
       "border-green-600/30 text-green-700 dark:border-green-500/30 dark:text-green-400",
   },
   "changes-requested": {
-    icon: X,
-    iconClassName: "text-destructive",
-    badgeClassName: "bg-destructive/10 text-destructive",
-    detailClassName: "border-destructive/40 text-destructive",
+    icon: TriangleAlert,
+    iconClassName: "text-amber-600 dark:text-amber-400",
+    badgeClassName:
+      "bg-amber-500/10 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+    detailClassName: "border-amber-500/40 text-amber-700 dark:text-amber-400",
   },
   "review-request": {
     icon: UserPlus,

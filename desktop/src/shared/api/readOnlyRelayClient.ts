@@ -12,7 +12,7 @@ import {
   AUTH_TIMEOUT_MS,
   HISTORY_TIMEOUT_MS,
   PUBLISH_TIMEOUT_MS,
-} from "@/shared/api/relayClientSession";
+} from "@/shared/api/relayClientTimings";
 
 type PendingHistory = {
   events: RelayEvent[];

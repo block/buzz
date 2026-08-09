@@ -5,21 +5,31 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
+use crate::config::{
+    Config, Provider, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
 use crate::handoff::HandoffOutcome;
 use crate::hints::SkillEntry;
-use crate::llm::Llm;
+use crate::llm::{Llm, LmStudioNativeClient};
+use crate::lmstudio::{LmStudioChatRequest, LmStudioOutput};
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent,
+    clamp, AgentError, ContentBlock, ExecutedToolCall, ExecutedToolProvider, HistoryItem,
+    ProviderStop, StopReason, ToolCall, ToolResult, ToolResultContent,
 };
 use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+/// Native evidence text is serialized into a single ACP JSON line. JSON can
+/// expand one input byte to six bytes (`\u00xx`), so 512 KiB leaves at least
+/// 960 KiB for the fixed envelope and bounded metadata below the 4 MiB line
+/// budget even in the worst case. This outbound boundary is intentionally
+/// independent of the larger generic MCP history/result setting.
+const MAX_NATIVE_ACP_EVIDENCE_TEXT_BYTES: usize = 512 * 1024;
 
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
@@ -29,6 +39,8 @@ pub struct RunCtx<'a> {
     pub session_id: &'a str,
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
+    /// Dedicated stateful native transport, present only for LM Studio sessions.
+    pub native_llm: Option<&'a Arc<LmStudioNativeClient>>,
     pub mcp: &'a Arc<McpRegistry>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
@@ -60,10 +72,17 @@ pub struct RunCtx<'a> {
     /// Accumulated output tokens across all LLM rounds in this turn, for
     /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
     pub turn_output_tokens: &'a mut Option<u64>,
+    /// Private native response state for this ACP session.
+    pub native_response_id: &'a mut Option<String>,
+    /// Per-session request sequence used for stable native evidence identifiers.
+    pub native_request_sequence: &'a mut u64,
 }
 
 impl RunCtx<'_> {
     pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
+        if self.cfg.provider == Provider::LmStudioNative {
+            return self.run_native(prompt).await;
+        }
         let user_text = prompt_to_text(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
             return Err(AgentError::InvalidParams(format!(
@@ -73,7 +92,13 @@ impl RunCtx<'_> {
         if self.original_task.is_none() {
             *self.original_task = Some(user_text.clone());
         }
+        let n2_destination = n2_publish_destination(&user_text);
         self.history.push(HistoryItem::User(user_text));
+
+        let (n2_evidence_prefetched, prefetch_stop) = self.prefetch_n2_evidence().await;
+        if let Some(stop) = prefetch_stop {
+            return Ok(stop);
+        }
 
         // Reset per-turn token accumulators for this prompt.
         *self.turn_input_tokens = None;
@@ -84,6 +109,7 @@ impl RunCtx<'_> {
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
+        let mut n2_empty_retry_used = false;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -205,10 +231,62 @@ impl RunCtx<'_> {
             }
 
             if response.tool_calls.is_empty() {
+                if n2_evidence_prefetched {
+                    tracing::info!(
+                        stop = ?response.stop,
+                        text_bytes = response.text.len(),
+                        reasoning_bytes = response.reasoning.len(),
+                        "Maritime N2 model round completed after evidence prefetch"
+                    );
+                }
                 if response.stop == ProviderStop::ToolUse {
                     return Err(AgentError::Llm(
                         "provider: stop=tool_use but zero tool_calls".into(),
                     ));
+                }
+                if should_retry_empty_n2_response(
+                    n2_evidence_prefetched,
+                    n2_empty_retry_used,
+                    response.stop,
+                    &response.text,
+                ) {
+                    tracing::warn!(
+                        "Maritime N2 model returned no answer after evidence prefetch; retrying once"
+                    );
+                    self.history.push(HistoryItem::Assistant {
+                        text: response.text,
+                        tool_calls: Vec::new(),
+                    });
+                    self.history.push(HistoryItem::User(
+                        "The World Monitor evidence fetch has completed. Answer the original \
+                         question now with a substantive intelligence assessment. State key \
+                         developments, uncertainties, and implications; do not reply with a \
+                         pickup acknowledgement or a promise to investigate later."
+                            .to_string(),
+                    ));
+                    n2_empty_retry_used = true;
+                    continue;
+                }
+                if should_auto_publish_n2_response(
+                    n2_evidence_prefetched,
+                    response.tool_calls.is_empty(),
+                    &response.text,
+                ) && matches!(response.stop, ProviderStop::EndTurn | ProviderStop::Other)
+                {
+                    let destination = n2_destination.as_ref().ok_or_else(|| {
+                        AgentError::InvalidParams(
+                            "Maritime N2 response cannot be published because the current Buzz \
+                             channel is missing from the prompt context"
+                                .into(),
+                        )
+                    })?;
+                    if let Some(stop) = self
+                        .publish_n2_response(destination, &response.text)
+                        .await?
+                    {
+                        return Ok(stop);
+                    }
+                    return Ok(map_stop(response.stop));
                 }
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
@@ -254,6 +332,173 @@ impl RunCtx<'_> {
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
             }
+        }
+    }
+
+    async fn run_native(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
+        let user_text = prompt_to_text(prompt)?;
+        if user_text.len() > MAX_PROMPT_BYTES {
+            return Err(AgentError::InvalidParams(format!(
+                "prompt: exceeds {MAX_PROMPT_BYTES} bytes"
+            )));
+        }
+        *self.turn_input_tokens = None;
+        *self.turn_output_tokens = None;
+        let client = self.native_llm.ok_or_else(|| {
+            AgentError::InvalidParams(
+                "LM Studio native runtime is missing its dedicated client".into(),
+            )
+        })?;
+        let runtime = self.cfg.lmstudio_runtime.as_ref().ok_or_else(|| {
+            AgentError::InvalidParams(
+                "LM Studio native runtime is missing validated egress policy".into(),
+            )
+        })?;
+        let mut request = LmStudioChatRequest::new(
+            self.effective_model,
+            user_text.as_str(),
+            self.system_prompt,
+            runtime.wire_integrations(),
+            self.cfg.lmstudio_reasoning,
+            self.cfg.max_output_tokens,
+            self.cfg.max_context_tokens,
+        )?;
+        if let Some(previous_response_id) = self.native_response_id.as_deref() {
+            request = request.continue_from(previous_response_id)?;
+        }
+        let history_start = self.history.len();
+        let original_task_was_empty = self.original_task.is_none();
+        if original_task_was_empty {
+            *self.original_task = Some(user_text.clone());
+        }
+        self.history.push(HistoryItem::User(user_text));
+        if *self.cancel.borrow() {
+            self.rollback_native_prompt(history_start, original_task_was_empty);
+            return Ok(StopReason::Cancelled);
+        }
+        if self.native_response_id.is_some() && self.should_handoff() {
+            self.rollback_native_prompt(history_start, original_task_was_empty);
+            return Err(AgentError::InvalidParams(
+                "LM Studio native context handoff is unavailable; start a new ACP session".into(),
+            ));
+        }
+
+        let request_sequence = self.native_request_sequence.saturating_add(1);
+        *self.native_request_sequence = request_sequence;
+        let request_identity = format!("{}:{request_sequence}", self.session_id);
+        let response_result = tokio::select! {
+            biased;
+            _ = self.cancel.changed() => Err(AgentError::Cancelled),
+            result = async {
+                if request.previous_response_id().is_some() {
+                    client.continue_chat(&request, &request_identity).await
+                } else {
+                    client.chat(&request, &request_identity).await
+                }
+            } => result,
+            _ = async {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({ "sessionUpdate": "keepalive" }),
+                        ),
+                    )
+                    .await;
+                }
+            } => unreachable!(),
+        };
+        let response = match response_result {
+            Ok(response) => response,
+            Err(AgentError::Cancelled) => {
+                self.rollback_native_prompt(history_start, original_task_was_empty);
+                return Ok(StopReason::Cancelled);
+            }
+            Err(error) => {
+                self.rollback_native_prompt(history_start, original_task_was_empty);
+                return Err(error);
+            }
+        };
+
+        *self.native_response_id = Some(response.response_id.clone());
+        *self.last_request_input_tokens = Some(response.stats.input_tokens);
+        *self.last_request_history_bytes = Some(
+            self.history
+                .iter()
+                .map(HistoryItem::context_pressure_bytes)
+                .sum(),
+        );
+        *self.turn_input_tokens = Some(response.stats.input_tokens);
+        *self.turn_output_tokens = Some(response.stats.total_output_tokens);
+
+        let mut assistant_text = Vec::new();
+        for (output_index, output) in response.output.into_iter().enumerate() {
+            let message_id = format!(
+                "lmstudio_{}_{}",
+                request_identity.replace(':', "_"),
+                output_index
+            );
+            match output {
+                LmStudioOutput::Reasoning { content } => {
+                    let content = clamp(content, MAX_PROMPT_BYTES);
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({
+                                "sessionUpdate": "agent_thought_chunk",
+                                "messageId": message_id,
+                                "content": { "type": "text", "text": content }
+                            }),
+                        ),
+                    )
+                    .await;
+                }
+                LmStudioOutput::Message { content } => {
+                    let content = clamp(content, MAX_PROMPT_BYTES);
+                    assistant_text.push(content.clone());
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({
+                                "sessionUpdate": "agent_message_chunk",
+                                "messageId": message_id,
+                                "content": { "type": "text", "text": content }
+                            }),
+                        ),
+                    )
+                    .await;
+                }
+                LmStudioOutput::ToolCall(call) => {
+                    emit_native_completed(
+                        self.wire,
+                        self.session_id,
+                        &call,
+                        &response.model_instance_id,
+                        self.cfg
+                            .max_tool_result_text_bytes
+                            .min(MAX_NATIVE_ACP_EVIDENCE_TEXT_BYTES),
+                    )
+                    .await;
+                }
+            }
+        }
+        self.history.push(HistoryItem::Assistant {
+            text: assistant_text.join("\n"),
+            tool_calls: Vec::new(),
+        });
+        Ok(StopReason::EndTurn)
+    }
+
+    fn rollback_native_prompt(&mut self, history_start: usize, original_task_was_empty: bool) {
+        self.history.truncate(history_start);
+        if original_task_was_empty {
+            *self.original_task = None;
         }
     }
 
@@ -365,6 +610,142 @@ impl RunCtx<'_> {
             }
             self.history.push(HistoryItem::ToolResult(result));
         }
+    }
+
+    async fn prefetch_n2_evidence(&mut self) -> (bool, Option<StopReason>) {
+        let Some(user_text) = self.history.iter().rev().find_map(|item| match item {
+            HistoryItem::User(text) => Some(text.as_str()),
+            _ => None,
+        }) else {
+            return (false, None);
+        };
+        let persona_id = std::env::var("COMMAND_ADVISER_PERSONA_ID").ok();
+        let requested = n2_prefetches_for(persona_id.as_deref(), user_text);
+        if requested.is_empty() {
+            return (false, None);
+        }
+        let available = self.mcp.tools();
+        let mut calls = Vec::with_capacity(requested.len());
+        for (bare_name, arguments) in &requested {
+            let Some(qualified_name) = available
+                .iter()
+                .find(|tool| {
+                    tool.name
+                        .rsplit_once("__")
+                        .is_some_and(|(_, bare)| bare == *bare_name)
+                })
+                .map(|tool| tool.name.clone())
+            else {
+                tracing::warn!(tool = bare_name, "Maritime N2 evidence tool is unavailable");
+                continue;
+            };
+            calls.push(ToolCall {
+                provider_id: format!("buzz_n2_prefetch_{}", unique_nonce()),
+                name: qualified_name,
+                arguments: arguments.clone(),
+            });
+        }
+        if calls.is_empty() {
+            return (false, None);
+        }
+        let call_ids = calls
+            .iter()
+            .map(|call| call.provider_id.clone())
+            .collect::<Vec<_>>();
+        tracing::info!(
+            calls = calls.len(),
+            requested = requested.len(),
+            "prefetching Maritime N2 evidence and doctrine"
+        );
+        self.history.push(HistoryItem::Assistant {
+            text: String::new(),
+            tool_calls: calls.clone(),
+        });
+        let stop = self.execute_calls(&calls).await;
+        if stop.is_none() {
+            let succeeded = self
+                .history
+                .iter()
+                .filter_map(|item| match item {
+                    HistoryItem::ToolResult(result)
+                        if call_ids.contains(&result.provider_id) && !result.is_error =>
+                    {
+                        Some(())
+                    }
+                    _ => None,
+                })
+                .count();
+            self.history
+                .push(HistoryItem::User(n2_prefetch_status_instruction(
+                    succeeded,
+                    requested.len(),
+                )));
+            tracing::info!(
+                succeeded,
+                requested = requested.len(),
+                "Maritime N2 evidence prefetch completed"
+            );
+        }
+        (true, stop)
+    }
+
+    async fn publish_n2_response(
+        &mut self,
+        destination: &N2PublishDestination,
+        assessment: &str,
+    ) -> Result<Option<StopReason>, AgentError> {
+        let qualified_name = self
+            .mcp
+            .tools()
+            .into_iter()
+            .find(|tool| {
+                tool.name
+                    .rsplit_once("__")
+                    .is_some_and(|(_, bare)| bare == "shell")
+            })
+            .map(|tool| tool.name)
+            .ok_or_else(|| {
+                AgentError::Mcp(
+                    "Maritime N2 response cannot be published because the Buzz shell tool is \
+                     unavailable"
+                        .into(),
+                )
+            })?;
+        let call = ToolCall {
+            provider_id: format!("buzz_n2_publish_{}", unique_nonce()),
+            name: qualified_name,
+            arguments: n2_publish_shell_arguments(destination, assessment),
+        };
+        self.history.push(HistoryItem::Assistant {
+            text: assessment.to_string(),
+            tool_calls: vec![call.clone()],
+        });
+        if let Some(stop) = self.execute_calls(std::slice::from_ref(&call)).await {
+            return Ok(Some(stop));
+        }
+        let result = self
+            .history
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                HistoryItem::ToolResult(result) if result.provider_id == call.provider_id => {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AgentError::Mcp("Maritime N2 Buzz publication returned no tool result".into())
+            })?;
+        validate_n2_publish_result(result.is_error, &result.text()).map_err(|message| {
+            AgentError::Mcp(format!("Maritime N2 publication failed: {message}"))
+        })?;
+        tracing::info!(
+            channel = destination.channel_id,
+            threaded = destination.reply_to.is_some(),
+            text_bytes = assessment.len(),
+            "published Maritime N2 assessment to Buzz"
+        );
+        Ok(None)
     }
 
     async fn execute_parallel(
@@ -599,6 +980,80 @@ async fn emit_completed(wire: &WireSender, sid: &str, call: &ToolCall, result: &
     .await;
 }
 
+async fn emit_native_completed(
+    wire: &WireSender,
+    sid: &str,
+    call: &ExecutedToolCall,
+    model_instance_id: &str,
+    evidence_text_limit: usize,
+) {
+    let provider = match &call.provider {
+        ExecutedToolProvider::EphemeralMcp { server_label } => {
+            json!({ "type": "ephemeral_mcp", "serverLabel": server_label })
+        }
+        ExecutedToolProvider::Plugin { plugin_id } => {
+            json!({ "type": "plugin", "pluginId": plugin_id })
+        }
+    };
+    let bounded_arguments = bounded_native_arguments(&call.arguments, evidence_text_limit);
+    let bounded_output = clamp(call.output.clone(), evidence_text_limit);
+    wire::send(
+        wire,
+        wire::session_update(
+            sid,
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": call.provider_id,
+                "title": call.name,
+                "kind": "other",
+                "status": "pending",
+                "rawInput": bounded_arguments,
+                "rawOutput": {
+                    "executedByProvider": true,
+                    "provider": provider.clone(),
+                    "modelInstanceId": model_instance_id,
+                },
+            }),
+        ),
+    )
+    .await;
+    wire::send(
+        wire,
+        wire::session_update(
+            sid,
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call.provider_id,
+                "status": "completed",
+                "content": [{
+                    "type": "content",
+                    "content": { "type": "text", "text": bounded_output }
+                }],
+                "rawOutput": {
+                    "isError": false,
+                    "executedByProvider": true,
+                    "provider": provider,
+                    "modelInstanceId": model_instance_id,
+                    "tool": call.name,
+                },
+            }),
+        ),
+    )
+    .await;
+}
+
+fn bounded_native_arguments(arguments: &serde_json::Value, limit: usize) -> serde_json::Value {
+    let serialized = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+    if serialized.len() <= limit {
+        return arguments.clone();
+    }
+    let preview_limit = limit.saturating_sub(128);
+    json!({
+        "_buzzTruncated": true,
+        "preview": clamp(serialized, preview_limit),
+    })
+}
+
 async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {
     wire::send(
         wire,
@@ -629,6 +1084,178 @@ fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
         }
     }
     Ok(parts.join("\n"))
+}
+
+fn n2_prefetches_for(
+    persona_id: Option<&str>,
+    user_text: &str,
+) -> Vec<(&'static str, serde_json::Value)> {
+    if persona_id != Some("builtin:command-intelligence") {
+        return Vec::new();
+    }
+    if user_text.to_ascii_lowercase().contains("south china sea") {
+        return vec![
+            (
+                "world_monitor_military_posture",
+                json!({"country_code":"PH","limit":25}),
+            ),
+            (
+                "world_monitor_maritime_activity",
+                json!({"country_code":"PH","limit":25}),
+            ),
+            (
+                "search_command_doctrine",
+                json!({
+                    "query":"maritime intelligence assessment, operational planning, logistics support and risk",
+                    "top_k":5
+                }),
+            ),
+        ];
+    }
+    vec![
+        (
+            "world_monitor_news_intelligence",
+            json!({"topic":"intelligence","limit":25,"days":7}),
+        ),
+        (
+            "search_command_doctrine",
+            json!({
+                "query":"intelligence assessment, operational planning, logistics support and risk",
+                "top_k":5
+            }),
+        ),
+    ]
+}
+
+fn n2_prefetch_status_instruction(succeeded: usize, requested: usize) -> String {
+    if succeeded == requested {
+        return format!(
+            "All {requested} current-run evidence calls succeeded. Use the immediately preceding \
+             World Monitor and doctrine tool results as the evidence for this answer; disregard \
+             earlier conversation messages that reported tool or connection failures; they \
+             describe older runs. Use the successful evidence to answer now; distinguish reported \
+             information from assessment, and state any gaps in what the successful evidence \
+             actually supports."
+        );
+    }
+    if succeeded == 0 {
+        return format!(
+            "All {requested} current-run evidence calls failed; disregard earlier promises to \
+             investigate later and continue with other available information. Identify the current \
+             source failure briefly, and answer the user's current question as far as the \
+             available evidence permits."
+        );
+    }
+    format!(
+        "{succeeded} of {requested} current-run evidence calls succeeded; use the successful \
+         results, disregard earlier conversation messages that report a different connection \
+         state, identify only the evidence that is currently missing, and answer the user's \
+         current question now."
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct N2PublishDestination {
+    channel_id: String,
+    reply_to: Option<String>,
+}
+
+fn n2_publish_destination(prompt: &str) -> Option<N2PublishDestination> {
+    let context = prompt
+        .split_once("[Context]\n")?
+        .1
+        .split("\n[")
+        .next()
+        .unwrap_or("");
+    let channel_line = context
+        .lines()
+        .find(|line| line.trim_start().starts_with("Channel:"))?;
+    let channel_id = channel_line
+        .split(|character: char| !character.is_ascii_hexdigit() && character != '-')
+        .find(|candidate| candidate.len() == 36 && uuid::Uuid::parse_str(candidate).is_ok())?
+        .to_ascii_lowercase();
+    let reply_to = context.rfind("--reply-to ").and_then(|index| {
+        let candidate = context[index + "--reply-to ".len()..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect::<String>();
+        (candidate.len() == 64).then(|| candidate.to_ascii_lowercase())
+    });
+    Some(N2PublishDestination {
+        channel_id,
+        reply_to,
+    })
+}
+
+fn n2_publish_shell_arguments(
+    destination: &N2PublishDestination,
+    assessment: &str,
+) -> serde_json::Value {
+    let encoded = hex::encode(assessment.as_bytes());
+    let reply = destination
+        .reply_to
+        .as_ref()
+        .map(|event_id| format!(" --reply-to '{event_id}'"))
+        .unwrap_or_default();
+    json!({
+        "command": format!(
+            "printf '%s' '{encoded}' | xxd -r -p | buzz messages send --channel '{}' --content -{reply}",
+            destination.channel_id
+        ),
+        "timeout_ms": 120_000,
+    })
+}
+
+fn should_auto_publish_n2_response(
+    evidence_prefetched: bool,
+    no_model_tool_calls: bool,
+    text: &str,
+) -> bool {
+    evidence_prefetched && no_model_tool_calls && !text.trim().is_empty()
+}
+
+fn validate_n2_publish_result(is_error: bool, result_text: &str) -> Result<(), String> {
+    if is_error {
+        return Err("Buzz shell tool reported an error".into());
+    }
+    let shell_result: serde_json::Value = serde_json::from_str(result_text)
+        .map_err(|_| "Buzz shell tool returned malformed output".to_string())?;
+    if shell_result
+        .get("exit_code")
+        .and_then(|value| value.as_i64())
+        != Some(0)
+    {
+        return Err("Buzz message command returned a non-zero exit status".into());
+    }
+    let stdout = shell_result
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Buzz message command returned no output".to_string())?;
+    let write_result = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .ok_or_else(|| "Buzz message command returned an unreadable relay response".to_string())?;
+    if write_result
+        .get("accepted")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return Err("Buzz relay did not accept the N2 assessment".into());
+    }
+    Ok(())
+}
+
+fn should_retry_empty_n2_response(
+    evidence_prefetched: bool,
+    retry_used: bool,
+    stop: ProviderStop,
+    text: &str,
+) -> bool {
+    evidence_prefetched
+        && !retry_used
+        && matches!(stop, ProviderStop::EndTurn | ProviderStop::Other)
+        && text.trim().is_empty()
 }
 
 /// Format a single hook output as a structured tool-result body.
@@ -742,5 +1369,206 @@ fn map_stop(p: ProviderStop) -> StopReason {
         ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
         ProviderStop::MaxTokens => StopReason::MaxTokens,
         ProviderStop::Refusal => StopReason::Refusal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        n2_prefetch_status_instruction, n2_prefetches_for, n2_publish_destination,
+        n2_publish_shell_arguments, should_auto_publish_n2_response,
+        should_retry_empty_n2_response, validate_n2_publish_result,
+    };
+    use crate::types::ProviderStop;
+    use serde_json::json;
+
+    #[test]
+    fn n2_prefetches_current_regional_evidence_and_doctrine_before_the_model_round() {
+        assert_eq!(
+            n2_prefetches_for(
+                Some("builtin:command-intelligence"),
+                "What is happening in the South China Sea today?"
+            ),
+            vec![
+                (
+                    "world_monitor_military_posture",
+                    json!({"country_code":"PH","limit":25})
+                ),
+                (
+                    "world_monitor_maritime_activity",
+                    json!({"country_code":"PH","limit":25})
+                ),
+                (
+                    "search_command_doctrine",
+                    json!({
+                        "query":"maritime intelligence assessment, operational planning, logistics support and risk",
+                        "top_k":5
+                    })
+                ),
+            ]
+        );
+        assert_eq!(
+            n2_prefetches_for(
+                Some("builtin:command-intelligence"),
+                "Give me a current regional intelligence update."
+            ),
+            vec![
+                (
+                    "world_monitor_news_intelligence",
+                    json!({"topic":"intelligence","limit":25,"days":7})
+                ),
+                (
+                    "search_command_doctrine",
+                    json!({
+                        "query":"intelligence assessment, operational planning, logistics support and risk",
+                        "top_k":5
+                    })
+                ),
+            ]
+        );
+        assert_eq!(
+            n2_prefetches_for(
+                Some("builtin:command-operations"),
+                "What is happening in the South China Sea today?"
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn n2_current_run_status_overrides_stale_failure_messages_in_dm_history() {
+        let succeeded = n2_prefetch_status_instruction(3, 3);
+        assert!(succeeded.contains("current-run evidence calls succeeded"));
+        assert!(succeeded.contains("disregard earlier conversation messages"));
+        assert!(succeeded.contains("answer now"));
+
+        let partial = n2_prefetch_status_instruction(2, 3);
+        assert!(partial.contains("2 of 3"));
+        assert!(partial.contains("use the successful results"));
+
+        let failed = n2_prefetch_status_instruction(0, 3);
+        assert!(failed.contains("current-run evidence calls failed"));
+        assert!(failed.contains("continue with other available information"));
+    }
+
+    #[test]
+    fn n2_retries_one_empty_end_turn_after_evidence_prefetch() {
+        assert!(should_retry_empty_n2_response(
+            true,
+            false,
+            ProviderStop::EndTurn,
+            "  "
+        ));
+        assert!(should_retry_empty_n2_response(
+            true,
+            false,
+            ProviderStop::Other,
+            ""
+        ));
+        assert!(!should_retry_empty_n2_response(
+            true,
+            true,
+            ProviderStop::EndTurn,
+            ""
+        ));
+        assert!(!should_retry_empty_n2_response(
+            false,
+            false,
+            ProviderStop::EndTurn,
+            ""
+        ));
+        assert!(!should_retry_empty_n2_response(
+            true,
+            false,
+            ProviderStop::Refusal,
+            ""
+        ));
+        assert!(!should_retry_empty_n2_response(
+            true,
+            false,
+            ProviderStop::EndTurn,
+            "Assessment"
+        ));
+    }
+
+    #[test]
+    fn n2_extracts_the_current_buzz_dm_destination_from_context() {
+        let destination = n2_publish_destination(
+            "[Context]\n\
+             Scope: dm\n\
+             Channel: Maritime N2 (#ea5388d5-9e15-4858-a0ae-45e4f43472f6)\n\
+             Thread root: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+             IMPORTANT: For ordinary replies in this turn, use `--reply-to \
+             bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb` on \
+             `buzz messages send`.\n\
+             [Buzz event: current]",
+        )
+        .expect("current destination");
+
+        assert_eq!(
+            destination.channel_id,
+            "ea5388d5-9e15-4858-a0ae-45e4f43472f6"
+        );
+        assert_eq!(
+            destination.reply_to.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn n2_builds_a_shell_publish_call_without_interpolating_assessment_text() {
+        let destination = n2_publish_destination(
+            "[Context]\n\
+             Scope: dm\n\
+             Channel: ea5388d5-9e15-4858-a0ae-45e4f43472f6\n\
+             Conversation context included below.\n\
+             [Buzz event: current]",
+        )
+        .expect("current destination");
+        let assessment = "Current picture: `$HOME`; $(touch /tmp/never-run).\n\nLogistics: fuel.";
+
+        let arguments = n2_publish_shell_arguments(&destination, assessment);
+        let command = arguments["command"].as_str().expect("command");
+
+        assert_eq!(arguments["timeout_ms"], 120_000);
+        assert!(command.contains(
+            "buzz messages send --channel 'ea5388d5-9e15-4858-a0ae-45e4f43472f6' --content -"
+        ));
+        assert!(!command.contains(assessment));
+        assert!(!command.contains("$HOME"));
+        assert!(!command.contains("touch /tmp/never-run"));
+        assert!(command.contains(&hex::encode(assessment.as_bytes())));
+        assert!(!command.contains("--reply-to"));
+    }
+
+    #[test]
+    fn n2_auto_publishes_only_a_substantive_plain_response_after_prefetch() {
+        assert!(should_auto_publish_n2_response(true, true, "Assessment"));
+        assert!(!should_auto_publish_n2_response(false, true, "Assessment"));
+        assert!(!should_auto_publish_n2_response(true, false, "Assessment"));
+        assert!(!should_auto_publish_n2_response(true, true, "  "));
+    }
+
+    #[test]
+    fn n2_requires_a_successful_accepted_buzz_write() {
+        let accepted = json!({
+            "exit_code": 0,
+            "stdout": "{\"event_id\":\"abc\",\"accepted\":true,\"message\":\"ok\"}\n",
+            "stderr": "",
+        })
+        .to_string();
+        assert!(validate_n2_publish_result(false, &accepted).is_ok());
+
+        let rejected = json!({
+            "exit_code": 0,
+            "stdout": "{\"event_id\":\"abc\",\"accepted\":false,\"message\":\"rejected\"}\n",
+            "stderr": "",
+        })
+        .to_string();
+        assert!(validate_n2_publish_result(false, &rejected).is_err());
+
+        let failed = json!({"exit_code": 2, "stdout": "", "stderr": "network"}).to_string();
+        assert!(validate_n2_publish_result(false, &failed).is_err());
+        assert!(validate_n2_publish_result(true, &accepted).is_err());
     }
 }

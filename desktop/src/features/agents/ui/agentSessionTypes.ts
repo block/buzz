@@ -9,6 +9,17 @@ export type ObserverEvent = {
   sessionId: string | null;
   turnId: string | null;
   startedAt?: string | null;
+  collaboration?: {
+    collaborationId?: string;
+    collaboration_id?: string;
+    workspace?: string;
+    context?: string;
+    leadPubkey?: string;
+    lead_pubkey?: string;
+    participantPubkeys?: string[];
+    participant_pubkeys?: string[];
+    summary?: string;
+  } | null;
   payload: unknown;
 };
 

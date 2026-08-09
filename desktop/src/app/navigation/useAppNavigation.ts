@@ -68,11 +68,51 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goCommandConsole = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/console",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goShip = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/ship",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goBattleRhythm = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/battle-rhythm" }, behavior),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
         {
           to: "/pulse",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goProfile = React.useCallback(
+    (pubkey: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/pulse",
+          search: { profile: pubkey },
         },
         behavior,
       ),
@@ -90,6 +130,25 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goPlans = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation({ to: "/plans" }, behavior),
+    [commitNavigation],
+  );
+
+  const goPlan = React.useCallback(
+    (planId: string, options?: NavigationBehavior & { taskId?: string }) =>
+      commitNavigation(
+        {
+          to: "/plans/$planId",
+          params: { planId },
+          search: options?.taskId ? { task: options.taskId } : {},
+        },
+        options,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -97,6 +156,7 @@ export function useAppNavigation() {
         commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
+        repositoryId?: string;
       },
     ) =>
       commitNavigation(
@@ -113,6 +173,9 @@ export function useAppNavigation() {
               ? { pullRequestId: behavior.pullRequestId }
               : {}),
             ...(behavior?.issueId ? { issueId: behavior.issueId } : {}),
+            ...(behavior?.repositoryId
+              ? { repositoryId: behavior.repositoryId }
+              : {}),
           },
         },
         behavior,
@@ -159,6 +222,8 @@ export function useAppNavigation() {
         autoSend?: string;
         messageId?: string;
         replace?: boolean;
+        /** Open this thread panel directly without waiting for a timeline row. */
+        thread?: string;
         threadRootId?: string | null;
       },
     ) =>
@@ -178,6 +243,7 @@ export function useAppNavigation() {
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
+            ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },
@@ -296,14 +362,20 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goBattleRhythm,
     goChannel,
+    goCommandConsole,
     goForumPost,
     goHome,
     goNewMessage,
+    goPlan,
+    goPlans,
     goProject,
     goProjects,
     goPulse,
+    goProfile,
     goSettings,
+    goShip,
     goWorkflow,
     goWorkflows,
     openSearchHit,

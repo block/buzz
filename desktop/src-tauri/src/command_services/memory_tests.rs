@@ -1,0 +1,452 @@
+#[cfg(all(test, unix))]
+mod tests {
+    use super::super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct FakeCredentials {
+        values: HashMap<String, String>,
+    }
+
+    impl CredentialSource for FakeCredentials {
+        fn load(&self, key: &str) -> Result<Option<String>, String> {
+            Ok(self.values.get(key).cloned())
+        }
+    }
+
+    fn protected_file(path: &Path, contents: &[u8], executable: bool) {
+        fs::write(path, contents).expect("write fixture");
+        let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
+        permissions.set_mode(if executable { 0o700 } else { 0o600 });
+        fs::set_permissions(path, permissions).expect("protect fixture");
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        let base = std::env::current_dir().expect("current directory");
+        tempfile::Builder::new()
+            .tempdir_in(&base)
+            .expect("temporary directory")
+    }
+
+    fn config_json(directory: &Path, local_port: u16) -> serde_json::Value {
+        let fingerprint = crate::command_services::ssh::sha256_fingerprint(b"config fake key blob");
+        json!({
+            "schema_version": 1,
+            "local_port": local_port,
+            "home_host_alias": "memory-home",
+            "home_user": "memory-sync",
+            "pinned_host_fingerprint": fingerprint,
+            "known_hosts_path": directory.join("known_hosts"),
+            "identity_file": directory.join("identity"),
+            "remote_loopback_port": 8006,
+            "local_node_id": "node:macbook-command",
+            "home_node_id": "node:home-command",
+            "sync_interval_minutes": 30,
+            "tool_allowlist": [
+                "command_memory_context",
+                "recall_for_entity",
+                "search_events",
+                "record_event"
+            ],
+            "credential_keys": {
+                "local_read": "memory.local.read",
+                "local_attestation": "memory.local.attestation",
+                "local_replicate": "memory.local.replicate",
+                "remote_read": "memory.remote.read",
+                "remote_replicate": "memory.remote.replicate"
+            }
+        })
+    }
+
+    fn credentials() -> FakeCredentials {
+        FakeCredentials {
+            values: [
+                ("memory.local.read", "local-read-token"),
+                ("memory.local.attestation", "local-attestation-secret"),
+                ("memory.local.replicate", "local-replicate-token"),
+                ("memory.remote.read", "remote-read-token"),
+                ("memory.remote.replicate", "remote-replicate-token"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
+        }
+    }
+
+    fn write_config(directory: &Path, local_port: u16) -> std::path::PathBuf {
+        let key = base64::engine::general_purpose::STANDARD.encode(b"config fake key blob");
+        protected_file(
+            &directory.join("known_hosts"),
+            format!("memory-home ssh-ed25519 {key}\n").as_bytes(),
+            false,
+        );
+        protected_file(&directory.join("identity"), b"placeholder\n", false);
+        let path = directory.join("memory.json");
+        protected_file(
+            &path,
+            serde_json::to_vec(&config_json(directory, local_port))
+                .expect("serialize fixture config")
+                .as_slice(),
+            false,
+        );
+        path
+    }
+
+    fn fake_readiness_server(
+        response: serde_json::Value,
+        expected_token: &'static str,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake service");
+        let port = listener.local_addr().expect("fake service address").port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept readiness request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let count = stream.read(&mut chunk).expect("read request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("utf8 request");
+            assert!(request.starts_with("GET /replication/readiness HTTP/1.1\r\n"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {expected_token}")));
+            let body = serde_json::to_vec(&response).expect("serialize response");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write response headers");
+            stream.write_all(&body).expect("write response body");
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn trusted_config_rejects_unknown_fields_collisions_and_invalid_tools() {
+        let directory = tempdir();
+        let path = write_config(directory.path(), 8006);
+        let mut value = config_json(directory.path(), 8006);
+        value
+            .as_object_mut()
+            .expect("config object")
+            .insert("renderer_bearer".to_string(), json!("secret"));
+        protected_file(
+            &path,
+            serde_json::to_vec(&value)
+                .expect("serialize config")
+                .as_slice(),
+            false,
+        );
+        assert_eq!(
+            load_trusted_config(&path, &credentials())
+                .err()
+                .expect("unknown renderer-controlled secret field must fail"),
+            MemoryError::InvalidConfig
+        );
+
+        let mut value = config_json(directory.path(), 8006);
+        value["local_node_id"] = value["home_node_id"].clone();
+        protected_file(
+            &path,
+            serde_json::to_vec(&value)
+                .expect("serialize config")
+                .as_slice(),
+            false,
+        );
+        assert_eq!(
+            load_trusted_config(&path, &credentials())
+                .err()
+                .expect("node collision must fail"),
+            MemoryError::InvalidConfig
+        );
+
+        let mut value = config_json(directory.path(), 8006);
+        value["tool_allowlist"] = json!(["recall_for_entity", "recall_for_entity"]);
+        protected_file(
+            &path,
+            serde_json::to_vec(&value)
+                .expect("serialize config")
+                .as_slice(),
+            false,
+        );
+        assert_eq!(
+            load_trusted_config(&path, &credentials())
+                .err()
+                .expect("duplicate tools must fail"),
+            MemoryError::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn trusted_config_rejects_attestation_reuse_across_every_bearer_slot() {
+        let directory = tempdir();
+        let path = write_config(directory.path(), 8006);
+        let shared = "s".repeat(1024);
+        for bearer_key in [
+            "memory.local.replicate",
+            "memory.remote.read",
+            "memory.remote.replicate",
+            "memory.local.read",
+        ] {
+            let mut reused = credentials();
+            reused.values.insert(bearer_key.to_string(), shared.clone());
+            reused
+                .values
+                .insert("memory.local.attestation".to_string(), shared.clone());
+
+            let error = load_trusted_config(&path, &reused)
+                .err()
+                .unwrap_or_else(|| panic!("{bearer_key} equal to attestation must fail closed"));
+            assert_eq!(error, MemoryError::CredentialsUnavailable, "{bearer_key}",);
+        }
+
+        let mut distinct = credentials();
+        let bearer = format!("{}a", "s".repeat(1023));
+        for bearer_key in [
+            "memory.local.read",
+            "memory.local.replicate",
+            "memory.remote.read",
+            "memory.remote.replicate",
+        ] {
+            distinct
+                .values
+                .insert(bearer_key.to_string(), bearer.clone());
+        }
+        distinct.values.insert(
+            "memory.local.attestation".to_string(),
+            format!("{}b", "s".repeat(1023)),
+        );
+        assert!(
+            load_trusted_config(&path, &distinct).is_ok(),
+            "maximum-length secrets that differ only in the final byte remain independent",
+        );
+    }
+
+    #[test]
+    fn legacy_replication_cli_path_is_rejected_as_an_unknown_config_field() {
+        let directory = tempdir();
+        let path = directory.path().join("memory.json");
+        let mut legacy = config_json(directory.path(), 8006);
+        legacy.as_object_mut().expect("config object").insert(
+            "replicate_cli_path".to_string(),
+            json!(directory.path().join("memory-mcp-replicate")),
+        );
+        protected_file(
+            &path,
+            serde_json::to_vec(&legacy)
+                .expect("serialize legacy config")
+                .as_slice(),
+            false,
+        );
+
+        assert_eq!(
+            load_trusted_config(&path, &credentials())
+                .err()
+                .expect("legacy subprocess configuration must fail closed"),
+            MemoryError::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn production_memory_replication_contains_no_subprocess_or_token_environment_boundary() {
+        let memory = include_str!("memory.rs");
+        let replication = include_str!("memory_replication.rs");
+        let source = format!("{memory}\n{replication}");
+
+        for forbidden in [
+            "Command::new",
+            ".spawn()",
+            "MEMORY_LOCAL_READ_TOKEN",
+            "MEMORY_LOCAL_REPLICATE_TOKEN",
+            "MEMORY_REMOTE_READ_TOKEN",
+            "MEMORY_REMOTE_REPLICATE_TOKEN",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "production replication must not contain {forbidden}"
+            );
+        }
+        let pull = memory
+            .find("replicate_direction(\"pull\"")
+            .expect("pull direction");
+        let push = memory
+            .find("replicate_direction(\"push\"")
+            .expect("push direction");
+        assert!(pull < push, "sync must complete pull before push");
+    }
+
+    #[test]
+    fn readiness_is_authenticated_loopback_only_and_checks_stable_node_identity() {
+        let response = json!({
+            "status": "ready",
+            "schema_version": 1,
+            "node_id": "node:macbook-command",
+            "revision_count": 41,
+            "conflict_count": 2,
+            "max_page_items": 200,
+            "max_envelope_bytes": 2097152,
+            "markdown_canonical": true,
+            "sqlite_derived": true
+        });
+        let (port, server) = fake_readiness_server(response, "local-read-token");
+        let directory = tempdir();
+        let path = write_config(directory.path(), port);
+        let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
+
+        let readiness = query_readiness(&trusted, Duration::from_secs(2))
+            .expect("valid authenticated readiness");
+
+        server.join().expect("join fake server");
+        assert_eq!(readiness.node_id.as_deref(), Some("node:macbook-command"));
+        assert_eq!(readiness.revision_count, 41);
+        assert_eq!(readiness.conflict_count, 2);
+        assert_eq!(readiness.endpoint, Some(format!("http://127.0.0.1:{port}")));
+        assert_eq!(
+            readiness.tool_allowlist,
+            vec![
+                "command_memory_context",
+                "recall_for_entity",
+                "search_events",
+                "record_event"
+            ]
+        );
+    }
+
+    #[test]
+    fn readiness_rejects_an_unexpected_node_id() {
+        let response = json!({
+            "status": "ready",
+            "schema_version": 1,
+            "node_id": "node:attacker",
+            "revision_count": 0,
+            "conflict_count": 0,
+            "max_page_items": 200,
+            "max_envelope_bytes": 2097152,
+            "markdown_canonical": true,
+            "sqlite_derived": true
+        });
+        let (port, server) = fake_readiness_server(response, "local-read-token");
+        let directory = tempdir();
+        let path = write_config(directory.path(), port);
+        let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
+
+        let error =
+            query_readiness(&trusted, Duration::from_secs(2)).expect_err("node mismatch must fail");
+
+        server.join().expect("join fake server");
+        assert_eq!(error, MemoryError::NodeIdentityMismatch);
+    }
+
+    #[test]
+    fn fail_soft_response_never_exposes_credentials_or_private_paths() {
+        let response = fail_soft_readiness(
+            MemoryError::CredentialsUnavailable,
+            Some("/Users/alice/.ssh/id_ed25519"),
+        );
+        let encoded = serde_json::to_string(&response).expect("serialize response");
+
+        assert_eq!(response.status, MemoryServiceStatus::Unavailable);
+        assert_eq!(response.error.as_deref(), Some("credentials_unavailable"));
+        assert!(!encoded.contains("/Users/alice"));
+        assert!(!encoded.contains("id_ed25519"));
+        assert!(!encoded.contains("Bearer"));
+    }
+
+    #[test]
+    fn production_scheduler_runs_at_the_configured_interval_and_stops_cleanly() {
+        let gate = Arc::new(SyncGate::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        let scheduler =
+            MemorySyncScheduler::start_for_test(Duration::from_millis(20), gate, move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executions.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(executions.load(Ordering::SeqCst) >= 1);
+
+        scheduler
+            .stop_and_join()
+            .expect("scheduler stops and joins");
+        let stopped_count = executions.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(executions.load(Ordering::SeqCst), stopped_count);
+    }
+
+    #[test]
+    fn scheduled_and_explicit_syncs_use_the_same_real_gate() {
+        let gate = Arc::new(SyncGate::default());
+        let manual_guard = gate.try_enter().expect("manual sync owns gate");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        let scheduler = MemorySyncScheduler::start_for_test(
+            Duration::from_millis(20),
+            Arc::clone(&gate),
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        drop(manual_guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executions.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        scheduler.stop_and_join().expect("scheduler joins");
+    }
+
+    #[test]
+    fn remote_authentication_and_node_identity_precede_any_cli_credentials() {
+        let cli_started = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&cli_started);
+
+        let error = run_after_remote_preflight(
+            || Err(MemoryError::NodeIdentityMismatch),
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect_err("remote node mismatch must block replication");
+
+        assert_eq!(error, MemoryError::NodeIdentityMismatch);
+        assert_eq!(cli_started.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn tunnel_close_failure_overrides_an_otherwise_successful_sync() {
+        let error = finish_after_tunnel_close::<()>(
+            Ok(()),
+            Err(crate::command_services::ssh::SshError::Teardown),
+        )
+        .expect_err("unreaped tunnel cannot report sync success");
+
+        assert_eq!(error, MemoryError::Teardown);
+    }
+}

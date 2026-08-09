@@ -11,10 +11,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
 }
 
-/// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// Result-level read authorization for events whose content is private to a
+/// single viewer. NIP-CB additionally requires exactly one `#p`
+/// tag equal to both the event author and reader. Other gated kinds retain
+/// their protocol-specific owner-tag behavior. Returns `true` for other kinds.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
 /// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
@@ -22,10 +22,21 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if kind != crate::kind::KIND_DM_VISIBILITY
+        && kind != crate::kind::KIND_AGENT_TURN_METRIC
+        && kind != crate::kind::KIND_COMMAND_BRIEF
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    if kind == crate::kind::KIND_COMMAND_BRIEF {
+        let mut owners = event.tags.filter(nostr::TagKind::SingleLetter(p));
+        let owner = owners.next().and_then(|tag| tag.content());
+        let author = event.pubkey.to_hex();
+        return owners.next().is_none()
+            && owner == Some(author.as_str())
+            && owner == Some(reader_pubkey_hex);
+    }
     event
         .tags
         .filter(nostr::TagKind::SingleLetter(p))
@@ -296,5 +307,62 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_command_brief_by_owner_p() {
+        let owner = Keys::generate();
+        let attacker = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_COMMAND_BRIEF as u16),
+            "ciphertext",
+        )
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["d", "run-1"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .allow_self_tagging()
+        .sign_with_keys(&owner)
+        .expect("sign");
+        assert!(reader_authorized_for_event(
+            &event,
+            &owner.public_key().to_hex()
+        ));
+        assert!(!reader_authorized_for_event(
+            &event,
+            &attacker.public_key().to_hex()
+        ));
+
+        for tags in [
+            vec![
+                Tag::parse(["d", "run-1"]).expect("d"),
+                Tag::parse(["status", "completed"]).expect("status"),
+            ],
+            vec![
+                Tag::public_key(owner.public_key()),
+                Tag::public_key(owner.public_key()),
+                Tag::parse(["d", "run-1"]).expect("d"),
+                Tag::parse(["status", "completed"]).expect("status"),
+            ],
+            vec![
+                Tag::public_key(attacker.public_key()),
+                Tag::parse(["d", "run-1"]).expect("d"),
+                Tag::parse(["status", "completed"]).expect("status"),
+            ],
+        ] {
+            let malformed = EventBuilder::new(
+                Kind::Custom(crate::kind::KIND_COMMAND_BRIEF as u16),
+                "ciphertext",
+            )
+            .tags(tags)
+            .allow_self_tagging()
+            .sign_with_keys(&owner)
+            .expect("sign");
+            assert!(
+                !reader_authorized_for_event(&malformed, &owner.public_key().to_hex()),
+                "stored malformed NIP-CB envelopes must fail closed"
+            );
+        }
     }
 }

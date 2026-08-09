@@ -1,4 +1,9 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   collectMessageIdsForAuxBackfill,
@@ -70,6 +75,35 @@ async function withThreadAux(
   return sortMessages([...replies, ...structuralAux, ...reactions]);
 }
 
+async function loadThreadReplies(
+  queryClient: QueryClient,
+  channelId: string,
+  rootId: string,
+): Promise<RelayEvent[]> {
+  const queryKey = threadRepliesKey(channelId, rootId);
+  const cacheAtStart = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+  const idsAtStart = new Set(cacheAtStart.map((event) => event.id));
+  const replies: RelayEvent[] = [];
+  let cursor: ThreadCursor | null = null;
+  for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
+    const response = await getThreadReplies(rootId, channelId, {
+      limit: THREAD_PAGE_LIMIT,
+      cursor,
+    });
+    replies.push(...response.events);
+    if (!response.nextCursor) {
+      const fetched = await withThreadAux(channelId, rootId, replies);
+      const current = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const receivedInFlight = current.filter(
+        (event) => !idsAtStart.has(event.id),
+      );
+      return sortMessages([...fetched, ...receivedInFlight]);
+    }
+    cursor = response.nextCursor;
+  }
+  throw new Error(`Thread ${rootId} exceeded the page safety limit.`);
+}
+
 /** Fetch a thread subtree into a cache independent from channel window pages. */
 export function useThreadReplies(
   activeChannel: Channel | null,
@@ -87,38 +121,36 @@ export function useThreadReplies(
       openThreadRootId !== null,
     queryFn: async (): Promise<RelayEvent[]> => {
       if (!activeChannel || !openThreadRootId) return [];
-      const cacheAtStart =
-        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const idsAtStart = new Set(cacheAtStart.map((event) => event.id));
-      const replies: RelayEvent[] = [];
-      let cursor: ThreadCursor | null = null;
-      for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
-        const response = await getThreadReplies(
-          openThreadRootId,
-          activeChannel.id,
-          { limit: THREAD_PAGE_LIMIT, cursor },
-        );
-        replies.push(...response.events);
-        if (!response.nextCursor) {
-          const fetched = await withThreadAux(
-            activeChannel.id,
-            openThreadRootId,
-            replies,
-          );
-          const current =
-            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-          const receivedInFlight = current.filter(
-            (event) => !idsAtStart.has(event.id),
-          );
-          return sortMessages([...fetched, ...receivedInFlight]);
-        }
-        cursor = response.nextCursor;
-      }
-      throw new Error(
-        `Thread ${openThreadRootId} exceeded the page safety limit.`,
-      );
+      return loadThreadReplies(queryClient, activeChannel.id, openThreadRootId);
     },
     staleTime: 0,
     gcTime: 60 * 60 * 1_000,
+  });
+}
+
+/**
+ * Load every summarized reply subtree for a channel-style Huddle transcript.
+ * Ordinary channels keep replies in their thread panels; Huddles flatten those
+ * replies into the chat timeline so companion and in-app presentations show the
+ * same conversation without opening a transient thread surface.
+ */
+export function useThreadRepliesForRoots(
+  activeChannel: Channel | null,
+  rootIds: readonly string[],
+) {
+  const queryClient = useQueryClient();
+  const channelId = activeChannel?.id ?? "none";
+  return useQueries({
+    queries: rootIds.map((rootId) => ({
+      queryKey: threadRepliesKey(channelId, rootId),
+      enabled: activeChannel !== null && activeChannel.channelType !== "forum",
+      queryFn: () => loadThreadReplies(queryClient, channelId, rootId),
+      staleTime: 0,
+      gcTime: 60 * 60 * 1_000,
+    })),
+    combine: (results) => ({
+      events: sortMessages(results.flatMap((result) => result.data ?? [])),
+      isPending: results.some((result) => result.isPending),
+    }),
   });
 }

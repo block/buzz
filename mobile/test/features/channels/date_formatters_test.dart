@@ -56,4 +56,47 @@ void main() {
       expect(isSameDay(a, b), isFalse);
     });
   });
+
+  group('formatThreadSummaryLastReplyTime', () {
+    const now = 2_000_000;
+
+    test('uses expanded relative units', () {
+      expect(
+        formatThreadSummaryLastReplyTime(now - 30, nowSeconds: now),
+        'just now',
+      );
+      expect(
+        formatThreadSummaryLastReplyTime(now - 60, nowSeconds: now),
+        '1 minute ago',
+      );
+      expect(
+        formatThreadSummaryLastReplyTime(now - 3 * 3600, nowSeconds: now),
+        '3 hours ago',
+      );
+      expect(
+        formatThreadSummaryLastReplyTime(now - 2 * 86400, nowSeconds: now),
+        '2 days ago',
+      );
+    });
+
+    test('uses a short month and ordinal for older replies', () {
+      final may19 = _ts(DateTime(2026, 5, 19, 12));
+      final may27 = _ts(DateTime(2026, 5, 27, 12));
+
+      expect(
+        formatThreadSummaryLastReplyTime(
+          may19,
+          nowSeconds: _ts(DateTime(2026, 5, 27, 12)),
+        ),
+        'on May 19th',
+      );
+      expect(
+        formatThreadSummaryLastReplyTime(
+          may27,
+          nowSeconds: _ts(DateTime(2026, 6, 4, 12)),
+        ),
+        'on May 27th',
+      );
+    });
+  });
 }

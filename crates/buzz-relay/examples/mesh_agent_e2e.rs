@@ -278,7 +278,9 @@ async fn agent_chat_in_isolated_home(
         .env("OPENAI_COMPAT_API_KEY", "buzz-mesh-local")
         .env("OPENAI_COMPAT_API", "chat")
         .env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096")
-        .env("BUZZ_AGENT_THINKING_EFFORT", "none")
+        // No BUZZ_AGENT_THINKING_EFFORT: apply_relay_mesh_env() deliberately
+        // leaves it unset so each model's chat template picks its own default.
+        // Pinning a value here would test a config the product does not ship.
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

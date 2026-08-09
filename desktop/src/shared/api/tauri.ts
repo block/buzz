@@ -3,6 +3,10 @@ import {
   activateRateLimit,
   parseRateLimitHint,
 } from "@/shared/api/relayRateLimitGate";
+import {
+  fromRawInstallRuntimeResult,
+  type RawInstallRuntimeResult,
+} from "@/shared/api/installTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -58,8 +62,6 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
-  // never omits the key.
   channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
@@ -114,10 +116,14 @@ type RawRelayAgent = {
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
+
+import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
+  runtime?: string | null;
   team_id?: string | null;
   relay_url: string;
   acp_command: string;
@@ -132,10 +138,12 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
+  model_source?: ManagedAgent["modelSource"];
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
+  restart_diff?: RawRestartDiffEntry[];
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -151,8 +159,7 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
-  // Optional: pre-feature mock fixtures may omit these. Mapped to
-  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -180,33 +187,37 @@ export type RawAcpRuntimeCatalogEntry = {
   mcp_command: string | null;
   model_env_var?: string | null;
   provider_env_var?: string | null;
+  locked_provider_id?: string | null;
+  locked_provider_label?: string | null;
+  native_model_discovery?: string | null;
+  base_url_env_var?: string | null;
+  classification_env_var?: string | null;
+  integrations_env_var?: string | null;
+  keychain_token_key?: string | null;
   thinking_env_var?: string | null;
+  max_tokens_env_var?: string | null;
+  context_limit_env_var?: string | null;
+  max_rounds_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
+  source: "builtin" | "preset" | "custom";
+  /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
+  definition_env?: Record<string, string>;
+  max_parallelism?: number;
 };
 
-export type RawInstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exit_code: number | null;
-  hint?: string;
-};
-
-export type RawInstallRuntimeResult = {
-  success: boolean;
-  steps: RawInstallStepResult[];
-  restarted_count: number;
-  failed_restart_count: number;
-};
+export type {
+  RawInstallRuntimeResult,
+  RawInstallStepResult,
+} from "./installTypes";
 
 type RawGitBashPrerequisite = {
   available: boolean;
@@ -458,6 +469,9 @@ export async function searchMessages(
     q: input.q,
     limit: input.limit,
     channelId: input.channelId,
+    authors: input.authors,
+    since: input.since,
+    until: input.until,
   });
 
   return {
@@ -542,6 +556,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  linkPreviewTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -552,6 +567,7 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      linkPreviewTags,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -590,11 +606,11 @@ export async function uploadMedia(
     isTemp,
   });
 }
-
-export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
-  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", {});
+export async function pickAndUploadMedia(
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId });
 }
-
 export async function uploadMediaBytes(
   data: number[],
   filename?: string,
@@ -608,23 +624,7 @@ export async function uploadMediaBytes(
   });
 }
 
-export async function editMessage(
-  channelId: string,
-  eventId: string,
-  content: string,
-  mediaTags?: string[][],
-  emojiTags?: string[][],
-  mentionPubkeys?: string[],
-): Promise<void> {
-  await invokeTauri("edit_message", {
-    channelId,
-    eventId,
-    content,
-    mediaTags: mediaTags ?? [],
-    emojiTags: emojiTags ?? [],
-    mentionPubkeys: mentionPubkeys ?? null,
-  });
-}
+export { editMessage } from "@/shared/api/editMessage";
 
 export async function deleteMessage(
   channelId: string,
@@ -685,6 +685,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
@@ -699,10 +700,12 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
+    modelSource: agent.model_source ?? null,
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
+    restartDiff: agent.restart_diff ?? [],
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -718,14 +721,12 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
-    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
-    // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
 }
 
-function fromRawAcpRuntimeCatalogEntry(
+export function fromRawAcpRuntimeCatalogEntry(
   entry: RawAcpRuntimeCatalogEntry,
 ): AcpRuntimeCatalogEntry {
   return {
@@ -739,33 +740,30 @@ function fromRawAcpRuntimeCatalogEntry(
     mcpCommand: entry.mcp_command,
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
+    lockedProviderId: entry.locked_provider_id ?? null,
+    lockedProviderLabel: entry.locked_provider_label ?? null,
+    nativeModelDiscovery: entry.native_model_discovery ?? null,
+    baseUrlEnvVar: entry.base_url_env_var ?? null,
+    classificationEnvVar: entry.classification_env_var ?? null,
+    integrationsEnvVar: entry.integrations_env_var ?? null,
+    keychainTokenKey: entry.keychain_token_key ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
+    maxTokensEnvVar: entry.max_tokens_env_var ?? null,
+    contextLimitEnvVar: entry.context_limit_env_var ?? null,
+    maxRoundsEnvVar: entry.max_rounds_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
-  };
-}
-
-function fromRawInstallRuntimeResult(
-  raw: RawInstallRuntimeResult,
-): InstallRuntimeResult {
-  return {
-    success: raw.success,
-    steps: raw.steps.map((step) => ({
-      step: step.step,
-      command: step.command,
-      success: step.success,
-      stdout: step.stdout,
-      stderr: step.stderr,
-      exitCode: step.exit_code,
-      hint: step.hint,
-    })),
-    restartedCount: raw.restarted_count,
-    failedRestartCount: raw.failed_restart_count,
+    source: entry.source,
+    definitionEnv: entry.definition_env ?? {},
+    ...(entry.max_parallelism !== undefined && {
+      maxParallelism: entry.max_parallelism,
+    }),
   };
 }
 
@@ -928,6 +926,45 @@ export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   ).map(fromRawAcpRuntimeCatalogEntry);
 }
 
+/** Input shape for creating or updating a custom harness. */
+export type HarnessDefinitionInput = {
+  id: string;
+  label: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  installInstructionsUrl?: string;
+  installHint?: string;
+};
+
+/** Save (create or overwrite) a custom harness definition. Returns the catalog entry. */
+export async function saveCustomHarness(
+  definition: HarnessDefinitionInput,
+  originalId?: string,
+): Promise<AcpRuntimeCatalogEntry> {
+  const raw = await invokeTauri<RawAcpRuntimeCatalogEntry>(
+    "save_custom_harness",
+    {
+      definition: {
+        id: definition.id,
+        label: definition.label,
+        command: definition.command,
+        args: definition.args ?? [],
+        env: definition.env ?? {},
+        installInstructionsUrl: definition.installInstructionsUrl ?? "",
+        installHint: definition.installHint ?? "",
+      },
+      originalId: originalId ?? null,
+    },
+  );
+  return fromRawAcpRuntimeCatalogEntry(raw);
+}
+
+/** Delete a custom harness definition by id. No-op if already gone. */
+export async function deleteCustomHarness(id: string): Promise<void> {
+  await invokeTauri<void>("delete_custom_harness", { id });
+}
+
 export async function installAcpRuntime(
   runtimeId: string,
 ): Promise<InstallRuntimeResult> {
@@ -990,9 +1027,8 @@ export type RuntimeFileConfigSubset = {
 };
 
 /**
- * Get the file-layer config for a runtime so dialogs can show
- * "Set in goose config" instead of surfacing a false required-field marker.
- * Returns `null` when the runtime has no config file or it cannot be parsed.
+ * Get the file-layer config for a runtime so dialogs can show "Set in goose config" instead of
+ * surfacing a false required-field marker. Returns `null` when unavailable or unparseable.
  */
 export async function getRuntimeFileConfig(
   runtimeId: string,
@@ -1006,13 +1042,9 @@ export async function getRuntimeFileConfig(
 }
 
 /**
- * Return the key names of all non-empty baked build env vars.
- *
- * Internal (Block) builds bake provider credentials into the binary at compile
- * time. This returns the *key names only* — never the values — so dialogs can
- * treat them as satisfied without exposing secrets to the frontend.
- *
- * OSS builds return an empty array (no baked env).
+ * Return the key names of all non-empty baked build env vars. Internal (Block) builds bake
+ * provider credentials into the binary at compile time; this returns *key names only* (never
+ * values) so dialogs treat them as satisfied without exposing secrets. OSS builds return [].
  */
 export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
@@ -1093,8 +1125,6 @@ export async function nip44DecryptFromSelf(
 ): Promise<string> {
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
 
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");

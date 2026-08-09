@@ -89,6 +89,11 @@ pub struct RelayLimitation {
 
 /// Canonical `RelayLimitation` advertised by this relay.
 ///
+/// `max_limit` is [`buzz_db::DEFAULT_MAX_PAGE_LIMIT`], the same constant the
+/// REQ path clamps filter limits to, so the advertised ceiling and the
+/// enforced one cannot drift (see
+/// `handlers::req::tests::req_filter_limit_clamps_to_advertised_nip11_max_limit`).
+///
 /// `auth_required` is always `true`: the REQ, EVENT, and COUNT handlers
 /// unconditionally reject connections that are not in
 /// `AuthState::Authenticated`. This is independent of the REST API token
@@ -103,7 +108,7 @@ fn relay_limitation(max_message_length: usize) -> RelayLimitation {
         max_message_length: Some(max_message_length as u64),
         max_subscriptions: Some(1024),
         max_filters: Some(10),
-        max_limit: Some(10_000),
+        max_limit: Some(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32),
         max_subid_length: Some(256),
         min_pow_difficulty: None,
         auth_required: true,

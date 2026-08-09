@@ -1,7 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldBounceForChannelNotification } from "./AppShell.helpers.ts";
+import {
+  deriveShellRoute,
+  markAllReadSources,
+  shouldBounceForChannelNotification,
+} from "./AppShell.helpers.ts";
+
+test("deriveShellRoute_selectsCommandConsoleForConsolePath", () => {
+  assert.deepEqual(deriveShellRoute("/console"), {
+    selectedChannelId: null,
+    selectedView: "console",
+  });
+});
+
+test("deriveShellRoute_selectsLivingShipForShipPath", () => {
+  assert.deepEqual(deriveShellRoute("/ship"), {
+    selectedChannelId: null,
+    selectedView: "ship",
+  });
+});
+
+test("battle rhythm route selects its own sidebar destination", () => {
+  assert.deepEqual(deriveShellRoute("/battle-rhythm"), {
+    selectedChannelId: null,
+    selectedView: "battleRhythm",
+  });
+});
+
+test("planning routes select Plans without selecting developer Projects", () => {
+  assert.deepEqual(deriveShellRoute("/plans"), {
+    selectedChannelId: null,
+    selectedView: "plans",
+  });
+  assert.deepEqual(deriveShellRoute("/plans/deployment-1"), {
+    selectedChannelId: null,
+    selectedView: "plans",
+  });
+});
 
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);
@@ -26,4 +62,44 @@ test("shouldBounceForChannelNotification_allowsBroadcastReplies", () => {
     ]),
     true,
   );
+});
+
+test("markAllReadSources clears Inbox overrides and active thread activity", () => {
+  const calls = [];
+
+  markAllReadSources({
+    activeChannelId: "active-channel",
+    channelActivityItems: [
+      { channelId: "another-channel", createdAt: 100 },
+      { channelId: "active-channel", createdAt: 200 },
+      { channelId: "active-channel", createdAt: 300 },
+    ],
+    unreadFeedItemIds: new Set(["first-inbox-item", "second-inbox-item"]),
+    undoUnreadFeedItem: (itemId) => calls.push(`inbox:${itemId}`),
+    markAllChannelReadMarkers: () => calls.push("channels"),
+    markActiveChannelRead: (channelId, createdAt) =>
+      calls.push(`active:${channelId}:${createdAt}`),
+  });
+
+  assert.deepEqual(calls, [
+    "inbox:first-inbox-item",
+    "inbox:second-inbox-item",
+    "channels",
+    "active:active-channel:300",
+  ]);
+});
+
+test("markAllReadSources skips the active marker without projected activity", () => {
+  const calls = [];
+
+  markAllReadSources({
+    activeChannelId: "active-channel",
+    channelActivityItems: [],
+    unreadFeedItemIds: new Set(),
+    undoUnreadFeedItem: () => calls.push("inbox"),
+    markAllChannelReadMarkers: () => calls.push("channels"),
+    markActiveChannelRead: () => calls.push("active"),
+  });
+
+  assert.deepEqual(calls, ["channels"]);
 });

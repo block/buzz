@@ -403,6 +403,9 @@ test("Enter with no matches jumps to create", async ({ page }) => {
 
   await openChannelBrowser(page);
   await page.getByTestId("channel-browser-search").fill(channelName);
+  await expect(page.getByTestId("channel-browser-create-row")).toContainText(
+    channelName,
+  );
   await page.keyboard.press("Enter");
 
   await expect(page.getByTestId("create-channel-name")).toHaveValue(

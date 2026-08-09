@@ -24,7 +24,6 @@ from .manifest import AgentClass, ExperimentManifest
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
 
-
 DEFAULT_MAX_AGENT_ROUNDS = 32
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
@@ -128,12 +127,20 @@ class BuzzContainerRuntime:
             if forwarder is not None:
                 infra.append(forwarder)
             await self._buzz_json(
-                trial.user, trial, "users", "set-profile", "--name",
+                trial.user,
+                trial,
+                "users",
+                "set-profile",
+                "--name",
                 trial.user.agent_id,
             )
             for credential in trial.credentials:
                 await self._buzz_json(
-                    credential, trial, "users", "set-profile", "--name",
+                    credential,
+                    trial,
+                    "users",
+                    "set-profile",
+                    "--name",
                     credential.agent_id,
                 )
                 agents.append(
@@ -150,9 +157,17 @@ class BuzzContainerRuntime:
             )
             # The task arrives exactly as it would in production Buzz: a
             # user prompt @mentioning the orchestrator. The harness never
-            # speaks as any agent.
+            # speaks as any agent. The orchestrator is mentioned by pubkey,
+            # not by name resolution: task text is untrusted payload, and any
+            # @-token inside it (e.g. Vim's `:%normal! @a`) would otherwise
+            # fail member resolution and kill the trial before the agent
+            # ever saw the task. An explicit --mention demotes unresolved
+            # @-tokens in the text to presentation-only.
             await self._send(
-                trial.user, trial, f"@{orchestrator.agent_id} {instruction}"
+                trial.user,
+                trial,
+                f"@{orchestrator.agent_id} {instruction}",
+                mention=orchestrator.nostr_pubkey,
             )
             final_message = await asyncio.wait_for(
                 self._wait_for_done(environment, orchestrator, trial, agents + infra),
@@ -244,11 +259,17 @@ class BuzzContainerRuntime:
             ) from error
         forwarder = _Agent(
             AgentCredential(
-                agent_id="relay-forwarder", role="infra",
-                nostr_secret_key="", nostr_pubkey="", nostr_auth_tag="",
-                llm_endpoint="", llm_api_key="",
+                agent_id="relay-forwarder",
+                role="infra",
+                nostr_secret_key="",
+                nostr_pubkey="",
+                nostr_auth_tag="",
+                llm_endpoint="",
+                llm_api_key="",
             ),
-            pid, log, log,
+            pid,
+            log,
+            log,
         )
         deadline = asyncio.get_running_loop().time() + self.readiness_timeout_seconds
         while True:
@@ -418,9 +439,14 @@ class BuzzContainerRuntime:
                 await self._raise_for_dead_agents(environment, agents)
             polls += 1
             messages = await self._buzz_json(
-                trial.user, trial,
-                "messages", "get", "--channel", trial.channel_id,
-                "--limit", "100",
+                trial.user,
+                trial,
+                "messages",
+                "get",
+                "--channel",
+                trial.channel_id,
+                "--limit",
+                "100",
             )
             for message in messages:
                 if message.get("pubkey") == orchestrator.nostr_pubkey and str(
@@ -451,9 +477,7 @@ class BuzzContainerRuntime:
             )
 
     @staticmethod
-    async def _stop_agents(
-        environment: BaseEnvironment, agents: list[_Agent]
-    ) -> None:
+    async def _stop_agents(environment: BaseEnvironment, agents: list[_Agent]) -> None:
         """Terminate every process of the uploaded stack (acp, agent, mcp)."""
         if not agents:
             return
@@ -461,14 +485,14 @@ class BuzzContainerRuntime:
         # to exist in task images, the /proc filesystem is.
         sweep = (
             "for d in /proc/[0-9]*; do "
-            f"grep -aq {REMOTE_BIN} \"$d/cmdline\" 2>/dev/null "
-            "&& kill -TERM \"${d#/proc/}\" 2>/dev/null; done; true"
+            f'grep -aq {REMOTE_BIN} "$d/cmdline" 2>/dev/null '
+            '&& kill -TERM "${d#/proc/}" 2>/dev/null; done; true'
         )
         try:
             await environment.exec(sweep)
             await asyncio.sleep(2)
             await environment.exec(sweep.replace("-TERM", "-KILL"))
-        except Exception:  # noqa: BLE001 — environment may already be gone
+        except Exception:  # noqa: S110, BLE001 — environment may already be gone
             pass
 
     async def _collect_logs(
@@ -476,7 +500,7 @@ class BuzzContainerRuntime:
     ) -> None:
         try:
             await environment.download_dir(REMOTE_LOGS, trial_dir)
-        except Exception:  # noqa: BLE001 — best effort; env may be torn down
+        except Exception:  # noqa: S110, BLE001 — best effort; env may be torn down
             pass
 
     # -- Buzz CLI as the trial user / provisioning identities -------------------
@@ -503,13 +527,24 @@ class BuzzContainerRuntime:
             )
 
     async def _send(
-        self, credential: AgentCredential, trial: TrialHandle, content: str
+        self,
+        credential: AgentCredential,
+        trial: TrialHandle,
+        content: str,
+        *,
+        mention: str | None = None,
     ) -> None:
-        await self._buzz_json(
-            credential, trial,
-            "messages", "send", "--channel", trial.channel_id,
-            "--content", content,
-        )
+        args = [
+            "messages",
+            "send",
+            "--channel",
+            trial.channel_id,
+            "--content",
+            content,
+        ]
+        if mention is not None:
+            args += ["--mention", mention]
+        await self._buzz_json(credential, trial, *args)
 
     async def _buzz_json(
         self, credential: AgentCredential, trial: TrialHandle, *args: str
@@ -614,9 +649,11 @@ class BuzzContainerRuntime:
             "",
             f"You are `{credential.agent_id}` (pubkey `{credential.nostr_pubkey}`).",
             f"The team coordinates in Buzz channel `{trial.channel_id}`.",
-            f"Tasks come from the user `{trial.user.agent_id}` "
-            f"(pubkey `{trial.user.nostr_pubkey}`); address your final report "
-            "to them.",
+            (
+                f"Tasks come from the user `{trial.user.agent_id}` "
+                f"(pubkey `{trial.user.nostr_pubkey}`); address your final report "
+                "to them."
+            ),
             "",
             "| Name | Role | Pubkey |",
             "|------|------|--------|",
@@ -625,8 +662,7 @@ class BuzzContainerRuntime:
             if teammate.agent_id == credential.agent_id:
                 continue
             lines.append(
-                f"| {teammate.agent_id} | {teammate.role} "
-                f"| `{teammate.nostr_pubkey}` |"
+                f"| {teammate.agent_id} | {teammate.role} | `{teammate.nostr_pubkey}` |"
             )
         composed = persona + "\n".join(lines) + "\n"
         path = trial_dir / f"{credential.agent_id}.system-prompt.md"

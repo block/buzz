@@ -18,8 +18,10 @@ import {
 } from "@/app/communityViewTransition";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
+import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
+import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -33,12 +35,14 @@ import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboa
 import {
   MachineOnboardingFlow,
   type MachineOnboardingPage,
+  type PostOnboardingNavigation,
 } from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
+import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -55,6 +59,7 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
+import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
@@ -63,10 +68,9 @@ import {
   listenForDeepLinks,
 } from "@/shared/deep-link";
 import { cn } from "@/shared/lib/cn";
-import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
-import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
-import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { CommandAdviserLoadingMark } from "./CommandAdviserLoadingMark";
+import { PlanningTaskScheduler } from "@/features/plans/usePlanningTaskScheduler";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -129,38 +133,8 @@ function useBootSplashHold(): BootSplashPhase {
   return phase;
 }
 
-// Animated Buzz mark for the loading gates. The static BuzzMark renders in
-// normal flow and sizes the box — it's plain SVG (no JS/SMIL), so it paints on
-// the very first frame even before scripting starts, avoiding a blank flash on
-// hard reload. The animated FuzzyLogo is layered on top and takes over once it
-// begins playing.
-function BeeLoader({
-  ariaLabel,
-  className,
-  tintClassName = "text-foreground",
-}: {
-  ariaLabel: string;
-  className?: string;
-  tintClassName?: string;
-}) {
-  return (
-    <div className={cn("relative", tintClassName, className)}>
-      <BuzzMark className="block h-auto w-full" />
-      <FuzzyLogo
-        ariaLabel={ariaLabel}
-        className="absolute inset-0 h-full! w-full! [&>svg]:h-full [&>svg]:w-full [&>svg]:max-w-full"
-        fuzz
-        loop
-        loopRestSeconds={0}
-      />
-    </div>
-  );
-}
-
-// Cold boot gate: the theme-adaptive grainient background with a single
-// centered Buzz bee flying over it — the same static mark as before, now with
-// its wings flapping (ported from the Buzz website's wing-flap). Replaces the
-// old "Setting up your community" text, which stays as an sr-only caption.
+// Cold boot gate: retain the established native loading behaviour while
+// presenting the downstream product identity from the first visible frame.
 function AppLoadingGate() {
   return (
     <div
@@ -171,7 +145,7 @@ function AppLoadingGate() {
       <StartupWindowDragRegion />
       <ThemeGrainientBackground />
       <span className="sr-only">{LOADING_TEXT}</span>
-      <FlappingBee className="relative z-10 h-auto w-28" />
+      <CommandAdviserLoadingMark />
     </div>
   );
 }
@@ -194,13 +168,7 @@ function CommunitySwitchGate() {
     >
       <StartupWindowDragRegion />
       <span className="sr-only">Switching community…</span>
-      {showSpinner ? (
-        <BeeLoader
-          ariaLabel="Switching community…"
-          className="h-auto w-20"
-          tintClassName="text-muted-foreground"
-        />
-      ) : null}
+      {showSpinner ? <CommandAdviserLoadingMark compact /> : null}
     </div>
   );
 }
@@ -269,9 +237,19 @@ function AppReady({
   }
 
   return (
-    <KnownAgentPubkeysProvider>
-      <RouterProvider router={router} />
-    </KnownAgentPubkeysProvider>
+    <EncryptedBackupProvider
+      onOpenSettings={() =>
+        void router.navigate({
+          to: "/settings",
+          search: { section: "profile" },
+        })
+      }
+    >
+      <KnownAgentPubkeysProvider>
+        <PlanningTaskScheduler />
+        <RouterProvider router={router} />
+      </KnownAgentPubkeysProvider>
+    </EncryptedBackupProvider>
   );
 }
 
@@ -307,6 +285,8 @@ function CommunityApp({
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
+  const isFindingCommunityAfterLeave =
+    activeCommunity === null && loadCommunityDiscoveryAfterLeave();
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -331,6 +311,7 @@ function CommunityApp({
     activeCommunity,
     communityKey,
     sharedIdentity,
+    isFindingCommunityAfterLeave,
   );
 
   const transitionCommunity = useCallback(
@@ -500,7 +481,9 @@ function CommunityApp({
       appContent = (
         <WelcomeSetup
           initialPage={resumeFirstCommunityPage ?? undefined}
-          onBack={onBackToMachineConfig}
+          onBack={
+            isFindingCommunityAfterLeave ? undefined : onBackToMachineConfig
+          }
         />
       );
     } else if ("error" in community && community.error) {
@@ -535,6 +518,7 @@ function CommunityApp({
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
       <CommunityQueryProvider key={communityKey}>
+        <CommunityThemeController />
         <AppReady
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
@@ -592,6 +576,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   });
   const [machineInitialPage, setMachineInitialPage] =
     useState<MachineOnboardingPage>();
+  const [postOnboardingNav, setPostOnboardingNav] =
+    useState<PostOnboardingNavigation | null>(null);
 
   const reopenMachineConfig = useCallback(() => {
     setMachineInitialPage("config");
@@ -606,6 +592,27 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [machine.complete],
   );
 
+  const navigateAfterOnboarding = useCallback(
+    (nav: PostOnboardingNavigation) => {
+      setPostOnboardingNav(nav);
+    },
+    [],
+  );
+
+  // Execute the pending navigation once the RouterProvider is mounted (i.e.
+  // machine.stage transitions to "ready").  We wait for the ready stage rather
+  // than using setTimeout(0) so the router is guaranteed to exist before we call
+  // router.navigate().
+  useEffect(() => {
+    if (machine.stage === "ready" && postOnboardingNav) {
+      void router.navigate({
+        to: postOnboardingNav.to,
+        search: postOnboardingNav.search ?? {},
+      });
+      setPostOnboardingNav(null);
+    }
+  }, [machine.stage, postOnboardingNav]);
+
   const openAddCommunity = useCallback(
     (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
       activeCommunity
@@ -618,12 +625,13 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [activeCommunity, communityOnboarding.start],
   );
 
-  // Deep links are captured here — above the machine-onboarding gate — not in
-  // CommunityApp. The Rust side queues them; draining into the persisted
-  // community-onboarding transaction immediately means an invite opened on a
-  // fresh install is acknowledged on screen while the identity steps are
-  // still pending, and survives a relaunch in between.
+  // Community links are app-global work. A Huddle companion loads the same
+  // React tree, but must never race the main window for the native pending-link
+  // queue or replace its dedicated transcript surface with onboarding.
+  const acceptsCommunityDeepLinks = huddleWindowChannelId() === null;
   useEffect(() => {
+    if (!acceptsCommunityDeepLinks) return;
+
     const unlisten = listenForDeepLinks({
       startCommunityOnboarding: communityOnboarding.start,
       openAddCommunity,
@@ -632,7 +640,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [communityOnboarding.start, openAddCommunity]);
+  }, [acceptsCommunityDeepLinks, communityOnboarding.start, openAddCommunity]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
@@ -662,8 +670,10 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       <MachineOnboardingFlow
         complete={completeMachineOnboarding}
         continueWithIdentity={machine.continueWithIdentity}
+        continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
+        navigateAfterComplete={navigateAfterOnboarding}
         queryClient={machine.queryClient}
       />
       {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}

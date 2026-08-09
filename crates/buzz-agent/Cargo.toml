@@ -18,6 +18,10 @@ path = "src/lib.rs"
 name = "buzz-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "buzz-lmstudio-agent"
+path = "src/bin/buzz-lmstudio-agent.rs"
+
 # Test-only fake MCP server. Built unconditionally because cargo can't gate
 # bins on `cfg(test)`, but it's tiny and only used by integration tests.
 [[bin]]
@@ -33,6 +37,7 @@ reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
 getrandom = "0.4"
+chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # OAuth 2.0 PKCE for Databricks (and future browser-auth providers).
@@ -43,6 +48,8 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
+buzz-core = { path = "../buzz-core" }
+uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

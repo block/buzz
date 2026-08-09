@@ -6,6 +6,49 @@ use super::{
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
 
+const COMMAND_TEAM_PERSONAS: [(&str, &str, &str); 8] = [
+    (
+        "builtin:command-chief-of-staff",
+        "Chief of Staff",
+        "challenge inconsistencies",
+    ),
+    (
+        "builtin:command-operations",
+        "Operations Adviser",
+        "readiness, dependencies, risks",
+    ),
+    (
+        "builtin:command-intelligence",
+        "Maritime N2 Adviser",
+        "reported information",
+    ),
+    (
+        "builtin:command-logistics",
+        "Logistics Adviser",
+        "replenishment",
+    ),
+    (
+        "builtin:command-navigation",
+        "Navigation Adviser",
+        "navigation evidence",
+    ),
+    (
+        "builtin:command-daily-routine",
+        "Daily Routine Adviser",
+        "calendar, reminders, deadlines",
+    ),
+    (
+        "builtin:command-reporting",
+        "Reporting Adviser",
+        "reports, returns, missing inputs",
+    ),
+    (
+        "builtin:command-plans",
+        "Plans Adviser",
+        "medium- and long-range",
+    ),
+];
+
 fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
         id: id.to_string(),
@@ -18,8 +61,10 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -43,7 +88,22 @@ fn merge_personas_adds_missing_built_ins() {
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
+    assert_eq!(
+        display_names,
+        vec![
+            "Fizz",
+            "Honey",
+            "Bumble",
+            "Chief of Staff",
+            "Operations Adviser",
+            "Maritime N2 Adviser",
+            "Logistics Adviser",
+            "Navigation Adviser",
+            "Daily Routine Adviser",
+            "Reporting Adviser",
+            "Plans Adviser",
+        ]
+    );
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)
@@ -51,8 +111,212 @@ fn merge_personas_adds_missing_built_ins() {
         .collect();
     assert_eq!(
         active_ids,
-        vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
+        vec![
+            "builtin:fizz",
+            "builtin:honey",
+            "builtin:bumble",
+            "builtin:command-chief-of-staff",
+            "builtin:command-operations",
+            "builtin:command-intelligence",
+            "builtin:command-logistics",
+            "builtin:command-navigation",
+            "builtin:command-daily-routine",
+            "builtin:command-reporting",
+            "builtin:command-plans",
+        ]
     );
+}
+
+#[test]
+fn command_team_builtins_are_active_symbolic_and_route_independent() {
+    let records = built_in_persona_records("2026-07-27T00:00:00Z");
+
+    for (id, display_name, role_fragment) in COMMAND_TEAM_PERSONAS {
+        let matches = records
+            .iter()
+            .filter(|record| record.id == id)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{id} should appear exactly once");
+        let record = matches[0];
+        assert_eq!(record.display_name, display_name);
+        assert!(record.is_builtin);
+        assert!(record.is_active);
+        assert_eq!(record.runtime, None);
+        assert_eq!(record.model, None);
+        assert!(
+            record
+                .avatar_url
+                .as_deref()
+                .is_some_and(|avatar| avatar.starts_with("data:image/svg+xml,")),
+            "{id} should use a compact symbolic SVG avatar"
+        );
+        assert!(
+            record.system_prompt.contains(role_fragment),
+            "{id} should retain its adviser role boundary"
+        );
+        assert!(record
+            .system_prompt
+            .contains("command-discussion-outcome-v1"));
+        assert!(record
+            .system_prompt
+            .contains("mem/command-brief/<adviser>/<yyyy-mm-dd>/<outcome-id>"));
+        assert!(record.system_prompt.contains("Recorded for future briefs"));
+        assert!(record
+            .system_prompt
+            .contains("only after `buzz mem set` succeeds"));
+        assert!(record
+            .system_prompt
+            .contains("Do not copy the raw Buzz transcript"));
+        assert!(record
+            .system_prompt
+            .contains("<persona-id>\\n<channel-id>\\n<triggering-event-id>"));
+        assert!(record.system_prompt.contains(
+            "Seek applicable doctrine with search_command_doctrine before substantive advice."
+        ));
+        assert!(record.system_prompt.contains(
+            "If no applicable doctrine is retrieved, continue with a reasoned assessment."
+        ));
+        assert!(record.system_prompt.contains("PLANNING DATA AND PROPOSALS"));
+        assert!(record
+            .system_prompt
+            .contains("Battle Rhythm is the approved ship schedule"));
+        assert!(record
+            .system_prompt
+            .contains("Never claim that a proposed planning change has been applied"));
+    }
+}
+
+#[test]
+fn n2_and_planning_prompts_pin_osint_provenance_and_virtual_jpg_behaviour() {
+    let records = built_in_persona_records("2026-07-28T00:00:00Z");
+    let n2 = records
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("N2 adviser should exist");
+    for required in [
+        "world_monitor_",
+        "MUST call at least one relevant world_monitor_ tool",
+        "Do not send a pickup acknowledgement",
+        "same turn",
+        "reported information",
+        "observed indicators",
+        "assumptions",
+        "assessment",
+        "ISO 3166-1 alpha-2",
+    ] {
+        assert!(n2.system_prompt.contains(required), "missing {required:?}");
+    }
+
+    for persona_id in [
+        "builtin:command-chief-of-staff",
+        "builtin:command-operations",
+    ] {
+        let prompt = &records
+            .iter()
+            .find(|record| record.id == persona_id)
+            .expect("planning persona should exist")
+            .system_prompt;
+        for required in [
+            "mission-specific Buzz channel",
+            "virtual Joint Planning Group",
+            "@mention",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "{persona_id} missing {required:?}"
+            );
+        }
+    }
+
+    let (twice, changed) = merge_personas(records.clone(), "2026-07-28T00:00:01Z");
+    assert!(!changed);
+    for persona_id in ["builtin:command-intelligence", "builtin:command-logistics"] {
+        assert_eq!(
+            twice
+                .iter()
+                .filter(|record| record.id == persona_id)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn merge_personas_upgrades_unmodified_command_prompts_for_planning_evidence() {
+    let current = built_in_persona_records("2026-07-29T00:00:00Z");
+    let mut previous = current.clone();
+    for record in &mut previous {
+        if record.id.starts_with("builtin:command-") {
+            record.system_prompt = record
+                .system_prompt
+                .strip_suffix(super::COMMAND_PLANNING_INTEGRATION)
+                .expect("new built-in prompt should end with planning integration")
+                .to_string();
+        }
+    }
+
+    let (upgraded, changed) = merge_personas(previous, "2026-07-29T00:00:01Z");
+
+    assert!(changed);
+    for expected in current
+        .iter()
+        .filter(|record| record.id.starts_with("builtin:command-"))
+    {
+        let actual = upgraded
+            .iter()
+            .find(|record| record.id == expected.id)
+            .expect("command persona should remain present");
+        assert_eq!(actual.system_prompt, expected.system_prompt);
+        assert_eq!(actual.updated_at, "2026-07-29T00:00:01Z");
+    }
+}
+
+#[test]
+fn merge_personas_upgrades_the_unmodified_n2_prompt_without_overwriting_custom_edits() {
+    let current = built_in_persona_records("2026-07-28T00:00:00Z")
+        .into_iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("N2 adviser should exist");
+
+    let mut previous = current.clone();
+    previous.system_prompt = super::PREVIOUS_COMMAND_INTELLIGENCE_PROMPT.to_string();
+    let (upgraded, changed) = merge_personas(vec![previous], "2026-07-28T00:00:01Z");
+    assert!(changed);
+    let upgraded_n2 = upgraded
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("upgraded N2 adviser should exist");
+    assert_eq!(upgraded_n2.system_prompt, current.system_prompt);
+    assert_eq!(upgraded_n2.updated_at, "2026-07-28T00:00:01Z");
+
+    let mut customised = current.clone();
+    customised.system_prompt.push_str("\nUser customisation.");
+    let (preserved, changed) = merge_personas(vec![customised.clone()], "2026-07-28T00:00:02Z");
+    assert!(
+        changed,
+        "the other missing built-ins should still be inserted"
+    );
+    let preserved_n2 = preserved
+        .iter()
+        .find(|record| record.id == "builtin:command-intelligence")
+        .expect("customised N2 adviser should exist");
+    assert_eq!(preserved_n2.system_prompt, customised.system_prompt);
+}
+
+#[test]
+fn navigation_builtin_remains_advisory() {
+    let records = built_in_persona_records("2026-07-27T00:00:00Z");
+    let navigation = records
+        .iter()
+        .find(|record| record.id == "builtin:command-navigation")
+        .expect("navigation adviser should exist");
+
+    assert!(navigation
+        .system_prompt
+        .contains("do not make navigational decisions"));
+    assert!(navigation
+        .system_prompt
+        .contains("do not generate executable navigation orders"));
 }
 
 #[test]
@@ -171,10 +435,7 @@ fn ensure_persona_is_active_rejects_inactive_personas() {
 
     let err = ensure_persona_is_active(&[persona], "builtin:fizz").unwrap_err();
 
-    assert_eq!(
-        err,
-        "Fizz is not in My Agents. Choose it from Agent Catalog first."
-    );
+    assert_eq!(err, "Fizz is not in My Agents.");
 }
 
 #[test]
@@ -317,6 +578,7 @@ fn migrate_preserves_customized_personas() {
         system_prompt: "My custom research workflow with special instructions".to_string(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         ..custom_persona("builtin:researcher", "My Researcher")
     }];
 
@@ -350,6 +612,7 @@ fn migrate_is_idempotent() {
         system_prompt: "My custom prompt".to_string(),
         is_builtin: false,
         is_active: false,
+        shared: false,
         ..custom_persona("builtin:researcher", "Researcher (retired)")
     }];
     assert!(
@@ -365,6 +628,7 @@ fn migrate_is_idempotent() {
         system_prompt: "Custom review prompt".to_string(),
         is_builtin: true,
         is_active: true,
+        shared: false,
         ..custom_persona("builtin:reviewer", "Reviewer")
     }];
     assert!(migrate_retired_personas(&mut stored_pre_demotion, now));
@@ -406,5 +670,31 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         effective_agent_command(Some("builtin:fizz"), &records, None),
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
+    );
+}
+
+#[test]
+fn command_adviser_builtins_default_to_single_turn_parallelism() {
+    let records = built_in_persona_records("2026-07-28T00:00:00Z");
+    let command_team: Vec<_> = records
+        .iter()
+        .filter(|persona| persona.id.starts_with("builtin:command-"))
+        .collect();
+
+    assert!(!command_team.is_empty(), "Command Team personas must exist");
+    assert!(
+        command_team
+            .iter()
+            .all(|persona| persona.parallelism == Some(1)),
+        "every Command Team persona must default to one concurrent turn"
+    );
+
+    let fizz = records
+        .iter()
+        .find(|persona| persona.id == "builtin:fizz")
+        .expect("Fizz built-in must exist");
+    assert_eq!(
+        fizz.parallelism, None,
+        "the Command Team limit must not change unrelated built-ins"
     );
 }

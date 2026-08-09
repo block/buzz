@@ -42,7 +42,7 @@ const ENGRAM_FETCH_LIMIT: u32 = 5000;
 /// decrypted UTF-8 payload (profile text for core, value for memory).
 /// `outgoing_refs` is the list of `[[slug]]` references extracted from the
 /// body — used by the UI to BFS reachability from `core`.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngramEntry {
     pub slug: String,
@@ -55,7 +55,7 @@ pub struct EngramEntry {
 /// Single-payload response for one panel open. `core` is split out because
 /// the UI roots the reachability tree there; `memories` excludes core (and
 /// tombstones) so it maps 1:1 to the `mem/...` set.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMemoryListing {
     /// `core` entry, if the agent has one.
@@ -108,6 +108,16 @@ pub async fn get_agent_memory(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentMemoryListing, String> {
+    read_agent_memory_listing(&agent_pubkey, &app, state.inner()).await
+}
+
+/// Reusable owner-gated engram listing used by both the Tauri command and
+/// native command-brief evidence collection.
+pub(crate) async fn read_agent_memory_listing(
+    agent_pubkey: &str,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<AgentMemoryListing, String> {
     // ── Owner gating ────────────────────────────────────────────────────
     // The viewer (this desktop's identity) is the prospective owner. The
     // relay query below is `#p`-tagged for the viewer's OWN pubkey and every
@@ -134,7 +144,7 @@ pub async fn get_agent_memory(
     // wrongly locked legitimate owners out of their own memory. The declared-
     // owner path is cleared (PR #917 author signed off); decryption still
     // does the real guarding.)
-    let agent = PublicKey::from_hex(&agent_pubkey)
+    let agent = PublicKey::from_hex(agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
     let viewer_pubkey = {
@@ -142,13 +152,13 @@ pub async fn get_agent_memory(
         keys.public_key().to_hex()
     };
 
-    let managed = load_managed_agents(&app)?;
+    let managed = load_managed_agents(app)?;
     let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
     let is_declared_owner = if is_managed {
         false // already authorized; skip the relay roundtrip
     } else {
         // Verify the agent's live `kind:0` declares the viewer as owner.
-        let kind0 = fetch_kind0(&state, &agent_pubkey).await?;
+        let kind0 = fetch_kind0(state, agent_pubkey).await?;
         kind0_declares_viewer_owner(kind0.as_ref(), &viewer_pubkey)
     };
 
@@ -176,7 +186,7 @@ pub async fn get_agent_memory(
         "#p": [owner_pubkey.to_hex()],
         "limit": ENGRAM_FETCH_LIMIT,
     });
-    let events = query_relay(&state, &[filter]).await?;
+    let events = query_relay(state, &[filter]).await?;
     // `>=` is intentional and accepts a false-positive at exactly
     // ENGRAM_FETCH_LIMIT events: if the relay returned the cap, we can't
     // distinguish "exactly cap" from "cap because clipped". The banner copy

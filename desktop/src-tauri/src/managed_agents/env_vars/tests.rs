@@ -150,11 +150,24 @@ fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer
     // anyone even when the UI/record says owner-only.
-    for key in ["BUZZ_ACP_RESPOND_TO", "BUZZ_ACP_RESPOND_TO_ALLOWLIST"] {
+    for key in [
+        "BUZZ_ACP_RESPOND_TO",
+        "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        "BUZZ_ACP_ALLOWED_RESPOND_TO",
+    ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
         let agent = map(&[(key, "anyone")]);
         let merged = merged_user_env(&BTreeMap::new(), &agent);
         assert!(merged.is_empty(), "{key} should be stripped");
+    }
+}
+
+#[test]
+fn reserved_keys_include_remote_lifetime_policy() {
+    for key in ["BUZZ_ACP_EXIT_AFTER_INACTIVITY", "BUZZ_ACP_NO_PRESENCE"] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "0")]);
+        assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
     }
 }
 
@@ -179,6 +192,43 @@ fn reserved_keys_include_relay_url() {
     let agent = map(&[("BUZZ_RELAY_URL", "ws://attacker.example")]);
     let merged = merged_user_env(&BTreeMap::new(), &agent);
     assert!(merged.is_empty());
+}
+
+#[test]
+fn reserved_keys_include_lmstudio_security_policy() {
+    for key in [
+        "BUZZ_AGENT_CLASSIFICATION",
+        "LM_STUDIO_BASE_URL",
+        "LM_STUDIO_MCP_INTEGRATIONS",
+        "LM_STUDIO_FALLBACK_PROVIDER",
+        "LM_STUDIO_API_TOKEN",
+        "LM_STUDIO_MODEL",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "attacker-controlled")]);
+        assert!(
+            merged_user_env(&BTreeMap::new(), &agent).is_empty(),
+            "{key} must be stripped from saved user configuration"
+        );
+    }
+    assert!(
+        !is_reserved_env_key("BUZZ_AGENT_PROVIDER"),
+        "the shared provider key remains configurable for non-native runtimes; \
+         the LM Studio projection force-overwrites it after user layers"
+    );
+}
+
+#[test]
+fn reserved_keys_include_command_adviser_source_injection() {
+    for key in [
+        "COMMAND_ADVISER_PERSONA_ID",
+        "COMMAND_ADVISER_RAG_URL",
+        "COMMAND_ADVISER_WORLD_MONITOR_ENDPOINT",
+        "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
+        "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+    }
 }
 
 // ── validate_user_env_keys ─────────────────────────────────────────

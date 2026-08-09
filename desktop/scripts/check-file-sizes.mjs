@@ -9,6 +9,14 @@ const MAX_LINES = 1000;
 
 const rules = [
   { root: "src-tauri/src", extensions: new Set([".rs"]), maxLines: MAX_LINES },
+  // Workspace member crates. Without this the ratchet's only Rust root is
+  // `src-tauri/src`, and a crate under `src-tauri/crates/` is born outside the
+  // repo's one size discipline -- silently, since the check still exits 0.
+  {
+    root: "src-tauri/crates",
+    extensions: new Set([".rs"]),
+    maxLines: MAX_LINES,
+  },
   {
     root: "src/app",
     extensions: new Set([".ts", ".tsx"]),
@@ -177,7 +185,7 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  ["src-tauri/src/managed_agents/readiness.rs", 1947],
   // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
   // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
@@ -296,7 +304,7 @@ const overrides = new Map([
   // Buzz-managed Node path helpers and resolution tests moved to
   // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
   // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
-  ["src-tauri/src/managed_agents/discovery.rs", 1393],
+  ["src-tauri/src/managed_agents/discovery.rs", 1898],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -308,12 +316,6 @@ const overrides = new Map([
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
   // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
   ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
-  // identity-import-keyring: the identity resolution state machine's behavioral
-  // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
-  // adoption / read-back-corruption / marker-failure arms, recovery-mode
-  // gating). Load-bearing regression coverage for silent identity rotation,
-  // not generic debt growth. Approved override; split if the matrix grows.
-  ["src-tauri/src/app_state_tests.rs", 1420],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
@@ -382,25 +384,6 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
-  // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
-  // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a
-  // relay 3xx cannot forward the minted auth header cross-origin (SSRF fix).
-  // +16 (1052 -> 1068): extracted that client into `build_media_fetch_client()`
-  // -> Result so the fail-closed invariant is testable (no silent redirect-
-  // following fallback; startup panics loudly instead). The function belongs
-  // here beside `build_app_state` and its sibling client; its doc comment
-  // carries the load-bearing SSRF rationale. Extraction would only relocate,
-  // not reduce, the security-critical code.
-  // +5 (1068 -> 1073): merge with main, which independently added the
-  // managed_agent_profile_reconcile_enabled flag (field + doc + init) under
-  // its own 1042-line override. Union of two separately approved additions.
-  // +8 (1073 -> 1081): agents-everywhere pair re-key — managed_agent_processes
-  // and session_config_cache re-keyed by ManagedAgentRuntimeKey, the runtime
-  // transition lock doc broadened to cover all protected-PID transitions, and
-  // clear_agent_session_caches (per-pubkey retain) added alongside the
-  // per-key clear. Load-bearing identity-contract change; queued to split.
-  ["src-tauri/src/app_state.rs", 1081],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
@@ -462,7 +445,9 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +1: rustfmt wraps the merged LM Studio-native discovery await after the
+  // v0.5.2 model-catalog integration; no additional behavior is introduced.
+  ["src-tauri/src/commands/agent_models.rs", 1193],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
@@ -494,7 +479,7 @@ const overrides = new Map([
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
   // +8: install_shell_from pure seam extracted for deterministic testing.
-  ["src-tauri/src/commands/agent_discovery.rs", 1523],
+  ["src-tauri/src/commands/agent_discovery.rs", 1842],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

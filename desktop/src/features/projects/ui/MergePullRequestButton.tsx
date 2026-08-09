@@ -2,7 +2,10 @@ import { AlertTriangle, Copy, GitMerge, SquareTerminal } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
+import type {
+  ProjectPullRequest,
+  Repository as Project,
+} from "@/features/projects/hooks";
 import { projectPullRequestConflictCommands } from "@/features/projects/projectPullRequestConflictRecovery";
 import {
   useMergeProjectPullRequestMutation,
@@ -178,7 +181,7 @@ export function MergePullRequestButton({
     <div className="contents">
       <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
         <Button
-          className="h-8 gap-1.5 bg-purple-600 px-3.5 text-white shadow-sm hover:bg-purple-700"
+          className="h-8 gap-1.5 px-3.5"
           disabled={mergeMutation.isPending || publishMergedMutation.isPending}
           onClick={() => {
             if (unpublishedStatusEvent) {

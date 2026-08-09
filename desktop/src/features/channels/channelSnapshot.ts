@@ -13,6 +13,7 @@
 
 import type { Channel } from "@/shared/api/types";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const STORAGE_KEY_PREFIX = "buzz-channels.v1";
 
@@ -51,9 +52,22 @@ export function writeChannelSnapshot(
 ): void {
   try {
     const key = channelSnapshotKey(relayUrl);
-    const serialized = JSON.stringify({ version: 1, channels });
-    if (window.localStorage.getItem(key) === serialized) return;
-    window.localStorage.setItem(key, serialized);
+    const previous = window.localStorage.getItem(key);
+    if (previous) {
+      try {
+        const parsed = parseChannelSnapshot(JSON.parse(previous));
+        if (parsed && JSON.stringify(parsed) === JSON.stringify(channels))
+          return;
+      } catch {
+        // Malformed snapshots are replaced below.
+      }
+    }
+    const serialized = JSON.stringify({
+      version: 1,
+      updatedAt: Date.now(),
+      channels,
+    });
+    setLocalStorageItemWithRecovery(key, serialized);
   } catch {
     // Storage access failures are non-fatal.
   }

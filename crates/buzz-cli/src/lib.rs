@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod links;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -82,11 +83,11 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
-    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
@@ -212,6 +213,9 @@ enum Cmd {
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
+    /// Create and manage multi-repo projects (NIP-MP)
+    #[command(subcommand)]
+    Projects(ProjectsCmd),
     /// Send, get, list, and set status on git patches (NIP-34)
     #[command(subcommand)]
     Patches(PatchesCmd),
@@ -294,8 +298,10 @@ pub enum AgentsCmd {
     },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
-        after_help = "The relay chooses the consent path (self / admin / owner) from the \
-submitted request; this command does not retry with a different shape.\n\n\
+        after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
+attaches its owner-auth tag. On extraction failure it retries once (common cause: profile \
+republish in progress). If the retry also fails, the command exits with an error — use \
+--admin to bypass this guard when your key is a relay admin.\n\n\
 Suggested --reason codes (unknown values are allowed): rotated, retired, \
 bot-rebuilt, left-organization, spam\n\n\
 Archiving a third-party identity is a human owner/admin action: an agent \
@@ -318,10 +324,21 @@ buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
+        #[arg(long, default_value_t = false)]
+        admin: bool,
     },
     /// Submit a NIP-IA unarchive request for an identity (kind 9036)
-    #[command(after_help = "Examples:\n  \
-buzz agents unarchive <PUBKEY> --reason returned")]
+    #[command(
+        after_help = "Auth flow: same as `archive` — retries kind:0 fetch once on \
+extraction failure, then exits with an error if still unresolvable. Use --admin to bypass \
+for relay-admin callers.\n\n\
+Examples:\n  \
+buzz agents unarchive <PUBKEY> --reason returned"
+    )]
     Unarchive {
         /// Target identity pubkey (hex)
         target_pubkey: String,
@@ -331,6 +348,12 @@ buzz agents unarchive <PUBKEY> --reason returned")]
         /// Optional human-readable note (not parsed for authorization)
         #[arg(long, default_value = "")]
         content: String,
+        /// Allow sending without owner-auth attestation after extraction fails
+        /// (relay-admin path). Use only when your key is a relay admin; ordinary
+        /// owners do not need this flag. Without it, auth-extraction failure after
+        /// one automatic retry is a hard error rather than a silent bare send.
+        #[arg(long, default_value_t = false)]
+        admin: bool,
     },
     /// Read the relay's current NIP-IA archive snapshot (kind 13535)
     #[command(
@@ -369,6 +392,9 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -808,6 +834,9 @@ pub enum UsersCmd {
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
+        /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
+        #[arg(long = "owner", requires = "name")]
+        owner: Option<String>,
     },
     /// Update the current identity's profile
     #[command(name = "set-profile")]
@@ -837,6 +866,19 @@ pub enum UsersCmd {
         /// Presence status
         #[arg(long, value_enum)]
         status: PresenceStatus,
+    },
+    /// Set your user status (NIP-38 kind:30315 — the "status" line on your profile)
+    #[command(name = "set-status")]
+    SetStatus {
+        /// Status text (required unless --clear)
+        #[arg(long, required_unless_present = "clear")]
+        text: Option<String>,
+        /// Optional emoji shown before the status text
+        #[arg(long)]
+        emoji: Option<String>,
+        /// Remove your status entirely
+        #[arg(long, conflicts_with_all = ["text", "emoji"])]
+        clear: bool,
     },
 }
 
@@ -1113,6 +1155,11 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
+        /// Channel UUID to bind the repo to. The `buzz-channel` tag is the
+        /// git ACL: without it the relay 404s every clone/fetch/push until
+        /// the author runs `buzz repos bind` (issue #3527).
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1131,6 +1178,20 @@ pub enum ReposCmd {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<u32>,
+    },
+    /// Bind (or rebind) one of your repositories to a channel.
+    ///
+    /// The `buzz-channel` tag on the announcement is the git ACL: the relay
+    /// authorizes clone/fetch/push by membership in the bound channel. A
+    /// repo announced without it (e.g. by a vanilla NIP-34 client) returns
+    /// 404 for everyone until its author binds it here.
+    Bind {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Channel UUID to bind. Replaces any existing binding.
+        #[arg(long)]
+        channel: String,
     },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
@@ -1187,6 +1248,122 @@ pub enum RepoPushRole {
     Admin,
     /// Any channel member.
     Member,
+}
+
+/// Visibility of a multi-repo project listing.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum ProjectVisibility {
+    /// Project appears in public listings (default).
+    Listed,
+    /// Project is hidden from public listings.
+    Unlisted,
+}
+
+impl ProjectVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectVisibility::Listed => "listed",
+            ProjectVisibility::Unlisted => "unlisted",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum ProjectsCmd {
+    /// Create a new multi-repo project (NIP-MP kind:30621)
+    ///
+    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    Create {
+        /// Project identifier (slug), up to 1024 bytes
+        slug: String,
+        /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
+        /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
+        /// At least one --repo is required.
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+        /// Display name (≤256 bytes)
+        #[arg(long)]
+        name: Option<String>,
+        /// Description (≤2048 bytes)
+        #[arg(long)]
+        description: Option<String>,
+        /// Associated Buzz channel UUID
+        #[arg(long)]
+        channel: Option<String>,
+        /// Visibility: `listed` (default) or `unlisted`
+        #[arg(long)]
+        visibility: Option<ProjectVisibility>,
+    },
+    /// Get a project by slug
+    Get {
+        /// Project slug
+        slug: String,
+        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// List projects
+    List {
+        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Add one or more member repositories to a project
+    #[command(name = "add-repo")]
+    AddRepo {
+        /// Project slug
+        slug: String,
+        /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+    },
+    /// Remove one or more member repositories from a project
+    #[command(name = "remove-repo")]
+    RemoveRepo {
+        /// Project slug
+        slug: String,
+        /// Member repository coordinate to remove (bare id or full `30617:<owner-hex>:<repo-d>`)
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+    },
+    /// Update project metadata (at least one setter or clearer required)
+    #[command(group = clap::ArgGroup::new("mutation").required(true).multiple(true))]
+    Update {
+        /// Project slug
+        slug: String,
+        /// Set the display name
+        #[arg(long, group = "mutation")]
+        name: Option<String>,
+        /// Remove the display name
+        #[arg(long, group = "mutation", conflicts_with = "name")]
+        clear_name: bool,
+        /// Set the description
+        #[arg(long, group = "mutation")]
+        description: Option<String>,
+        /// Remove the description
+        #[arg(long, group = "mutation", conflicts_with = "description")]
+        clear_description: bool,
+        /// Set the associated Buzz channel UUID
+        #[arg(long, group = "mutation")]
+        channel: Option<String>,
+        /// Remove the associated channel
+        #[arg(long, group = "mutation", conflicts_with = "channel")]
+        clear_channel: bool,
+        /// Set visibility: `listed` or `unlisted`
+        #[arg(long, group = "mutation")]
+        visibility: Option<ProjectVisibility>,
+        /// Remove the visibility tag (absence defaults to `listed`)
+        #[arg(long, group = "mutation", conflicts_with = "visibility")]
+        clear_visibility: bool,
+    },
+    /// Delete a project (head-based tombstone; verified after submit)
+    Delete {
+        /// Project slug
+        slug: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1338,6 +1515,9 @@ pub enum PrCmd {
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
+        /// Channel where this pull request originated (NIP-29 h-tag)
+        #[arg(long)]
+        channel: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1727,6 +1907,41 @@ pub enum ModerationCmd {
     },
 }
 
+/// Normalize hand-authored `BUZZ_AUTH_TAG` input to strict JSON.
+///
+/// `.env` files and shell exports sometimes carry the tag in the unquoted
+/// shorthand `[auth,<hex>,<conditions>,<hex>]` (quotes dropped by hand).
+/// When the input is not valid JSON but is bracket-delimited, rewrite it as
+/// a JSON array of the comma-separated fields (an empty field `,,` becomes
+/// `""`, matching the canonical form `["auth","hex","","hex"]`).
+///
+/// This is presentation-layer leniency at the configuration edge only: the
+/// output is always fed through the SDK's strict `parse_auth_tag` /
+/// `verify_auth_tag`, which enforce structure, hex, the conditions grammar,
+/// and the BIP-340 signature. Inputs that are already valid JSON — or not
+/// recognizable as the shorthand — are returned unchanged so the strict
+/// parser reports the error on the original bytes.
+fn normalize_auth_tag_input(input: &str) -> String {
+    let trimmed = input.trim();
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_owned();
+    }
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let fields: Vec<&str> = trimmed[1..trimmed.len() - 1]
+            .split(',')
+            .map(str::trim)
+            .collect();
+        // Only a plausible 4-field auth tag is rewritten; anything else is
+        // passed through untouched for the strict parser to reject with an
+        // error that references the caller's original input.
+        if fields.len() == 4 && !fields.iter().any(|f| f.contains('"')) {
+            // serde_json cannot fail serializing a Vec<&str>.
+            return serde_json::to_string(&fields).expect("string array serializes");
+        }
+    }
+    trimmed.to_owned()
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -1747,17 +1962,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
+    //
+    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
+    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
+    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
+    // JSON; all validation and signature verification happen on the strict
+    // path below, unchanged.
     let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref json) if !json.is_empty() => {
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(json)
+        Some(ref input) if !input.is_empty() => {
+            let json = normalize_auth_tag_input(input);
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
                 .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(json, &keys.public_key()).map_err(|e| {
+            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
                 CliError::Auth(format!(
                     "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
                     keys.public_key().to_hex()
                 ))
             })?;
-            (Some(tag), Some(json.clone()))
+            // Canonical wire form derives from the parsed-and-verified tag
+            // (same shape as buzz-acp's RestClient), never from raw input.
+            let canonical = serde_json::to_string(tag.as_slice())
+                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
+            (Some(tag), Some(canonical))
         }
         _ => (None, None),
     };
@@ -1778,6 +2004,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
@@ -1794,10 +2021,79 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
+    /// conditions field becomes `""`.
+    #[test]
+    fn normalize_auth_tag_raw_shorthand() {
+        let owner = "a".repeat(64);
+        let sig = "b".repeat(128);
+
+        let raw = format!("[auth,{owner},,{sig}]");
+        let json = normalize_auth_tag_input(&raw);
+        let parsed: Vec<String> = serde_json::from_str(&json).expect("output must be JSON");
+        assert_eq!(parsed, vec!["auth", &owner, "", &sig]);
+
+        // With conditions and surrounding whitespace (shell/.env artifacts).
+        let raw = format!("  [auth, {owner} , kind=9, {sig}]  \n");
+        let json = normalize_auth_tag_input(&raw);
+        let parsed: Vec<String> = serde_json::from_str(&json).expect("output must be JSON");
+        assert_eq!(parsed, vec!["auth", &owner, "kind=9", &sig]);
+    }
+
+    /// Valid JSON input passes through byte-identical (modulo outer trim) —
+    /// the normalizer must never rewrite well-formed input.
+    #[test]
+    fn normalize_auth_tag_json_passthrough() {
+        let owner = "a".repeat(64);
+        let sig = "b".repeat(128);
+        let json_in = serde_json::json!(["auth", owner, "kind=9", sig]).to_string();
+        assert_eq!(normalize_auth_tag_input(&json_in), json_in);
+    }
+
+    /// Inputs that are neither JSON nor a plausible 4-field shorthand pass
+    /// through unchanged, so the strict parser rejects the original bytes.
+    #[test]
+    fn normalize_auth_tag_leaves_garbage_untouched() {
+        for garbage in [
+            "not a tag",
+            "[auth,too,few]",
+            "[a,b,c,d,e]",
+            r#"[auth,"quoted",x,y]"#, // quote chars => not the shorthand
+            "[]",
+            "{\"auth\":1}",
+        ] {
+            assert_eq!(normalize_auth_tag_input(garbage), garbage.trim());
+        }
+    }
+
     /// Smoke test: CLI definition is valid and parseable.
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn set_status_clear_rejects_text_and_emoji() {
+        for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
+            let args = ["buzz", "users", "set-status", "--clear"]
+                .into_iter()
+                .chain(extra);
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "--clear must conflict with {}",
+                extra[0]
+            );
+        }
+    }
+
+    #[test]
+    fn set_status_requires_text_or_clear() {
+        assert!(Cli::try_parse_from(["buzz", "users", "set-status"]).is_err());
+        assert!(
+            Cli::try_parse_from(["buzz", "users", "set-status", "--emoji", "🎶"]).is_err(),
+            "--emoji alone must not imply a status"
+        );
+        assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
     }
 
     #[test]
@@ -1818,6 +2114,7 @@ mod tests {
             "pack",
             "patches",
             "pr",
+            "projects",
             "reactions",
             "repos",
             "social",
@@ -1921,7 +2218,13 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "users"),
-            vec!["get", "presence", "set-presence", "set-profile"]
+            vec![
+                "get",
+                "presence",
+                "set-presence",
+                "set-profile",
+                "set-status"
+            ]
         );
         assert_eq!(
             names(&cmd, "workflows"),
@@ -1942,7 +2245,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["bind", "create", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -1966,6 +2269,18 @@ mod tests {
         assert_eq!(
             names(&cmd, "patches"),
             vec!["get", "list", "send", "status"]
+        );
+        assert_eq!(
+            names(&cmd, "projects"),
+            vec![
+                "add-repo",
+                "create",
+                "delete",
+                "get",
+                "list",
+                "remove-repo",
+                "update"
+            ]
         );
         assert_eq!(
             names(&cmd, "issues"),
@@ -2004,11 +2319,12 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
+            ("projects", 7),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
-            ("users", 4),
+            ("users", 5),
             ("workflows", 8),
         ];
 
@@ -2028,5 +2344,154 @@ mod tests {
                 group_name, expected_count, actual_count
             );
         }
+    }
+
+    /// Collect all args (recursing into subcommands) whose env var name looks
+    /// like a credential but does NOT have `hide_env_values` set.
+    fn collect_unhidden_secret_args(cmd: &clap::Command) -> Vec<(String, String)> {
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let mut violations: Vec<(String, String)> = Vec::new();
+
+        for arg in cmd.get_arguments() {
+            if let Some(env_key) = arg.get_env() {
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    violations.push((cmd.get_name().to_string(), env_name));
+                }
+            }
+        }
+
+        for sub in cmd.get_subcommands() {
+            violations.extend(collect_unhidden_secret_args(sub));
+        }
+
+        violations
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        let cmd = Cli::command();
+        let violations = collect_unhidden_secret_args(&cmd);
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each:\n{}",
+            violations
+                .iter()
+                .map(|(cmd, env)| format!("  command={cmd:?} env={env:?}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    // ── projects update mutation group ────────────────────────────────────────
+
+    /// Multiple independent fields must be accepted in the same invocation.
+    #[test]
+    fn projects_update_multi_field_is_accepted() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--description",
+                "Y",
+            ])
+            .is_ok(),
+            "--name and --description together must be accepted"
+        );
+    }
+
+    /// A setter for one field and a clearer for a different field must be accepted.
+    #[test]
+    fn projects_update_setter_with_other_clearer_is_accepted() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--clear-description",
+            ])
+            .is_ok(),
+            "--name with --clear-description must be accepted"
+        );
+    }
+
+    /// A setter and its own clearer are mutually exclusive — clap must reject this.
+    #[test]
+    fn projects_update_setter_with_own_clearer_is_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--clear-name",
+            ])
+            .is_err(),
+            "--name and --clear-name together must be rejected by clap"
+        );
+    }
+
+    /// Providing no mutation options at all must be rejected by clap (required group).
+    #[test]
+    fn projects_update_no_mutation_is_rejected_by_clap() {
+        // Without credentials, a valid parse would reach authentication and fail
+        // with auth_error — but a clap-level rejection happens before any I/O.
+        // We verify it's a clap error (not just any error) by checking the error
+        // kind is not a runtime/auth failure — Cli::try_parse_from returns Err
+        // immediately for argument violations.
+        assert!(
+            Cli::try_parse_from(["buzz", "projects", "update", "my-slug"]).is_err(),
+            "update with no setters or clearers must be rejected at parse time"
+        );
+    }
+
+    /// An unrecognised visibility token must be rejected by clap before any I/O.
+    #[test]
+    fn projects_create_invalid_visibility_is_rejected_by_clap() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "create",
+                "my-slug",
+                "--repo",
+                "buzz",
+                "--visibility",
+                "chartreuse",
+            ])
+            .is_err(),
+            "--visibility chartreuse must be rejected at parse time"
+        );
+    }
+
+    /// An unrecognised visibility token on update must be rejected by clap before any I/O.
+    #[test]
+    fn projects_update_invalid_visibility_is_rejected_by_clap() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--visibility",
+                "chartreuse",
+            ])
+            .is_err(),
+            "--visibility chartreuse on update must be rejected at parse time"
+        );
     }
 }

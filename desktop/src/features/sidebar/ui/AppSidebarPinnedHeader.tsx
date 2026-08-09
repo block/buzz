@@ -1,4 +1,14 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  CalendarDays,
+  ChartGantt,
+  FolderGit2,
+  Inbox,
+  ShieldCheck,
+  ShipWheel,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -12,14 +22,18 @@ import {
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 
-type SidebarSelectedView =
+export type SidebarSelectedView =
   | "home"
   | "channel"
   | "messages"
   | "agents"
+  | "console"
+  | "ship"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "plans"
+  | "projects"
+  | "battleRhythm";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -38,7 +52,11 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectBattleRhythm: () => void;
+  onSelectCommandConsole: () => void;
   onSelectHome: () => void;
+  onSelectShip: () => void;
+  onSelectPlans: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -83,7 +101,11 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectBattleRhythm,
+  onSelectCommandConsole,
   onSelectHome,
+  onSelectShip,
+  onSelectPlans,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -91,20 +113,29 @@ export function AppSidebarPrimaryMenu({
 }: AppSidebarPrimaryMenuProps) {
   return (
     <SidebarHeader
-      className="cursor-default select-none px-2 pb-0 pt-0"
+      className="relative z-40 cursor-default select-none px-2 pb-0 pt-0"
       data-tauri-drag-region
       data-testid="sidebar-primary-menu"
     >
       <SidebarMenu className="pb-2">
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             isActive={selectedView === "home"}
             onClick={onSelectHome}
             tooltip="Inbox"
             type="button"
           >
-            <Inbox className="h-4 w-4" />
-            <SidebarMenuLabel>Inbox</SidebarMenuLabel>
+            <Inbox
+              className={
+                selectedView !== "home" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "home" ? "opacity-80" : undefined}
+            >
+              Inbox
+            </SidebarMenuLabel>
           </SidebarMenuButton>
           {homeBadgeCount > 0 ? (
             <SidebarMenuBadge
@@ -114,6 +145,30 @@ export function AppSidebarPrimaryMenu({
               {Math.min(homeBadgeCount, 99)}
             </SidebarMenuBadge>
           ) : null}
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-battle-rhythm-view"
+            isActive={selectedView === "battleRhythm"}
+            onClick={onSelectBattleRhythm}
+            tooltip="Battle Rhythm"
+            type="button"
+          >
+            <CalendarDays className="h-4 w-4" />
+            <SidebarMenuLabel>Battle Rhythm</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-plans-view"
+            isActive={selectedView === "plans"}
+            onClick={onSelectPlans}
+            tooltip="Plans"
+            type="button"
+          >
+            <ChartGantt className="h-4 w-4" />
+            <SidebarMenuLabel>Plans</SidebarMenuLabel>
+          </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="pulse">
           <SidebarMenuItem>
@@ -145,14 +200,47 @@ export function AppSidebarPrimaryMenu({
         </FeatureGate>
         <SidebarMenuItem>
           <SidebarMenuButton
+            className="data-[active=true]:font-normal"
             data-testid="open-agents-view"
             isActive={selectedView === "agents"}
             onClick={onSelectAgents}
             tooltip="Agents"
             type="button"
           >
-            <Bot className="h-4 w-4" />
-            <SidebarMenuLabel>Agents</SidebarMenuLabel>
+            <Bot
+              className={
+                selectedView !== "agents" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
+            <SidebarMenuLabel
+              className={selectedView !== "agents" ? "opacity-80" : undefined}
+            >
+              Agents
+            </SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-command-console-view"
+            isActive={selectedView === "console"}
+            onClick={onSelectCommandConsole}
+            tooltip="Command Console"
+            type="button"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            <SidebarMenuLabel>Command Console</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-living-ship-view"
+            isActive={selectedView === "ship"}
+            onClick={onSelectShip}
+            tooltip="Living Ship"
+            type="button"
+          >
+            <ShipWheel className="h-4 w-4" />
+            <SidebarMenuLabel>Living Ship</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

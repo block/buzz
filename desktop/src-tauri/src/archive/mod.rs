@@ -5,11 +5,12 @@
 //!
 //! Two access proof paths, chosen by event kind:
 //!
-//! **Persistent scopes** (`channel_h`, `referenced_e`, and `owner_p`+44200):
+//! **Persistent scopes** (`channel_h`, `referenced_e`, and owner-private kinds):
 //! the relay is the source of truth. Candidates are grouped and re-queried via
 //! a batched authed `/query`; only events the relay returns are inserted.
-//! For kind-44200 (agent turn metrics), content is decrypted at ingest and
-//! stored as plaintext JSON — fail-closed (decrypt error → drop).
+//! Owner-private content is decrypted only after the current identity proves
+//! access through the relay query and local cryptography. Kind 44210 stores
+//! only strict decrypted payload JSON; failures are dropped.
 //!
 //! **Ephemeral scope** (`owner_p`, kind 24200 observer frames): the relay
 //! never stores these, so `/query` cannot verify them. The relay's REQ-time
@@ -35,6 +36,7 @@ use crate::relay::{query_relay, relay_ws_url_with_override};
 
 const KIND_AGENT_OBSERVER_FRAME: u16 = 24200;
 const KIND_AGENT_TURN_METRIC: u16 = 44200;
+const KIND_COMMAND_BRIEF: u16 = 44210;
 const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
@@ -483,21 +485,23 @@ pub async fn list_save_subscriptions(
 /// Does NOT purge already-archived event data — retention is decoupled in v1.
 /// GC of orphaned event rows happens in P4 purge commands, not here.
 #[tauri::command]
-pub fn delete_save_subscription(
+pub async fn delete_save_subscription(
     state: State<'_, AppState>,
     scope_type: ScopeType,
     scope_value: String,
 ) -> Result<bool, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    let conn = open_db()?;
-    store::delete_save_subscription(
-        &conn,
-        &identity_pk,
-        &relay_url,
-        scope_type.as_str(),
-        &scope_value,
-    )
+    run_archive_db_task(move |conn| {
+        store::delete_save_subscription(
+            conn,
+            &identity_pk,
+            &relay_url,
+            scope_type.as_str(),
+            &scope_value,
+        )
+    })
+    .await
 }
 
 // ── read_archived_events ─────────────────────────────────────────────────────
@@ -516,7 +520,7 @@ pub fn delete_save_subscription(
 /// newest-first order. Compound cursor `(before_created_at, before_id)` works
 /// identically to `read_archived_events`.
 #[tauri::command]
-pub fn read_archived_observer_events_for_channel(
+pub async fn read_archived_observer_events_for_channel(
     state: State<'_, AppState>,
     channel_id: String,
     before_created_at: Option<i64>,
@@ -525,16 +529,18 @@ pub fn read_archived_observer_events_for_channel(
 ) -> Result<Vec<String>, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    let conn = open_db()?;
-    store::read_archived_observer_events_for_channel(
-        &conn,
-        &identity_pk,
-        &relay_url,
-        &channel_id,
-        before_created_at,
-        before_id.as_deref(),
-        limit.unwrap_or(DEFAULT_READ_LIMIT),
-    )
+    run_archive_db_task(move |conn| {
+        store::read_archived_observer_events_for_channel(
+            conn,
+            &identity_pk,
+            &relay_url,
+            &channel_id,
+            before_created_at,
+            before_id.as_deref(),
+            limit.unwrap_or(DEFAULT_READ_LIMIT),
+        )
+    })
+    .await
 }
 
 // ── index_observer_channel_id ─────────────────────────────────────────────────
@@ -548,24 +554,26 @@ pub fn read_archived_observer_events_for_channel(
 ///
 /// Idempotent: rows that are already indexed are left unchanged.
 #[tauri::command]
-pub fn index_observer_channel_id(
+pub async fn index_observer_channel_id(
     state: State<'_, AppState>,
     entries: Vec<ObserverChannelIndexEntry>,
 ) -> Result<(), String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    let conn = open_db()?;
-    for entry in &entries {
-        store::upsert_observer_channel_index(
-            &conn,
-            &identity_pk,
-            &relay_url,
-            &entry.event_id,
-            entry.channel_id.as_deref(),
-            entry.created_at,
-        )?;
-    }
-    Ok(())
+    run_archive_db_task(move |conn| {
+        for entry in &entries {
+            store::upsert_observer_channel_index(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &entry.event_id,
+                entry.channel_id.as_deref(),
+                entry.created_at,
+            )?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// A single (event_id, channel_id?, created_at) record used by
@@ -591,21 +599,23 @@ pub struct ObserverChannelIndexEntry {
 /// Together these constitute the one-shot idempotent backfill required by the
 /// Slice 1 acceptance criteria (Thufir Pass 4).
 #[tauri::command]
-pub fn read_unindexed_observer_rows(
+pub async fn read_unindexed_observer_rows(
     state: State<'_, AppState>,
 ) -> Result<Vec<RawObserverRow>, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    let conn = open_db()?;
-    let rows = store::read_unindexed_observer_rows(&conn, &identity_pk, &relay_url)?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, raw_json, created_at)| RawObserverRow {
-            id,
-            raw_json,
-            created_at,
-        })
-        .collect())
+    run_archive_db_task(move |conn| {
+        let rows = store::read_unindexed_observer_rows(conn, &identity_pk, &relay_url)?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, raw_json, created_at)| RawObserverRow {
+                id,
+                raw_json,
+                created_at,
+            })
+            .collect())
+    })
+    .await
 }
 
 /// Wire type returned by `read_unindexed_observer_rows`.
@@ -632,10 +642,10 @@ const DEFAULT_READ_LIMIT: i64 = 50;
 /// `kinds` is an optional filter; an empty array means "no kinds matched"
 /// (not "all kinds") — callers should pass `null`/`None` when they want all.
 ///
-/// Note: stored row payloads are not uniform — kind 44200 rows store the raw
-/// metric payload JSON, while all other kinds store full Nostr Event JSON. A
-/// caller doing `Event::from_json` on an unfiltered read must filter by kind
-/// first (today's only reader filters `kinds: [24200]`).
+/// Note: stored row payloads are not uniform — kind 44200 stores raw metric
+/// payload JSON, kind 44210 stores strict decrypted payload JSON, and other
+/// kinds store full Nostr Event JSON. Callers using `Event::from_json` must
+/// filter out payload-only kinds (today's only reader filters `kinds: [24200]`).
 #[tauri::command]
 pub async fn read_archived_events(
     state: State<'_, AppState>,
@@ -671,3 +681,6 @@ pub async fn read_archived_events(
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+mod command_brief_tests;

@@ -44,6 +44,16 @@ test("an explicit inherited default label wins over harness discovery", () => {
   );
 });
 
+test("shared compute describes Auto's collective behavior", () => {
+  assert.equal(
+    resolveDefaultModelLabel({
+      discoveredModelOptions: null,
+      isSharedCompute: true,
+    }),
+    "Auto (collective when available)",
+  );
+});
+
 // ── appendNoModelsSentinel ─────────────────────────────────────────────────────
 
 test("appendNoModelsSentinel_emptyOptionsDiscoveryFinished_addsDisabledRow", () => {

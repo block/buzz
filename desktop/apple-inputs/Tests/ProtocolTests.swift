@@ -1,0 +1,95 @@
+import XCTest
+
+final class ProtocolTests: XCTestCase {
+    func testDecodesOnlyKnownOperationAndEmitsOneLineResponse() throws {
+        let request = try AppleInputRequest.decode(line: #"{"operation":"permission_status","arguments":{"source":"calendar"}}"#)
+        XCTAssertEqual(request.operation, .permissionStatus)
+        let output = try AppleInputResponse(source: "calendar", permission: .notDetermined, records: []).encodeLine()
+        XCTAssertFalse(output.dropLast().contains("\n"))
+        XCTAssertTrue(output.hasSuffix("\n"))
+    }
+
+    func testRejectsUnknownRequestKeys() {
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_notes","script":"tell application \"Finder\""}"#))
+    }
+
+    func testDecodesTypedCalendarWindow() throws {
+        let request = try AppleInputRequest.decode(line: #"{"operation":"read_calendar","arguments":{"calendar_ids":["work"],"start":"2026-07-01T00:00:00Z","end":"2026-07-02T00:00:00Z","maximum":25}}"#)
+        guard case .readCalendar(let payload) = request.payload else { return XCTFail("wrong payload") }
+        XCTAssertEqual(payload.calendarIdentifiers, ["work"])
+        XCTAssertEqual(payload.maximum, 25)
+    }
+
+    func testDecodesReadOnlyEventKitSourceDiscovery() throws {
+        let calendars = try AppleInputRequest.decode(
+            line: #"{"operation":"list_calendars","arguments":{}}"#
+        )
+        let reminders = try AppleInputRequest.decode(
+            line: #"{"operation":"list_reminder_lists","arguments":{}}"#
+        )
+        let notes = try AppleInputRequest.decode(
+            line: #"{"operation":"list_note_folders","arguments":{}}"#
+        )
+
+        XCTAssertEqual(calendars.operation, .listCalendars)
+        XCTAssertEqual(reminders.operation, .listReminderLists)
+        XCTAssertEqual(notes.operation, .listNoteFolders)
+    }
+
+    func testReminderPayloadRequiresBoundedRFC3339Window() throws {
+        let request = try AppleInputRequest.decode(line: #"{"operation":"read_reminders","arguments":{"list_ids":["work"],"start":"2026-07-01T00:00:00Z","end":"2026-07-02T00:00:00Z","maximum":2}}"#)
+        guard case .readReminders(let payload) = request.payload else { return XCTFail("wrong payload") }
+        XCTAssertLessThan(payload.start, payload.end)
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_reminders","arguments":{"list_ids":["work"],"maximum":2}}"#))
+    }
+
+    func testRejectsWrongTypesUnknownPayloadKeysAndOversizedIdentifiers() {
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_files","arguments":{"paths":"nope"}}"#))
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_notes","arguments":{"folder_ids":["work"],"maximum":1,"script":"bad"}}"#))
+        let long = String(repeating: "x", count: ProtocolLimits.maximumStringBytes + 1)
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_files","arguments":{"paths":["\#(long)"]}}"#))
+    }
+
+    func testRejectsExcessiveCalendarWindowAndResponseSize() throws {
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_calendar","arguments":{"calendar_ids":["work"],"start":"2020-01-01T00:00:00Z","end":"2026-01-01T00:00:00Z","maximum":1}}"#))
+        let huge = AppleInputRecord(fields: ["body": String(repeating: "x", count: ProtocolLimits.maximumResponseBytes)])
+        XCTAssertThrowsError(try AppleInputResponse(source: "notes", permission: .authorized, records: [huge]).encodeLine())
+    }
+
+    func testDecodesBoundedCalendarReconciliationAndRejectsDuplicateIDs() throws {
+        let valid = #"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[{"external_id":"battle-rhythm:brief","title":"Navigation brief","start":"2026-07-29T08:00:00Z","end":"2026-07-29T08:30:00Z","is_all_day":false,"location":"Bridge","notes":null}]}}"#
+        let request = try AppleInputRequest.decode(line: valid)
+        guard case .reconcileCalendar(let payload) = request.payload else {
+            return XCTFail("wrong payload")
+        }
+        XCTAssertEqual(payload.projections.count, 1)
+        XCTAssertEqual(payload.projections[0].externalID, "battle-rhythm:brief")
+
+        let duplicate = #"{"operation":"reconcile_calendar","arguments":{"coverage_start":"2026-07-01T00:00:00Z","coverage_end":"2026-08-01T00:00:00Z","projections":[{"external_id":"battle-rhythm:brief","title":"One","start":"2026-07-29T08:00:00Z","end":"2026-07-29T08:30:00Z","is_all_day":false,"location":null,"notes":null},{"external_id":"battle-rhythm:brief","title":"Two","start":"2026-07-30T08:00:00Z","end":"2026-07-30T08:30:00Z","is_all_day":false,"location":null,"notes":null}]}}"#
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: duplicate))
+    }
+
+    func testSubprocessRejectsMalformedAndOversizedLinesWithoutCrashing() throws {
+        let malformed = try runHelper(input: "{bad}\n")
+        XCTAssertTrue(malformed.contains(#""source":"protocol""#))
+        XCTAssertTrue(malformed.contains(#""error":"#))
+
+        let oversized = String(repeating: "x", count: ProtocolLimits.maximumLineBytes + 1) + "\n"
+        let response = try runHelper(input: oversized)
+        XCTAssertTrue(response.contains(#""source":"protocol""#))
+    }
+
+    private func runHelper(input: String) throws -> String {
+        let executable = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent().appendingPathComponent("BuzzAppleInputs")
+        let process = Process()
+        process.executableURL = executable
+        let stdin = Pipe(), stdout = Pipe()
+        process.standardInput = stdin; process.standardOutput = stdout
+        try process.run()
+        stdin.fileHandleForWriting.write(Data(input.utf8))
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+        return String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+}

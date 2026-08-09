@@ -22,6 +22,7 @@ import {
 import {
   playNotificationSound,
   resolveSlotSound,
+  shouldPlayNotificationSound,
   slotForFeedKind,
 } from "./lib/sound";
 import type { NotificationSettings } from "./hooks";
@@ -73,9 +74,11 @@ export function useFeedDesktopNotifications(
   pubkey: string | undefined,
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
+  enabled: boolean,
   profiles?: UserProfileLookup,
   mutedChannelIds?: ReadonlySet<string>,
   channels: readonly NotificationChannel[] = [],
+  silentChannelIds?: ReadonlySet<string>,
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const seenItemIdsRef = React.useRef<Set<string>>(
@@ -125,7 +128,10 @@ export function useFeedDesktopNotifications(
         title: notificationTitle(item, senderName),
       });
 
-      if (didSend) {
+      if (
+        didSend &&
+        shouldPlayNotificationSound(item.channelId, silentChannelIds)
+      ) {
         const slot = slotForFeedKind(item.kind, item.category);
         playNotificationSound(resolveSlotSound(settings, slot));
       }
@@ -133,7 +139,7 @@ export function useFeedDesktopNotifications(
   );
 
   React.useEffect(() => {
-    if (!feed) {
+    if (!enabled || !feed) {
       return;
     }
 
@@ -214,6 +220,7 @@ export function useFeedDesktopNotifications(
       void deliverFeedNotification(item, senderName);
     }
   }, [
+    enabled,
     feed,
     channels,
     mutedChannelIds,

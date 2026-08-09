@@ -1,7 +1,11 @@
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { isCommandTeamPersonaId } from "@/features/command-console/domain/commandTeam";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 
-type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
+export type PersonaGroup = {
+  persona: AgentPersona;
+  agents: ManagedAgent[];
+};
 
 export function buildUnifiedGroups(
   personas: AgentPersona[],
@@ -21,17 +25,26 @@ export function buildUnifiedGroups(
   }
 
   const matched = new Set<string>();
-  const groups: PersonaGroup[] = personas.map((persona) => {
+  const seenPersonas = new Set<string>();
+  const personaGroups: PersonaGroup[] = personas.flatMap((persona) => {
+    if (seenPersonas.has(persona.id)) return [];
+    seenPersonas.add(persona.id);
     matched.add(persona.id);
-    return { persona, agents: byPersonaId.get(persona.id) ?? [] };
+    return [{ persona, agents: byPersonaId.get(persona.id) ?? [] }];
   });
+  const commandTeamGroups = personaGroups.filter(({ persona }) =>
+    isCommandTeamPersonaId(persona.id),
+  );
+  const groups = personaGroups.filter(
+    ({ persona }) => !isCommandTeamPersonaId(persona.id),
+  );
 
   const unknown: ManagedAgent[] = [];
   for (const [id, list] of byPersonaId) {
     if (!matched.has(id)) unknown.push(...list);
   }
 
-  return { groups, ungrouped, unknown };
+  return { commandTeamGroups, groups, ungrouped, unknown };
 }
 
 export function pickProfileAgent(agents: ManagedAgent[]) {

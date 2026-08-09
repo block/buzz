@@ -1,0 +1,434 @@
+export type BattleRhythmSourceType = "fas" | "longcast" | "shortcast" | "other";
+export type BattleRhythmStatus = "draft" | "approved" | "cancelled";
+export type BattleRhythmRecurrence = Readonly<{
+  frequency: "daily" | "weekly" | "monthly";
+  interval: number;
+  until: string | null;
+  seriesId: string;
+}>;
+export type EventOwnership =
+  | { readonly kind: "manual" }
+  | {
+      readonly kind: "source";
+      readonly sourceId: string;
+      readonly revisionId: string;
+      readonly sourceLocation: string;
+    };
+export type BattleRhythmSource = Readonly<{
+  schemaVersion: 1;
+  id: string;
+  type: BattleRhythmSourceType;
+  displayName: string;
+  coverageStart: string;
+  coverageEnd: string;
+  documentName: string;
+  documentHash: string;
+  revisionId: string;
+  priorRevisionId: string | null;
+  importedAt: string;
+  status: BattleRhythmStatus;
+  sourceReference: string;
+}>;
+export type BattleRhythmEvent = Readonly<{
+  schemaVersion: 1;
+  id: string;
+  ownership: EventOwnership;
+  title: string;
+  description: string | null;
+  type: string;
+  start: string;
+  end: string;
+  allDay: boolean;
+  timeZone: string;
+  status: BattleRhythmStatus;
+  location: string | null;
+  responsibleOwner: string | null;
+  participants: readonly string[];
+  remarks: string | null;
+  linkedPlanId: string | null;
+  linkedTaskId: string | null;
+  linkedMissionRequirementId: string | null;
+  parentActivityId: string | null;
+  recurrence: BattleRhythmRecurrence | null;
+  excludedOccurrenceStarts: readonly string[];
+}>;
+export type BattleRhythmChange = Readonly<
+  | { kind: "added"; after: BattleRhythmEvent }
+  | { kind: "changed"; before: BattleRhythmEvent; after: BattleRhythmEvent }
+  | { kind: "removed"; before: BattleRhythmEvent }
+>;
+export type BattleRhythmRevision = Readonly<{
+  schemaVersion: 1;
+  id: string;
+  sourceId: string;
+  priorRevisionId: string | null;
+  importedAt: string;
+  changes: readonly BattleRhythmChange[];
+}>;
+export type BattleRhythmRevisionChunk = Readonly<{
+  schemaVersion: 1;
+  revisionId: string;
+  sourceId: string;
+  priorRevisionId: string | null;
+  importedAt: string;
+  chunkIndex: number;
+  chunkCount: number;
+  manifestHash: string;
+  changes: readonly BattleRhythmChange[];
+}>;
+
+const ISO =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+const statuses = new Set(["draft", "approved", "cancelled"]);
+const sourceTypes = new Set(["fas", "longcast", "shortcast", "other"]);
+const eventKeys = [
+  "schemaVersion",
+  "id",
+  "ownership",
+  "title",
+  "description",
+  "type",
+  "start",
+  "end",
+  "allDay",
+  "timeZone",
+  "status",
+  "location",
+  "responsibleOwner",
+  "participants",
+  "remarks",
+  "linkedPlanId",
+  "linkedTaskId",
+  "linkedMissionRequirementId",
+  "parentActivityId",
+  "recurrence",
+  "excludedOccurrenceStarts",
+];
+function fail(message: string): never {
+  throw new Error(`Invalid Battle Rhythm contract: ${message}`);
+}
+function record(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    fail("object required");
+  const o = value as Record<string, unknown>;
+  if (
+    Object.keys(o).length !== keys.length ||
+    Object.keys(o).some((key) => !keys.includes(key))
+  )
+    fail("unknown or missing field");
+  return o;
+}
+function string(value: unknown, name: string, max = 4096): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > max)
+    fail(`${name} must be bounded nonempty text`);
+  return value;
+}
+function nullableString(value: unknown, name: string): string | null {
+  return value === null ? null : string(value, name);
+}
+function timestamp(value: unknown, name: string): string {
+  const raw = string(value, name, 64);
+  const parts = ISO.exec(raw);
+  if (!parts || Number.isNaN(Date.parse(raw))) fail(`${name} must be ISO-8601`);
+  const [year, month, day, hour, minute, second] = parts
+    .slice(1, 7)
+    .map(Number);
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== day ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    (parts[8] !== undefined && (Number(parts[8]) > 23 || Number(parts[9]) > 59))
+  )
+    fail(`${name} must be a real RFC3339 timestamp`);
+  return raw;
+}
+function status(value: unknown): BattleRhythmStatus {
+  if (typeof value !== "string" || !statuses.has(value)) fail("invalid status");
+  return value as BattleRhythmStatus;
+}
+function freeze<T extends object>(value: T): Readonly<T> {
+  return Object.freeze(value);
+}
+export function parseBattleRhythmSource(value: unknown): BattleRhythmSource {
+  const o = record(value, [
+    "schemaVersion",
+    "id",
+    "type",
+    "displayName",
+    "coverageStart",
+    "coverageEnd",
+    "documentName",
+    "documentHash",
+    "revisionId",
+    "priorRevisionId",
+    "importedAt",
+    "status",
+    "sourceReference",
+  ]);
+  const start = timestamp(o.coverageStart, "coverageStart"),
+    end = timestamp(o.coverageEnd, "coverageEnd");
+  if (Date.parse(start) >= Date.parse(end)) fail("coverage must be ordered");
+  if (typeof o.type !== "string" || !sourceTypes.has(o.type))
+    fail("invalid source type");
+  const hash = string(o.documentHash, "documentHash", 128);
+  if (!/^[a-f0-9]{64}$/i.test(hash)) fail("documentHash must be sha256");
+  return freeze({
+    schemaVersion: one(o.schemaVersion),
+    id: string(o.id, "id", 256),
+    type: o.type as BattleRhythmSourceType,
+    displayName: string(o.displayName, "displayName"),
+    coverageStart: start,
+    coverageEnd: end,
+    documentName: string(o.documentName, "documentName"),
+    documentHash: hash,
+    revisionId: string(o.revisionId, "revisionId", 256),
+    priorRevisionId: nullableString(o.priorRevisionId, "priorRevisionId"),
+    importedAt: timestamp(o.importedAt, "importedAt"),
+    status: status(o.status),
+    sourceReference: string(o.sourceReference, "sourceReference"),
+  });
+}
+function one(value: unknown): 1 {
+  if (value !== 1) fail("schemaVersion must be 1");
+  return 1;
+}
+function ownership(value: unknown): EventOwnership {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    fail("ownership object required");
+  const o = value as Record<string, unknown>;
+  if (o.kind === "manual") {
+    if (Object.keys(o).length !== 1) fail("manual ownership has no source");
+    return freeze({ kind: "manual" });
+  }
+  if (o.kind === "source" && Object.keys(o).length === 4)
+    return freeze({
+      kind: "source",
+      sourceId: string(o.sourceId, "sourceId", 256),
+      revisionId: string(o.revisionId, "revisionId", 256),
+      sourceLocation: string(o.sourceLocation, "sourceLocation"),
+    });
+  fail("invalid ownership");
+}
+function recurrence(
+  value: unknown,
+  start: string,
+): BattleRhythmRecurrence | null {
+  if (value === null) return null;
+  const o = record(value, ["frequency", "interval", "until", "seriesId"]);
+  if (
+    typeof o.frequency !== "string" ||
+    !["daily", "weekly", "monthly"].includes(o.frequency) ||
+    !Number.isInteger(o.interval) ||
+    typeof o.interval !== "number" ||
+    o.interval < 1 ||
+    o.interval > 366
+  )
+    fail("invalid recurrence rule");
+  const until =
+    o.until === null ? null : timestamp(o.until, "recurrence.until");
+  if (until !== null && Date.parse(until) < Date.parse(start))
+    fail("recurrence until precedes start");
+  return freeze({
+    frequency: o.frequency as BattleRhythmRecurrence["frequency"],
+    interval: o.interval,
+    until,
+    seriesId: string(o.seriesId, "seriesId", 256),
+  });
+}
+function localParts(value: string, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(value));
+  const item = (type: string) =>
+    parts.find((part) => part.type === type)?.value;
+  return {
+    year: Number(item("year")),
+    month: Number(item("month")),
+    day: Number(item("day")),
+    time: `${item("hour")}:${item("minute")}:${item("second")}`,
+  };
+}
+function isOccurrence(
+  start: string,
+  occurrence: string,
+  rule: BattleRhythmRecurrence,
+  timeZone: string,
+): boolean {
+  const first = localParts(start, timeZone),
+    next = localParts(occurrence, timeZone);
+  if (first.time !== next.time) return false;
+  const firstDay = Date.UTC(first.year, first.month - 1, first.day);
+  const nextDay = Date.UTC(next.year, next.month - 1, next.day);
+  if (nextDay < firstDay) return false;
+  if (rule.frequency === "daily")
+    return ((nextDay - firstDay) / 86_400_000) % rule.interval === 0;
+  if (rule.frequency === "weekly")
+    return ((nextDay - firstDay) / 86_400_000) % (7 * rule.interval) === 0;
+  const months = (next.year - first.year) * 12 + next.month - first.month;
+  return next.day === first.day && months >= 0 && months % rule.interval === 0;
+}
+function excludedOccurrences(
+  value: unknown,
+  start: string,
+  rule: BattleRhythmRecurrence | null,
+  timeZone: string,
+): readonly string[] {
+  if (!Array.isArray(value) || value.length > 512)
+    fail("excluded occurrences invalid");
+  if (value.length && !rule) fail("exclusions require recurrence");
+  const parsed = value.map((item) => timestamp(item, "excluded occurrence"));
+  if (
+    parsed.some((item, index) => {
+      const previous = parsed[index - 1];
+      return previous !== undefined && Date.parse(previous) >= Date.parse(item);
+    })
+  )
+    fail("excluded occurrences must be sorted and unique");
+  if (
+    rule &&
+    parsed.some(
+      (item) =>
+        (rule.until !== null && Date.parse(item) > Date.parse(rule.until)) ||
+        !isOccurrence(start, item, rule, timeZone),
+    )
+  )
+    fail("excluded occurrence outside series");
+  return freeze(parsed);
+}
+export function parseBattleRhythmEvent(value: unknown): BattleRhythmEvent {
+  const o = record(value, eventKeys);
+  const start = timestamp(o.start, "start"),
+    end = timestamp(o.end, "end");
+  if (Date.parse(start) >= Date.parse(end)) fail("start must precede end");
+  if (typeof o.allDay !== "boolean") fail("allDay must be boolean");
+  if (!Array.isArray(o.participants) || o.participants.length > 256)
+    fail("participants invalid");
+  const parsedRecurrence = recurrence(o.recurrence, start);
+  return freeze({
+    schemaVersion: one(o.schemaVersion),
+    id: string(o.id, "id", 256),
+    ownership: ownership(o.ownership),
+    title: string(o.title, "title", 512),
+    description: nullableString(o.description, "description"),
+    type: string(o.type, "type", 128),
+    start,
+    end,
+    allDay: o.allDay,
+    timeZone: string(o.timeZone, "timeZone", 128),
+    status: status(o.status),
+    location: nullableString(o.location, "location"),
+    responsibleOwner: nullableString(o.responsibleOwner, "responsibleOwner"),
+    participants: freeze(
+      o.participants.map((p) => string(p, "participant", 256)),
+    ),
+    remarks: nullableString(o.remarks, "remarks"),
+    linkedPlanId: nullableString(o.linkedPlanId, "linkedPlanId"),
+    linkedTaskId: nullableString(o.linkedTaskId, "linkedTaskId"),
+    linkedMissionRequirementId: nullableString(
+      o.linkedMissionRequirementId,
+      "linkedMissionRequirementId",
+    ),
+    parentActivityId: nullableString(o.parentActivityId, "parentActivityId"),
+    recurrence: parsedRecurrence,
+    excludedOccurrenceStarts: excludedOccurrences(
+      o.excludedOccurrenceStarts,
+      start,
+      parsedRecurrence,
+      string(o.timeZone, "timeZone", 128),
+    ),
+  });
+}
+function change(value: unknown): BattleRhythmChange {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    fail("change object required");
+  const o = value as Record<string, unknown>;
+  if (o.kind === "added" && Object.keys(o).length === 2)
+    return freeze({ kind: "added", after: parseBattleRhythmEvent(o.after) });
+  if (o.kind === "removed" && Object.keys(o).length === 2)
+    return freeze({
+      kind: "removed",
+      before: parseBattleRhythmEvent(o.before),
+    });
+  if (o.kind === "changed" && Object.keys(o).length === 3)
+    return freeze({
+      kind: "changed",
+      before: parseBattleRhythmEvent(o.before),
+      after: parseBattleRhythmEvent(o.after),
+    });
+  fail("invalid change");
+}
+export function parseBattleRhythmRevision(
+  value: unknown,
+): BattleRhythmRevision {
+  const o = record(value, [
+    "schemaVersion",
+    "id",
+    "sourceId",
+    "priorRevisionId",
+    "importedAt",
+    "changes",
+  ]);
+  if (!Array.isArray(o.changes) || o.changes.length > 2000)
+    fail("changes must contain at most 2000 entries");
+  return freeze({
+    schemaVersion: one(o.schemaVersion),
+    id: string(o.id, "id", 256),
+    sourceId: string(o.sourceId, "sourceId", 256),
+    priorRevisionId: nullableString(o.priorRevisionId, "priorRevisionId"),
+    importedAt: timestamp(o.importedAt, "importedAt"),
+    changes: freeze(o.changes.map(change)),
+  });
+}
+export function parseBattleRhythmRevisionChunk(
+  value: unknown,
+): BattleRhythmRevisionChunk {
+  const o = record(value, [
+    "schemaVersion",
+    "revisionId",
+    "sourceId",
+    "priorRevisionId",
+    "importedAt",
+    "chunkIndex",
+    "chunkCount",
+    "manifestHash",
+    "changes",
+  ]);
+  if (
+    !Number.isInteger(o.chunkIndex) ||
+    !Number.isInteger(o.chunkCount) ||
+    typeof o.chunkIndex !== "number" ||
+    typeof o.chunkCount !== "number" ||
+    o.chunkIndex < 0 ||
+    o.chunkIndex >= o.chunkCount
+  )
+    fail("invalid chunk sequence");
+  if (!Array.isArray(o.changes)) fail("chunk changes required");
+  const manifestHash = string(o.manifestHash, "manifestHash", 128);
+  if (!/^[a-f0-9]{64}$/i.test(manifestHash))
+    fail("manifestHash must be sha256");
+  return freeze({
+    schemaVersion: one(o.schemaVersion),
+    revisionId: string(o.revisionId, "revisionId", 256),
+    sourceId: string(o.sourceId, "sourceId", 256),
+    priorRevisionId: nullableString(o.priorRevisionId, "priorRevisionId"),
+    importedAt: timestamp(o.importedAt, "importedAt"),
+    chunkIndex: o.chunkIndex,
+    chunkCount: o.chunkCount,
+    manifestHash,
+    changes: freeze(o.changes.map(change)),
+  });
+}
