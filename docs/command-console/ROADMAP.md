@@ -31,13 +31,16 @@ each capability.
 | --- | --- | --- | --- |
 | Command Adviser V1 and Buzz v0.5.2 integration | Complete and merged | [PR #14](https://github.com/NavigatorRAN/buzz/pull/14), merged as `e9b121154` | Retain as the rollback baseline for the v0.5.8 phase |
 | V4 Living Ship | Complete and merged | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), merged as `865569bb4` after installed-app acceptance | Included in the v0.5.2 integration line; retain its real-user journey in every release regression |
-| Upstream Buzz refresh | Active implementation phase | `codex/phase-upstream-v0.5.8-sync`; pinned `desktop-v0.5.8` at `f3de86057` | Capture rollback state, merge deliberately, and complete the regression gate |
+| Upstream Buzz refresh | Complete and accepted | [PR #16](https://github.com/NavigatorRAN/buzz/pull/16), merged into the integration line as `f09c3a1ea`; pinned `desktop-v0.5.8` at `f3de86057` | Preserve as the accepted product baseline |
+| Repository baseline promotion | Active implementation phase | `codex/phase-v0.5.8-baseline-promotion` | Consolidate the accepted integration line into `main`, then close superseded stacked PRs #1-13 |
 | V2 Keeper | Approved product design; not implemented | Canonical design is currently in Memory MCP under `buzz-keeper` | Revalidate against the synchronized base, then start typed-memory MVP |
 | V3 native remote access | Design to be frozen; not implemented | Canonical design is currently in the Version 3 peer task and Memory MCP under `native-buzz-remote-access-pilot` | Revalidate after the upstream sync; implementation follows Keeper MVP |
 
-Living Ship and the v0.5.2 integration line are complete. PR #14 merged as
-`e9b121154`, which is the fixed downstream rollback baseline. The active phase
-is the controlled sync to pinned upstream tag `desktop-v0.5.8`.
+Living Ship, the v0.5.2 integration line, and the controlled sync to pinned
+upstream tag `desktop-v0.5.8` are complete. The synchronized application passed
+installed-app acceptance, including live adviser turns and substantive doctrine
+RAG retrieval. The active phase promotes that accepted integration head to
+`main` as the single downstream baseline before Keeper work begins.
 
 ## Execution sequence
 
@@ -53,6 +56,11 @@ is the controlled sync to pinned upstream tag `desktop-v0.5.8`.
 
 Exit gate: one integrated downstream baseline contains the operational Command
 Adviser product and Living Ship, with no feature work left on stacked branches.
+
+Completion record: PR #15 merged into PR #14, PR #14 merged into
+`codex/project-execution-v1`, and the resulting integrated baseline was retained
+through the v0.5.8 sync. The older stacked pull requests remain open only until
+the accepted v0.5.8 tree is promoted to `main`.
 
 ### 1. Controlled Buzz stable-tag sync
 
@@ -86,6 +94,27 @@ Before changing the live installation, capture a restorable backup of:
 
 Exit gate: the synchronized release is installed and the regression matrix below
 passes without loss of existing user data.
+
+Completion record: PR #16 merged into `codex/project-execution-v1` as
+`f09c3a1ea`. The installed Command Adviser application retained existing data,
+all managed advisers completed real turns, Living Ship worked, and the fixed
+ADF doctrine semantic canary returned substantive retrieval after the embedding
+service fault was repaired.
+
+### 1.5 Promote the accepted downstream baseline
+
+- Merge the accepted `codex/project-execution-v1` tree into `main` through one
+  consolidation pull request.
+- Change only the delivery control record during promotion; do not reopen the
+  accepted product implementation.
+- After merge, close stacked PRs #1-13 as superseded by the consolidated
+  baseline so GitHub shows one current implementation line.
+- Preserve PR #16 and the installed-app acceptance record as the regression
+  evidence for the promoted tree.
+
+Exit gate: `main` contains the accepted v0.5.8 Command Adviser product, old
+stacked PRs are closed without deleting their history, and Keeper is the only
+active implementation programme.
 
 ### 2. Revalidate and freeze V2 and V3 designs
 
@@ -191,6 +220,9 @@ Automated checks are necessary but do not replace these installed-app journeys:
 
 The following work does not block the roadmap above:
 
+- the offline-adaptive Command Adviser and mirrored knowledge programme, which
+  remains a documented future option until the current local/cloud product
+  demonstrates a real operational need for it;
 - RAG 2.0 or a new knowledge replication ecosystem;
 - expanded operational-risk and mission-analysis workflows beyond the current
   advisory team;
