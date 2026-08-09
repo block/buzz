@@ -364,6 +364,7 @@ export function eventToProjectPullRequest(
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,
     channelId: getTag(pullRequest, "h") ?? null,
+    originAgentName: getTag(pullRequest, "buzz-origin-agent") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
     reviewers,

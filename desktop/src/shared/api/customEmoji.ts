@@ -44,6 +44,7 @@ export function reactionEmojiUrl(
 
 /** NIP-30 shortcode chars. Matches the relay's `[A-Za-z0-9_-]` validation. */
 const SHORTCODE_RE = /^[a-z0-9_-]+$/;
+const MAX_SHORTCODE_LENGTH = 64;
 
 /**
  * Normalize a shortcode the same way the relay does: strip surrounding colons
@@ -52,7 +53,9 @@ const SHORTCODE_RE = /^[a-z0-9_-]+$/;
 export function normalizeShortcode(raw: string): string | null {
   const stripped = raw.trim().replace(/^:+/, "").replace(/:+$/, "");
   const lower = stripped.toLowerCase();
-  return SHORTCODE_RE.test(lower) ? lower : null;
+  return lower.length <= MAX_SHORTCODE_LENGTH && SHORTCODE_RE.test(lower)
+    ? lower
+    : null;
 }
 
 /**

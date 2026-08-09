@@ -32,7 +32,6 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 
@@ -226,6 +225,7 @@ test.describe("global agent config screenshots", () => {
     await page
       .getByTestId("global-agent-default-harness-option-claude")
       .click();
+    await waitForAnimations(page);
     await expect(page.getByTestId("global-agent-model")).toHaveText(
       /Default model/,
     );
@@ -712,7 +712,6 @@ test.describe("global agent config screenshots", () => {
     await page.goto("/");
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
-    await page.getByRole("menuitem", { name: "Create agent" }).click();
 
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,

@@ -4,11 +4,13 @@ class _PhotoGalleryPicker extends StatelessWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
 
   const _PhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
   });
 
   @override
@@ -17,12 +19,14 @@ class _PhotoGalleryPicker extends StatelessWidget {
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
     );
     if (defaultTargetPlatform != TargetPlatform.iOS) return fallback;
     return _IOSInlinePhotoPicker(
       onBack: onBack,
       onPickAllPhotos: onPickAllPhotos,
       onChoosePhotos: onChoosePhotos,
+      onChooseAllPhotos: onChooseAllPhotos,
       fallback: fallback,
     );
   }
@@ -32,11 +36,13 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
 
   const _RecentPhotoGalleryPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
   });
 
   @override
@@ -73,7 +79,9 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                   .read(photoLibraryProvider)
                   .resolveSelectedPhotos(selection.value);
         if (photos.isNotEmpty && context.mounted) {
-          await onChoosePhotos(photos);
+          await (selection.value.isEmpty ? onChooseAllPhotos : onChoosePhotos)(
+            photos,
+          );
         }
       } catch (_) {
         if (context.mounted) {

@@ -22,6 +22,7 @@
       "owner_pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "policy_env": {
         "BUZZ_ACP_AGENTS": "10",
+        "BUZZ_ACP_DISPLAY_NAME": "worker",
         "BUZZ_ACP_LAZY_POOL": "true",
         "BUZZ_ACP_MODEL": "gpt-5",
         "BUZZ_ACP_RELAY_OBSERVER": "true",

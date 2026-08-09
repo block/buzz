@@ -104,11 +104,21 @@ pub struct Llm {
     auth: Arc<dyn TokenSource>,
 }
 
+/// Connect-phase timeout applied to every outgoing LLM HTTP request.
+///
+/// A 10-second budget is generous for a TLS + HTTP/2 handshake to a
+/// well-provisioned gateway.  Repeated connect timeouts indicate a
+/// network/reachability problem, not a slow generation.
+const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .read_timeout(cfg.llm_timeout)
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
+            // No client-level read_timeout: we apply a per-request total
+            // timeout via RequestBuilder::timeout() so that escalated budgets
+            // on slow models are not silently floored by a fixed client-level
+            // value. The connect_timeout above still bounds the handshake phase.
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
@@ -129,23 +139,15 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
+        let call_start = std::time::Instant::now();
         let result = match cfg.provider {
-            Provider::Anthropic => {
-                let v = self
-                    .post_anthropic(
-                        cfg,
-                        &anthropic_body(
-                            cfg,
-                            system_prompt,
-                            history,
-                            tools,
-                            effective_model,
-                            effort,
-                        ),
-                    )
-                    .await?;
-                parse_anthropic(v)
-            }
+            Provider::Anthropic => self
+                .post_anthropic(
+                    cfg,
+                    &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                )
+                .await
+                .and_then(parse_anthropic),
             Provider::OpenRouter => {
                 let mut body =
                     openai_body(cfg, system_prompt, history, tools, effective_model, None);
@@ -155,8 +157,9 @@ impl Llm {
                     effective_model,
                     cfg.prompt_caching,
                 );
-                let v = self.post_openrouter(cfg, &body).await?;
-                parse_openai_with_reasoning_details(v)
+                self.post_openrouter(cfg, &body)
+                    .await
+                    .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(
@@ -230,13 +233,41 @@ impl Llm {
         // map_err here prepends `(model-name) ` to the inner string only.
         // This is the single place all provider paths converge, so the mapping
         // is centralized and never needs to be repeated in each provider arm.
-        result.map_err(|e| match e {
+        // Every arm above returns its `Result` into this mapper rather than
+        // using `?` — an early return would silently skip the stamp, which is
+        // exactly what the Anthropic and OpenRouter arms used to do.
+        let stamped = result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
             AgentError::LlmModelNotFound(s) => {
                 AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
             }
+            // Stamped like the others: this is the error most likely to be read
+            // during an incident, so it must name the model whose window was
+            // exceeded. Without an explicit arm it would fall through `other`
+            // and be the only unstamped provider error.
+            AgentError::LlmContextExceeded(s) => {
+                AgentError::LlmContextExceeded(format!("({effective_model}) {s}"))
+            }
             other => other,
-        })
+        });
+        // Emit one INFO event per successful LLM call. This gives operators
+        // visibility into healthy-but-slow generation (which previously logged
+        // nothing at INFO) and provides a wall-clock record even when no error
+        // fires. Token counts use `?`-formatting to preserve the None-vs-zero
+        // distinction: `None` means the provider omitted usage entirely.
+        if let Ok(ref response) = stamped {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                duration_ms,
+                input_tokens = ?response.input_tokens,
+                cached_input_tokens = ?response.cached_input_tokens,
+                output_tokens = ?response.output_tokens,
+                "llm: call completed"
+            );
+        }
+        stamped
     }
 
     pub async fn summarize(
@@ -247,111 +278,125 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
-        match cfg.provider {
-            Provider::Anthropic => {
-                let body = json!({
-                    "model": effective_model,
-                    "max_tokens": max_output_tokens,
-                    "system": system_prompt,
-                    "messages": [{
-                        "role": "user",
-                        "content": [{ "type": "text", "text": user_prompt }],
-                    }],
-                });
-                Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
-            }
-            Provider::OpenRouter => {
-                let body = openrouter_summary_body(
-                    effective_model,
-                    system_prompt,
-                    user_prompt,
-                    max_output_tokens,
-                );
-                let v = self.post_openrouter(cfg, &body).await?;
-                Ok(parse_openai(v)?.text)
-            }
-            Provider::OpenAi | Provider::Databricks => {
-                let r = self
-                    .openai_request(
-                        cfg,
+        let call_start = std::time::Instant::now();
+        let result = (async {
+            match cfg.provider {
+                Provider::Anthropic => {
+                    let body = json!({
+                        "model": effective_model,
+                        "max_tokens": max_output_tokens,
+                        "system": system_prompt,
+                        "messages": [{
+                            "role": "user",
+                            "content": [{ "type": "text", "text": user_prompt }],
+                        }],
+                    });
+                    Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
+                }
+                Provider::OpenRouter => {
+                    let body = openrouter_summary_body(
                         effective_model,
-                        false,
-                        |use_responses, request_model| {
-                            if use_responses {
-                                (
-                                    json!({
-                                        "model": request_model,
-                                        "max_output_tokens": max_output_tokens,
-                                        "instructions": system_prompt,
-                                        "input": user_prompt,
-                                    }),
-                                    parse_responses as OpenAiParse,
-                                )
-                            } else {
-                                (
-                                    json!({
-                                        "model": request_model,
-                                        "stream": false,
-                                        "max_completion_tokens": max_output_tokens,
-                                        "messages": [
-                                            { "role": "system", "content": system_prompt },
-                                            { "role": "user", "content": user_prompt },
-                                        ],
-                                    }),
-                                    parse_openai as OpenAiParse,
-                                )
-                            }
-                        },
-                    )
-                    .await?;
-                Ok(r.text)
+                        system_prompt,
+                        user_prompt,
+                        max_output_tokens,
+                    );
+                    let v = self.post_openrouter(cfg, &body).await?;
+                    Ok(parse_openai(v)?.text)
+                }
+                Provider::OpenAi | Provider::Databricks => {
+                    let r = self
+                        .openai_request(
+                            cfg,
+                            effective_model,
+                            false,
+                            |use_responses, request_model| {
+                                if use_responses {
+                                    (
+                                        json!({
+                                            "model": request_model,
+                                            "max_output_tokens": max_output_tokens,
+                                            "instructions": system_prompt,
+                                            "input": user_prompt,
+                                        }),
+                                        parse_responses as OpenAiParse,
+                                    )
+                                } else {
+                                    (
+                                        json!({
+                                            "model": request_model,
+                                            "stream": false,
+                                            "max_completion_tokens": max_output_tokens,
+                                            "messages": [
+                                                { "role": "system", "content": system_prompt },
+                                                { "role": "user", "content": user_prompt },
+                                            ],
+                                        }),
+                                        parse_openai as OpenAiParse,
+                                    )
+                                }
+                            },
+                        )
+                        .await?;
+                    Ok(r.text)
+                }
+                Provider::DatabricksV2 => {
+                    let r = self
+                        .databricks_v2_request(cfg, effective_model, |route| match route {
+                            DatabricksV2Route::OpenAiResponses => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_output_tokens": max_output_tokens,
+                                    "instructions": system_prompt,
+                                    "input": user_prompt,
+                                }),
+                                parse_responses as OpenAiParse,
+                            ),
+                            DatabricksV2Route::AnthropicMessages => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_tokens": max_output_tokens,
+                                    "system": system_prompt,
+                                    "messages": [{
+                                        "role": "user",
+                                        "content": [{ "type": "text", "text": user_prompt }],
+                                    }],
+                                }),
+                                parse_anthropic as OpenAiParse,
+                            ),
+                            DatabricksV2Route::MlflowChatCompletions => (
+                                json!({
+                                    "model": effective_model,
+                                    "stream": false,
+                                    "max_completion_tokens": max_output_tokens,
+                                    "messages": [
+                                        { "role": "system", "content": system_prompt },
+                                        { "role": "user", "content": user_prompt },
+                                    ],
+                                }),
+                                parse_openai as OpenAiParse,
+                            ),
+                        })
+                        .await?;
+                    Ok(r.text)
+                }
             }
-            Provider::DatabricksV2 => {
-                let r = self
-                    .databricks_v2_request(cfg, effective_model, |route| match route {
-                        DatabricksV2Route::OpenAiResponses => (
-                            json!({
-                                "model": effective_model,
-                                "max_output_tokens": max_output_tokens,
-                                "instructions": system_prompt,
-                                "input": user_prompt,
-                            }),
-                            parse_responses as OpenAiParse,
-                        ),
-                        DatabricksV2Route::AnthropicMessages => (
-                            json!({
-                                "model": effective_model,
-                                "max_tokens": max_output_tokens,
-                                "system": system_prompt,
-                                "messages": [{
-                                    "role": "user",
-                                    "content": [{ "type": "text", "text": user_prompt }],
-                                }],
-                            }),
-                            parse_anthropic as OpenAiParse,
-                        ),
-                        DatabricksV2Route::MlflowChatCompletions => (
-                            json!({
-                                "model": effective_model,
-                                "stream": false,
-                                "max_completion_tokens": max_output_tokens,
-                                "messages": [
-                                    { "role": "system", "content": system_prompt },
-                                    { "role": "user", "content": user_prompt },
-                                ],
-                            }),
-                            parse_openai as OpenAiParse,
-                        ),
-                    })
-                    .await?;
-                Ok(r.text)
-            }
+        })
+        .await;
+        if result.is_ok() {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                duration_ms,
+                "llm: summarize completed"
+            );
         }
+        result
     }
 
     async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, |r| {
+        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -657,6 +702,7 @@ impl Llm {
                 &url,
                 body_ref,
                 effective_model == MESH_VIRTUAL_MODEL_ID,
+                cfg.llm_timeout,
                 |r| r.bearer_auth(&bearer),
             )
             .await
@@ -679,7 +725,7 @@ impl Llm {
         let mut bearer = self.auth.bearer().await?;
         let mut refreshed = false;
         loop {
-            match openrouter_post(&self.http, &url, body, &bearer).await {
+            match openrouter_post(&self.http, &url, body, &bearer, cfg.llm_timeout).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
                     let new_bearer = self.auth.refresh_now(&bearer).await?;
@@ -1075,13 +1121,39 @@ fn responses_body(
         "input": input,
     });
     if let Some(e) = effort {
-        body["reasoning"] = json!({ "effort": e.openai_effort_str() });
+        body["reasoning"] = json!({
+            "effort": e.openai_effort_str(),
+            "summary": cfg.thinking_summary.as_str(),
+        });
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
     }
     body
+}
+
+/// Narrow matcher for "the input exceeded the model's context window" provider
+/// errors — the ground-truth signal that history must shrink. Only consulted
+/// alongside an HTTP 400 (see the two `!status.is_success()` classification
+/// sites), never on its own: the phrases below are specific, but pairing them
+/// with the status keeps an unrelated 4xx that happens to quote one of them
+/// from triggering a recovery.
+///
+/// Deliberately tight. A generic 400 must stay `AgentError::Llm` so it remains
+/// terminal — misclassifying one as recoverable would spend the whole recovery
+/// budget on an error that shrinking history cannot fix, replacing a clear
+/// failure with a slow one.
+fn is_context_length_error(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    // OpenAI/Databricks machine-readable code; the most reliable marker.
+    b.contains("context_length_exceeded")
+        // Prose forms: OpenAI's classic phrasing and the Databricks gateway's
+        // "context window of this model" variant seen in both bug reports.
+        || b.contains("maximum context length")
+        || b.contains("context window")
+        // Anthropic: "prompt is too long: N tokens > M maximum".
+        || b.contains("prompt is too long")
 }
 
 /// Narrow matcher for "you should be on the Responses API" provider errors,
@@ -1157,6 +1229,11 @@ fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
 }
 
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
+    let max_tokens = v.get("status").and_then(Value::as_str) == Some("incomplete")
+        && v.get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            == Some("max_output_tokens");
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -1187,7 +1264,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     }
                 }
             }
-            Some("function_call") => {
+            Some("function_call") if !max_tokens => {
                 saw_function_call = true;
                 let raw = item
                     .get("arguments")
@@ -1207,6 +1284,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     Default::default(),
                 )?);
             }
+            // Incomplete Responses output can carry a partial function call.
+            // It is intentionally discarded by the in-turn recovery path.
+            Some("function_call") => {}
             Some("reasoning") => {
                 // Reasoning summary items from the Responses API. Each item has a
                 // `summary` array of `{"type": "summary_text", "text": "..."}` objects.
@@ -1479,13 +1559,19 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
                         reasoning.push_str(t);
                     }
                 }
-                // Anthropic's replay shape is fully modelled, so nothing to keep.
-                Some("tool_use") => tool_calls.push(make_tool_call(
-                    str_field(b, "id"),
-                    str_field(b, "name"),
-                    b.get("input").cloned().unwrap_or(Value::Null),
-                    Default::default(),
-                )?),
+                // A max-token response may end in the middle of a tool input.
+                // The agent discards all calls from truncated responses, so do
+                // not reject the whole response trying to parse an input that
+                // can never be executed.
+                Some("tool_use") if stop != ProviderStop::MaxTokens => {
+                    tool_calls.push(make_tool_call(
+                        str_field(b, "id"),
+                        str_field(b, "name"),
+                        b.get("input").cloned().unwrap_or(Value::Null),
+                        Default::default(),
+                    )?)
+                }
+                Some("tool_use") => {}
                 _ => {}
             }
         }
@@ -1573,30 +1659,33 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         }
     };
     let mut tool_calls = Vec::new();
-    if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
-        for tc in arr {
-            let f = tc
-                .get("function")
-                .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
-            let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-            let args: Value = serde_json::from_str(raw)
-                .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
-            // Everything on the wire object we do not model, kept for replay.
-            let extra = tc
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            tool_calls.push(make_tool_call(
-                str_field(tc, "id"),
-                str_field(f, "name"),
-                args,
-                extra,
-            )?);
+    if stop != ProviderStop::MaxTokens {
+        if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
+            for tc in arr {
+                let f = tc
+                    .get("function")
+                    .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
+                let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let args: Value = serde_json::from_str(raw).map_err(|e| {
+                    AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}"))
+                })?;
+                // Everything on the wire object we do not model, kept for replay.
+                let extra = tc
+                    .as_object()
+                    .map(|o| {
+                        o.iter()
+                            .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tool_calls.push(make_tool_call(
+                    str_field(tc, "id"),
+                    str_field(f, "name"),
+                    args,
+                    extra,
+                )?);
+            }
         }
     }
     dedupe_provider_ids(&mut tool_calls);
@@ -1680,6 +1769,44 @@ const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MS: u64 = 8_000;
 
+/// Maximum per-request timeout after escalation.
+///
+/// Each attempt that ends with a timeout doubles the budget for the next
+/// attempt: base, 2×base, 4×base, … The escalation is bounded here so a
+/// slow model cannot keep a worker alive indefinitely. The cap is also
+/// applied when `base` already exceeds it (e.g. an operator-set 1500 s stays
+/// 1500 s instead of being truncated to 1200 s — we never shrink the budget).
+const ESCALATION_TIMEOUT_CAP: std::time::Duration = std::time::Duration::from_secs(1200);
+
+/// Compute the per-attempt timeout after `timeout_failures` prior attempts
+/// timed out.
+///
+/// The budget doubles for every timeout failure: `base × 2^timeout_failures`.
+/// Non-timeout retryable failures (429, 5xx, connect resets) are not counted
+/// here — they are not evidence of a slow model. The budget is capped at
+/// `max(ESCALATION_TIMEOUT_CAP, base)` so a base already above the cap is
+/// preserved as-is.
+///
+/// Examples at base = 240 s: 0 failures → 240 s; 1 → 480 s; 2 → 960 s; 3 → 1200 s.
+///
+/// **Worst-case turn ceiling** (all 3 attempts time out, `MAX_RETRIES = 3`):
+///
+/// ```text
+/// total ≤ base + min(2×base, cap) + min(4×base, cap)
+/// ```
+///
+/// Concrete anchors operators can use to size their outer turn timeout:
+/// - 240 s base (default): 240 + 480 + 960 = **1680 s** (~28 min)
+/// - 900 s base: 900 + 1200 + 1200 = **3300 s** (~55 min)
+fn escalated_timeout(base: std::time::Duration, timeout_failures: u32) -> std::time::Duration {
+    // `checked_shl` returns None when the shift would overflow u32; saturate to
+    // u32::MAX so the cap below clamps it rather than panicking or wrapping.
+    let multiplier = 1u32.checked_shl(timeout_failures).unwrap_or(u32::MAX);
+    let scaled = base.saturating_mul(multiplier);
+    let cap = ESCALATION_TIMEOUT_CAP.max(base);
+    scaled.min(cap)
+}
+
 async fn backoff_with_jitter(attempt: u32) {
     let base = BASE_BACKOFF_MS
         .saturating_mul(1u64 << attempt)
@@ -1704,6 +1831,125 @@ async fn backoff_with_jitter(attempt: u32) {
 /// is always a network failure, never a malformed request we'd just resend.
 fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
+}
+
+/// Which phase of an HTTP exchange produced a timeout error.
+///
+/// Used by `timeout_message` to choose the right factual description.
+#[derive(Clone, Copy)]
+enum TimeoutPhase {
+    /// Timeout before any response bytes — transport/send phase.
+    Transport,
+    /// Timeout after headers were received, while reading body chunks.
+    BodyRead,
+}
+
+/// Pure function: build the human-readable timeout message for an LLM call.
+///
+/// Takes the two reqwest flags and the per-request total timeout rather than a
+/// `&reqwest::Error` so the flag-precedence logic can be tested without any
+/// network involvement.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; this is computed by `escalated_timeout` and may be
+/// larger than `cfg.llm_timeout` when earlier attempts already timed out.
+/// Connect timeouts use `LLM_CONNECT_TIMEOUT`.
+///
+/// This message appears in the terminal error produced by `classify_transport_error`
+/// (transport-phase timeout, always terminal) and `classify_body_read_error`
+/// (body-read timeout, terminal only on the final attempt — earlier attempts
+/// are retried with an escalated budget before reaching this message).
+fn timeout_message(
+    is_connect: bool,
+    per_request_timeout: std::time::Duration,
+    phase: TimeoutPhase,
+) -> String {
+    if is_connect {
+        // Connect-phase timeout: the TCP/TLS handshake didn't complete.
+        // reqwest sets both is_timeout() and is_connect() for this case.
+        format!("connect timeout: no connection established within {LLM_CONNECT_TIMEOUT:?}")
+    } else {
+        match phase {
+            TimeoutPhase::Transport => format!(
+                "read timeout: no response bytes received within {per_request_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+            // Total-request timeout fired during body streaming: the response
+            // started but did not complete within the window.
+            TimeoutPhase::BodyRead => format!(
+                "request timed out: response did not complete within {per_request_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+        }
+    }
+}
+
+/// Produce a human-readable description of a transport-layer reqwest error.
+///
+/// reqwest's `Display` for a timeout fire is the opaque
+/// `"error sending request for url (...)"` — the same text as every other
+/// pre-response failure — because the HTTP layer lumps them together.
+/// We replace that string with a factual message that names which kind of
+/// timeout fired, making it immediately obvious in logs whether the client
+/// never connected or whether no response bytes arrived within the window.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_transport_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
+    if e.is_timeout() {
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::Transport)
+    } else {
+        format!("transport: {e}")
+    }
+}
+
+/// Produce a human-readable description of an error that occurred while
+/// reading response body chunks (`resp.chunk()`).
+///
+/// A timeout here means the total per-request budget expired during body
+/// streaming — headers (and possibly some body bytes) arrived but the response
+/// did not complete within the window. Non-final-attempt body timeouts are
+/// retried with an escalated budget before this function is called, so the
+/// message is only produced on the final attempt. Any other body-decode failure
+/// preserves the `"body read: ..."` prefix expected by callers and existing
+/// tests.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_body_read_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
+    if e.is_timeout() {
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::BodyRead)
+    } else {
+        format!("body read: {e}")
+    }
+}
+
+/// Provider bodies that mean "this model cannot accept image input", the
+/// signal the agent loop uses to strip rejected images from history and
+/// continue the turn (see `replace_unsupported_images`).
+///
+/// Deliberately tight, same doctrine as [`is_context_length_error`]: each
+/// phrase is a verbatim capability rejection observed live. Misclassifying a
+/// generic 400 as recoverable would mutate history for an error that removing
+/// images cannot fix.
+fn is_unsupported_image_input_error(body: &str) -> bool {
+    let b = body.to_ascii_lowercase();
+    // OpenRouter 404: no provider endpoint accepts images for this model.
+    b.contains("no endpoints found that support image input")
+        // OpenAI-compatible 400 from text-only single-model deployments,
+        // e.g. Crusoe serverless GLM: `"crusoeai/GLM-5.2-NVFP4 is not a
+        // multimodal model"`. Without this arm the 400 is terminal, the image
+        // stays in history, and every subsequent request in the session fails
+        // identically — the turn wedges until the harness/user gives up.
+        || b.contains("is not a multimodal model")
 }
 
 /// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
@@ -1786,6 +2032,7 @@ async fn post<F>(
     url: &str,
     body: &Value,
     detect_mesh_fallback: bool,
+    base_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
 where
@@ -1794,22 +2041,33 @@ where
     let body_bytes = serde_json::to_vec(body)
         .map_err(|e| PostError::Agent(AgentError::Llm(format!("serialize: {e}"))))?;
     let call_start = std::time::Instant::now();
-    for attempt in 0..MAX_RETRIES {
+    // Count prior attempts that ended with a timeout so we can double the
+    // budget on the next attempt. Non-timeout retryable failures (429, 5xx,
+    // connect resets) are not evidence of a slow model and do NOT escalate.
+    let mut timeout_failures: u32 = 0;
+    'attempt: for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match apply(
             http.post(url)
                 .header("content-type", "application/json")
-                .body(body_bytes.clone()),
+                .body(body_bytes.clone())
+                .timeout(per_request_timeout),
         )
         .send()
         .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -1818,7 +2076,7 @@ where
                 return Err(PostError::Agent(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e, per_request_timeout),
                 )));
             }
         };
@@ -1864,15 +2122,37 @@ where
         // upstream capacity — no retry was attempted, so cumulative duration
         // would be misleading.
         if status == 404 {
+            let error_body = read_error_body(resp).await;
+            if is_unsupported_image_input_error(&error_body) {
+                return Err(PostError::Agent(AgentError::UnsupportedImageInput(
+                    error_body,
+                )));
+            }
             return Err(PostError::Agent(AgentError::LlmModelNotFound(format!(
-                "{status}: {}",
-                read_error_body(resp).await
+                "{status}: {error_body}"
             ))));
         }
         if !status.is_success() {
+            let body = read_error_body(resp).await;
+            // Context-window overflow is a recovery signal, not a terminal
+            // error: classify it here, where status and body are still separate
+            // values. Callers must never re-derive this from the formatted
+            // string — `Llm::complete` stamps the model name onto it before the
+            // agent loop ever sees it.
+            if status == 400 && is_context_length_error(&body) {
+                return Err(PostError::Agent(AgentError::LlmContextExceeded(format!(
+                    "{status}: {body}"
+                ))));
+            }
+            // Image-capability rejection is equally recoverable and equally
+            // deterministic: a text-only deployment 400s the same request
+            // forever. Typed here (not just on the 404 arm) because
+            // OpenAI-compatible providers report it as a 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(PostError::Agent(AgentError::UnsupportedImageInput(body)));
+            }
             return Err(PostError::Agent(AgentError::Llm(format!(
-                "{status}: {}",
-                read_error_body(resp).await
+                "{status}: {body}"
             ))));
         }
         if let Some(len) = resp.content_length() {
@@ -1888,6 +2168,7 @@ where
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
                     if buf.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+                        // Size overflow: not a timeout, not retryable.
                         return Err(PostError::Agent(AgentError::Llm(format!(
                             "response exceeded {MAX_LLM_RESPONSE_BYTES} bytes"
                         ))));
@@ -1896,18 +2177,85 @@ where
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // A timeout during body streaming means the total
+                    // per-request budget expired mid-body (headers arrived but
+                    // the response stalled). Retry with an escalated budget,
+                    // same as a transport-phase timeout — the server may be
+                    // slow to flush, not permanently broken.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
+                        &classify_body_read_error(&e, per_request_timeout),
                     )));
                 }
             }
         }
-        return serde_json::from_slice(&buf)
-            .map_err(|e| PostError::Agent(AgentError::Llm(format!("json: {e}"))));
+        // A 2xx body that fails to parse (e.g. a provider flushing a
+        // truncated JSON document and closing the stream cleanly) is a
+        // transient upstream fault, not a request problem: retry it like a
+        // 5xx. Safe to re-send — a malformed body produced no parsed
+        // response, so no tool call was ever extracted from it, and the
+        // retried request is the identical completion POST captured in
+        // `body_bytes` at function entry.
+        match serde_json::from_slice(&buf) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                if attempt + 1 < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        error = %e,
+                        "llm: malformed response body, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(PostError::Agent(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("json: {e}"),
+                )));
+            }
+        }
     }
-    unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
+    // Unreachable in practice: every iteration either returns or continues.
+    // A fallthrough here would mean MAX_RETRIES was 0, which is rejected at
+    // config validation. Return a terminal error rather than panic so the
+    // invariant is not load-bearing.
+    Err(PostError::Agent(terminal_llm_error(
+        call_start.elapsed(),
+        MAX_RETRIES,
+        "exhausted retries",
+    )))
+}
+
+pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
+    PkceOAuthConfig {
+        discovery_url: format!(
+            "{}/oidc/.well-known/oauth-authorization-server",
+            host.trim_end_matches('/')
+        ),
+        client_id: DATABRICKS_CLIENT_ID.into(),
+        scopes: DATABRICKS_OAUTH_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        cache_namespace: "databricks".into(),
+        cache_dir_override: None,
+    }
 }
 
 /// Build the `TokenSource` for the configured provider.
@@ -1929,41 +2277,63 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             if !cfg.api_key.is_empty() {
                 return Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())));
             }
-            let discovery_url = format!(
-                "{}/oidc/.well-known/oauth-authorization-server",
-                cfg.base_url.trim_end_matches('/')
-            );
-            let pkce = PkceOAuthConfig {
-                discovery_url,
-                client_id: DATABRICKS_CLIENT_ID.into(),
-                scopes: DATABRICKS_OAUTH_SCOPES
-                    .iter()
-                    .map(|s| (*s).into())
-                    .collect(),
-                cache_namespace: "databricks".into(),
-                cache_dir_override: None,
-            };
-            Ok(PkceOAuthTokenSource::new(pkce)?)
+            Ok(PkceOAuthTokenSource::new(databricks_pkce_config(
+                &cfg.base_url,
+            ))?)
+        }
+    }
+}
+
+/// Completion-token cap that [`Llm::summarize`] actually requests from
+/// `provider`, given the caller's visible-text budget. OpenRouter grants
+/// reasoning a separate, equal budget on top of the text budget (see
+/// [`openrouter_summary_body`]), so its top-level cap is double the caller's
+/// budget; every other provider requests the caller's budget unchanged.
+/// Callers that reserve output headroom in an input budget
+/// (`handoff_prompt_budget_bytes`) must reserve THIS value, not the text
+/// budget — otherwise input plus the actual completion allowance can exceed
+/// the configured context window.
+pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
+    match provider {
+        Provider::OpenRouter => max_output_tokens.saturating_mul(2),
+        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
+            max_output_tokens
         }
     }
 }
 
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
 /// Extracted so tests can assert on the actual wire shape instead of a
-/// hand-rolled literal — summaries never carry `reasoning` (see
-/// `apply_openrouter_mutations`, which the summary path never calls).
-/// It spells the token limit `max_tokens` directly for the same reason: the
-/// mutation that renames it is never applied here.
+/// hand-rolled literal — summaries never carry config-driven reasoning
+/// *effort* (see `apply_openrouter_mutations`, which the summary path never
+/// calls). It spells the token limit `max_tokens` directly for the same
+/// reason: the mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
     user_prompt: &str,
     max_output_tokens: u32,
 ) -> Value {
+    // Reasoning models spend output tokens thinking before emitting any
+    // visible text, and that spend counts against `max_tokens`. Left
+    // unseparated, a model can burn the entire cap mid-reasoning and return an
+    // empty `content` — observed with deepseek-v4-flash, where 13 consecutive
+    // handoff attempts length-stopped inside the reasoning channel and every
+    // one degraded to lossy history truncation. Give reasoning its own
+    // equal-sized budget on top of the text budget so `max_output_tokens`
+    // remains what the caller means: visible summary text. `exclude` keeps the
+    // reasoning out of the response body; `summarize()` only reads `content`.
+    // Non-reasoning endpoints ignore the `reasoning` object (see
+    // `apply_openrouter_mutations` on why it is never paired with
+    // `provider.require_parameters`).
     json!({
         "model": effective_model,
         "stream": false,
-        "max_tokens": max_output_tokens,
+        "max_tokens": summary_completion_cap(Provider::OpenRouter, max_output_tokens),
+        "reasoning": {
+            "max_tokens": max_output_tokens,
+            "exclude": true,
+        },
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt },
@@ -1993,18 +2363,31 @@ enum OpenRouterErrorClass {
 
 /// Ceiling applied to the server-supplied `Retry-After` header before we
 /// sleep on it. OpenRouter can advertise waits up to an hour, but
-/// `openrouter_post`'s per-attempt sleep happens *outside*
-/// `Client::timeout` (`cfg.llm_timeout`, default 240s) — an unclamped hint
-/// could keep a single turn alive for up to two full-duration sleeps across
-/// `MAX_RETRIES`. Clamping (never rejecting) keeps us honoring the server's
-/// backoff signal while bounding worst-case turn latency to a value smaller
-/// than the connect/response timeout.
+/// `openrouter_post`'s per-attempt sleep happens *outside* the per-request
+/// `.timeout()` budget — an unclamped hint could keep a single turn alive for
+/// up to two full-duration sleeps across `MAX_RETRIES`. Clamping (never
+/// rejecting) keeps us honoring the server's backoff signal while bounding
+/// worst-case turn latency to a value smaller than the per-request timeout.
 const RETRY_AFTER_CAP_SECS: u64 = 60;
+
+/// Compute the retry delay from a raw `Retry-After` header value.
+///
+/// Returns `Some(duration)` when the header is present, non-zero, and
+/// parseable as a decimal number of seconds; the value is capped at
+/// `RETRY_AFTER_CAP_SECS`. Returns `None` when the header is absent,
+/// unparseable, or zero — callers should fall back to `backoff_with_jitter`.
+///
+/// This is the single place the cap logic lives; `parse_retry_after_header`
+/// delegates here so the cap can be unit tested without an HTTP header map.
+fn retry_delay_for_429(header_value: Option<&str>) -> Option<std::time::Duration> {
+    let val = header_value?;
+    let secs: u64 = val.trim().parse().ok()?;
+    (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+}
 
 fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
     let val = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let secs: u64 = val.trim().parse().ok()?;
-    (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+    retry_delay_for_429(Some(val))
 }
 
 fn classify_openrouter_error(
@@ -2049,11 +2432,16 @@ async fn openrouter_post(
     url: &str,
     body: &Value,
     bearer: &str,
+    base_timeout: std::time::Duration,
 ) -> Result<Value, AgentError> {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
     let call_start = std::time::Instant::now();
-    for attempt in 0..MAX_RETRIES {
+    // Count prior timeout failures for per-attempt budget escalation; see
+    // `escalated_timeout` for the doubling strategy.
+    let mut timeout_failures: u32 = 0;
+    'attempt: for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match http
             .post(url)
             .header("content-type", "application/json")
@@ -2061,16 +2449,22 @@ async fn openrouter_post(
             .header("X-OpenRouter-Title", "Buzz")
             .bearer_auth(bearer)
             .body(body_bytes.clone())
+            .timeout(per_request_timeout)
             .send()
             .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: openrouter transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -2079,7 +2473,7 @@ async fn openrouter_post(
                 return Err(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e, per_request_timeout),
                 ));
             }
         };
@@ -2113,6 +2507,9 @@ async fn openrouter_post(
             // about the model, and reporting a parameter problem as
             // `LlmModelNotFound` (or vice versa) sends the user to the wrong fix.
             let error_body = read_error_body(resp).await;
+            if is_unsupported_image_input_error(&error_body) {
+                return Err(AgentError::UnsupportedImageInput(error_body));
+            }
             if error_body.contains("No endpoints found that can handle the requested parameters") {
                 return Err(openrouter_parameter_routing_error(&error_body));
             }
@@ -2177,10 +2574,21 @@ async fn openrouter_post(
             };
         }
         if !status.is_success() {
-            return Err(AgentError::Llm(format!(
-                "{status}: {}",
-                read_error_body(resp).await
-            )));
+            let body = read_error_body(resp).await;
+            // Same recovery classification as the shared `post()` terminal:
+            // `openrouter_post` is a separate implementation with its own retry
+            // loop and status ladder, so it needs its own arm or OpenRouter
+            // agents keep the permanent context-400 stuck loop.
+            if status == 400 && is_context_length_error(&body) {
+                return Err(AgentError::LlmContextExceeded(format!("{status}: {body}")));
+            }
+            // Same 400-shaped image rejection as the shared `post()` terminal:
+            // OpenRouter normally reports this as a 404 (handled above), but a
+            // BYOK/passthrough upstream can surface the provider's own 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(AgentError::UnsupportedImageInput(body));
+            }
+            return Err(AgentError::Llm(format!("{status}: {body}")));
         }
         if let Some(len) = resp.content_length() {
             if len as usize > MAX_LLM_RESPONSE_BYTES {
@@ -2203,15 +2611,55 @@ async fn openrouter_post(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // Body-read timeout: retry with escalated budget, same as
+                    // transport-phase timeouts — see the corresponding arm in
+                    // `post()` for the full rationale.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: openrouter body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
-                    ))
+                        &classify_body_read_error(&e, per_request_timeout),
+                    ));
                 }
             }
         }
-        return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
+        // Same malformed-body retry as the shared `post()` terminal: a
+        // truncated 2xx JSON body is transient upstream trouble, and
+        // re-sending is provably tool-safe — nothing was parsed, so no tool
+        // call could have been extracted, and the retry re-uses the
+        // identical `body_bytes` completion request.
+        match serde_json::from_slice(&buf) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                if attempt + 1 < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        error = %e,
+                        "llm: openrouter malformed response body, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("json: {e}"),
+                ));
+            }
+        }
     }
     Err(terminal_llm_error(
         call_start.elapsed(),
@@ -2327,7 +2775,7 @@ fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, HookServers, OpenAiApi, Provider};
+    use crate::config::{Config, HookServers, OpenAiApi, Provider, ThinkingSummary};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -2365,6 +2813,7 @@ mod tests {
             prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
         }
     }
@@ -2483,6 +2932,8 @@ mod tests {
                 });
                 let status_text = match response.status {
                     200 => "OK",
+                    400 => "Bad Request",
+                    413 => "Payload Too Large",
                     500 => "Internal Server Error",
                     502 => "Bad Gateway",
                     503 => "Service Unavailable",
@@ -3204,10 +3655,51 @@ mod tests {
         let v = serde_json::json!({
             "status": "incomplete",
             "incomplete_details": {"reason": "max_output_tokens"},
-            "output": [],
+            "output": [{
+                "type": "function_call",
+                "call_id": "partial",
+                "name": "dev__shell",
+                "arguments": "{\"command\":\"unterminated",
+            }],
         });
         let r = parse_responses(v).unwrap();
         assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn truncated_openai_tool_arguments_are_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "partial text",
+                    "tool_calls": [{
+                        "id": "partial",
+                        "type": "function",
+                        "function": {
+                            "name": "dev__shell",
+                            "arguments": "{\"command\":\"unterminated",
+                        },
+                    }],
+                },
+            }],
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn truncated_anthropic_tool_use_is_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "tool_use", "id": "", "name": "", "input": null}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
     }
 
     #[test]
@@ -3780,6 +4272,75 @@ mod tests {
             Some(ThinkingEffort::Low),
         );
         assert_eq!(body["reasoning"]["effort"], "low");
+        // summary defaults to "auto" when effort is set.
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn responses_body_summary_present_iff_effort_set() {
+        // effort set → reasoning object present with both effort and summary.
+        let body_with_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Medium),
+        );
+        assert!(
+            body_with_effort.get("reasoning").is_some(),
+            "reasoning must be present when effort is set"
+        );
+        assert_eq!(body_with_effort["reasoning"]["effort"], "medium");
+        assert_eq!(body_with_effort["reasoning"]["summary"], "auto");
+
+        // effort None → reasoning object entirely absent.
+        let body_no_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body_no_effort.get("reasoning").is_none(),
+            "reasoning must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn responses_body_emits_configured_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Detailed;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::High),
+        );
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(
+            body["reasoning"]["summary"], "detailed",
+            "configured summary mode must be forwarded to reasoning object"
+        );
+    }
+
+    #[test]
+    fn responses_body_concise_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Concise;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Low),
+        );
+        assert_eq!(body["reasoning"]["summary"], "concise");
     }
 
     #[test]
@@ -4120,9 +4681,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4184,9 +4752,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after 499 retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after 499 retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4235,9 +4810,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .unwrap_err();
+        let err = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .unwrap_err();
         match &err {
             PostError::Agent(AgentError::Llm(msg)) => {
                 assert!(
@@ -4255,6 +4837,401 @@ mod tests {
             accepts.load(Ordering::SeqCst),
             MAX_RETRIES,
             "server must see exactly MAX_RETRIES attempts — 499 must be retried"
+        );
+    }
+
+    /// Regression (write-compressor, tb21-twins-1): a provider returning
+    /// HTTP 200 with a *truncated* JSON body (cleanly closed, correct
+    /// framing, unparseable content) previously surfaced as a terminal
+    /// `AgentError::Llm("json: EOF while parsing a value ...")` on the very
+    /// first attempt, killing the agent turn. A malformed body is transient
+    /// upstream trouble and must be retried like a 5xx. Re-sending is
+    /// tool-safe: nothing was parsed, so no tool call was extracted from the
+    /// bad body, and the retry replays the identical completion request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_retries_malformed_json_body_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    // First attempt: 200 OK with a truncated JSON document.
+                    // Content-Length matches the bytes actually sent, so the
+                    // body read completes cleanly — the fault is purely that
+                    // the JSON is cut off mid-value.
+                    let body = "{\"choices\":[{\"mess";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                // Subsequent attempts: complete valid JSON.
+                let body = "{\"ok\":true}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after retrying the malformed body");
+        assert_eq!(out, serde_json::json!({ "ok": true }));
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 attempts (malformed body retried once)"
+        );
+    }
+
+    /// A persistently malformed 200 body exhausts MAX_RETRIES and surfaces
+    /// the terminal error with the `json:` detail plus cumulative
+    /// duration/attempt count — never an early first-attempt death.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_exhausts_retries_on_persistent_malformed_json() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                let body = "{\"choices\":[{\"mess";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            PostError::Agent(AgentError::Llm(msg)) => {
+                assert!(
+                    msg.contains("json:"),
+                    "expected the json parse detail, got: {msg}"
+                );
+                assert!(
+                    msg.contains("cumulative") && msg.contains("3 attempts"),
+                    "expected cumulative duration + exact attempt count, got: {msg}"
+                );
+            }
+            other => panic!("expected PostError::Agent(AgentError::Llm), got: {other:?}"),
+        }
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "server must see exactly MAX_RETRIES attempts — malformed bodies must be retried"
+        );
+    }
+
+    /// Same regression coverage for `openrouter_post`, which carries its own
+    /// retry loop: a truncated 200 body on the first attempt is retried and
+    /// the call succeeds on the second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_retries_malformed_json_body_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    let body = "{\"choices\":[{\"mess";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = openrouter_post(&client, &url, &json!({}), "key", Duration::from_secs(5))
+            .await
+            .expect("openrouter_post should succeed after retrying the malformed body");
+        assert!(out.is_object(), "expected a JSON object: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 attempts (malformed body retried once)"
+        );
+    }
+
+    /// A body-read timeout on the first attempt triggers a retry under an
+    /// escalated budget, and the call succeeds on the second attempt.
+    ///
+    /// The stub sends HTTP 200 headers for the first request, writes a partial
+    /// body, then stalls long enough to exhaust the base timeout (1 s).  On the
+    /// second request it sends a complete response immediately.  The test asserts
+    /// that `post()` returns success and that the server saw exactly 2 requests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                // Drain the incoming request headers on every attempt.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare a 64-byte body, send only 4 bytes,
+                    // then stall for 3 s — long enough to outlast the 1 s
+                    // base timeout and trigger a body-read timeout.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"s",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // Connection closes here; the client has already timed out.
+                    continue;
+                }
+
+                // Second attempt: complete a valid JSON response immediately.
+                let body = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // No client-level timeout — per-request timeout is applied inside post().
+        let client = Client::builder().build().unwrap();
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({"model": "x"}),
+            false,
+            // Small base timeout so the body stall triggers quickly.
+            Duration::from_secs(1),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object response: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
+        );
+    }
+
+    /// `openrouter_post`: a body-read timeout on the first attempt retries under
+    /// an escalated budget and succeeds on the second attempt.
+    ///
+    /// Same shape as `post_body_read_timeout_retries_with_escalated_budget` —
+    /// the stub stalls mid-body on the first request, then returns a complete
+    /// response immediately on the second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare 64-byte body, send 4 bytes, stall.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"c",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                // Second attempt: complete valid OpenRouter JSON response.
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder().build().unwrap();
+        let out = openrouter_post(&client, &url, &json!({}), "key", Duration::from_secs(1))
+            .await
+            .expect("openrouter_post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
         );
     }
 
@@ -4391,6 +5368,363 @@ mod tests {
             warnings, 1,
             "exactly one stall warning with duration+attempts fields at threshold"
         );
+    }
+
+    // ---- escalated_timeout (pure-function tests) ----------------------------
+
+    /// No prior timeouts → budget is base unchanged.
+    #[test]
+    fn escalated_timeout_zero_failures_returns_base() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 0),
+            base,
+            "0 timeout failures must return base unchanged"
+        );
+    }
+
+    /// One prior timeout → budget doubles.
+    #[test]
+    fn escalated_timeout_one_failure_doubles() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(480),
+            "1 timeout failure must double the base to 480s"
+        );
+    }
+
+    /// Two prior timeouts → budget quadruples.
+    #[test]
+    fn escalated_timeout_two_failures_quadruples() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 2),
+            Duration::from_secs(960),
+            "2 timeout failures must quadruple the base to 960s"
+        );
+    }
+
+    /// At three prior timeouts (base 240 s, 240×8 = 1920 s) the cap kicks in
+    /// and the result is clamped to ESCALATION_TIMEOUT_CAP (1200 s).
+    #[test]
+    fn escalated_timeout_three_failures_capped_at_1200s() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 3),
+            Duration::from_secs(1200),
+            "3 timeout failures with 240s base must be capped at 1200s"
+        );
+    }
+
+    /// When base already exceeds the cap, the cap is raised to base (we never
+    /// shrink the operator-configured budget).
+    #[test]
+    fn escalated_timeout_base_above_cap_is_never_shrunk() {
+        let base = Duration::from_secs(1500);
+        // All scaled values (1×, 2×, 4×, …) are ≥ base, and the effective cap
+        // is max(ESCALATION_TIMEOUT_CAP, base) = 1500s, so they're all clamped
+        // to 1500s.
+        assert_eq!(
+            escalated_timeout(base, 0),
+            Duration::from_secs(1500),
+            "base 1500s at 0 failures must stay 1500s"
+        );
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(1500),
+            "base 1500s at 1 failure must be capped at 1500s (not truncated to 1200s)"
+        );
+    }
+
+    // ---- timeout_message (pure-function tests, no network) ------------------
+
+    /// Connect timeout (is_connect=true) wins regardless of phase and shows
+    /// the LLM_CONNECT_TIMEOUT value — never the read-timeout text.
+    #[test]
+    fn timeout_message_connect_true_shows_connect_timeout() {
+        let llm = std::time::Duration::from_secs(240);
+        for phase in [TimeoutPhase::Transport, TimeoutPhase::BodyRead] {
+            let msg = timeout_message(true, llm, phase);
+            assert!(
+                msg.starts_with("connect timeout:"),
+                "is_connect=true must start with 'connect timeout:': {msg}"
+            );
+            // The configured connect timeout (10s) must appear verbatim.
+            assert!(
+                msg.contains("10s"),
+                "connect timeout must include the 10s configured value: {msg}"
+            );
+            assert!(
+                !msg.contains("read timeout"),
+                "connect timeout must not mention 'read timeout': {msg}"
+            );
+            assert!(
+                !msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+                "connect timeout must not reference the read-timeout config knob: {msg}"
+            );
+        }
+    }
+
+    /// Transport read-timeout (is_connect=false, Transport phase) shows the
+    /// configured llm_timeout value and the config-knob hint.
+    #[test]
+    fn timeout_message_transport_phase_shows_read_timeout_and_duration() {
+        let llm = std::time::Duration::from_secs(240);
+        let msg = timeout_message(false, llm, TimeoutPhase::Transport);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "transport read-timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("240s"),
+            "transport read-timeout must include the 240s configured value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "transport read-timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("connect timeout"),
+            "transport read-timeout must not say 'connect timeout': {msg}"
+        );
+    }
+
+    /// Body-read timeout (BodyRead phase) says "response did not complete" and
+    /// shows the per-request timeout value and the config-knob hint.
+    ///
+    /// With per-request total timeouts, a body-stall fires the same total-budget
+    /// timer as a transport stall — the message reflects that the entire request
+    /// (not just a read-idle window) expired.
+    #[test]
+    fn timeout_message_body_read_phase_says_did_not_complete_and_duration() {
+        let per_request = std::time::Duration::from_secs(300);
+        let msg = timeout_message(false, per_request, TimeoutPhase::BodyRead);
+        assert!(
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
+        );
+        assert!(
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
+        );
+        assert!(
+            msg.contains("300s"),
+            "body-read timeout must include the 300s per-request value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("read timeout"),
+            "body-read timeout must not say 'read timeout': {msg}"
+        );
+    }
+
+    /// A non-default duration threads through correctly — verifies the value
+    /// is not hard-coded anywhere in the pure function.
+    #[test]
+    fn timeout_message_duration_is_not_hardcoded() {
+        let msg = timeout_message(
+            false,
+            std::time::Duration::from_secs(600),
+            TimeoutPhase::Transport,
+        );
+        assert!(
+            msg.contains("600s"),
+            "transport read-timeout must reflect the supplied 600s value: {msg}"
+        );
+        assert!(
+            !msg.contains("240s"),
+            "must not hard-code 240s when 600s was supplied: {msg}"
+        );
+    }
+
+    // ---- classify_transport_error / classify_body_read_error (reqwest integration) --
+
+    /// A real loopback read-timeout must produce a message rooted at "read
+    /// timeout:" that contains the configured value — and must NOT use reqwest's
+    /// opaque "error sending request" string.
+    ///
+    /// This is the one test that requires real network I/O (loopback only) to
+    /// verify that reqwest actually sets is_timeout() for the scenario in which
+    /// Buzz agents stall (server connected but emitting no bytes).
+    #[tokio::test]
+    async fn classify_transport_error_read_timeout_is_loopback_verified() {
+        use tokio::net::TcpListener;
+
+        let llm_timeout = std::time::Duration::from_millis(50);
+        // Bind and never accept — TCP connect succeeds, no bytes follow.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _listener = listener; // keep alive so connect succeeds
+
+        let client = reqwest::Client::builder()
+            .read_timeout(llm_timeout)
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("must time out");
+
+        // Preconditions: verify reqwest's classification before asserting our output.
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout"
+        );
+        assert!(
+            !err.is_connect(),
+            "precondition: read timeout must not set is_connect"
+        );
+
+        let msg = classify_transport_error(&err, llm_timeout);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "read timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("50ms"),
+            "read timeout must include the configured 50ms value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "read timeout must name the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("error sending request"),
+            "read timeout must not use the opaque reqwest string: {msg}"
+        );
+    }
+
+    /// Non-timeout transport errors preserve the original reqwest error text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
+        use tokio::net::TcpListener;
+
+        // Accept-then-close: keep the listener alive so the endpoint stays
+        // owned throughout, spawn a task that accepts exactly one connection
+        // and immediately drops the socket.  Produces a deterministic
+        // non-timeout reqwest error (request-class, not is_timeout()) while
+        // the test holds exclusive ownership of the address — no released-port
+        // race possible.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                drop(sock); // close immediately, no response written
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("must fail: server closes connection before response");
+
+        assert!(
+            !err.is_timeout(),
+            "precondition: connection-closed is not a timeout: {err}"
+        );
+
+        assert_eq!(
+            classify_transport_error(&err, std::time::Duration::from_secs(240)),
+            format!("transport: {err}")
+        );
+    }
+
+    /// A body-read timeout fires after headers arrive but before the body is
+    /// complete.  A loopback server sends an HTTP 200 with a declared content-
+    /// length larger than the payload it actually delivers; the client reads
+    /// one chunk, then stalls until the per-request total timeout fires.
+    ///
+    /// Asserts the exact wording, configured duration, and config-knob hint.
+    /// Also covers the non-timeout fallback via classify_body_read_error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classify_body_read_error_timeout_says_did_not_complete() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let per_request_timeout = std::time::Duration::from_millis(100);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: accept once, send headers + one body chunk, then hang.
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Consume the request.
+                let mut buf = [0u8; 512];
+                let _ = sock.read(&mut buf).await;
+                // Declare 1 KiB body, send 4 bytes, then do nothing.
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\n\
+                          Content-Type: application/json\r\n\
+                          Content-Length: 1024\r\n\
+                          \r\n\
+                          test",
+                    )
+                    .await;
+                // Hold the connection open so the client times out rather than
+                // seeing EOF.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+
+        // Use a client-level read_timeout to produce a body-stall error; in
+        // production we use per-request .timeout(), but the error classification
+        // is the same — reqwest sets is_timeout() in both cases.
+        let client = reqwest::Client::builder()
+            .read_timeout(per_request_timeout)
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("headers must arrive before timeout");
+
+        // Consume the response body — this is where the timeout fires.
+        let err = resp.bytes().await.expect_err("body read must time out");
+
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout for body stall"
+        );
+
+        // ---- classify_body_read_error: timeout path ----
+        let msg = classify_body_read_error(&err, per_request_timeout);
+        assert!(
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
+        );
+        assert!(
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
+        );
+        assert!(
+            msg.contains("100ms"),
+            "body-read timeout must include the per-request 100ms value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+
+        // ---- classify_body_read_error: non-timeout fallback (pure, no I/O) ----
+        // We can't produce a real non-timeout body error without real I/O, but
+        // the pure-function path is identical to classify_transport_error's
+        // non-timeout fallback and is covered by the pure tests above.
     }
 
     // ---- usage / input-token extraction -------------------------------------
@@ -5271,8 +6605,14 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
     }
 
+    /// The summary body reserves `max_output_tokens` for visible text by
+    /// granting reasoning a separate, equal budget on top and excluding it
+    /// from the response. Without the separation, a reasoning model can spend
+    /// the entire cap thinking and length-stop with empty `content`, which
+    /// `summarize()` reports as an empty summary and the handoff degrades to
+    /// lossy truncation.
     #[test]
-    fn openrouter_summary_carries_neither_reasoning_nor_provider() {
+    fn openrouter_summary_budgets_reasoning_separately_and_carries_no_provider() {
         let body = openrouter_summary_body(
             "anthropic/claude-opus-4-7",
             "summarize",
@@ -5282,14 +6622,25 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-opus-4-7");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "text to summarize");
-        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(
+            body["max_tokens"], 2048,
+            "total cap must cover the text budget plus the reasoning budget"
+        );
+        assert_eq!(
+            body["reasoning"]["max_tokens"], 1024,
+            "reasoning gets its own budget so it cannot starve the summary text"
+        );
+        assert_eq!(
+            body["reasoning"]["exclude"], true,
+            "reasoning must not be included in the response; summarize() reads only content"
+        );
+        assert!(
+            body["reasoning"].get("effort").is_none(),
+            "budget-based cap only; effort stays unset for the summary call"
+        );
         assert!(
             body.get("max_completion_tokens").is_none(),
             "summary body must use OpenRouter's token-limit spelling"
-        );
-        assert!(
-            body.get("reasoning").is_none(),
-            "summary body must not carry reasoning"
         );
         assert!(
             body.get("provider").is_none(),
@@ -6014,6 +7365,8 @@ mod tests {
     fn status_line(status: u16) -> &'static str {
         match status {
             200 => "200 OK",
+            400 => "400 Bad Request",
+            413 => "413 Payload Too Large",
             401 => "401 Unauthorized",
             402 => "402 Payment Required",
             403 => "403 Forbidden",
@@ -6127,6 +7480,240 @@ mod tests {
         (url, captured, attempts)
     }
 
+    /// Wren's rider: assert on the error emerging from `complete()` for the
+    /// OpenRouter path, not from `openrouter_post`. The bug was the `?` in the
+    /// provider arm, which is invisible from below — a low-level test can see
+    /// the classification but not whether the arm returns it into the
+    /// convergence mapper. The regression test has to cross the layer that had
+    /// the bug.
+    ///
+    /// Two claims here: the variant is `LlmContextExceeded` (so the agent loop
+    /// can recover), and the message carries the `(model)` stamp (so the arm
+    /// reaches the mapper at all). Measured before the fix: variant was correct
+    /// but UNSTAMPED, which is exactly the bypass Wren named.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_context_400_is_typed_and_stamped_through_complete() {
+        let (url, _captured, _attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            400,
+            r#"{"error":{"message":"This model's maximum context length is 8192 tokens","code":"context_length_exceeded"}}"#,
+        )])
+        .await;
+        let mut c = cfg(Provider::OpenRouter);
+        c.base_url = url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "or-model-xyz").await.unwrap_err();
+        assert!(
+            matches!(err, AgentError::LlmContextExceeded(_)),
+            "OpenRouter context-window 400 must classify as LlmContextExceeded, got: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("or-model-xyz"),
+            "OpenRouter arm must return into the convergence mapper so the model stamp is \
+             applied; got: {text}"
+        );
+    }
+
+    /// Same two claims on the Anthropic arm — the other `?` Wren named, and the
+    /// other terminal's provider phrasing ("prompt is too long").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anthropic_context_400_is_typed_and_stamped_through_complete() {
+        let (base_url, _captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 300000 tokens > 200000 maximum"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::Anthropic);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "claude-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::LlmContextExceeded(_)),
+            "Anthropic context-window 400 must classify as LlmContextExceeded, got: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("claude-probe-model"),
+            "Anthropic arm must return into the convergence mapper so the model stamp is \
+             applied; got: {text}"
+        );
+    }
+
+    /// Negative arm for the OpenRouter terminal: an ordinary 400 must stay
+    /// `AgentError::Llm`. Paired with the positive above, this is what proves
+    /// the matcher — not the status alone — is doing the classification. The
+    /// body deliberately quotes "tokens" and "model", the words a loose matcher
+    /// would key on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_ordinary_400_stays_plain_llm_error() {
+        let (url, _captured, _attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            400,
+            r#"{"error":{"message":"Invalid value for 'max_tokens': must be an integer for this model","code":"invalid_value"}}"#,
+        )])
+        .await;
+        let mut c = cfg(Provider::OpenRouter);
+        c.base_url = url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "or-model-xyz").await.unwrap_err();
+        assert!(
+            matches!(err, AgentError::Llm(_)),
+            "an ordinary 400 must stay a terminal AgentError::Llm, got: {err:?}"
+        );
+    }
+
+    /// Negative arm for the shared `post()` terminal (OpenAI/Databricks), the
+    /// second of the two `!status.is_success()` sites. Same body as the
+    /// OpenRouter negative so the two terminals are compared on equal input.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_ordinary_400_stays_plain_llm_error() {
+        let (base_url, _captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"Invalid value for 'max_tokens': must be an integer for this model","code":"invalid_value"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::Llm(_)),
+            "an ordinary 400 must stay a terminal AgentError::Llm, got: {err:?}"
+        );
+    }
+
+    /// Positive arm for the shared `post()` terminal: OpenAI's machine-readable
+    /// `context_length_exceeded` code classifies as recoverable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_context_400_is_typed_through_complete() {
+        let (base_url, _captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"This model's maximum context length is 8192 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::LlmContextExceeded(_)),
+            "OpenAI context-window 400 must classify as LlmContextExceeded, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("gpt-probe-model"),
+            "expected the convergence mapper's model stamp, got: {err}"
+        );
+    }
+
+    /// A context-window 400 must NOT trip the Responses-API auto-upgrade. True
+    /// by construction — `try_upgrade` matches only `AgentError::Llm` and the
+    /// typed variant can never reach it — but asserted because the guarantee
+    /// lives in a pattern match one refactor away from widening, and a silent
+    /// sticky upgrade would reroute every later OpenAI call for the process.
+    ///
+    /// `openai_api = Auto` is load-bearing in BOTH arms: `try_upgrade` is only
+    /// consulted under `Auto` (`llm.rs:587`), so with the test helper's default
+    /// `Chat` the upgrade path is disabled outright and the negative below would
+    /// pass without observing anything. The control caught exactly that.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn context_400_does_not_trip_responses_upgrade() {
+        let (base_url, _captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"This model's maximum context length is 8192 tokens.","code":"context_length_exceeded"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        c.openai_api = OpenAiApi::Auto;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AgentError::LlmContextExceeded(_)));
+        assert!(
+            !llm.auto_upgraded.load(Ordering::Relaxed),
+            "a context-window 400 must not latch the Responses-API upgrade"
+        );
+        // Positive control: the same helper DOES latch on a genuine
+        // "use the Responses API" error, so the negative above is a real
+        // observation and not a probe that can never fire.
+        let (base_url2, _c2) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"This model is only supported in /v1/responses"}}),
+        }])
+        .await;
+        let mut c2 = cfg(Provider::OpenAi);
+        c2.base_url = base_url2;
+        c2.openai_api = OpenAiApi::Auto;
+        let llm2 = Llm::new(&c2).unwrap();
+        let _ = complete_model(&llm2, &c2, "gpt-probe-model").await;
+        assert!(
+            llm2.auto_upgraded.load(Ordering::Relaxed),
+            "control: a genuine Responses-API error must latch the upgrade"
+        );
+    }
+
+    /// The `status == 400` conjunct is load-bearing, not belt-and-braces: the
+    /// recovery ladder is only a correct response to an INPUT-SIZE rejection.
+    /// A 403 whose body happens to quote context-window prose (a guardrail
+    /// echoing the request, say) is a permission failure — shrinking history
+    /// cannot fix it, so classifying it as recoverable would burn the whole
+    /// recovery budget on three doomed summarize round-trips and turn a clear
+    /// immediate error into a slow one.
+    ///
+    /// 413 (Payload Too Large) is the right probe status, and picking it took a
+    /// measurement: my first attempt used 403, which BOTH ladders intercept
+    /// earlier (shared `post()` maps 401/403 to `LlmAuth`; `openrouter_post()`
+    /// has its own 403 arm), so those probes never reached the classification
+    /// site at all and the mutant with the conjunct deleted survived them. 413
+    /// is intercepted by neither ladder, so it reaches the same
+    /// `!status.is_success()` terminal the 400 does — and it is the most
+    /// plausible real-world carrier of size prose on a non-400. One arm per
+    /// terminal site.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_413_with_context_prose_is_not_recoverable() {
+        let (base_url, _captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 413,
+            body: json!({"error":{"message":"payload too large: this model's maximum context length is 8192 tokens"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::Llm(_)),
+            "only a 400 may classify as a context overflow; a 413 must stay terminal, got: \
+             {err:?}"
+        );
+    }
+
+    /// Same claim at the OpenRouter terminal, which has its own status ladder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_413_with_context_prose_is_not_recoverable() {
+        let (url, _captured, _attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            413,
+            r#"{"error":{"message":"payload too large: this model's maximum context length is 8192 tokens"}}"#,
+        )])
+        .await;
+        let mut c = cfg(Provider::OpenRouter);
+        c.base_url = url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "or-model-xyz").await.unwrap_err();
+        assert!(
+            matches!(err, AgentError::Llm(_)),
+            "only a 400 may classify as a context overflow; a 413 must stay terminal, got: \
+             {err:?}"
+        );
+    }
+
     /// A 403 (guardrail/moderation/permission rejection, per OpenRouter docs)
     /// must NOT be classified as `LlmAuth`: refreshing a static key returns
     /// the identical key, so retrying would just waste a duplicate request.
@@ -6142,9 +7729,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("403") && s.contains("model flagged by moderation")),
             "403 must surface as AgentError::Llm with status+body, not LlmAuth: got {err:?}"
@@ -6169,9 +7762,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("credits exhausted")),
             "got {err:?}"
@@ -6199,9 +7798,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "parameter-routing 404 must not be reported as a missing model: got {err:?}"
@@ -6210,6 +7815,107 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "404 must not be retried"
+        );
+    }
+
+    /// A provider's explicit image-capability rejection is a recoverable typed
+    /// error, not a missing model. The agent loop uses this signal to remove the
+    /// image from history before retrying the next LLM round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_404_unsupported_image_is_typed_and_not_retried() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            404,
+            r#"{"error":{"message":"No endpoints found that support image input"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
+            "image rejection must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// OpenAI-compatible text-only deployments report the image rejection as a
+    /// 400, not OpenRouter's 404 — Crusoe serverless GLM answers
+    /// `"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"` to every request
+    /// whose history contains an image. Before the 400 arm existed, this fell
+    /// through to terminal `AgentError::Llm`: the image stayed in history and
+    /// every later call in the session failed identically (measured live:
+    /// 8 wedged benchmark trials, 40 min of doomed retries each). Asserted
+    /// through `complete()` so the arm's return path into the convergence
+    /// mapper is covered, same doctrine as the context-400 tests above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_400_unsupported_image_is_typed_through_complete() {
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model","type":"invalid_request_error"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
+            "a text-only deployment's 400 must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            captured.lock().await.len(),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// Same 400-shaped rejection at the OpenRouter terminal, which has its own
+    /// status ladder: a BYOK/passthrough upstream can surface the provider's
+    /// own 400 body instead of OpenRouter's 404 routing error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_400_unsupported_image_is_typed_and_not_retried() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            400,
+            r#"{"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
+            "image rejection must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deterministic capability rejection must not be retried"
         );
     }
 
@@ -6229,9 +7935,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::LlmModelNotFound(s) if s.contains("404") && s.contains("vendor/nonexistent-model")),
             "a model-level 404 must stay LlmModelNotFound: got {err:?}"
@@ -6254,9 +7966,15 @@ mod tests {
             .build()
             .unwrap();
         let before = std::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("second attempt succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert!(
             before.elapsed() >= Duration::from_secs(1),
@@ -6265,33 +7983,65 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    /// A `Retry-After` far beyond `RETRY_AFTER_CAP_SECS` must not stall the
-    /// retry loop for anywhere near its advertised duration — proving the
-    /// cap is enforced end-to-end in `openrouter_post`'s actual sleep, not
-    /// merely in the isolated `parse_retry_after_header` unit tests above.
-    /// Runs on a paused clock so a real 999999s wait would hang the test
-    /// instead of silently passing.
-    #[tokio::test(start_paused = true)]
-    async fn openrouter_post_429_retry_sleep_capped_despite_huge_retry_after() {
-        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
-            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
-                .with_header("Retry-After", "999999"),
-            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
-        ])
-        .await;
-        let http = Client::builder().build().unwrap();
-        let before = tokio::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
-        assert_eq!(out["choices"][0]["message"]["content"], "ok");
-        assert!(
-            before.elapsed() <= Duration::from_secs(RETRY_AFTER_CAP_SECS + 5),
-            "retry sleep must be clamped to RETRY_AFTER_CAP_SECS ({RETRY_AFTER_CAP_SECS}s), \
-             not the header's 999999s: elapsed {:?}",
-            before.elapsed()
+    // ---- retry_delay_for_429 (pure-function tests, no network) ---------------
+
+    /// A huge server-advertised Retry-After is capped at RETRY_AFTER_CAP_SECS.
+    /// This test proves the cap is actually wired into the loop's only delay
+    /// computation (not just a dead constant), because `openrouter_post`'s 429
+    /// arm calls `parse_retry_after_header` which delegates to this function.
+    #[test]
+    fn retry_delay_for_429_huge_value_is_capped() {
+        let d = retry_delay_for_429(Some("999999")).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "999999s must be capped to {RETRY_AFTER_CAP_SECS}s"
         );
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A small value below the cap is returned as-is.
+    #[test]
+    fn retry_delay_for_429_small_value_honored() {
+        let d = retry_delay_for_429(Some("3")).unwrap();
+        assert_eq!(d, Duration::from_secs(3), "3s must be honored verbatim");
+    }
+
+    /// A value equal to the cap is returned unchanged (boundary).
+    #[test]
+    fn retry_delay_for_429_exact_cap_is_not_truncated() {
+        let d = retry_delay_for_429(Some(&RETRY_AFTER_CAP_SECS.to_string())).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "exact cap must not be truncated"
+        );
+    }
+
+    /// Missing header returns None → caller falls back to backoff.
+    #[test]
+    fn retry_delay_for_429_missing_header_is_none() {
+        assert!(
+            retry_delay_for_429(None).is_none(),
+            "absent header must return None"
+        );
+    }
+
+    /// Garbage / non-numeric header returns None.
+    #[test]
+    fn retry_delay_for_429_garbage_header_is_none() {
+        assert!(
+            retry_delay_for_429(Some("not-a-number")).is_none(),
+            "unparseable header must return None"
+        );
+    }
+
+    /// Zero is treated as absent (no-op: don't sleep 0 seconds).
+    #[test]
+    fn retry_delay_for_429_zero_is_none() {
+        assert!(
+            retry_delay_for_429(Some("0")).is_none(),
+            "zero Retry-After must return None (no-op sleep)"
+        );
     }
 
     /// An untyped 503 (no `error.metadata.error_type`) exhausts all
@@ -6305,9 +8055,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "got {err:?}"
@@ -6332,9 +8088,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("200 succeeds");
+        openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("200 succeeds");
         let headers = captured.lock().await;
         let header_str = headers
             .first()
@@ -6363,9 +8125,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry after 499 should succeed");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry after 499 should succeed");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
@@ -6388,9 +8156,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -6439,9 +8213,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("body read")),
             "truncated body must surface as AgentError::Llm with 'body read': got {err:?}"

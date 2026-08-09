@@ -9,12 +9,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
   final Widget fallback;
 
   const _IOSInlinePhotoPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
     required this.fallback,
   });
 
@@ -97,7 +99,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
       try {
         final photos = await onPickAllPhotos();
         if (photos.isNotEmpty) {
-          await onChoosePhotos(photos);
+          await onChooseAllPhotos(photos);
         }
       } catch (_) {
         if (context.mounted) {

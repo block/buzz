@@ -100,10 +100,11 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
-in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
-pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
-in one shot. Run `just ci` for the full local gate. Run `just hooks` to
+commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
+typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
+JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
+CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
+`just ci` for the full local gate. Run `just hooks` to
 re-install hooks after env changes. Before agents run Git or hooks, activate the
 repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
 commands to compensate for an unconfigured shell `PATH`.
@@ -507,6 +508,7 @@ reconnects preserve pending avatar verification work):
 - `resetRenderScopedReactionHydration()` — reaction hydration cache
 - `clearSearchHitEventCache()` — search result event cache
 - `clearMarkdownNodeCache()` — markdown parse-node cache
+- `resetLinkPreviewTitleCache()` — link preview title cache (Buzz entity titles come from relay events)
 
 **If you add a new module-level cache, Map, or class instance that holds
 community-scoped data, you must add its reset to `resetCommunityState()`.**

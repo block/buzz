@@ -214,10 +214,12 @@ function DmChannelIcon({
 
 function SidebarChannelIcon({
   channel,
+  className,
   dmParticipants,
   presenceStatus,
 }: {
   channel: Channel;
+  className?: string;
   dmParticipants?: SidebarDmParticipant[];
   presenceStatus?: PresenceStatus;
 }) {
@@ -238,14 +240,14 @@ function SidebarChannelIcon({
   }
 
   if (channel.visibility === "private") {
-    return <Lock className="h-4 w-4" />;
+    return <Lock className={cn("h-4 w-4", className)} />;
   }
 
   if (channel.channelType === "forum") {
-    return <FileText className="h-4 w-4" />;
+    return <FileText className={cn("h-4 w-4", className)} />;
   }
 
-  return <Hash className="h-4 w-4" />;
+  return <Hash className={cn("h-4 w-4", className)} />;
 }
 
 export function ChannelMenuButton({
@@ -288,21 +290,24 @@ export function ChannelMenuButton({
     (hasSidebarUnreadProjections
       ? unreadThreadChannelIds.has(channel.id)
       : hasUnread);
+  const inactiveContentOpacity = cn(
+    !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
+    !isActive &&
+      isMuted &&
+      !hasTopLevelUnread &&
+      !hasThreadUnread &&
+      "opacity-50 dark:opacity-45",
+  );
 
   const button = (
     <SidebarMenuButton
       className={cn(
+        "data-[active=true]:font-normal",
         isActive
           ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
-          : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-accent-foreground",
-        !isActive &&
-          hasTopLevelUnread &&
-          "font-semibold text-sidebar-foreground hover:text-sidebar-foreground",
-        !isActive &&
-          isMuted &&
-          !hasTopLevelUnread &&
-          !hasThreadUnread &&
-          "opacity-50",
+          : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
+        hasTopLevelUnread &&
+          "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -313,10 +318,16 @@ export function ChannelMenuButton({
     >
       <SidebarChannelIcon
         channel={channel}
+        className={
+          channel.channelType === "dm" ? undefined : inactiveContentOpacity
+        }
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
-      <span className="min-w-0 flex-1 truncate" data-sidebar-row-label>
+      <span
+        className={cn("min-w-0 flex-1 truncate", inactiveContentOpacity)}
+        data-sidebar-row-label
+      >
         {resolvedLabel}
       </span>
       {ephemeralDisplay ? (

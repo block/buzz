@@ -21,25 +21,13 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
+/// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
-/// minimum supported version.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
+/// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
+/// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
+/// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
+/// Pure planning function: never spawns a process. Tests use it to assert commands without real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
@@ -167,7 +155,6 @@ pub async fn save_custom_harness(
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
-        // Security: no user-supplied avatar URL in catalog entries.
         avatar_url: String::new(),
         availability,
         command: command_opt,
@@ -177,6 +164,9 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
         install_hint: definition.install_hint,
         install_instructions_url: definition.install_instructions_url,
         can_auto_install: false,
@@ -186,8 +176,8 @@ pub async fn save_custom_harness(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Custom,
-        // Carry definition env back so the edit form can read and preserve it.
         definition_env: definition.env,
+        max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
     })
 }
 

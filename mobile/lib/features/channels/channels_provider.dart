@@ -11,7 +11,7 @@ import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
-import 'read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 import 'unread_badge/observed_unread_event.dart';
