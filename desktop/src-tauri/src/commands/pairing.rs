@@ -39,6 +39,13 @@ enum PairingMode {
     RecoverIdentity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdvertisedMobileRelay {
+    ws_url: String,
+    http_url: String,
+    is_private_tailnet: bool,
+}
+
 #[derive(Clone)]
 struct PairingTaskContext {
     mode: PairingMode,
@@ -89,11 +96,19 @@ impl PairingHandle {
 /// Start a NIP-AB pairing session that sends this desktop identity to mobile.
 #[tauri::command]
 pub async fn start_pairing(
+    advertised_relay_url: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
     pairing: State<'_, PairingHandle>,
 ) -> Result<String, String> {
-    start_pairing_session(app, state, pairing, PairingMode::SendIdentity).await
+    start_pairing_session(
+        app,
+        state,
+        pairing,
+        PairingMode::SendIdentity,
+        advertised_relay_url.as_deref(),
+    )
+    .await
 }
 
 /// Start a recovery session. The fresh desktop shows the QR and receives the
@@ -104,7 +119,7 @@ pub async fn start_identity_recovery_pairing(
     state: State<'_, AppState>,
     pairing: State<'_, PairingHandle>,
 ) -> Result<String, String> {
-    start_pairing_session(app, state, pairing, PairingMode::RecoverIdentity).await
+    start_pairing_session(app, state, pairing, PairingMode::RecoverIdentity, None).await
 }
 
 async fn start_pairing_session(
@@ -112,6 +127,7 @@ async fn start_pairing_session(
     state: State<'_, AppState>,
     pairing: State<'_, PairingHandle>,
     mode: PairingMode,
+    advertised_relay_url: Option<&str>,
 ) -> Result<String, String> {
     let _start_guard = pairing.start_lock.lock().await;
     let task_generation =
@@ -127,11 +143,20 @@ async fn start_pairing_session(
     *pairing.mode.lock().map_err(|e| e.to_string())? = mode;
     *pairing.payload.lock().map_err(|e| e.to_string())? = None;
 
-    let ws_url = relay_ws_url_with_override(&state);
-    let http_url = relay_api_base_url_with_override(&state);
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let advertised_relay = resolve_advertised_mobile_relay(
+        advertised_relay_url,
+        &relay_ws_url_with_override(&state),
+        &relay_api_base_url_with_override(&state),
+    )?;
+    let pairing_relay_url = resolve_pairing_relay_url(
+        &advertised_relay.ws_url,
+        probe_pairing_relay(&advertised_relay.ws_url).await,
+    )?;
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
+    if advertised_relay.is_private_tailnet {
+        qr_uri.push_str("&transport=tailnet");
+    }
     if mode == PairingMode::RecoverIdentity {
         qr_uri.push_str("&mode=recover");
     }
@@ -143,7 +168,7 @@ async fn start_pairing_session(
             .to_bech32()
             .map_err(|e| format!("encode nsec: {e}"))?;
         let payload_json = serde_json::json!({
-            "relayUrl": http_url,
+            "relayUrl": advertised_relay.http_url,
             "pubkey": keys.public_key().to_hex(),
             "nsec": nsec,
         });
@@ -176,6 +201,55 @@ async fn start_pairing_session(
     ));
 
     Ok(qr_uri)
+}
+
+fn resolve_advertised_mobile_relay(
+    advertised_relay_url: Option<&str>,
+    default_ws_url: &str,
+    default_http_url: &str,
+) -> Result<AdvertisedMobileRelay, String> {
+    let Some(raw_url) = advertised_relay_url else {
+        return Ok(AdvertisedMobileRelay {
+            ws_url: default_ws_url.to_string(),
+            http_url: default_http_url.to_string(),
+            is_private_tailnet: false,
+        });
+    };
+
+    let mut http_url = url::Url::parse(raw_url.trim())
+        .map_err(|_| "private mobile relay must be a valid HTTPS tailnet origin".to_string())?;
+    let host = http_url
+        .host_str()
+        .ok_or_else(|| "private mobile relay must include a tailnet host".to_string())?
+        .to_ascii_lowercase();
+
+    if http_url.scheme() != "https"
+        || !host.ends_with(".ts.net")
+        || !http_url.username().is_empty()
+        || http_url.password().is_some()
+        || !matches!(http_url.path(), "" | "/")
+        || http_url.query().is_some()
+        || http_url.fragment().is_some()
+    {
+        return Err(
+            "private mobile relay must be an HTTPS *.ts.net origin without credentials, path, query, or fragment"
+                .to_string(),
+        );
+    }
+
+    http_url.set_path("/");
+    let http_url = http_url.to_string();
+    let mut ws_url = url::Url::parse(&http_url)
+        .map_err(|_| "private mobile relay could not be normalized".to_string())?;
+    ws_url
+        .set_scheme("wss")
+        .map_err(|_| "private mobile relay could not be converted to WSS".to_string())?;
+
+    Ok(AdvertisedMobileRelay {
+        ws_url: ws_url.to_string(),
+        http_url,
+        is_private_tailnet: true,
+    })
 }
 
 /// User confirmed the SAS codes match. Sends sas-confirm + payload.

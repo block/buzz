@@ -31,7 +31,7 @@
 - Consumes: current workspace relay from `relay_ws_url_with_override` and `relay_api_base_url_with_override`.
 - Produces: `startPairing(advertisedRelayUrl?: string): Promise<string>` and Rust `resolve_advertised_mobile_relay(Option<&str>, default_ws, default_http) -> Result<AdvertisedMobileRelay, String>`.
 
-- [ ] **Step 1: Write failing Rust tests for tailnet-only normalization**
+- [x] **Step 1: Write failing Rust tests for tailnet-only normalization**
 
 Add table-driven tests proving:
 
@@ -48,7 +48,7 @@ assert!(resolved.is_private_tailnet);
 
 Reject `http://`, non-`ts.net` hosts, credentials, query, fragment, non-root path, and empty host. Prove `None` preserves the current relay unchanged.
 
-- [ ] **Step 2: Run the Rust test and verify RED**
+- [x] **Step 2: Run the Rust test and verify RED**
 
 Run:
 
@@ -59,7 +59,7 @@ cargo test --manifest-path desktop/src-tauri/Cargo.toml pairing_relay -- --nocap
 
 Expected: compilation fails because `resolve_advertised_mobile_relay` does not exist.
 
-- [ ] **Step 3: Implement the smallest server-trusted resolver**
+- [x] **Step 3: Implement the smallest server-trusted resolver**
 
 Add:
 
@@ -74,7 +74,7 @@ struct AdvertisedMobileRelay {
 
 Parse with `url::Url`, require an HTTPS origin whose lowercase host ends in `.ts.net`, normalize the path to `/`, and derive WSS by changing only the scheme. When no override is supplied, retain the current main-relay URLs and set `is_private_tailnet` false.
 
-- [ ] **Step 4: Thread the optional origin through NIP-AB pairing**
+- [x] **Step 4: Thread the optional origin through NIP-AB pairing**
 
 Change the Tauri command to:
 
@@ -89,7 +89,7 @@ pub async fn start_pairing(
 
 Use the resolved WSS URL for pairing-relay discovery and the QR. Use the resolved HTTPS URL in the encrypted identity payload. Append `&transport=tailnet` only for the private override so the code is auditable without changing the NIP-AB cryptographic transcript.
 
-- [ ] **Step 5: Update the desktop API and verify GREEN**
+- [x] **Step 5: Update the desktop API and verify GREEN**
 
 Implement:
 
@@ -105,7 +105,7 @@ export async function startPairing(
 
 Run the focused Rust tests again and require PASS.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add desktop/src-tauri/src/commands/pairing.rs \
