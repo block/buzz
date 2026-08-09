@@ -75,13 +75,69 @@ export function resolveManagedAgentChannelId(
   return matches.length === 1 ? matches[0].id : null;
 }
 
+/**
+ * Entity holon R2 / upstream #2857 spirit:
+ * If the same DNA (pubkey) is already online/away on the relay, starting a
+ * second local body is dual-spawn. Fail closed unless allowDualBody.
+ */
+export function refuseDualBodyIfPresentElsewhere(input: {
+  agent: Pick<ManagedAgent, "pubkey" | "name" | "backend" | "status">;
+  presenceLookup?: PresenceLookup | null;
+  /** Optional public place hint (host · role · surface_kind) — never paths. */
+  placeHint?: {
+    hostId?: string;
+    hostRole?: string;
+    surfaceKind?: string;
+  } | null;
+  /** When true, skip the guard (explicit fork path later). */
+  allowDualBody?: boolean;
+}): void {
+  if (input.allowDualBody) return;
+  // Provider deploy has its own at-most-one converge; local is the absently-Respawn risk.
+  if (input.agent.backend.type !== "local") return;
+  if (isManagedAgentActive(input.agent)) return;
+
+  const pk = normalizePubkey(input.agent.pubkey);
+  const status =
+    input.presenceLookup?.[pk] ?? input.presenceLookup?.[input.agent.pubkey];
+  if (status !== "online" && status !== "away") return;
+
+  const short = pk.slice(0, 8);
+  const place = input.placeHint;
+  const placeBits = [place?.hostRole, place?.hostId, place?.surfaceKind]
+    .filter(Boolean)
+    .join(" · ");
+  throw new Error(
+    `Refuse dual body for ${input.agent.name} (DNA ${short}…): already ${status}` +
+      (placeBits ? ` · ${placeBits}` : " elsewhere") +
+      ". Stop the other body or use a fork with a new birth certificate — " +
+      "do not absently Respawn on this computer expecting to continue a remote workspace.",
+  );
+}
+
 export async function startManagedAgentWithRules({
   agent,
   startManagedAgent,
+  presenceLookup,
+  placeHint,
+  allowDualBody,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
+  presenceLookup?: PresenceLookup | null;
+  placeHint?: {
+    hostId?: string;
+    hostRole?: string;
+    surfaceKind?: string;
+  } | null;
+  allowDualBody?: boolean;
 }) {
+  refuseDualBodyIfPresentElsewhere({
+    agent,
+    presenceLookup,
+    placeHint,
+    allowDualBody,
+  });
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
@@ -93,6 +149,9 @@ export async function respawnManagedAgentWithRules({
   startManagedAgent,
   stopManagedAgent,
   onStopped,
+  presenceLookup,
+  placeHint,
+  allowDualBody,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
@@ -100,12 +159,28 @@ export async function respawnManagedAgentWithRules({
   /** Called after a successful stop and before start begins — use this to
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
+  presenceLookup?: PresenceLookup | null;
+  placeHint?: {
+    hostId?: string;
+    hostRole?: string;
+    surfaceKind?: string;
+  } | null;
+  allowDualBody?: boolean;
 }) {
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
+    // Local stop then start is same-host restart — not dual-body.
+    await startManagedAgent(agent.pubkey);
+    return;
   }
 
+  refuseDualBodyIfPresentElsewhere({
+    agent,
+    presenceLookup,
+    placeHint,
+    allowDualBody,
+  });
   await startManagedAgent(agent.pubkey);
 }
 

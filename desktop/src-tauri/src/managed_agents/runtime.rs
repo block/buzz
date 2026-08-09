@@ -825,11 +825,15 @@ pub fn spawn_agent_child(
         }
     }
 
-    // Stamp desktop ownership and an unpredictable harness-generation identity.
-    let start_nonce = uuid::Uuid::new_v4().simple().to_string();
-    command
-        .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
-        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
+    // Ownership + entity holon R3 self-location (after user env so place wins).
+    let start_nonce = crate::managed_agents::self_location::stamp_desktop_spawn_identity(
+        &mut command,
+        &current_instance_id(app),
+        &record.pubkey,
+        record.display_name.as_deref(),
+        &record.name,
+        effective_prompt.as_deref(),
+    );
 
     // Stamp the effective spawn config from the values that populated the
     // `Command` above, BEFORE spawning. Re-resolving after `spawn()` would let

@@ -1,0 +1,31 @@
+# Example systemd --user unit for home (asus).
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp host-agentd.service.example ~/.config/systemd/user/host-agentd.service
+#   # edit paths + token
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now host-agentd.service
+#
+# Bind to Tailscale IP (recommended) so only the mesh can reach it:
+#   HOST_AGENTD_HOST=100.79.175.63
+# Loopback (127.0.0.1) needs an SSH local forward from the laptop — prefer mesh.
+
+[Unit]
+Description=Buzz host-agentd (Remote Agents control plane)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=BUZZ_HOST_ROLE=home
+Environment=BUZZ_HOST_ID=asus-g501vw
+Environment=HOST_AGENTD_HOST=100.79.175.63
+Environment=HOST_AGENTD_PORT=8787
+# Environment=HOST_AGENTD_TOKEN=change-me
+# Environment=BUZZ_HOST_AGENTS=%h/.local/bin/buzz-host-agents
+WorkingDirectory=%h/.buzz-dev/hosts/home
+ExecStart=/usr/bin/python3 %h/Apps/BZ/host-agents/host-agentd.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

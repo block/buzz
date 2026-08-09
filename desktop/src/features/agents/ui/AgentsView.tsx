@@ -20,6 +20,7 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { RemoteAgentsSection } from "@/features/remote-agents/ui/RemoteAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -266,6 +267,9 @@ export function AgentsView() {
               }}
               onDeletePersona={personas.openDelete}
             />
+
+            {/* Host-pinned seats (headless home) — not local ACP agents */}
+            <RemoteAgentsSection />
 
             <TeamsSection
               error={

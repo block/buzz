@@ -1,0 +1,614 @@
+#!/usr/bin/env bash
+# buzz-host-agents — status / list / arm / disarm for 24h host-pinned seats
+# Headless-friendly. Room text never grants tools.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ADAPTERS_DIR="${BUZZ_ADAPTERS_DIR:-$(cd "$SCRIPT_DIR/../adapters" 2>/dev/null && pwd || true)}"
+HOST_ID="${BUZZ_HOST_ID:-$(hostname -s 2>/dev/null || hostname || echo unknown-host)}"
+# Heuristic: asus / g501 → home SoT role
+if [[ -n "${BUZZ_HOST_ROLE:-}" ]]; then
+  HOST_ROLE="$BUZZ_HOST_ROLE"
+elif [[ "$HOST_ID" =~ [Aa]sus|g501|G501 ]]; then
+  HOST_ROLE="home"
+else
+  HOST_ROLE="laptop"
+fi
+HOST_ROOT="${BUZZ_HOST_ROOT:-$HOME/.buzz-dev/hosts/$HOST_ROLE}"
+REGISTRY="${BUZZ_HOST_REGISTRY:-$HOST_ROOT/registry.json}"
+UNITS_DIR="${HOST_ROOT}/units"
+ABILITY_CHANNEL="${BUZZ_ABILITY_CHANNEL:-1f00dcd1-cf71-4410-bab7-32c1d226e61d}"
+METABOLISM_CHANNEL="${BUZZ_METABOLISM_CHANNEL:-92297894-c2e8-4df1-a710-d1cfd1032d5e}"
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \?//'
+  echo "Usage: $0 {init|path|list|status|register|arm|disarm|help} [options]"
+  echo "  status   [--json] [--post]"
+  echo "  register --seat ID [--model M] [--notes T] [--room UUID] [--display NAME]"
+  echo "  arm      --preset co-lab-watch|co-lab-gemma|push-nerve|status-only --seat ID --room UUID [--model M]"
+  echo "  disarm   --preset … --seat ID"
+}
+
+ensure_dirs() {
+  mkdir -p "$HOST_ROOT" "$UNITS_DIR"
+}
+
+cmd_init() {
+  ensure_dirs
+  if [[ -f "$REGISTRY" ]]; then
+    echo "BUZZ_HOST registry exists path=$REGISTRY"
+    return 0
+  fi
+  cat >"$REGISTRY" <<JSON
+{
+  "schema": "host-agent.registry.v0",
+  "host_id": "$HOST_ID",
+  "host_role": "$HOST_ROLE",
+  "updated_at": $(date +%s),
+  "seats": [
+    {
+      "seat_id": "home-grok",
+      "pubkey_hint": "",
+      "runtimes": ["use-buzz", "watch", "local-llm"],
+      "model": "gemma3:4b",
+      "channels": [],
+      "expected_online": true,
+      "notes": "primary 24h host seat"
+    }
+  ]
+}
+JSON
+  echo "BUZZ_HOST init path=$REGISTRY host_id=$HOST_ID role=$HOST_ROLE"
+}
+
+cmd_path() {
+  echo "$REGISTRY"
+}
+
+# Register (or update) a seat in the host registry — Desktop "Create remote agent".
+cmd_register() {
+  ensure_dirs
+  local seat="" model="" notes="" room="" display=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --seat) seat="$2"; shift 2;;
+      --model) model="$2"; shift 2;;
+      --notes) notes="$2"; shift 2;;
+      --room) room="$2"; shift 2;;
+      --display|--name) display="$2"; shift 2;;
+      *) echo "unknown $1" >&2; return 2;;
+    esac
+  done
+  [[ -n "$seat" ]] || { echo "error: --seat required" >&2; return 2; }
+  # Seat ids: slug for unit dirs / host-agentd paths
+  if [[ ! "$seat" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$ ]]; then
+    echo "error: seat id must be 1–63 chars [A-Za-z0-9._-], start alnum" >&2
+    return 2
+  fi
+  if [[ ! -f "$REGISTRY" ]]; then
+    cmd_init
+  fi
+  python3 - "$REGISTRY" "$seat" "${model:-}" "${notes:-}" "${room:-}" "${display:-}" <<'PY'
+import json, sys, time
+path, seat, model, notes, room, display = sys.argv[1:7]
+with open(path) as f:
+    d = json.load(f)
+seats = d.setdefault("seats", [])
+found = None
+for s in seats:
+    if s.get("seat_id") == seat:
+        found = s
+        break
+if found is None:
+    found = {"seat_id": seat, "expected_online": False, "channels": [], "runtimes": []}
+    seats.append(found)
+if model:
+    found["model"] = model
+if notes:
+    found["notes"] = notes
+if display:
+    found["display_name"] = display
+if room:
+    ch = found.get("channels") or []
+    if room not in ch:
+        ch.append(room)
+    found["channels"] = ch
+# Default runtimes for remote internal seats
+if not found.get("runtimes"):
+    found["runtimes"] = ["watch", "local-llm"] if (model or "").startswith(("gemma", "llama", "qwen")) else ["watch"]
+d["updated_at"] = int(time.time())
+with open(path, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+print(json.dumps({"ok": True, "seat_id": seat, "model": found.get("model"), "display_name": found.get("display_name")}))
+PY
+  echo "BUZZ_HOST registered seat=$seat model=${model:-} room=${room:-}"
+}
+
+load_registry_or_empty() {
+  if [[ -f "$REGISTRY" ]]; then
+    cat "$REGISTRY"
+  else
+    echo "{\"schema\":\"host-agent.registry.v0\",\"host_id\":\"$HOST_ID\",\"host_role\":\"$HOST_ROLE\",\"seats\":[]}"
+  fi
+}
+
+check_relay() {
+  local url="${BUZZ_RELAY_URL:-}"
+  if [[ -z "$url" && -f "${HOME}/.buzz-dev/agents/${BUZZ_SEAT_ID:-home-grok}/agent.env" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${HOME}/.buzz-dev/agents/${BUZZ_SEAT_ID:-home-grok}/agent.env" 2>/dev/null || true; set +a
+    url="${BUZZ_RELAY_URL:-}"
+  fi
+  url="${url:-https://groundfeed.communities.buzz.xyz}"
+  # Normalize ws to https for curl probe
+  local http="${url/wss:/https:}"
+  http="${http/ws:/http:}"
+  local code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 "$http/" 2>/dev/null || echo 000)"
+  echo "$code|$http"
+}
+
+check_ollama() {
+  local host="${BUZZ_DRIVER_LOCAL_LLM_HOST:-http://127.0.0.1:11434}"
+  if curl -sS --connect-timeout 1 --max-time 2 "$host/api/tags" >/tmp/buzz-host-ollama.json 2>/dev/null; then
+    local models
+    models="$(python3 -c 'import json; d=json.load(open("/tmp/buzz-host-ollama.json")); print(",".join(m.get("name","") for m in d.get("models") or []))' 2>/dev/null || echo "?")"
+    echo "yes|$models"
+  else
+    echo "no|"
+  fi
+}
+
+check_watchers() {
+  # soft signal: processes or unit files
+  local n=0
+  n="$(pgrep -af 'buzz-watcher|buzz-push-watcher|stub_runtime.py watch|messages watch' 2>/dev/null | grep -v pgrep | wc -l | tr -d ' ')"
+  local units=0
+  [[ -d "$UNITS_DIR" ]] && units="$(find "$UNITS_DIR" -name '*.pid' 2>/dev/null | wc -l | tr -d ' ')"
+  echo "${n}|${units}"
+}
+
+cmd_list() {
+  ensure_dirs
+  python3 - "$REGISTRY" "$HOST_ID" "$HOST_ROLE" <<'PY'
+import json, sys
+from pathlib import Path
+path, host_id, role = sys.argv[1:4]
+if Path(path).is_file():
+    d = json.loads(Path(path).read_text())
+else:
+    d = {"host_id": host_id, "host_role": role, "seats": []}
+print("host_id=%s role=%s" % (d.get("host_id"), d.get("host_role")))
+for s in d.get("seats") or []:
+    print(
+        "  seat=%s model=%s runtimes=%s online=%s"
+        % (s.get("seat_id"), s.get("model"), s.get("runtimes"), s.get("expected_online"))
+    )
+PY
+}
+
+cmd_status() {
+  local as_json=0 post=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) as_json=1; shift;;
+      --post) post=1; shift;;
+      *) shift;;
+    esac
+  done
+  ensure_dirs
+  local relay ollama watchers
+  relay="$(check_relay)"
+  ollama="$(check_ollama)"
+  watchers="$(check_watchers)"
+  local relay_code="${relay%%|*}"
+  local relay_url="${relay#*|}"
+  local ollama_yes="${ollama%%|*}"
+  local ollama_models="${ollama#*|}"
+  local watch_n="${watchers%%|*}"
+  local unit_n="${watchers#*|}"
+
+  local payload
+  payload="$(python3 - "$HOST_ID" "$HOST_ROLE" "$relay_code" "$relay_url" "$ollama_yes" "$ollama_models" "$watch_n" "$unit_n" "$REGISTRY" "$UNITS_DIR" <<'PY'
+import json,sys,time,os
+from pathlib import Path
+host_id, role, code, url, ollama, models, wn, un, reg_path, units_dir = sys.argv[1:11]
+seats=[]
+try:
+    reg=json.load(open(reg_path))
+    seats=list(reg.get("seats") or [])
+except Exception:
+    pass
+# Enrich seats with live unit pid / model / surface hints from unit dirs
+units_path = Path(units_dir)
+live_units = []
+if units_path.is_dir():
+    for pidf in units_path.glob("*/watch.pid"):
+        unit_name = pidf.parent.name
+        pid = None
+        alive = False
+        try:
+            pid = int(pidf.read_text().strip())
+            os.kill(pid, 0)
+            alive = True
+        except (ValueError, OSError, ProcessLookupError):
+            alive = False
+        live_units.append({
+            "unit_name": unit_name,
+            "unit_pid": pid,
+            "alive": alive,
+            "log": str(pidf.parent / "watch.log"),
+        })
+        # match seat-preset naming: seat-preset
+        for s in seats:
+            sid = s.get("seat_id") or ""
+            if unit_name.startswith(sid + "-") or unit_name == sid:
+                s["unit_name"] = unit_name
+                s["unit_pid"] = pid
+                s["unit_alive"] = alive
+# surface_root optional env per seat
+for s in seats:
+    sid = s.get("seat_id") or ""
+    env_key = "BUZZ_SURFACE_ROOT_" + sid.upper().replace("-", "_")
+    surface = os.environ.get(env_key) or os.environ.get("BUZZ_SURFACE_ROOT") or s.get("surface_root")
+    if surface:
+        s["surface_root"] = surface
+        s.setdefault("surface_kind", "path")
+out={
+  "schema":"host-agent.status.v0",
+  "host_id": host_id,
+  "host_role": role,
+  "ts": int(time.time()),
+  "relay": {"http_code": code, "url": url, "ok": code in ("200","301","302","404")},
+  "ollama": {"ok": ollama=="yes", "models": [m for m in models.split(",") if m]},
+  "watchers": {"process_matches": int(wn or 0), "unit_pids": int(un or 0), "units": live_units},
+  "seats": seats,
+}
+print(json.dumps(out, indent=2))
+PY
+)"
+
+  if [[ "$as_json" == "1" ]]; then
+    echo "$payload"
+  else
+    echo "BUZZ_HOST status host_id=$HOST_ID role=$HOST_ROLE"
+    echo "  relay   code=$relay_code url=$relay_url"
+    echo "  ollama  $ollama_yes models=$ollama_models"
+    echo "  watch   processes=$watch_n units=$unit_n"
+    echo "  registry $REGISTRY"
+    python3 - "$REGISTRY" <<'PY'
+import json, sys
+from pathlib import Path
+path = sys.argv[1]
+if not Path(path).is_file():
+    raise SystemExit(0)
+d = json.loads(Path(path).read_text())
+for s in d.get("seats") or []:
+    print(
+        "  seat %s model=%s expected_online=%s"
+        % (s.get("seat_id"), s.get("model"), s.get("expected_online"))
+    )
+PY
+  fi
+
+  if [[ "$post" == "1" ]]; then
+    post_status_card "$payload"
+  fi
+}
+
+post_status_card() {
+  local payload="$1"
+  local seat="${BUZZ_SEAT_ID:-home-grok}"
+  if [[ ! -f "${HOME}/.buzz-dev/agents/${seat}/agent.env" ]]; then
+    echo "BUZZ_HOST skip --post (no seat env for $seat)" >&2
+    return 0
+  fi
+  # shellcheck disable=SC1090
+  set -a; source "${HOME}/.buzz-dev/agents/${seat}/agent.env"; set +a
+  local body
+  body="$(PAYLOAD_JSON="$payload" python3 <<'PY'
+import json, os
+d = json.loads(os.environ["PAYLOAD_JSON"])
+models = ",".join(d.get("ollama", {}).get("models") or [])
+relay = d.get("relay") or {}
+ollama = d.get("ollama") or {}
+watch = d.get("watchers") or {}
+lines = [
+    "## HOST status · " + str(d.get("host_id") or ""),
+    "",
+    "```",
+    f"  host_id   {d.get('host_id')} role={d.get('host_role')}",
+    f"  relay     {relay.get('http_code')} {str(relay.get('url') or '')[:60]}",
+    f"  ollama    {ollama.get('ok')} models={models}",
+    f"  watchers  proc={watch.get('process_matches')} units={watch.get('unit_pids')}",
+    "```",
+    "",
+    "status · buzz-host-agents",
+]
+print("\n".join(lines))
+PY
+)"
+  if command -v bash >/dev/null && [[ -x "${HOME}/.grok/skills/use-buzz/scripts/buzz-post.sh" ]]; then
+    bash "${HOME}/.grok/skills/use-buzz/scripts/buzz-post.sh" --room "$ABILITY_CHANNEL" --content "$body" 2>&1 | tail -3
+  else
+    echo "BUZZ_HOST post body ready (no buzz-post.sh)"
+    echo "$body"
+  fi
+}
+
+find_python_stub() {
+  if [[ -n "$ADAPTERS_DIR" && -f "$ADAPTERS_DIR/stub_runtime.py" ]]; then
+    echo "$ADAPTERS_DIR"
+    return
+  fi
+  for d in \
+    "$HOME/Apps/BZ/metabolic-local-llm-real/adapters" \
+    "$HOME/Apps/BZ/metabolic-product-drivers/adapters" \
+    "$HOME/PROJECTS/ buzz/docs/metabolic/adapters" \
+    "$HOME/PROJECTS/buzz/docs/metabolic/adapters"
+  do
+    if [[ -f "$d/stub_runtime.py" ]]; then
+      echo "$d"
+      return
+    fi
+  done
+  return 1
+}
+
+find_codex_skill() {
+  for d in \
+    "$HOME/PROJECTS/codex-buzz-skill-dev" \
+    "$HOME/.codex/skills/use-buzz-codex" \
+    "$HOME/Apps/BZ/use-buzz-push" \
+    "$HOME/.grok/skills/use-buzz-push"
+  do
+    if [[ -x "$d/scripts/buzz-session.sh" ]] || [[ -x "$d/scripts/buzz-watcher.sh" ]]; then
+      echo "$d"
+      return
+    fi
+  done
+  return 1
+}
+
+cmd_arm_push_nerve() {
+  local seat="$1" room="$2" unit="$3" log="$4" pidf="$5"
+  local skill
+  skill="$(find_codex_skill)" || {
+    echo "error: push-nerve needs codex skill / use-buzz-push (buzz-session.sh or buzz-watcher.sh)" >&2
+    return 2
+  }
+  mkdir -p "$unit"
+  if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+    echo "BUZZ_HOST arm already-running seat=$seat preset=push-nerve pid=$(cat "$pidf")"
+    return 0
+  fi
+  if [[ -f "${HOME}/.buzz-dev/agents/${seat}/agent.env" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${HOME}/.buzz-dev/agents/${seat}/agent.env"; set +a
+  fi
+  export BUZZ_SEAT_ID="$seat"
+  export BUZZ_WATCH_ROOM="$room"
+  export BUZZ_WATCH_PUSH="${BUZZ_WATCH_PUSH:-auto}"
+  # Prefer session start when available; else long-running watcher
+  if [[ -x "$skill/scripts/buzz-session.sh" ]]; then
+    nohup bash "$skill/scripts/buzz-session.sh" start --seat "$seat" --room "$room" \
+      >>"$log" 2>&1 &
+  else
+    nohup bash "$skill/scripts/buzz-watcher.sh" >>"$log" 2>&1 &
+  fi
+  echo $! >"$pidf"
+  echo "BUZZ_HOST armed seat=$seat preset=push-nerve room=$room pid=$(cat "$pidf") log=$log skill=$skill"
+  if [[ -f "$REGISTRY" ]]; then
+    python3 - "$REGISTRY" "$seat" "$room" <<'PY'
+import json,sys,time
+path,seat,room=sys.argv[1:4]
+d=json.load(open(path))
+found=False
+for s in d.get("seats") or []:
+    if s.get("seat_id")==seat:
+        s["expected_online"]=True
+        s.setdefault("runtimes", [])
+        if "push-nerve" not in s["runtimes"]:
+            s["runtimes"].append("push-nerve")
+        ch=s.get("channels") or []
+        if room not in ch: ch.append(room)
+        s["channels"]=ch
+        found=True
+if not found:
+    d.setdefault("seats",[]).append({
+        "seat_id": seat, "runtimes":["push-nerve"],
+        "model": "", "channels":[room], "expected_online": True
+    })
+d["updated_at"]=int(time.time())
+open(path,"w").write(json.dumps(d,indent=2)+"\n")
+PY
+  fi
+}
+
+cmd_arm() {
+  local preset="" seat="home-grok" room="" model=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --preset) preset="$2"; shift 2;;
+      --seat) seat="$2"; shift 2;;
+      --room) room="$2"; shift 2;;
+      --model) model="$2"; shift 2;;
+      *) echo "unknown $1" >&2; return 2;;
+    esac
+  done
+  [[ -n "$preset" ]] || { echo "error: --preset required" >&2; return 2; }
+  # Ensure seat exists in registry before arming (create-from-UI path)
+  if [[ -f "$REGISTRY" ]]; then
+    if ! python3 - "$REGISTRY" "$seat" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if any(s.get("seat_id")==sys.argv[2] for s in (d.get("seats") or [])) else 1)
+PY
+    then
+      cmd_register --seat "$seat" --model "${model:-}" --room "${room:-}" || true
+    fi
+  else
+    cmd_register --seat "$seat" --model "${model:-}" --room "${room:-}" || true
+  fi
+  [[ -n "$room" ]] || room="$METABOLISM_CHANNEL"
+  ensure_dirs
+  local adir
+  adir="$(find_python_stub)" || { echo "error: adapters/stub_runtime.py not found" >&2; return 2; }
+
+  local unit="$UNITS_DIR/${seat}-${preset}"
+  mkdir -p "$unit"
+  local log="$unit/watch.log"
+  local pidf="$unit/watch.pid"
+
+  if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
+    echo "BUZZ_HOST arm already-running seat=$seat preset=$preset pid=$(cat "$pidf")"
+    return 0
+  fi
+
+  # Load seat env
+  if [[ -f "${HOME}/.buzz-dev/agents/${seat}/agent.env" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${HOME}/.buzz-dev/agents/${seat}/agent.env"; set +a
+  fi
+  if [[ -f "${HOME}/.buzz-dev/agents/${seat}/local-llm.env" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${HOME}/.buzz-dev/agents/${seat}/local-llm.env"; set +a
+  fi
+
+  export BUZZ_SEAT_ID="$seat"
+  export BUZZ_HOST_ID="${BUZZ_HOST_ID:-$HOST_ID}"
+  export BUZZ_HOST_ROLE="${BUZZ_HOST_ROLE:-$HOST_ROLE}"
+  export BUZZ_ADAPTER_STATE_DIR="${BUZZ_ADAPTER_STATE_DIR:-$HOME/.buzz-dev/adapters/${HOST_ROLE}-${seat}}"
+  mkdir -p "$BUZZ_ADAPTER_STATE_DIR"
+
+  # Entity holon R3: inject self-location (public env + PLACE_PROMPT) — place wins
+  if [[ -f "$SCRIPT_DIR/location_proof.py" ]]; then
+    python3 "$SCRIPT_DIR/location_proof.py" --inject-seat "$seat" --unit-dir "$unit" \
+      >/dev/null 2>&1 || true
+    if [[ -f "$unit/self-location.env" ]]; then
+      # shellcheck disable=SC1090
+      set -a; source "$unit/self-location.env"; set +a
+    fi
+  fi
+
+  case "$preset" in
+    status-only)
+      echo "BUZZ_HOST arm preset=status-only (no process)"
+      cmd_status
+      return 0
+      ;;
+    co-lab-watch)
+      export BUZZ_DRIVER_DRY_RUN="${BUZZ_DRIVER_DRY_RUN:-1}"
+      ;;
+    co-lab-gemma)
+      export BUZZ_DRIVER_DRY_RUN="${BUZZ_DRIVER_DRY_RUN:-0}"
+      export BUZZ_DRIVER_LOCAL_LLM_MODEL="${model:-${BUZZ_DRIVER_LOCAL_LLM_MODEL:-gemma3:4b}}"
+      export BUZZ_DRIVER=local-llm
+      ;;
+    push-nerve|codex-home|codex@home)
+      # Codex-style push L0 on this host (if skill scripts present)
+      preset="push-nerve"
+      cmd_arm_push_nerve "$seat" "$room" "$unit" "$log" "$pidf"
+      return $?
+      ;;
+    *)
+      echo "error: unknown preset $preset (co-lab-watch|co-lab-gemma|push-nerve|status-only)" >&2
+      return 2
+      ;;
+  esac
+
+  python3 "$adir/stub_runtime.py" arm \
+    --runtime local-llm \
+    --seat "$seat" \
+    --room "$room" \
+    --room-name "${BUZZ_WATCH_ROOM_NAME:-}" \
+    --transport push \
+    --driver local-llm \
+    --self-pubkey "${BUZZ_PUBLIC_KEY:-}" \
+    >"$unit/arm.out" 2>&1 || {
+      echo "BUZZ_HOST arm failed (see $unit/arm.out)" >&2
+      cat "$unit/arm.out" >&2 || true
+      return 1
+    }
+
+  # Start watch in background
+  nohup python3 "$adir/stub_runtime.py" watch \
+    --runtime local-llm \
+    --seat "$seat" \
+    --mode auto \
+    >>"$log" 2>&1 &
+  echo $! >"$pidf"
+  echo "BUZZ_HOST armed seat=$seat preset=$preset room=$room pid=$(cat "$pidf") log=$log"
+  echo "  DRY_RUN=${BUZZ_DRIVER_DRY_RUN:-} MODEL=${BUZZ_DRIVER_LOCAL_LLM_MODEL:-}"
+
+  # touch registry expected_online
+  if [[ -f "$REGISTRY" ]]; then
+    python3 - "$REGISTRY" "$seat" "$room" <<'PY'
+import json,sys,time
+path,seat,room=sys.argv[1:4]
+d=json.load(open(path))
+found=False
+for s in d.get("seats") or []:
+    if s.get("seat_id")==seat:
+        s["expected_online"]=True
+        ch=s.get("channels") or []
+        if room not in ch: ch.append(room)
+        s["channels"]=ch
+        found=True
+if not found:
+    d.setdefault("seats",[]).append({
+        "seat_id": seat, "runtimes":["watch","local-llm"],
+        "model": "gemma3:4b", "channels":[room], "expected_online": True
+    })
+d["updated_at"]=int(time.time())
+open(path,"w").write(json.dumps(d,indent=2)+"\n")
+PY
+  fi
+}
+
+cmd_disarm() {
+  local preset="" seat="home-grok"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --preset) preset="$2"; shift 2;;
+      --seat) seat="$2"; shift 2;;
+      *) shift;;
+    esac
+  done
+  local unit="$UNITS_DIR/${seat}-${preset:-co-lab-gemma}"
+  local pidf="$unit/watch.pid"
+  if [[ -f "$pidf" ]]; then
+    local pid
+    pid="$(cat "$pidf")"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "$pid" 2>/dev/null || true
+      echo "BUZZ_HOST disarmed seat=$seat preset=${preset:-co-lab-gemma} pid=$pid"
+    else
+      echo "BUZZ_HOST disarm stale-pid seat=$seat"
+    fi
+    rm -f "$pidf"
+  else
+    echo "BUZZ_HOST disarm nothing-running seat=$seat"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    init) cmd_init "$@";;
+    path) cmd_path "$@";;
+    list) cmd_list "$@";;
+    status) cmd_status "$@";;
+    register|seat-add|create) cmd_register "$@";;
+    arm) cmd_arm "$@";;
+    disarm) cmd_disarm "$@";;
+    -h|--help|help) usage;;
+    *) usage; return 2;;
+  esac
+}
+
+main "$@"

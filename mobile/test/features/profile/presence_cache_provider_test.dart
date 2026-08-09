@@ -4,13 +4,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-/// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
+/// Tests for [PresenceCacheNotifier].
 ///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
+/// Live path: kind:20001 over WS for tracked pubkeys.
+/// Snapshot path (R4): [track] issues HTTP `POST /query` for authors' 20001.
 void main() {
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
@@ -118,6 +115,7 @@ void main() {
       'deadbeef',
       'cafebabe',
     ]);
+    await _pumpEventQueue();
 
     // Seed cafebabe -> offline, then set deadbeef online.
     relaySession.emit(_presence('cafebabe', 'offline'));
@@ -131,17 +129,60 @@ void main() {
     // There should be no literal "pubkey" key in the map.
     expect(cache.containsKey('pubkey'), isFalse);
   });
+
+  test('track issues presence snapshot query for new pubkeys', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    relaySession.snapshotEvents = [_presence('alice', 'online', createdAt: 50)];
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(relaySession.queryFilters, isNotEmpty);
+    expect(relaySession.queryFilters.last.kinds, [EventKind.presenceUpdate]);
+    expect(relaySession.queryFilters.last.authors, ['alice']);
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
+  test('live event does not lose to older snapshot', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
+
+    relaySession.emit(_presence('alice', 'online', createdAt: 200));
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+
+    // Snapshot returns older offline — must not clobber live.
+    relaySession.snapshotEvents = [
+      _presence('alice', 'offline', createdAt: 100),
+    ];
+    container.read(presenceCacheProvider.notifier).track(['bob']); // new track
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
 }
 
-NostrEvent _presence(String pubkey, String status) => NostrEvent(
-  id: 'evt-$pubkey-$status',
-  pubkey: pubkey,
-  createdAt: 1000,
-  kind: EventKind.presenceUpdate,
-  tags: const [],
-  content: status,
-  sig: 'sig',
-);
+NostrEvent _presence(String pubkey, String status, {int createdAt = 1000}) =>
+    NostrEvent(
+      id: 'evt-$pubkey-$status-$createdAt',
+      pubkey: pubkey,
+      createdAt: createdAt,
+      kind: EventKind.presenceUpdate,
+      tags: const [],
+      content: status,
+      sig: 'sig',
+    );
 
 Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
@@ -161,7 +202,9 @@ ProviderContainer _buildContainer({
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> filters = [];
+  final List<NostrFilter> queryFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  List<NostrEvent> snapshotEvents = const [];
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -178,6 +221,15 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       filters.remove(filter);
       _listeners.remove(onEvent);
     };
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
+    return snapshotEvents;
   }
 
   /// Emit an event synchronously to all live subscribers.
