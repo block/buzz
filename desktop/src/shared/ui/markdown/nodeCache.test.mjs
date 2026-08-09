@@ -163,8 +163,8 @@ test("KaTeX parse failure degrades to source without throwing", () => {
 
 test("formula-bomb message is math-disabled and renders literally", () => {
   clearMarkdownNodeCache();
-  // > 50 formulas trips the per-message cap => math off, literal `$...$`.
-  const many = Array.from({ length: 51 }, (_, i) => `$x_{${i}}$`).join(" ");
+  // > 100 formulas trips the per-message cap => math off, literal `$...$`.
+  const many = Array.from({ length: 101 }, (_, i) => `$x_{${i}}$`).join(" ");
   const el = renderCachedMarkdown({ ...BASE, content: many });
   const html = renderToStaticMarkup(el);
   assert.ok(!/katex/.test(html), "math disabled => no katex output");

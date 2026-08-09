@@ -23,7 +23,7 @@
 
 export const MATH_LIMITS = {
   /** Hard cap on formulas per message before math is disabled entirely. */
-  maxFormulasPerMessage: 50,
+  maxFormulasPerMessage: 100,
   /** Hard cap on a single formula's source length (in chars) before it is
    * neutralised to literal text. */
   maxFormulaLength: 2_000,
