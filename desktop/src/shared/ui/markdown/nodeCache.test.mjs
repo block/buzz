@@ -203,7 +203,10 @@ test("oversized display math degrades to literal with no stray partial math", ()
     0,
     "fully literal degradation, no katex",
   );
-  assert.ok(html.includes("b".repeat(64)), "oversized source preserved literally");
+  assert.ok(
+    html.includes("b".repeat(64)),
+    "oversized source preserved literally",
+  );
 });
 
 test("oversized display formula is neutralised; sibling math still renders", () => {
@@ -215,5 +218,8 @@ test("oversized display formula is neutralised; sibling math still renders", () 
   });
   const html = renderToStaticMarkup(el);
   assert.match(html, /katex/, "healthy sibling formulas still render as math");
-  assert.ok(html.includes("c".repeat(64)), "oversized display preserved literally");
+  assert.ok(
+    html.includes("c".repeat(64)),
+    "oversized display preserved literally",
+  );
 });
