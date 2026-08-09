@@ -1534,7 +1534,7 @@ fn patch_config_option_current_value(
 ///
 /// Non-fatal for most errors: logs and proceeds. The agent falls back
 /// to its default permission mode (`"default"`), which still works via
-/// Check if the agent's `session/new` response advertises a given mode ID
+/// Check whether the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
 fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
