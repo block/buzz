@@ -2255,7 +2255,7 @@ impl Db {
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
         idempotency: event::MessageIdempotencyParams<'_>,
     ) -> Result<event::IdempotentMessageInsertOutcome> {
-        event::insert_idempotent_message_with_thread_metadata(
+        let outcome = event::insert_idempotent_message_with_thread_metadata(
             &self.pool,
             community_id,
             event,
@@ -2263,7 +2263,18 @@ impl Db {
             thread_meta,
             idempotency,
         )
-        .await
+        .await?;
+        if let event::IdempotentMessageInsertOutcome::Created {
+            event_was_inserted: true,
+            ..
+        } = &outcome
+        {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(outcome)
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.
@@ -6566,6 +6577,80 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert channel");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn idempotent_message_insert_populates_mentions() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, db_name) = create_scratch_db(&admin, "idem_mention").await;
+        let cleanup_pool = pool.clone();
+        let test_result = tokio::spawn(async move {
+            let db = Db::from_pool(pool);
+            let community_uuid = make_community(&db.pool).await;
+            let community = CommunityId::from_uuid(community_uuid);
+            let channel = Uuid::new_v4();
+            insert_channel(&db.pool, community_uuid, channel).await;
+
+            let author = Keys::generate();
+            let mentioned = Keys::generate();
+            let mentioned_hex = mentioned.public_key().to_hex();
+            let event = EventBuilder::new(Kind::Custom(9), "retry-safe mention")
+                .tags([Tag::parse(["p", mentioned_hex.as_str()]).expect("p tag")])
+                .sign_with_keys(&author)
+                .expect("sign event");
+            let author_bytes = author.public_key().to_bytes();
+
+            let outcome = db
+                .insert_idempotent_message_with_thread_metadata(
+                    community,
+                    &event,
+                    channel,
+                    None,
+                    event::MessageIdempotencyParams {
+                        author_pubkey: &author_bytes,
+                        key: &[7u8; 32],
+                        semantic_digest: &[9u8; 32],
+                    },
+                )
+                .await
+                .expect("insert idempotent message");
+            assert!(matches!(
+                outcome,
+                event::IdempotentMessageInsertOutcome::Created {
+                    event_was_inserted: true,
+                    ..
+                }
+            ));
+
+            let mention_rows: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM event_mentions \
+                 WHERE community_id = $1 AND event_id = $2 \
+                   AND pubkey_hex = $3 AND channel_id = $4",
+            )
+            .bind(community_uuid)
+            .bind(event.id.as_bytes().as_slice())
+            .bind(mentioned_hex)
+            .bind(channel)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count mention rows");
+            assert_eq!(mention_rows, 1);
+        })
+        .await;
+
+        cleanup_pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {db_name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop idempotent mention scratch DB");
+        test_result.expect("idempotent mention test task");
     }
 
     #[tokio::test]
