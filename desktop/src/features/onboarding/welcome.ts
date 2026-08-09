@@ -291,6 +291,15 @@ export function welcomeChannelEnsuredStorageKey(
   )}:${pubkey}`;
 }
 
+function legacyWelcomeChannelEnsuredStorageKey(
+  pubkey: string,
+  communityScope: string,
+) {
+  return `${WELCOME_CHANNEL_ENSURED_STORAGE_KEY}:${encodeURIComponent(
+    communityScope,
+  )}:${pubkey}`;
+}
+
 export function hasEnsuredWelcomeChannel(
   pubkey: string | null | undefined,
   communityScope: string | null | undefined,
@@ -300,11 +309,29 @@ export function hasEnsuredWelcomeChannel(
   }
 
   try {
-    return (
-      window.localStorage.getItem(
-        welcomeChannelEnsuredStorageKey(pubkey, communityScope),
-      ) === "true"
+    const canonicalKey = welcomeChannelEnsuredStorageKey(
+      pubkey,
+      communityScope,
     );
+    if (window.localStorage.getItem(canonicalKey) === "true") {
+      return true;
+    }
+
+    // Existing installs wrote the raw relay URL into this key. Migrate the
+    // exact legacy marker while the configured URL is still unchanged, so a
+    // later formatting-only edit cannot trigger one final duplicate team.
+    const legacyKey = legacyWelcomeChannelEnsuredStorageKey(
+      pubkey,
+      communityScope,
+    );
+    if (
+      legacyKey !== canonicalKey &&
+      window.localStorage.getItem(legacyKey) === "true"
+    ) {
+      window.localStorage.setItem(canonicalKey, "true");
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
