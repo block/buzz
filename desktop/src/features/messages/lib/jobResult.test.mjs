@@ -260,6 +260,29 @@ test("rejects unsafe URL credentials and upward file traversal", () => {
   }
 });
 
+test("rejects absolute local paths for every raw reference kind", () => {
+  for (const kind of ["branch", "canvas", "workflow_output", "other"]) {
+    for (const reference of [
+      "/Users/Brad/private.txt",
+      "~/private.txt",
+      String.raw`\Users\Brad\private.txt`,
+      String.raw`\\server\share\private.txt`,
+      String.raw`C:\Users\Brad\private.txt`,
+      "safe/../../private.txt",
+    ]) {
+      assert.equal(
+        parseContent(
+          manifest({
+            artifacts: [{ kind, label: "Unsafe local reference", reference }],
+          }),
+        ),
+        null,
+        `${kind} reference ${reference} should be rejected`,
+      );
+    }
+  }
+});
+
 test("requires one reply tag matching the payload job request", () => {
   const tags = [["e", JOB_REQUEST, "", "reply"]];
   assert.equal(getJobResultRequestId(tags), JOB_REQUEST);

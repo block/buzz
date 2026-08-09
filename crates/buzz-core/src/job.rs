@@ -200,6 +200,8 @@ impl JobArtifact {
         let is_url = Url::parse(&self.reference).is_ok();
         if is_url {
             validate_reference_url(&self.reference)?;
+        } else {
+            validate_portable_raw_reference(&self.reference)?;
         }
         match self.kind {
             JobArtifactKind::PullRequest
@@ -490,6 +492,25 @@ fn validate_file_reference(value: &str) -> Result<(), JobResultError> {
     Ok(())
 }
 
+fn validate_portable_raw_reference(value: &str) -> Result<(), JobResultError> {
+    if value.starts_with('/')
+        || value.starts_with('\\')
+        || value.starts_with("~/")
+        || value.starts_with("~\\")
+        || value.as_bytes().get(1) == Some(&b':')
+    {
+        return Err(JobResultError::InvalidReference(
+            "raw artifact references must not be absolute local paths".into(),
+        ));
+    }
+    if value.split(['/', '\\']).any(|component| component == "..") {
+        return Err(JobResultError::InvalidReference(
+            "raw artifact references must not traverse outside their source".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_commit_reference(value: &str) -> Result<(), JobResultError> {
     if Url::parse(value).is_ok() {
         return validate_reference_url(value);
@@ -652,6 +673,35 @@ mod tests {
                 ),
                 "{reference:?} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn absolute_local_paths_are_rejected_for_all_raw_reference_kinds() {
+        for kind in [
+            JobArtifactKind::Branch,
+            JobArtifactKind::Canvas,
+            JobArtifactKind::WorkflowOutput,
+            JobArtifactKind::Other,
+        ] {
+            for reference in [
+                "/Users/alice/private.txt",
+                "~/private.txt",
+                r"\Users\alice\private.txt",
+                r"\\server\share\private.txt",
+                r"C:\Users\alice\private.txt",
+                "safe/../../private.txt",
+            ] {
+                let mut candidate = payload(JobDisposition::Completed);
+                candidate.artifacts = vec![artifact(kind, reference)];
+                assert!(
+                    matches!(
+                        candidate.validate(),
+                        Err(JobResultError::InvalidReference(_))
+                    ),
+                    "{kind:?} reference {reference:?} should be rejected"
+                );
+            }
         }
     }
 
