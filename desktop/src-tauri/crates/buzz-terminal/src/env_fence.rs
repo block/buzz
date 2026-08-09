@@ -53,19 +53,38 @@ pub const UNIX_INHERIT_ALLOWLIST: &[&str] = &[
 /// plumbing that every process on the machine can read. The keys the fence
 /// exists to withhold (`BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, ...) stay
 /// unlisted, exactly as on Unix.
+/// The list is longer than the Unix one for a structural reason rather than a
+/// permissive one: a Unix shell reads rc files and a Windows shell does not,
+/// so anything omitted here is omitted for the whole session with no mechanism
+/// to restore it. Every entry is machine or user *layout* — paths and counts
+/// any process on the box can read — and the keys the fence exists to withhold
+/// stay unlisted, exactly as on Unix.
 pub const WINDOWS_INHERIT_ALLOWLIST: &[&str] = &[
-    "ComSpec",      // default-program resolution (see above)
-    "SystemRoot",   // required by much of Win32; DLL and WMI resolution
-    "windir",       // legacy alias of SystemRoot; old scripts read it
-    "PATHEXT",      // which extensions the shell treats as executable
-    "USERPROFILE",  // ~ equivalent; portable-pty's cwd fallback (see above)
-    "HOMEDRIVE",    // POSIX-ish home components used by ports and MSYS tools
-    "HOMEPATH",     // companion to HOMEDRIVE
-    "APPDATA",      // roaming config; PowerShell profiles, npm, git
-    "LOCALAPPDATA", // local config and caches
-    "TEMP",         // temp dir; absence breaks cmd internals and most tools
-    "TMP",          // companion to TEMP
-    "USERNAME",     // prompt expansion, `whoami`-adjacent tooling
+    "ComSpec",                // default-program resolution (see above)
+    "SystemRoot",             // required by much of Win32; DLL and WMI resolution
+    "SystemDrive",            // `%SystemDrive%` in scripts and installers
+    "windir",                 // legacy alias of SystemRoot; old scripts read it
+    "PATHEXT",                // which extensions the shell treats as executable
+    "USERPROFILE",            // ~ equivalent; portable-pty's cwd fallback (see above)
+    "HOMEDRIVE",              // POSIX-ish home components used by ports and MSYS tools
+    "HOMEPATH",               // companion to HOMEDRIVE
+    "APPDATA",                // roaming config; PowerShell profiles, npm, git
+    "LOCALAPPDATA",           // local config and caches
+    "ProgramData",            // machine-wide app data; chocolatey, docker, certs
+    "ALLUSERSPROFILE",        // legacy alias of ProgramData
+    "ProgramFiles",           // install root many tool scripts resolve through
+    "ProgramFiles(x86)",      // 32-bit install root on 64-bit Windows
+    "ProgramW6432",           // 64-bit install root as seen from a 32-bit process
+    "PUBLIC",                 // shared user profile; some installers write here
+    "PSModulePath",           // how `powershell` finds its modules at all
+    "TEMP",                   // temp dir; absence breaks cmd internals and most tools
+    "TMP",                    // companion to TEMP
+    "USERNAME",               // prompt expansion, `whoami`-adjacent tooling
+    "USERDOMAIN",             // companion to USERNAME on domain-joined machines
+    "COMPUTERNAME",           // prompt expansion; build scripts label output with it
+    "NUMBER_OF_PROCESSORS",   // parallelism default for cargo, make, ninja
+    "PROCESSOR_ARCHITECTURE", // which binaries a script picks to run
+    "OS",                     // `%OS%`, still branched on by older scripts
 ];
 
 #[cfg(unix)]

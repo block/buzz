@@ -5,7 +5,7 @@
 //! prove that what the builder holds is what the kernel hands the child.
 
 use crate::env_fence::{fence_env, WINDOWS_INHERIT_ALLOWLIST};
-use crate::path::user_shell_path;
+use crate::path::{user_shell_path, windows_shell_path};
 use crate::shell::{
     is_executable_file, login_argv0, pick_windows_shell, resolve_shell, FALLBACK_SHELL,
 };
@@ -425,6 +425,79 @@ fn windows_shell_survives_an_empty_environment() {
         pick_windows_shell(None, None, |_| false),
         r"C:\Windows\System32\cmd.exe"
     );
+}
+
+/// The user's own entries survive, in their own order, ahead of the system
+/// directories we guarantee. This is the regression that stripped `ssh`,
+/// `git`, and every other installed tool from the Windows terminal.
+#[test]
+fn windows_path_keeps_what_the_user_installed() {
+    let inherited = r"C:\Users\dev\.cargo\bin;C:\Program Files\Git\cmd;C:\Windows\System32\OpenSSH";
+    let path = windows_shell_path(Some(inherited), Some(r"C:\Windows"));
+    let entries: Vec<&str> = path.split(';').collect();
+
+    assert_eq!(
+        &entries[..3],
+        &[
+            r"C:\Users\dev\.cargo\bin",
+            r"C:\Program Files\Git\cmd",
+            r"C:\Windows\System32\OpenSSH",
+        ],
+        "inherited entries must keep their order and their precedence"
+    );
+    for required in [
+        r"C:\Windows\System32",
+        r"C:\Windows",
+        r"C:\Windows\System32\Wbem",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0",
+    ] {
+        assert!(
+            entries.contains(&required),
+            "{required} must be reachable however sparse the inherited PATH"
+        );
+    }
+}
+
+/// A `PATH` that already names a system directory must not gain a second copy
+/// of it, whatever case or trailing separator it was written with.
+#[test]
+fn windows_path_does_not_duplicate_system_directories() {
+    let path = windows_shell_path(
+        Some(r"c:\windows\system32\;C:\tools;C:\WINDOWS\System32\Wbem"),
+        Some(r"C:\Windows"),
+    );
+    let entries: Vec<&str> = path.split(';').collect();
+
+    let system32 = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .trim_end_matches('\\')
+                .eq_ignore_ascii_case(r"C:\Windows\System32")
+        })
+        .count();
+    assert_eq!(
+        system32, 1,
+        "System32 appears once, in the form the user wrote: {path}"
+    );
+    assert!(
+        entries.contains(&r"C:\tools"),
+        "de-duplication must not drop unrelated entries: {path}"
+    );
+}
+
+/// An absent or empty inherited `PATH` still yields a usable shell rather than
+/// an empty string.
+#[test]
+fn windows_path_survives_an_empty_environment() {
+    for inherited in [None, Some(""), Some(";;")] {
+        let path = windows_shell_path(inherited, None);
+        assert_eq!(
+            path,
+            r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0",
+            "an empty inherited PATH falls back to the system directories alone"
+        );
+    }
 }
 
 /// Guards the duplication of `RESERVED_ENV_KEYS` above. If the desktop crate
