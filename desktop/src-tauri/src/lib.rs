@@ -83,6 +83,36 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
+
+#[cfg(target_os = "macos")]
+fn set_configured_dock_icon<R: tauri::Runtime>(app: &tauri::App<R>) {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSString;
+    use std::path::Path;
+
+    let Some(icon_path) = app
+        .config()
+        .bundle
+        .icon
+        .iter()
+        .find(|path| Path::new(path).exists())
+    else {
+        return;
+    };
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let icon_path = NSString::from_str(icon_path);
+    let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &icon_path) else {
+        return;
+    };
+
+    unsafe {
+        NSApplication::sharedApplication(main_thread).setApplicationIconImage(Some(&image));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
@@ -312,6 +342,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
             {
+                set_configured_dock_icon(app);
                 tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
