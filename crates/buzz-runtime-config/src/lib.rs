@@ -16,9 +16,11 @@ use std::{fs::File, io::Read as _, path::Path};
 pub mod error;
 pub mod hermes;
 pub mod kimi;
+pub mod launch;
 pub mod model;
 
 pub use error::ConfigError;
+pub use launch::{to_launch_json, LaunchMapError, McpLaunchConfigDocument};
 pub use model::{
     McpServerConfig, McpServerInventoryEntry, RuntimeKind, RuntimeMcpConfig, RuntimeMcpInventory,
     ValidationIssue,
