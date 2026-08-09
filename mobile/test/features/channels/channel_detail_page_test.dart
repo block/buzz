@@ -4053,6 +4053,81 @@ void main() {
       expect(find.text('Reply number 0'), findsNothing);
     });
 
+    testWidgets('thread shows a Latest pill when scrolled up that jumps back '
+        'to the newest reply', (tester) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply number $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // At the tail after opening: no pill.
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+
+      // Scroll up to read older replies: the pill appears.
+      await tester.drag(
+        find.byKey(const ValueKey('thread-message-list')),
+        const Offset(0, 600),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsOneWidget,
+      );
+      expect(find.text('Reply number 39'), findsNothing);
+
+      // Tapping the pill returns to the newest reply and hides the pill.
+      await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+      await tester.pumpAndSettle();
+      expect(find.text('Reply number 39'), findsOneWidget);
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+    });
+
     testWidgets('thread deep link still lands on the linked reply', (
       tester,
     ) async {
@@ -4203,73 +4278,72 @@ void main() {
       );
     });
 
-    testWidgets(
-      'initial thread hydration lands on the newest reply',
-      (tester) async {
-        final rootEvent = _textMsg(
-          id: 'thread-root',
-          pubkey: 'alice',
-          content: 'Thread root',
-          createdAt: 1000,
-        );
-        final replies = [
-          for (var i = 0; i < 30; i++)
-            _textMsg(
-              id: 'reply-$i',
-              pubkey: 'bob',
-              content: 'Reply $i',
-              createdAt: 1100 + i,
-              extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
-              ],
-            ),
-        ];
-        final completer = Completer<List<NostrEvent>>();
-
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [rootEvent],
-            pendingThreadReplies: {'thread-root': completer.future},
-            users: const {
-              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-            },
+    testWidgets('initial thread hydration lands on the newest reply', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
           ),
-        );
-        await tester.pumpAndSettle();
+      ];
+      final completer = Completer<List<NostrEvent>>();
 
-        final threadHead = formatTimeline([rootEvent]).single;
-        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: [threadHead],
-              channelId: _channelId,
-              currentPubkey: 'self',
-              isMember: true,
-              isArchived: false,
-            ),
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
           ),
-        );
-        await tester.pumpAndSettle();
-        expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsOneWidget,
-        );
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsOneWidget,
+      );
 
-        completer.complete(replies);
-        await tester.pumpAndSettle();
+      completer.complete(replies);
+      await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(const ValueKey('thread-message-group-reply-29')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsNothing,
-        );
-      },
-    );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-29')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-thread-root')),
+        findsNothing,
+      );
+    });
 
     testWidgets(
       'deep-linking an older reply does not resume tail following on keyboard resize',
