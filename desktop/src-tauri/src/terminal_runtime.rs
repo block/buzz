@@ -289,28 +289,15 @@ impl Session {
         }
         if let Some(reader) = self.reader.take() {
             #[cfg(unix)]
-            {
-                let _ = buzz_terminal::lifecycle::shutdown_draining(&mut self.child, reader);
-            }
+            let _ = buzz_terminal::lifecycle::shutdown_draining(&mut self.child, reader);
+            // Windows must also close the pseudo console, and only the helper
+            // knows when: see `lifecycle::shutdown_closing_console`.
             #[cfg(not(unix))]
-            {
-                reader.begin_closing();
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                // ConPTY inverts the Unix EOF contract this teardown was
-                // written against: the output pipe does not EOF when the child
-                // dies — only when the pseudo console itself is closed. The
-                // reader is blocked in read(), so stop()'s flag alone can
-                // never wake it; joining here deadlocks the closing thread
-                // (the app's main thread for a sync command) — the
-                // AppHangB1 behind #4930. Dropping the master runs
-                // ClosePseudoConsole while the reader is still draining,
-                // which is also the order ConPTY requires: the close blocks
-                // until pending output is consumed, then EOFs the reader.
-                drop(self.master.take());
-                reader.stop();
-                reader.join();
-            }
+            let _ = buzz_terminal::lifecycle::shutdown_closing_console(
+                &mut self.child,
+                reader,
+                self.master.take(),
+            );
         }
         if let Ok(mut channel) = self.channel.lock() {
             *channel = None;
