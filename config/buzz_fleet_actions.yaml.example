@@ -1,0 +1,50 @@
+# Buzz Fleet Action Handlers — Example Config
+#
+# This config defines domain-specific read-only actions that the autonomous
+# responder can execute without user prompts. Copy this file, customize for
+# your deployment, and pass via --actions-config.
+#
+# The responder's generic core (ACKs, recovery, destructive detection) works
+# without this config. This config only adds domain-specific actions.
+#
+# Each action has:
+#   name:              Human-readable identifier
+#   trigger_regex:     Regex to match in message content (capture groups → {1}, {2}, ...)
+#   trigger_keywords:  Alternative: list of keywords (any match triggers)
+#   command:           Shell command to execute (list of args, supports {N} substitution)
+#   cwd:               Working directory (optional)
+#   timeout:           Max execution time in seconds (default: 30)
+#   result_template:   Template for result message ({output} = command output, {N} = regex groups)
+#   destructive:       If true, queue for manual execution instead of auto-executing (default: false)
+
+actions:
+  # Example: PR validation (read-only gh pr view)
+  - name: pr_validation
+    trigger_regex: "validate\\s+PR\\s*#?(\\d+)"
+    command: ["gh", "pr", "view", "{1}", "--json", "state,mergeable,mergeStateStatus,headRefName,commits"]
+    cwd: "/path/to/your/repo"
+    timeout: 30
+    result_template: "PR #{1} validation: {output}"
+
+  # Example: Fleet status check (read-only gh pr list + git log)
+  - name: status_check
+    trigger_keywords:
+      - "fleet status"
+      - "open prs"
+      - "what's open"
+      - "queue status"
+    command: ["gh", "pr", "list", "--state", "open", "--json", "number,title,mergeable"]
+    cwd: "/path/to/your/repo"
+    timeout: 15
+    result_template: "STATUS: {output}"
+
+  # Example: Git main head check
+  - name: main_head
+    trigger_keywords:
+      - "main head"
+      - "current main"
+      - "what's on main"
+    command: ["git", "log", "--oneline", "origin/main", "-1"]
+    cwd: "/path/to/your/repo"
+    timeout: 10
+    result_template: "main: {output}"
