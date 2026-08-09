@@ -79,7 +79,13 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     _prefsKey = '$_draftsPrefsKey:${config.baseUrl}:$pubkey';
 
     final prefs = ref.read(savedPrefsProvider);
-    final raw = prefs.getString(_prefsKey);
+    final raw = readMigratedPref<String>(
+      prefs,
+      canonicalKey: _prefsKey,
+      legacyKey: '$_draftsPrefsKey:${config.storedOrigin}:$pubkey',
+      read: prefs.getString,
+      write: prefs.setString,
+    );
     if (raw == null) return const [];
     try {
       final decoded = jsonDecode(raw);

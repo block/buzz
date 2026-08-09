@@ -1,5 +1,5 @@
 use super::backfill_standalone_agents_in_dir;
-use crate::managed_agents::spawn_hash::spawn_config_hash;
+use crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot;
 use crate::managed_agents::{
     persona_events::{persona_content_hash, persona_event_content},
     AgentDefinition, ManagedAgentRecord, DEFAULT_AGENT_PARALLELISM,
@@ -61,8 +61,10 @@ fn folded_definition_json(
             name_pool: vec!["Sparrow".to_string(), "Robin".to_string()],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: None,
             source_team_persona_slug: None,
+            catalog_source: None,
             env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
@@ -113,7 +115,7 @@ fn backfill_adopts_matching_folded_definition_without_manufacturing_duplicate() 
         .iter()
         .filter_map(ManagedAgentRecord::to_definition_view)
         .collect();
-    let hash_before = spawn_config_hash(
+    let snapshot_before = prospective_spawn_config_snapshot(
         before_instance,
         &before_definitions,
         &[],
@@ -170,7 +172,7 @@ fn backfill_adopts_matching_folded_definition_without_manufacturing_duplicate() 
         .iter()
         .filter_map(ManagedAgentRecord::to_definition_view)
         .collect();
-    let hash_after = spawn_config_hash(
+    let snapshot_after = prospective_spawn_config_snapshot(
         instance,
         &after_definitions,
         &[],
@@ -178,7 +180,8 @@ fn backfill_adopts_matching_folded_definition_without_manufacturing_duplicate() 
         &Default::default(),
     );
     assert_eq!(
-        hash_before, hash_after,
+        snapshot_before.canonical(),
+        snapshot_after.canonical(),
         "adoption must keep the effective spawn configuration stable"
     );
 }
@@ -562,11 +565,11 @@ fn backfilled_definition_carries_prompt_present_even_if_empty() {
 }
 
 #[test]
-fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
-    // B5 hash row 2: pre-backfill the record hashes prompt None; post-backfill
+fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
+    // B5 drift row 2: pre-backfill the record snapshots prompt None; post-backfill
     // the prospective re-snapshot pulls Some("") from the manufactured
     // definition. The spawn layer treats an empty prompt as no prompt (env
-    // absent either way), so the hash must not move — otherwise every
+    // absent either way), so the snapshot must not move — otherwise every
     // prompt-less standalone agent lights the restart badge on upgrade.
     let dir = tempfile::tempdir().unwrap();
     let pubkey = "c".repeat(64);
@@ -577,7 +580,7 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let hash_before = spawn_config_hash(
+    let before = prospective_spawn_config_snapshot(
         pre_instance,
         &[],
         &[],
@@ -593,7 +596,7 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
         .iter()
         .filter_map(|r| r.to_definition_view())
         .collect();
-    let hash_after = spawn_config_hash(
+    let after = prospective_spawn_config_snapshot(
         post_instance,
         &personas,
         &[],
@@ -602,15 +605,16 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
     );
 
     assert_eq!(
-        hash_before, hash_after,
+        before.canonical(),
+        after.canonical(),
         "backfill must not flip the restart badge for prompt-less agents"
     );
 }
 
 #[test]
-fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
+fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
     // The general no-behavior-change rail: a standalone agent WITH config
-    // must also hash identically across backfill (the definition snapshots
+    // must also snapshot identically across backfill (the definition snapshots
     // the record's own values, so the re-snapshot writes back what is
     // already there).
     let dir = tempfile::tempdir().unwrap();
@@ -626,7 +630,7 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let hash_before = spawn_config_hash(
+    let before = prospective_spawn_config_snapshot(
         pre_instance,
         &[],
         &[],
@@ -642,7 +646,7 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
         .iter()
         .filter_map(|r| r.to_definition_view())
         .collect();
-    let hash_after = spawn_config_hash(
+    let after = prospective_spawn_config_snapshot(
         post_instance,
         &personas,
         &[],
@@ -650,7 +654,7 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
         &Default::default(),
     );
 
-    assert_eq!(hash_before, hash_after);
+    assert_eq!(before.canonical(), after.canonical());
 }
 
 #[test]

@@ -5,7 +5,7 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
-| Desktop | `just release-desktop` | Signed desktop app (macOS/Linux) |
+| Desktop | `just release-desktop <version>` | Packaged desktop app (signed/notarized macOS, unsigned Windows, and Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
 | Mobile | `scripts/mobile-release.sh candidate X.Y.Z` | Exact `mobile-vX.Y.Z-rc.N` source identity |
 
@@ -16,13 +16,17 @@ remains manual because OSS CI cannot trigger private CI.
 
 ## Quick Start
 
+Prepare desktop releases locally from an up-to-date, clean `main` checkout:
+
 ```sh
-# Desktop release (next patch version)
-just release-desktop
+just release-desktop 0.5.3
+```
 
-# Desktop explicit version
-just release-desktop 0.4.0
+The recipe generates the immutable candidate and opens or updates its pull
+request. Candidate branch creation uses the operator's GitHub permissions; the
+release App is intentionally limited to creating protected release tags.
 
+```sh
 # Relay release
 just release-relay
 just release-relay 0.4.0
@@ -31,8 +35,9 @@ just release-relay 0.4.0
 scripts/mobile-release.sh candidate 0.5.0
 ```
 
-Desktop and relay releases use metadata PRs. Mobile does not. Each
-`mobile-vX.Y.Z-rc.N` tag is an immutable candidate and the artifact of record.
+Desktop uses an immutable generated candidate PR; relay continues using its
+metadata PR. Mobile does not. Each `mobile-vX.Y.Z-rc.N` tag is an immutable
+candidate and the artifact of record.
 There is no mobile release branch, stable mobile tag alias, finalization step,
 or mobile GitHub Release.
 
@@ -42,12 +47,31 @@ or mobile GitHub Release.
 
 ### Desktop
 
-1. **`just release-desktop`** runs locally on `main`, creates or updates a
-   `version-bump/<version>` PR, bumps the desktop manifests, regenerates
-   lockfiles, and updates `CHANGELOG.md`.
-2. **Merge the PR.** `auto-tag-on-release-pr-merge` pushes `v<version>`.
-3. **The tag triggers `release.yml`.** It builds, signs, notarizes, and
-   publishes the desktop app for macOS and Linux.
+1. Run `just release-desktop <version>` from a clean, up-to-date `main` checkout.
+   The script creates one deterministic candidate commit and records both its
+   frozen base and the verified prior release ledger in candidate metadata.
+2. Review the exact candidate SHA, complete changelog, and CI. Regenerating or
+   pushing the branch creates a new candidate and requires checks to run again.
+3. **Squash merge** the PR after all protected-branch checks pass. The merge is
+   the human authorization event; an authorized owner/admin bypass is treated
+   the same way. Unrelated changes reaching `main` do not invalidate the
+   reviewed candidate.
+4. `auto-tag-on-release-pr-merge` verifies the closed event against GitHub's PR
+   identity, validates candidate content, and proves every required check came
+   from its trusted producer and was successful when the PR merged. It creates
+   `desktop-v<version>` at the exact reviewed PR head—not the squash commit.
+   Retries accept that tag only at the same SHA and never move it. GitHub does
+   not expose when an individual check rerun was created, so an ordinary rerun
+   after merge deliberately makes tag verification fail closed; inspect that
+   run and create a new candidate version rather than retrying the blocked tag.
+5. The tag triggers `release.yml`. It builds and stages all platform artifacts,
+   publishes the versioned release only after the complete set succeeds, then
+   updates the rolling updater manifest last for stable versions.
+
+Because squash merging leaves immutable candidate tags on side history, the next
+release uses validated prior candidate metadata as its ledger boundary. It
+includes unrelated commits after the prior frozen base and excludes exactly the
+prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 
 ### Relay
 
@@ -144,12 +168,15 @@ for distributable builds or builds from an immutable release tag.
 
 ---
 
-## Manual Release Retry
+## Release Retry
 
-The **Release** workflow's manual dispatch is only a retry mechanism for an
-existing immutable `v<version>` tag. Select that tag in the ref picker and
-provide the matching semver version without the `v` prefix. It cannot build
-from `main` or another caller-selected source ref.
+`release.yml` has no manual dispatch and cannot build from `main` or another
+caller-selected ref. If a run for an existing immutable
+`desktop-v<version>` tag fails, rerun that failed workflow from GitHub Actions
+(or use `gh run rerun <run-id> --failed --repo block/buzz`). A stable rerun also
+repairs `buzz-desktop-latest/latest.json` if the original run published the
+versioned release but failed during that final rolling-manifest upload. Do not
+recreate, move, or push the immutable tag again.
 
 Mobile intentionally has no branch or arbitrary-ref fallback. The private
 Buildkite pipeline accepts only an exact candidate tag.
@@ -160,10 +187,12 @@ Buildkite pipeline accepts only an exact candidate tag.
 
 For mobile, trigger the private
 [Release Mobile pipeline](https://buildkite.com/runway/buzz-mobile-releases) with
-an exact RC tag for the platform build being cut. For desktop, use
-[Release Desktop](https://buildkite.com/runway/sprout-releases). See the
+an exact RC tag for the platform build being cut. For desktop, start
+[Release Desktop](https://buildkite.com/runway/sprout-releases) and enter the
+exact public source tag as `desktop_ref=desktop-v<version>`; a generic
+`v<version>` tag is intentionally rejected. See the
 [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
-for the private pipeline contract.
+for the rest of the private pipeline contract.
 
 ---
 
@@ -171,7 +200,7 @@ for the private pipeline contract.
 
 Desktop publishes two GitHub releases:
 
-1. **`v<version>`**: the user-facing release with installers.
+1. **`desktop-v<version>`**: the user-facing release with installers.
 2. **`buzz-desktop-latest`**: the rolling auto-updater release.
 
 Mobile publishes only annotated `mobile-vX.Y.Z-rc.N` git tags. Store artifacts
@@ -184,9 +213,11 @@ GitHub Release or a stable `mobile-vX.Y.Z` alias.
 
 The release workflow builds **two separate macOS DMGs**: Apple
 Silicon (`darwin-aarch64`, the `release` job) and Intel
-(`darwin-x86_64`, the `release-macos-x64` job), plus Linux `.deb` and
-`.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
-the same `v<version>` release. Intel users download the `_x64.dmg`.
+(`darwin-x86_64`, the `release-macos-x64` job), an unsigned Windows x64
+NSIS installer (its filename includes `_alpha-unsigned`), and Linux `.deb` and
+`.AppImage` packages. Both macOS DMGs are codesigned, notarized, and attached
+to the same `desktop-v<version>` release. Intel users
+download the `_x64.dmg`.
 
 The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
 which strips infra libraries over-bundled by linuxdeploy (they crash on
@@ -204,20 +235,27 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 - **Write access** to the `block/buzz` GitHub repository
 - An `origin` remote whose configured URL is the canonical `block/buzz`
   repository
-- `gh` CLI version 2.87.0 or newer, authenticated with permission to dispatch
-  the candidate workflow
+- `gh` CLI authenticated with permission to push the candidate branch and open
+  its pull request
+- The Default `main` ruleset configured for squash-only merging, strict required
+  checks, stale-review dismissal, and the **Desktop Release Candidate** check
 - Release tag ruleset [`14378754`](https://github.com/block/buzz/rules/14378754)
-  active for `mobile-v*`, with creation, update, deletion, and non-fast-forward
-  protections and `buzz-release-bot` as its sole always-bypass actor
+  active for `desktop-v*` and `mobile-v*`, with creation, update, deletion, and
+  non-fast-forward protections and `buzz-release-bot` as its sole always-bypass
+  actor
 - The `buzz-release-bot` App credentials configured for GitHub Actions
-- The following **GitHub Actions secrets** must also be configured for the
+- The following **GitHub Actions variables and secrets** configured for the
   desktop release lane:
 
-  | Secret | Purpose |
-  |--------|---------|
-  | `BUZZ_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
-  | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
-  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
+  | Name | Kind | Purpose |
+  |------|------|---------|
+  | `BUZZ_RELEASE_TAGGER_CLIENT_ID` | Variable | GitHub App client ID used to create protected release tags |
+  | `BUZZ_RELEASE_TAGGER_PRIVATE_KEY` | Secret | GitHub App private key |
+  | `OSX_CODESIGN_ROLE` | Secret | macOS signing role used by `block/apple-codesign-action` |
+  | `CODESIGN_S3_BUCKET` | Secret | macOS signing exchange bucket |
+  | `BUZZ_UPDATER_PUBLIC_KEY` or `SPROUT_UPDATER_PUBLIC_KEY` | Secret | Tauri updater public key |
+  | `TAURI_SIGNING_PRIVATE_KEY` | Secret | Tauri updater private key |
+  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Secret | Password for the private key |
 
 Mobile candidate publication requires workflow-dispatch access and the existing
 release App because strict tag protection denies direct human creation. The App
@@ -232,10 +270,18 @@ actor list.
 
 ## Troubleshooting
 
-### `just release-desktop` fails with "must be on main branch"
+### The desktop candidate is stale or cannot be squash merged
+
+Do not update the branch manually and do not weaken the ruleset. Run
+`just release-desktop <version>` again from current `main`; this regenerates the
+candidate, reruns CI, and requires a fresh trusted approval on the new exact
+head. The post-merge verifier refuses to tag a squash whose parent differs from
+the recorded candidate base or whose tree differs from the validated PR head.
+
+### Local `just release-desktop` fails with "must be on main branch"
 Switch to `main` and pull latest before running the release recipe.
 
-### `just release-desktop` fails with "working tree is dirty"
+### Local `just release-desktop` fails with "working tree is dirty"
 Commit or stash your changes before running the release recipe.
 
 ### New commits land after publishing a mobile candidate

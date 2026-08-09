@@ -15,9 +15,8 @@ type E2eWindow = Window & {
   }) => void;
 };
 
-test("Share compute has a clear empty state and starts and stops sharing", async ({
-  page,
-}) => {
+test("Share compute chooses a model before sharing", async ({ page }) => {
+  const modelRef = "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M";
   await installMockBridge(page);
   await page.goto("/");
   await openSettings(page, "compute");
@@ -26,30 +25,62 @@ test("Share compute has a clear empty state and starts and stops sharing", async
   const toggle = page.getByTestId("mesh-share-compute-toggle");
   const model = page.getByTestId("mesh-share-compute-model");
 
-  await expect(card).toContainText("Not sharing right now");
-  await expect(card).toContainText(
-    "Choose a suggested model below, or enter a model reference or local file",
-  );
-  await expect(toggle).toBeDisabled();
+  await expect(card).not.toContainText("Not sharing right now");
+  await expect(
+    page.getByTestId("mesh-share-compute-options-motion"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("mesh-share-compute-sharing-status"),
+  ).toHaveCount(0);
+  await expect(model).toBeVisible();
+  await expect(toggle).toBeEnabled();
+  await model.click();
+  await page.getByRole("option", { name: "Custom model…" }).click();
+  await page.getByLabel("Custom model reference").fill(modelRef);
 
-  await model.fill("hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M");
+  await toggle.click();
+  await expect(
+    page.getByTestId("mesh-share-compute-options-motion"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("mesh-share-compute-sharing-status"),
+  ).toBeVisible();
+  await expect(model).toBeVisible();
   await expect(card).toContainText(
     "Buzz downloads remote models when sharing starts",
   );
-  await expect(toggle).toBeEnabled();
-
-  await toggle.click();
   await expect(toggle).toBeChecked();
-  await expect(card).toContainText("Sharing SmolLM2 135M with relay members");
+  await expect(
+    page.getByTestId("mesh-share-compute-sharing-status"),
+  ).toContainText("SmolLM2 135M with relay members");
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
     )
     .toContain("mesh_start_node");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as E2eWindow).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+      ),
+    )
+    .toContainEqual({
+      command: "mesh_start_node",
+      payload: {
+        request: { mode: "serve", modelId: modelRef },
+      },
+    });
 
   await toggle.click();
   await expect(toggle).not.toBeChecked();
-  await expect(card).toContainText("Not sharing right now");
+  await expect(card).not.toContainText("Not sharing right now");
+  await expect(
+    page.getByTestId("mesh-share-compute-options-motion"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("mesh-share-compute-sharing-status"),
+  ).toHaveCount(0);
+  await expect(model).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
@@ -87,16 +118,20 @@ test("a consuming client can switch to sharing its saved local model", async ({
 
   const card = page.getByTestId("settings-mesh-share-compute");
   const toggle = page.getByTestId("mesh-share-compute-toggle");
-  const model = page.getByTestId("mesh-share-compute-model");
-
   await expect(card).toContainText(
     "This machine is currently using another member's shared compute",
   );
   await expect(card).toContainText("Buzz may briefly restart");
   await expect(toggle).not.toBeChecked();
-  await expect(model).toBeEnabled();
-  await expect(model).toHaveValue(localModel);
+  await expect(
+    page.getByTestId("mesh-share-compute-options-motion"),
+  ).toHaveCount(0);
   await expect(toggle).toBeEnabled();
+  const customModel = page.getByLabel("Custom model reference");
+  await expect(customModel).toHaveValue(localModel);
+  await customModel.fill("");
+  await expect(customModel).toBeVisible();
+  await customModel.fill("hf://demo/replacement-model:Q4_K_M");
   await toggle.click();
   await expect(toggle).toBeChecked();
 
@@ -107,6 +142,8 @@ test("a consuming client can switch to sharing its saved local model", async ({
   expect(commands.names).not.toContain("mesh_stop_node");
   expect(commands.payloads).toContainEqual({
     command: "mesh_start_node",
-    payload: { request: { mode: "serve", modelId: localModel } },
+    payload: {
+      request: { mode: "serve", modelId: "hf://demo/replacement-model:Q4_K_M" },
+    },
   });
 });

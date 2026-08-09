@@ -18,12 +18,10 @@ const rules = [
 // Non-display uses: array windows over pubkey lists, color/initials
 // derivation where the value is never presented as an identity.
 const overrides = new Set([
-  // ProfileAvatar fallback label — decorative glyphs inside an avatar disc.
-  "src/features/huddle/components/ParticipantList.tsx:92",
   // HexAvatar: 6-char badge + hue derivation inside a color-coded disc,
   // clearly decorative (paired with a full truncatePubkey aria-label).
-  "src/features/huddle/components/ParticipantList.tsx:143",
-  "src/features/huddle/components/ParticipantList.tsx:144",
+  "src/features/huddle/components/ParticipantList.tsx:150",
+  "src/features/huddle/components/ParticipantList.tsx:151",
   // clientId (not a pubkey) sliced in a debug log next to the real thing.
   "src/features/channels/readState/readStateManager.ts:338",
   // Array windows (first N pubkeys), not string truncation.

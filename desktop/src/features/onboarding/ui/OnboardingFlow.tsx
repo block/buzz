@@ -388,8 +388,8 @@ export function OnboardingFlow({
   // key's relay profile reseeds the steps, and a key that already finished
   // onboarding on this machine skips straight into the app.
   const importExistingKey = React.useCallback(
-    async (nsec: string) => {
-      const identity = await importIdentity(nsec);
+    async (nsec: string, password?: string) => {
+      const identity = await importIdentity(nsec, password);
       relayClient.disconnect();
       queryClient.setQueryData(["identity"], identity);
       queryClient.removeQueries({ queryKey: profileQueryKey });

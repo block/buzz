@@ -3,7 +3,7 @@ use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 
 /// A linked instance record with no persona-derived fields set yet — the
 /// state right after creation, before any snapshot apply.
-fn sample_record() -> ManagedAgentRecord {
+pub(super) fn sample_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -50,8 +50,10 @@ fn sample_record() -> ManagedAgentRecord {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -137,7 +139,7 @@ fn preview_passes_through_unchanged_when_persona_missing() {
     assert_eq!(preview.persona_id.as_deref(), Some("deleted-persona"));
 }
 
-fn sample_persona() -> AgentDefinition {
+pub(super) fn sample_persona() -> AgentDefinition {
     AgentDefinition {
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
@@ -149,8 +151,10 @@ fn sample_persona() -> AgentDefinition {
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: Some("test-slug".to_string()),
+        catalog_source: None,
         env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -248,6 +252,25 @@ fn build_persona_event_produces_correct_kind() {
     let keys = nostr::Keys::generate();
     let event = builder.sign_with_keys(&keys).unwrap();
     assert_eq!(event.kind.as_u16() as u32, KIND_PERSONA);
+}
+
+#[test]
+fn shared_persona_event_has_exact_tag_and_round_trips() {
+    let mut record = sample_persona();
+    record.shared = true;
+    let event = build_persona_event(&record)
+        .unwrap()
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+
+    let shared_tags: Vec<Vec<&str>> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "shared"))
+        .map(|tag| tag.as_slice().iter().map(String::as_str).collect())
+        .collect();
+    assert_eq!(shared_tags, vec![vec!["shared", "true"]]);
+    assert!(persona_from_event(&event).unwrap().shared);
 }
 
 #[test]
@@ -355,8 +378,10 @@ fn content_matches_nip_ap_vector() {
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -384,8 +409,10 @@ fn round_trip_minimal_persona() {
         name_pool: vec![],
         is_builtin: true,
         is_active: false,
+        shared: false,
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -479,8 +506,10 @@ fn quad_absent_definition_hash_stable_across_activation() {
         name_pool: vec!["nib".to_string()],
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -521,8 +550,10 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,
+        shared: false,
         source_team: None,
         source_team_persona_slug: None,
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
@@ -880,6 +911,7 @@ mod flush_barrier {
         }
 
         let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
         *state.relay_url_override.lock().unwrap() = Some(spawn_stub_relay().await);
 
         let flushed = flush_pending_events(&db_path, &state).await.expect("flush");

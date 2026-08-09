@@ -12,6 +12,9 @@ import test from "node:test";
 function makePreview(overrides = {}) {
   return {
     displayName: "Test Agent",
+    isBuiltIn: false,
+    model: null,
+    runtime: null,
     systemPrompt: "You are helpful.",
     avatarUrl: null,
     memoryLevel: "none",

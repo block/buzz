@@ -32,8 +32,8 @@ use crate::managed_agents::{
 ///   manufactured definition snapshots the record's own values (prompt
 ///   present-even-if-empty via `to_definition_view`'s `unwrap_or_default`, env
 ///   COPIED so later instances inherit a working config, quad copied to the
-///   definition defaults), keeping `spawn_config_hash` stable. In both paths
-///   the record gains `persona_source_version` = the linked definition's
+///   definition defaults), keeping the spawn-config snapshot stable. In both
+///   paths the record gains `persona_source_version` = the linked definition's
 ///   content hash so the drift badge starts in sync.
 ///
 /// The manufactured definition's slug is the agent's pubkey: 64-hex passes

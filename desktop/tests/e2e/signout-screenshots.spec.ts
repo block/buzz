@@ -23,7 +23,7 @@ test.describe("signout screenshots", () => {
     });
   });
 
-  test("signout-section — Sign Out card in Settings › Profile", async ({
+  test("signout-section — data deletion card in Settings › Profile", async ({
     page,
   }) => {
     await installMockBridge(page);
@@ -32,6 +32,9 @@ test.describe("signout screenshots", () => {
 
     const section = page.getByTestId("settings-signout");
     await section.scrollIntoViewIfNeeded();
+    await expect(
+      section.getByRole("button", { name: "Delete my data" }),
+    ).toBeVisible();
 
     // Settle animations before capture.
     await page.evaluate(() =>
@@ -59,7 +62,7 @@ test.describe("signout screenshots", () => {
     await expect(dialog).toBeVisible({ timeout: 5_000 });
     await expect(dialog.getByText("Sign out and wipe all data?")).toBeVisible();
     await expect(
-      dialog.getByRole("button", { name: "Delete My Data" }),
+      dialog.getByRole("button", { name: "Delete my data" }),
     ).toBeVisible();
 
     // Settle animations before capture.
