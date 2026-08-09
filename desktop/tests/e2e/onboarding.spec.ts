@@ -3218,7 +3218,9 @@ test("welcome-everywhere banner: dismiss persists after channel re-entry", async
 
   // Return — banner must stay hidden.
   await page.getByTestId("channel-welcome-everyone").click();
-  await expect(page.getByTestId("chat-title")).toContainText("Welcome");
+  await expect(page.getByTestId("chat-title")).toContainText(
+    "welcome-everyone",
+  );
   await expect(banner).toHaveCount(0);
 });
 
