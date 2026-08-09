@@ -4,9 +4,11 @@
 //! assertion against the `CommandBuilder` alone would be weaker: it would not
 //! prove that what the builder holds is what the kernel hands the child.
 
-use crate::env_fence::fence_env;
+use crate::env_fence::{fence_env, WINDOWS_INHERIT_ALLOWLIST};
 use crate::path::user_shell_path;
-use crate::shell::{is_executable_file, login_argv0, resolve_shell, FALLBACK_SHELL};
+use crate::shell::{
+    is_executable_file, login_argv0, pick_windows_shell, resolve_shell, FALLBACK_SHELL,
+};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 
@@ -323,6 +325,105 @@ fn child_shell_is_the_resolved_shell_not_the_inherited_one() {
     assert!(
         !out.contains("/definitely/not/a/real/shell"),
         "the inherited SHELL reached the child:\n{out}"
+    );
+}
+
+/// The Windows allowlist obeys the same law as the Unix one: no secrets, ever.
+/// Windows environment names are case-insensitive, so the comparison here is
+/// too — an allowlist entry of `comspec` and one of `BUZZ_PRIVATE_KEY` differ
+/// only in how obviously wrong they are.
+#[test]
+fn windows_allowlist_admits_no_secrets() {
+    for entry in WINDOWS_INHERIT_ALLOWLIST {
+        let upper = entry.to_ascii_uppercase();
+        assert!(
+            !SECRET_KEYS
+                .iter()
+                .any(|secret| secret.eq_ignore_ascii_case(entry)),
+            "{entry} is a reserved secret and must not be allowlisted"
+        );
+        assert!(
+            !upper.starts_with("BUZZ") && !upper.starts_with("NOSTR"),
+            "{entry}: Buzz/Nostr-namespaced keys are exactly what the fence \
+             exists to withhold"
+        );
+    }
+}
+
+/// The keys the spawn itself depends on must be present: `ComSpec` and
+/// `USERPROFILE` feed `portable-pty`'s default-program and cwd resolution
+/// (`cmdbuilder.rs:671-675`, `:609-611`), and their absence is the confirmed
+/// `CreateProcessW "cmd.exe" in cwd None ... (os error 2)` failure. This
+/// pins them so a future trim of the list cannot silently reintroduce it.
+#[test]
+fn windows_allowlist_covers_the_spawn_contract() {
+    for key in ["ComSpec", "SystemRoot", "PATHEXT", "USERPROFILE"] {
+        assert!(
+            WINDOWS_INHERIT_ALLOWLIST.contains(&key),
+            "{key} is load-bearing for the Windows spawn and must stay \
+             allowlisted"
+        );
+    }
+}
+
+/// A rooted `ComSpec` naming a real file is the user's choice; honour it
+/// verbatim, including the `C:/` forward-slash and `\\server` UNC spellings
+/// Windows itself accepts.
+#[test]
+fn windows_shell_honours_a_valid_comspec() {
+    for candidate in [
+        r"C:\Windows\System32\cmd.exe",
+        r"D:\shells\nu.exe",
+        "C:/Windows/System32/cmd.exe",
+        r"\\server\share\cmd.exe",
+    ] {
+        assert_eq!(
+            pick_windows_shell(Some(candidate), Some(r"C:\Windows"), |path| path
+                == candidate),
+            candidate,
+            "a rooted, existing ComSpec must be used verbatim"
+        );
+    }
+}
+
+/// A `ComSpec` naming a file that does not exist falls through to the
+/// `SystemRoot`-derived absolute fallback — the case that used to become
+/// `CreateProcessW`'s os error 2, because `lpApplicationName` is never
+/// path-searched.
+#[test]
+fn windows_shell_falls_back_when_comspec_is_missing() {
+    let picked = pick_windows_shell(
+        Some(r"C:\definitely\not\real\cmd.exe"),
+        Some(r"D:\CustomRoot"),
+        |_| false,
+    );
+    assert_eq!(picked, r"D:\CustomRoot\System32\cmd.exe");
+}
+
+/// The hijack guard: a relative `ComSpec=cmd.exe` is rejected even when a file
+/// by that name exists, because `lpApplicationName` would execute whatever
+/// `cmd.exe` sits in Buzz's current directory. `is_file` answering `true` is
+/// exactly the attack scenario, so this arm discriminates the rootedness
+/// check from the existence check.
+#[test]
+fn windows_shell_rejects_a_relative_comspec_even_if_the_file_exists() {
+    for candidate in ["cmd.exe", r"tools\cmd.exe", r"\cmd.exe", "C:cmd.exe"] {
+        assert_eq!(
+            pick_windows_shell(Some(candidate), Some(r"C:\Windows"), |_| true),
+            r"C:\Windows\System32\cmd.exe",
+            "{candidate}: a ComSpec not anchored to a drive or UNC share must \
+             not be spawned"
+        );
+    }
+}
+
+/// With no `ComSpec` and no `SystemRoot` at all — a hand-stripped environment
+/// — the resolver still produces an absolute path rather than a bare name.
+#[test]
+fn windows_shell_survives_an_empty_environment() {
+    assert_eq!(
+        pick_windows_shell(None, None, |_| false),
+        r"C:\Windows\System32\cmd.exe"
     );
 }
 
