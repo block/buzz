@@ -21,6 +21,10 @@
 //! on many systems. A directory or a non-executable file falls through to the
 //! next candidate instead of becoming an unspawnable child.
 
+// Every user of `Path` in this module is part of the Unix executability check;
+// the Windows resolver below works on the string form, because what it has to
+// reject (a relative `ComSpec`) is a question about the text, not the file.
+#[cfg(unix)]
 use std::path::Path;
 
 /// Last-resort shell. POSIX guarantees `/bin/sh`; if this is not executable
