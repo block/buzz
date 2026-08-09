@@ -443,6 +443,10 @@ export function WelcomeComposerGuidanceLayer({
   settingUp,
   state,
 }: WelcomeComposerGuidanceLayerProps) {
+  if (state === "hidden") {
+    return null;
+  }
+
   return (
     <div className="relative" data-testid="welcome-composer-guidance-layer">
       <ComposerDockGlassBackdrop
