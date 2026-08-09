@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { availableMediaDevices } from "./mediaDevices.ts";
+import {
+  availableMediaDevices,
+  MICROPHONE_UNAVAILABLE_ERROR,
+  requireMediaDevices,
+} from "./mediaDevices.ts";
 
 /**
  * Swap `globalThis.navigator` for the duration of `run`, and swallow the
@@ -54,5 +58,26 @@ test("returns null when mediaDevices exists but exposes no enumerateDevices", ()
 test("returns null when there is no navigator at all", () => {
   withNavigator(undefined, () => {
     assert.equal(availableMediaDevices(), null);
+  });
+});
+
+test("requireMediaDevices throws the sentinel when the API is missing", () => {
+  // The join path cannot degrade, so it throws a value huddleError can map to
+  // copy instead of letting a raw TypeError reach the error boundary.
+  withNavigator({}, () => {
+    assert.throws(
+      () => requireMediaDevices(),
+      (error) => error.message === MICROPHONE_UNAVAILABLE_ERROR,
+    );
+  });
+});
+
+test("requireMediaDevices returns the object when getUserMedia is present", () => {
+  const media = {
+    enumerateDevices: () => Promise.resolve([]),
+    getUserMedia: () => Promise.resolve({}),
+  };
+  withNavigator({ mediaDevices: media }, () => {
+    assert.equal(requireMediaDevices(), media);
   });
 });

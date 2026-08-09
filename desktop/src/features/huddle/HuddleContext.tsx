@@ -5,10 +5,7 @@ import * as React from "react";
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { type AudioInputDevice, useAudioDevices } from "./lib/useAudioDevices";
 import { formatHuddleActionError } from "./lib/huddleError";
-import {
-  availableMediaDevices,
-  MICROPHONE_UNAVAILABLE_ERROR,
-} from "./lib/mediaDevices";
+import { availableMediaDevices, requireMediaDevices } from "./lib/mediaDevices";
 import {
   type VoiceInputMode,
   useHuddlePttState,
@@ -220,9 +217,7 @@ export function HuddleProvider({
       .catch(() => {
         /* best-effort */
       });
-    // The device list itself comes from Rust and always loads; only the
-    // hot-plug listener needs `navigator.mediaDevices`, which is absent in a
-    // non-secure context.
+    // Only the hot-plug listener needs mediaDevices; the list comes from Rust.
     const media = availableMediaDevices();
     if (!media) return;
     media.addEventListener("devicechange", refreshOutputDevices);
@@ -584,11 +579,7 @@ export function HuddleProvider({
       if (selectedDeviceId) {
         audioConstraints.deviceId = { exact: selectedDeviceId };
       }
-      const media = availableMediaDevices();
-      if (!media?.getUserMedia) {
-        throw new Error(MICROPHONE_UNAVAILABLE_ERROR);
-      }
-      const stream = await media.getUserMedia({
+      const stream = await requireMediaDevices().getUserMedia({
         audio: audioConstraints,
       });
       const audioTrack = stream.getAudioTracks()[0];

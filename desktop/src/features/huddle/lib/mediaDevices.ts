@@ -38,3 +38,15 @@ export function availableMediaDevices(): MediaDevices | null {
 
 /** Raw error thrown when a huddle needs a mic but the API is unavailable. */
 export const MICROPHONE_UNAVAILABLE_ERROR = "microphone_unavailable";
+
+/**
+ * Like [`availableMediaDevices`], for the join path, which cannot degrade: a
+ * huddle without a microphone is not a huddle. Throws the sentinel that
+ * `formatHuddleActionError` turns into user-facing copy, instead of letting
+ * the raw `undefined is not an object` reach the error boundary.
+ */
+export function requireMediaDevices(): MediaDevices {
+  const media = availableMediaDevices();
+  if (!media?.getUserMedia) throw new Error(MICROPHONE_UNAVAILABLE_ERROR);
+  return media;
+}
