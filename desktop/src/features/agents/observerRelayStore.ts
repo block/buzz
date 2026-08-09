@@ -45,6 +45,9 @@ const EMPTY_EVENTS: ObserverEvent[] = [];
 const EMPTY_TRANSCRIPT: TranscriptItem[] = [];
 
 const listeners = new Set<() => void>();
+const eventListeners = new Set<
+  (agentPubkey: string, event: ObserverEvent) => void
+>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
@@ -211,6 +214,9 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
     ? sorted.slice(sorted.length - MAX_OBSERVER_EVENTS)
     : sorted;
   eventsByAgent.set(key, final);
+  for (const listener of eventListeners) {
+    listener(key, event);
+  }
 
   // Determine whether the new event landed at the end of the sorted array.
   // If it did (common case), we can incrementally process just this event.
@@ -231,6 +237,16 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   invalidateSnapshot(key);
 
   notifyListeners();
+}
+
+/** Subscribe to each newly accepted live observer event after deduplication. */
+export function subscribeObserverEvents(
+  listener: (agentPubkey: string, event: ObserverEvent) => void,
+) {
+  eventListeners.add(listener);
+  return () => {
+    eventListeners.delete(listener);
+  };
 }
 
 /**

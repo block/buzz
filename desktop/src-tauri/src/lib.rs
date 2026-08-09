@@ -85,11 +85,8 @@ use tauri_plugin_window_state::StateFlags;
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
+    // mesh-llm's async chains overflow tokio's default 2 MiB worker stacks.
+    // Match upstream's 8 MiB stacks before anything touches tauri::async_runtime.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -904,6 +901,8 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::causal_ledger::read_causal_ledger,
+            archive::causal_ledger::append_causal_ledger_entry,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

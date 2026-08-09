@@ -17,6 +17,7 @@
 //! validation (sig/id + kind + p-tag + agent tag + frame=telemetry + author
 //! == agent) is applied fail-closed.
 
+pub(crate) mod causal_ledger;
 mod pipeline;
 pub mod store;
 
