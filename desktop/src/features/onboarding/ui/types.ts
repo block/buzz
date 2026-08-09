@@ -1,4 +1,8 @@
-import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+  Profile,
+} from "@/shared/api/types";
 
 export type OnboardingPage =
   | "profile"
@@ -62,9 +66,18 @@ export type SetupStepActions = {
   navigateToAgentSettings?: () => void;
 };
 
+export type DefaultConfigDraft = {
+  config: GlobalAgentConfig;
+  isCustomModelEditing: boolean;
+  isCustomProvider: boolean;
+  isDirty: boolean;
+};
+
 export type DefaultConfigStepActions = {
   back: () => void;
   complete: () => void;
+  discardDraft: () => void;
+  updateDraft: (draft: DefaultConfigDraft) => void;
 };
 
 export type SetupStepRuntimeState = {

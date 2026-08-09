@@ -99,19 +99,27 @@ export function routeLiveAgentText(
  * in thread arrival order even when the bridge resolves calls asynchronously.
  */
 export function createOrderedSpeaker(
-  speak: (text: string, routeId: number) => Promise<void>,
+  speak: (
+    text: string,
+    routeId: number,
+    speakerPubkey: string,
+  ) => Promise<void>,
   onError: (error: unknown) => void,
   initiallyEnabled = true,
   onDrop: (routeId: number, reason: "disabled") => void = () => {},
 ): {
-  enqueue: (text: string, routeId?: number) => "queued" | "disabled";
+  enqueue: (
+    text: string,
+    routeId: number | undefined,
+    speakerPubkey: string,
+  ) => "queued" | "disabled";
   setEnabled: (enabled: boolean) => void;
 } {
   let tail = Promise.resolve();
   let enabled = initiallyEnabled;
   let generation = 0;
   return {
-    enqueue(text, routeId = 0) {
+    enqueue(text, routeId = 0, speakerPubkey) {
       if (!enabled) return "disabled";
       const queuedGeneration = generation;
       tail = tail
@@ -120,7 +128,7 @@ export function createOrderedSpeaker(
             onDrop(routeId, "disabled");
             return;
           }
-          return speak(text, routeId);
+          return speak(text, routeId, speakerPubkey);
         })
         .catch(onError);
       return "queued";

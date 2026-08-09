@@ -221,7 +221,7 @@ test("virtualized rows preserve their heterogeneous height estimates", () => {
   );
   const estimates = items.map(estimateVirtualizedTimelineItemHeight);
 
-  assert.equal(estimates[0], 32);
+  assert.equal(estimates[0], 56);
   assert.ok(estimates[2] > estimates[1] + 200);
   assert.equal(estimates.at(-1), 96);
 });

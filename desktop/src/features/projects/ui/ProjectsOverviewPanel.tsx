@@ -1,4 +1,4 @@
-import { CircleDot, FolderGit2, GitPullRequest, Radio } from "lucide-react";
+import { CircleDot, FolderGit2, Folders, GitPullRequest } from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -7,14 +7,13 @@ import type {
 } from "@/features/projects/hooks";
 
 export type ProjectsOverviewSection =
+  | "projects"
   | "repositories"
   | "prs"
-  | "local"
   | "issues";
 
 type ProjectsOverviewPanelProps = {
   children: React.ReactNode;
-  localRepositoryCount: number;
   metadata: React.ReactNode;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   projects: Project[];
@@ -27,7 +26,7 @@ function overviewStats(
 ) {
   return projects.reduce(
     (stats, project) => {
-      const summary = summaries?.[project.repoAddress];
+      const summary = summaries?.[project.id];
       return {
         issues: stats.issues + (summary?.issueCount ?? 0),
         prs: stats.prs + (summary?.prCount ?? 0),
@@ -61,7 +60,7 @@ function StatPill({
         </span>
         <Icon className="h-3.5 w-3.5 text-muted-foreground/70" />
       </span>
-      <span className="mt-auto pt-4 text-4xl font-semibold leading-none tracking-tight text-foreground">
+      <span className="mt-auto pt-3 text-2xl font-semibold leading-none tracking-tight text-foreground">
         {count}
       </span>
     </button>
@@ -70,7 +69,6 @@ function StatPill({
 
 export function ProjectsOverviewPanel({
   children,
-  localRepositoryCount,
   metadata,
   onSelectSection,
   projects,
@@ -78,38 +76,50 @@ export function ProjectsOverviewPanel({
 }: ProjectsOverviewPanelProps) {
   const stats = overviewStats(projects, summaries);
 
+  // The feed owns the full left column; the stat counters live at the top
+  // of the side rail as compact cards, above People and Contribution
+  // Activity, instead of a full-width row over the feed. The feed column
+  // has no left inset so the timeline spine lines up with the section tabs.
   return (
-    <section className="-mx-4 mb-4" data-testid="projects-overview-panel">
+    <section
+      className="-mr-[calc(1rem+10px)] mb-4"
+      data-testid="projects-overview-panel"
+    >
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
-          <StatPill
-            count={projects.length}
-            icon={FolderGit2}
-            label="Repositories"
-            onClick={() => onSelectSection("repositories")}
-          />
-          <StatPill
-            count={stats.prs}
-            icon={GitPullRequest}
-            label="Pull requests"
-            onClick={() => onSelectSection("prs")}
-          />
-          <StatPill
-            count={localRepositoryCount}
-            icon={Radio}
-            label="Local"
-            onClick={() => onSelectSection("local")}
-          />
-          <StatPill
-            count={stats.issues}
-            icon={CircleDot}
-            label="Issues"
-            onClick={() => onSelectSection("issues")}
-          />
-        </div>
-        {metadata}
-        <div className="order-2 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-2">
+        <div className="order-1 min-w-0 pb-4 pr-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-1">
           {children}
+        </div>
+        <div className="order-2 flex min-w-0 flex-col gap-3 px-4 pb-4 pt-2 xl:order-none xl:col-start-2 xl:row-start-1">
+          <div className="grid grid-cols-2 gap-2">
+            <StatPill
+              count={projects.length}
+              icon={Folders}
+              label="Projects"
+              onClick={() => onSelectSection("projects")}
+            />
+            <StatPill
+              count={projects.reduce(
+                (count, project) => count + project.repositories.length,
+                0,
+              )}
+              icon={FolderGit2}
+              label="Repositories"
+              onClick={() => onSelectSection("repositories")}
+            />
+            <StatPill
+              count={stats.prs}
+              icon={GitPullRequest}
+              label="Pull requests"
+              onClick={() => onSelectSection("prs")}
+            />
+            <StatPill
+              count={stats.issues}
+              icon={CircleDot}
+              label="Issues"
+              onClick={() => onSelectSection("issues")}
+            />
+          </div>
+          {metadata}
         </div>
       </div>
     </section>

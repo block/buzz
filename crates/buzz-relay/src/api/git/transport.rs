@@ -224,7 +224,92 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
+        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+
         Ok(GitAuth { pubkey, tenant })
+    }
+}
+
+/// Deny banned principals on every Git HTTP request.
+///
+/// Git runs outside the WebSocket authentication path, so a valid NIP-98
+/// credential and channel membership are not enough — neither reflects a
+/// moderation ban. Git credentials are also deliberately reused across a
+/// session (see the replay notes above), so no session expiry would close the
+/// gap on its own. Re-read the durable ban per request instead.
+///
+/// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
+/// `handlers::auth`: banning a human must also revoke their agents, or the ban
+/// is bypassable by cloning and pushing through an agent key.
+async fn deny_banned_git_principal(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+    auth_tag: Option<&str>,
+) -> Result<(), Response> {
+    let agent = git_restriction_state(db, community, pubkey).await?;
+
+    // Skip the owner read when the agent is already banned: the denial is
+    // identical either way. Mirrors the WebSocket cascade's short-circuit.
+    let owner = if agent.banned {
+        None
+    } else {
+        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+    };
+    let owner_state = match owner {
+        Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
+        None => None,
+    };
+
+    enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
+        warn!(
+            pubkey = %pubkey.to_hex(),
+            owner = ?owner.map(|owner| owner.to_hex()),
+            "git: community ban denied request"
+        );
+        (status, "blocked: banned from this community").into_response()
+    })
+}
+
+/// One restriction read, failing closed with 503.
+///
+/// A restriction-store outage must not be reported to the client as a
+/// permission decision — 503 says "retry", 403 would claim a ban that was
+/// never read.
+async fn git_restriction_state(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> Result<buzz_db::moderation::RestrictionState, Response> {
+    db.moderation_restriction_state(community, pubkey.as_bytes())
+        .await
+        .map_err(|error| {
+            warn!(pubkey = %pubkey.to_hex(), error = %error, "git: ban lookup failed closed");
+            (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+        })
+}
+
+fn enforce_git_ban(restriction: &buzz_db::moderation::RestrictionState) -> Result<(), StatusCode> {
+    if restriction.banned {
+        Err(StatusCode::FORBIDDEN)
+    } else {
+        Ok(())
+    }
+}
+
+/// Either principal's ban denies the request; `None` owner means no attested
+/// owner to inherit from.
+///
+/// Split from the DB reads so agent→owner precedence stays unit-testable
+/// without Postgres.
+fn enforce_git_ban_cascade(
+    agent: &buzz_db::moderation::RestrictionState,
+    owner: Option<&buzz_db::moderation::RestrictionState>,
+) -> Result<(), StatusCode> {
+    enforce_git_ban(agent)?;
+    match owner {
+        Some(owner) => enforce_git_ban(owner),
+        None => Ok(()),
     }
 }
 
@@ -2610,6 +2695,76 @@ mod sec005_read_gate_tests {
         assert!(!read_role_allows(Some("")), "empty role must deny");
     }
 
+    #[test]
+    fn durable_ban_denies_git_even_with_otherwise_valid_auth() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Err(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn timeout_without_ban_does_not_revoke_git_access() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now()),
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Ok(()));
+    }
+
+    fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
+        buzz_db::moderation::RestrictionState {
+            banned,
+            muted_until: None,
+        }
+    }
+
+    // ── Agent → owner ban cascade ────────────────────────────────────────
+    //
+    // Git accepts NIP-OA attestations on the signed NIP-98 token, so an agent
+    // key can act for its owner (`deny_banned_git_principal`). The NIP-42 gate
+    // in `handlers::auth` cascades the ban check to the proven owner for that
+    // reason, and Git must agree: if only the presented key were checked, a
+    // banned human would keep clone and push access through any agent key.
+
+    #[test]
+    fn banned_owner_denies_git_for_an_otherwise_clear_agent() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(true))),
+            Err(StatusCode::FORBIDDEN),
+            "an agent must inherit its proven owner's ban"
+        );
+    }
+
+    #[test]
+    fn banned_agent_denies_git_whatever_the_owner_state() {
+        for owner in [None, Some(restriction(false)), Some(restriction(true))] {
+            assert_eq!(
+                enforce_git_ban_cascade(&restriction(true), owner.as_ref()),
+                Err(StatusCode::FORBIDDEN),
+                "a directly banned agent must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_agent_and_clear_owner_allow_git() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(false))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn clear_agent_without_attested_owner_allows_git() {
+        // No NIP-OA tag on the request: nothing to inherit, so the agent's own
+        // state decides. A missing owner must not read as a ban.
+        assert_eq!(enforce_git_ban_cascade(&restriction(false), None), Ok(()));
+    }
+
     fn announcement(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
         EventBuilder::new(Kind::Custom(30617), "")
             .tags(tags)
@@ -2964,5 +3119,130 @@ mod sec005_read_gate_tests {
                 .is_err(),
             "deleted announcement must deny reads even for channel members"
         );
+    }
+
+    // ── Ban gate wiring (requires Postgres) ──────────────────────────────
+    //
+    // The pure tests above fix the decision table; these prove the gate is
+    // actually wired to the durable store — that it reads the real ban row,
+    // resolves the NIP-OA owner from a live attestation, and fails closed when
+    // the store is unreachable. `deny_banned_git_principal` runs inside the
+    // `GitAuth` extractor, which every Git route (`info/refs`, `git-upload-pack`,
+    // `git-receive-pack`) goes through, so advertise, fetch and push all
+    // inherit these outcomes.
+
+    /// Community + a ban actor, without the channel/repo fixture the read-gate
+    /// tests need — the ban gate runs before any repo is resolved.
+    async fn setup_ban_community() -> (buzz_db::Db, buzz_core::CommunityId, Vec<u8>) {
+        let db = setup_db().await;
+        let host = format!("ban-git-{}.example", uuid::Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let actor = Keys::generate().public_key().to_bytes().to_vec();
+        db.ensure_user(community, &actor).await.expect("actor");
+        (db, community, actor)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_denies_banned_member_and_allows_clear_member() {
+        let (db, community, actor) = setup_ban_community().await;
+        let member = Keys::generate();
+        let member_pk = member.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &member_pk).await.expect("member");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &member.public_key(), None)
+                .await
+                .is_ok(),
+            "precondition: an unbanned member passes the git ban gate"
+        );
+
+        db.ban_community_member(community, &member_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban");
+
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "blocked: banned from this community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_cascades_to_a_banned_nip_oa_owner() {
+        let (db, community, actor) = setup_ban_community().await;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let owner_pk = owner.public_key().to_bytes().to_vec();
+        let agent_pk = agent.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &owner_pk).await.expect("owner");
+        db.ensure_user(community, &agent_pk).await.expect("agent");
+
+        // A real attestation: the gate must verify it, not trust a claim.
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=9")
+            .expect("auth tag");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
+                .await
+                .is_ok(),
+            "precondition: neither agent nor owner is banned"
+        );
+
+        // Ban the human only. The agent's own row stays clear.
+        db.ban_community_member(community, &owner_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban owner");
+
+        let (status, _) = denial_parts(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "banning the owner must revoke its agent's git access"
+        );
+
+        // An unattested request from the same agent key is unaffected: the
+        // cascade must follow a verified owner, not punish every agent.
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+                .await
+                .is_ok(),
+            "without an attestation there is no owner to inherit from"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_fails_closed_with_503_when_the_store_is_unreachable() {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        // Closing the pool is the cheapest faithful stand-in for the
+        // restriction store being unavailable mid-request.
+        pool.close().await;
+
+        let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a store outage must deny as retryable, never allow and never claim a 403"
+        );
+        assert_eq!(body, "authorization unavailable");
     }
 }

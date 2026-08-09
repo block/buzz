@@ -177,6 +177,68 @@ async function applyCaretFormat(
   await page.getByRole("button", { name: label, exact: true }).click();
 }
 
+for (const platform of [
+  { name: "macOS", navigatorPlatform: "MacIntel", shortcut: "Meta+Shift+V" },
+  {
+    name: "Windows/Linux",
+    navigatorPlatform: "Win32",
+    shortcut: "Control+Shift+V",
+  },
+]) {
+  test(`pastes rich clipboard content without formatting on ${platform.name}`, async ({
+    page,
+  }) => {
+    await page.addInitScript((navigatorPlatform) => {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        value: navigatorPlatform,
+      });
+    }, platform.navigatorPlatform);
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"], {
+        origin: "http://127.0.0.1:4173",
+      });
+    await openGeneral(page);
+
+    await page.evaluate(async () => {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob(
+            [
+              '<p><strong>Bold</strong> and <a href="https://example.com">linked</a></p><ul><li>list item</li></ul>',
+            ],
+            { type: "text/html" },
+          ),
+          "text/plain": new Blob(["Bold and linked\nlist item"], {
+            type: "text/plain",
+          }),
+        }),
+      ]);
+    });
+
+    const input = page.getByTestId("message-input");
+    await input.click();
+    await page.keyboard.press(platform.shortcut);
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+              .__BUZZ_E2E_COMMANDS__ ?? [],
+        ),
+      )
+      .toContain("read_clipboard_text");
+    await expect(input).toHaveText("Bold and linkedlist item");
+    await expect(input.locator("strong, a, ul, li")).toHaveCount(0);
+    await expect(input.locator(":scope > p")).toHaveText([
+      "Bold and linked",
+      "list item",
+    ]);
+  });
+}
+
 for (const format of [
   { label: "Code block", selector: "pre" },
   { label: "Bullet list", selector: "ul" },

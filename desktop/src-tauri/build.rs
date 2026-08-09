@@ -1,6 +1,9 @@
 // Shared schema, included from the same source the runtime command parses with,
 // so the build-time validation below and the runtime parse cannot drift.
 include!("src/commands/reconnect_hook_config.rs");
+// Same source of truth the runtime filters with, so a baked build env cannot
+// carry a reserved key the runtime believes it already rejected.
+include!("src/managed_agents/reserved_env_keys.rs");
 
 use base64::Engine as _;
 
@@ -13,10 +16,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_BUZZ_AGENT_MODEL");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ENV");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
-    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT");
-    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
+
+    // Explicit owner-only agent-access capability. Release packaging sets this
+    // presence-only marker; OSS/custom builds leave agent access configurable.
+    if std::env::var("BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY").is_ok() {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_ACCESS_OWNER_ONLY=1");
+    }
 
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_URL={relay_url}");
@@ -61,6 +69,20 @@ fn main() {
                     line
                 );
             }
+            // The baked env is written into every spawned agent's environment
+            // LAST (see `managed_agents/runtime.rs`), after Buzz sets the
+            // access gates and identity vars. A baked reserved key would
+            // therefore silently override the gate the UI promises, so reject
+            // it at build time instead of shipping a binary that bypasses its
+            // own enforcement.
+            if is_reserved_env_key(key) {
+                panic!(
+                    "BUZZ_BUILD_AGENT_ENV line {}: `{}` is reserved by Buzz and cannot be baked \
+                     into a build (it would override Buzz's own identity/access env)",
+                    line_no + 1,
+                    key
+                );
+            }
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_ENV={encoded}");
@@ -73,21 +95,6 @@ fn main() {
             panic!("BUZZ_BUILD_RELAY_RECONNECT_CMD doesn't match ReconnectHookConfig: {e}")
         });
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_RECONNECT_CMD={val}");
-    }
-
-    // Presence-only flag: when set (any non-empty value), observer-feed archive
-    // defaults to ON for the current identity on first run.  OSS builds leave
-    // this unset → default OFF.  No JSON validation needed — the command only
-    // checks `.is_some()`.
-    if std::env::var("BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT").is_ok() {
-        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_OBSERVER_ARCHIVE_DEFAULT=1");
-    }
-
-    // Presence-only flag: when set (any non-empty value), agent-turn-metric
-    // archive defaults to ON for the current identity on first run.  OSS builds
-    // leave this unset → default OFF.
-    if std::env::var("BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT").is_ok() {
-        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT=1");
     }
 
     // Presence-only release capability: internal desktop builds opt into

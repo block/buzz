@@ -409,8 +409,8 @@ void main() {
       final row = quickReactionEmoji(entries, customShortcodes: const {});
 
       expect(row.first, '\u{1F525}');
-      expect(row, hasLength(4));
-      expect(row, containsAll(defaultQuickEmojis.take(3)));
+      expect(row, hasLength(5));
+      expect(row, containsAll(defaultQuickEmojis.take(4)));
     });
 
     test('drops custom emoji no longer in the palette', () {
