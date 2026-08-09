@@ -102,6 +102,7 @@ fn merge_personas_adds_missing_built_ins() {
             "Daily Routine Adviser",
             "Reporting Adviser",
             "Plans Adviser",
+            "Keeper",
         ]
     );
     let active_ids: Vec<&str> = records
@@ -123,6 +124,7 @@ fn merge_personas_adds_missing_built_ins() {
             "builtin:command-daily-routine",
             "builtin:command-reporting",
             "builtin:command-plans",
+            "builtin:keeper",
         ]
     );
 }
@@ -183,6 +185,59 @@ fn command_team_builtins_are_active_symbolic_and_route_independent() {
         assert!(record
             .system_prompt
             .contains("Never claim that a proposed planning change has been applied"));
+    }
+}
+
+#[test]
+fn keeper_builtin_is_owner_private_and_uses_encrypted_engram_protocol() {
+    let records = built_in_persona_records("2026-08-09T00:00:00Z");
+    let keeper = records
+        .iter()
+        .find(|record| record.id == "builtin:keeper")
+        .expect("Keeper should be available as a built-in managed persona");
+
+    assert_eq!(keeper.display_name, "Keeper");
+    assert!(keeper.is_builtin);
+    assert!(keeper.is_active);
+    assert_eq!(keeper.runtime, None);
+    assert_eq!(keeper.model, None);
+    assert!(!keeper.shared);
+    assert_eq!(keeper.respond_to, None);
+    assert!(keeper.respond_to_allowlist.is_empty());
+    assert_eq!(keeper.parallelism, Some(1));
+    assert!(keeper
+        .avatar_url
+        .as_deref()
+        .is_some_and(|avatar| avatar.starts_with("data:image/svg+xml,")));
+
+    for required in [
+        "keeper-index-v1",
+        "keeper-person-v1",
+        "keeper-interaction-v1",
+        "keeper-unresolved-v1",
+        "mem/keeper/index",
+        "mem/keeper/person/<opaque-id>",
+        "mem/keeper/interaction/<capture-id>",
+        "mem/keeper/unresolved/<capture-id>",
+        "buzz mem ls --json",
+        "buzz mem get",
+        "buzz mem set",
+        "buzz mem rm",
+        "source_event_id",
+        "source_thread_id",
+        "facts",
+        "observations",
+        "confidence",
+        "ambiguous",
+        "read it back",
+        "correction",
+        "forget",
+        "undo",
+    ] {
+        assert!(
+            keeper.system_prompt.contains(required),
+            "Keeper prompt missing {required:?}"
+        );
     }
 }
 

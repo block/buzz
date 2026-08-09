@@ -23,6 +23,12 @@ const managed = [
     status: "stopped",
   },
   {
+    pubkey: "keeper-key",
+    name: "Keeper",
+    personaId: "builtin:keeper",
+    status: "running",
+  },
+  {
     pubkey: "other-key",
     name: "Other",
     personaId: "builtin:fizz",
@@ -30,7 +36,7 @@ const managed = [
   },
 ];
 
-test("projects only command personas into stable ship presentation records", () => {
+test("projects command and approved support personas into stable ship presentation records", () => {
   const result = projectLivingShipAgents({
     managedAgents: managed,
     channels: [{ id: "ops-channel", name: "operations" }],
@@ -76,7 +82,17 @@ test("projects only command personas into stable ship presentation records", () 
         lifecycle: "offline",
         channelName: null,
       },
+      {
+        adviser: "keeper",
+        locationId: "wardroom",
+        lifecycle: "online",
+        channelName: null,
+      },
     ],
+  );
+  assert.equal(
+    result.some(({ personaId }) => personaId === "builtin:fizz"),
+    false,
   );
 });
 

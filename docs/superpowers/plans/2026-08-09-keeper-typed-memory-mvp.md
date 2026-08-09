@@ -32,25 +32,25 @@
 - Consumes: existing `AgentDefinition`, on-demand persona conversation provisioning, and `buzz mem ls|get|set|rm`.
 - Produces: active `builtin:keeper`, display name `Keeper`, symbolic avatar, one-turn parallelism, and a prompt defining `keeper-index-v1`, `keeper-person-v1`, `keeper-interaction-v1`, and `keeper-unresolved-v1` records.
 
-- [ ] **Step 1: Write the failing built-in behavior test**
+- [x] **Step 1: Write the failing built-in behavior test**
 
   Add a test that finds `builtin:keeper` and asserts it is active, built-in, runtime/model independent, owner-private, single-turn, symbolic, and names the exact encrypted slugs and CLI read/write/tombstone commands. Assert the prompt requires source event/thread IDs, fact/observation separation, ambiguity quarantine, read-back verification, correction, forget, and immediate undo.
 
-- [ ] **Step 2: Run the focused Rust test and verify RED**
+- [x] **Step 2: Run the focused Rust test and verify RED**
 
   Run: `. ./bin/activate-hermit && cargo test --manifest-path desktop/src-tauri/Cargo.toml managed_agents::personas::tests::keeper_builtin_is_owner_private_and_uses_encrypted_engram_protocol -- --exact`
 
   Expected: FAIL because no `builtin:keeper` definition exists.
 
-- [ ] **Step 3: Add the minimal Keeper definition**
+- [x] **Step 3: Add the minimal Keeper definition**
 
   Add a compact naval-style SVG data URI and an explicit prompt. The prompt must use opaque lowercase IDs in slugs, resolve identity through `mem/keeper/index`, quarantine multiple matches, retain the triggering Buzz event/thread references, use stdin for JSON writes, verify successful writes with `buzz mem get`, and report partial failure truthfully.
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
   Run the Step 2 command again. Expected: PASS.
 
-- [ ] **Step 5: Add the E2E bridge fixture and run persona regressions**
+- [x] **Step 5: Add the E2E bridge fixture and run persona regressions**
 
   Mirror the built-in in `resetMockPersonas`, then run:
 
@@ -72,25 +72,25 @@
 - Consumes: managed agents identified by `personaId`.
 - Produces: `LivingShipAgentId = AdviserId | "keeper"`; Keeper appears only after its managed instance exists, uses Ship's Office as its working home, and remains outside Command Brief contribution contracts.
 
-- [ ] **Step 1: Write failing projection tests**
+- [x] **Step 1: Write failing projection tests**
 
   Extend the room-map test with `keeper: "ships-office"`. Add a managed Keeper fixture and assert `projectLivingShipAgents` includes it while still excluding unrelated personas.
 
-- [ ] **Step 2: Run focused TypeScript tests and verify RED**
+- [x] **Step 2: Run focused TypeScript tests and verify RED**
 
   Run: `cd desktop && pnpm test src/features/living-ship/domain/shipLayout.test.mjs src/features/living-ship/domain/shipProjection.test.mjs`
 
   Expected: FAIL because the visual registry has no Keeper.
 
-- [ ] **Step 3: Widen the Living Ship-only identity and add Keeper metadata**
+- [x] **Step 3: Widen the Living Ship-only identity and add Keeper metadata**
 
   Introduce `LivingShipAgentId` locally, add Keeper with persona ID `builtin:keeper`, Ship's Office home, short label `KEEP`, and a reused compatible sprite column. Update screen copy from only “command team” to “command team and support agents”. Do not change `AdviserId`, `SPECIALISTS`, or Daily Command Brief schemas.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
   Run the Step 2 command again. Expected: PASS.
 
-- [ ] **Step 5: Extend the real screen journey**
+- [x] **Step 5: Extend the real screen journey**
 
   Add a running Keeper managed-agent seed to `living-ship.spec.ts`, assert its visible state and details, then run:
 
@@ -108,17 +108,19 @@
 - Consumes: Tasks 1-2.
 - Produces: a verified phase PR and a reproducible installed-app acceptance checklist.
 
-- [ ] **Step 1: Run focused gates**
+- [x] **Step 1: Run focused gates**
 
   Run the Rust persona test, Living Ship domain tests, Living Ship Playwright journey, `git diff --check`, and relevant format/lint checks.
 
-- [ ] **Step 2: Run the repository gate**
+- [x] **Step 2: Run the repository gate**
 
   Run: `. ./bin/activate-hermit && just ci`
 
   Expected: all configured Rust, desktop, Tauri, web, mobile, sidecar, build, and unit gates pass.
 
-- [ ] **Step 3: Update the rollout record**
+  Result: PASS on 9 August 2026. The gate included 4,740 desktop tests, 2,584 desktop-native tests, 1,261 mobile tests, the Rust workspace, lint and format checks, and production desktop and web builds.
+
+- [x] **Step 3: Update the rollout record**
 
   Mark the compatibility freeze complete and Keeper MVP implemented/pending installed-app acceptance. Record the exact test commands and final PR/commit evidence once known.
 

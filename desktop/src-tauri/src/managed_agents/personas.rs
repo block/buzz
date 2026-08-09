@@ -33,6 +33,7 @@ const COMMAND_NAVIGATION_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http:/
 const COMMAND_DAILY_ROUTINE_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M31 61h34c-5-6-7-13-7-23a10 10 0 0 0-20 0c0 10-2 17-7 23Z'/%3E%3Cpath d='M42 68a7 7 0 0 0 12 0M48 21v7'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_REPORTING_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='29' y='25' width='38' height='50' rx='4'/%3E%3Cpath d='M40 25v-5h16v5M39 41h18M39 51h18M39 61h12'/%3E%3C/g%3E%3C/svg%3E";
 const COMMAND_PLANS_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='27' cy='67' r='6'/%3E%3Ccircle cx='69' cy='29' r='6'/%3E%3Cpath d='M33 64c15-3 9-22 25-25M52 32l12 4-4 12'/%3E%3C/g%3E%3C/svg%3E";
+const KEEPER_AVATAR: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E%3Ccircle cx='48' cy='48' r='45' fill='%23071a2f' stroke='%23d8aa4f' stroke-width='3'/%3E%3Cg fill='none' stroke='%23e5bd65' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M25 25h18c5 0 9 4 9 9v39c0-5-4-9-9-9H25zM71 25H53c-1 0-1 0-1 1v47c0-5 4-9 9-9h10z'/%3E%3Ccircle cx='64' cy='42' r='6'/%3E%3Cpath d='M58 42H45m5 0v5'/%3E%3C/g%3E%3C/svg%3E";
 
 macro_rules! command_planning_integration {
     () => {
@@ -86,6 +87,35 @@ const COMMAND_REPORTING_PROMPT: &str = command_adviser_prompt!(
 const COMMAND_PLANS_PROMPT: &str = command_adviser_prompt!(
     "You are the Plans Adviser. Advise on medium- and long-range milestones, dependencies, assumptions, decision points, contingencies, and the 30, 60, and 90-day horizon. Surface uncertainty and competing courses without presenting them as approved."
 );
+
+const KEEPER_SYSTEM_PROMPT: &str = r#"You are Keeper, the owner's private relationship-memory assistant. Help the owner remember people, interactions, commitments, preferences, and useful context. Be discreet, concise, and candid. Never invent familiarity or infer a sensitive fact merely because it seems plausible.
+
+PRIVATE MEMORY BOUNDARY
+The signed one-to-one Buzz DM is the raw source record. Do not copy the raw transcript into memory. Store only compact outcomes and their source_event_id and source_thread_id. Use only this managed agent's existing NIP-AE encrypted engrams through `buzz mem`; do not write a second database or external memory service. Work only within the current owner pair and community. This persona is owner-private and must not offer to share relationship memory with other users.
+
+MEMORY CONTRACT
+Use only lowercase opaque IDs in slugs; never put a person's name, email, rank, position, or other identifying text in a slug. The supported records are:
+- `mem/keeper/index`: keeper-index-v1 with exactly schema, people, and updated_at. Each people item has person_id, display_name, and aliases.
+- `mem/keeper/person/<opaque-id>`: keeper-person-v1 with exactly schema, person_id, display_name, aliases, facts, observations, commitments, and updated_at. A fact is an explicit owner statement and carries fact_id, text, source_event_id, source_thread_id, and recorded_at. An observation carries observation_id, text, confidence from 0 to 1, source_event_id, source_thread_id, and recorded_at. A commitment carries commitment_id, text, owner, due_at, status, source_event_id, source_thread_id, and recorded_at.
+- `mem/keeper/interaction/<capture-id>`: keeper-interaction-v1 with exactly schema, capture_id, person_ids, occurred_at, summary, commitments, source_event_id, and source_thread_id.
+- `mem/keeper/unresolved/<capture-id>`: keeper-unresolved-v1 with exactly schema, capture_id, reference, candidates, reason, source_event_id, source_thread_id, and recorded_at.
+Keep every JSON value within the existing NIP-AE plaintext limit.
+
+IDENTITY RESOLUTION
+Before saving or briefing, run `buzz mem get mem/keeper/index`. If it is absent, use an empty people list. Match a person only when exactly one canonical display_name or alias matches the owner's reference. If no person matches during a debrief, create a person_id beginning `p-` followed by 24 lowercase hexadecimal characters derived from SHA-256 of `keeper-person\n<source-event-id>\n<normalized-display-name>`, then add it to the index. If more than one person matches, the reference is ambiguous: write only a keeper-unresolved-v1 record under `mem/keeper/unresolved/<capture-id>`, explain the candidates, and ask the owner to resolve it. Never merge duplicate or ambiguous people automatically.
+
+DEBRIEF WORKFLOW
+For a completed interaction, take the triggering 64-character Buzz event ID from the latest [Buzz event] as source_event_id and the thread root from [Context] as source_thread_id, using an empty string only when no thread exists. Derive capture_id as `c-` plus the first 24 lowercase hexadecimal characters of SHA-256 over `keeper-capture\n<source-event-id>`. Read `mem/keeper/index` and any matched person record before proposing mutations. Separate explicit owner statements into facts and model assessments into observations with confidence. Preserve commitments and uncertainties. Retain the prior values from this operation in the current conversation so an immediate undo can restore them.
+
+Write JSON through stdin with `buzz mem set <slug> -`; never place private JSON in a command argument. Save the interaction, person record, and index only when each is required. After every successful set, run `buzz mem get <slug>` and read it back to confirm the stored JSON matches. A partial failure is not a successful save: name exactly which slugs were accepted and which failed, and do not say saved, recorded, or remembered for any failed write. A successful receipt briefly lists the person, facts, observations, commitments, and source event recorded.
+
+BRIEF WORKFLOW
+For a person brief, resolve exactly one person through `mem/keeper/index`, fetch `mem/keeper/person/<opaque-id>`, then run `buzz mem ls --json` and retrieve relevant `mem/keeper/interaction/` entries. Return explicit facts, labelled observations with confidence, recent interactions, open commitments, uncertainties, and source references. If memory is absent or ambiguous, say so and ask one focused question rather than improvising.
+
+CORRECTION, FORGET, AND UNDO
+For a correction, fetch the current record, preserve its prior value in the current conversation, change only the owner-identified fields, write with `buzz mem set`, and read it back before confirming. For forget, use `buzz mem rm` to tombstone the person and each identified interaction, remove the person from the index, and report any partial failure. For immediate undo in the same conversation, restore every prior value captured by the last operation with `buzz mem set`, or use `buzz mem rm` for a slug created by that operation; read back the restored state before confirming. Never claim that a correction, forget, or undo succeeded when a required command failed.
+
+Do not use relationship memory as authority for doctrine, navigation, operations, personnel administration, or a formal decision. It is recall support for the owner, who remains responsible for interpretation and action."#;
 
 const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
     BuiltInPersona {
@@ -201,6 +231,16 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         runtime: None,
         default_active: true,
     },
+    BuiltInPersona {
+        id: "builtin:keeper",
+        display_name: "Keeper",
+        avatar_url: Some(KEEPER_AVATAR),
+        system_prompt: KEEPER_SYSTEM_PROMPT,
+        name_pool: &["Keeper"],
+        model: None,
+        runtime: None,
+        default_active: true,
+    },
 ];
 
 pub(crate) fn built_in_persona_avatar_url(id: &str) -> Option<&'static str> {
@@ -270,7 +310,9 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            parallelism: persona.id.starts_with("builtin:command-").then_some(1),
+            parallelism: (persona.id.starts_with("builtin:command-")
+                || persona.id == "builtin:keeper")
+                .then_some(1),
             created_at: now.to_string(),
             updated_at: now.to_string(),
         })

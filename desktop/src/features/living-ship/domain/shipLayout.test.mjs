@@ -7,7 +7,7 @@ import {
   resolveAgentLocation,
 } from "./shipLayout.ts";
 
-test("pins the approved room geometry and all eight adviser home rooms", () => {
+test("pins the approved room geometry and adviser and support-agent home rooms", () => {
   assert.deepEqual(
     SHIP_ROOMS.map(({ id, zone, row, column }) => ({ id, zone, row, column })),
     [
@@ -35,6 +35,7 @@ test("pins the approved room geometry and all eight adviser home rooms", () => {
       daily_routine: "ships-office",
       reporting: "ships-office",
       plans: "plans",
+      keeper: "ships-office",
     },
   );
 });

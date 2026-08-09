@@ -19,6 +19,7 @@ const COMMAND_AGENTS = [
   ["6".repeat(64), "Daily Routine", "builtin:command-daily-routine", "running"],
   ["7".repeat(64), "Reporting", "builtin:command-reporting", "stopped"],
   ["8".repeat(64), "Plans", "builtin:command-plans", "stopped"],
+  ["9".repeat(64), "Keeper", "builtin:keeper", "running"],
 ] as const;
 
 type LivingShipE2eWindow = Window & {
@@ -121,11 +122,15 @@ test("Living Ship shows working, collaborating, idle and not-aboard advisers", a
   await expect(
     canvas.getByRole("button", { name: /Select Reporting/ }),
   ).toHaveAttribute("data-state", "offline");
-
   await waitForAnimations(page);
   await page.screenshot({
     path: "test-results/living-ship/01-overview.png",
   });
+
+  const keeper = canvas.getByRole("button", { name: /Select Keeper/ });
+  await expect(keeper).toHaveAttribute("data-state", "idle");
+  await keeper.click();
+  await expect(page.getByTestId("ship-agent-details")).toContainText("Keeper");
 
   await canvas.getByRole("button", { name: /Select Operations/ }).click();
   const details = page.getByTestId("ship-agent-details");

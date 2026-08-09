@@ -5,6 +5,7 @@ import { installMockBridge } from "../helpers/bridge";
 const OPERATIONS_PERSONA_ID = "builtin:command-operations";
 const INTELLIGENCE_PERSONA_ID = "builtin:command-intelligence";
 const LOGISTICS_PERSONA_ID = "builtin:command-logistics";
+const KEEPER_PERSONA_ID = "builtin:keeper";
 const OPERATIONS_PUBKEY = "f".repeat(64);
 const COMMAND_TEAM_PERSONA_IDS = [
   "builtin:command-chief-of-staff",
@@ -167,6 +168,35 @@ test("a Command Team start error stays visible and does not navigate", async ({
   await expect(page).toHaveURL(agentsUrl);
   expect(await managedOperationsAgents(page)).toHaveLength(1);
   expect(await commandCount(page, "open_dm")).toBe(0);
+});
+
+test("Keeper provisions once from its persona card and opens an owner DM", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`persona-agent-row-${KEEPER_PERSONA_ID}`);
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Message" }).click();
+
+  await expect(page.getByTestId("chat-title")).toContainText("Keeper");
+  const agents = await managedAgentsForPersona(page, KEEPER_PERSONA_ID);
+  expect(agents).toHaveLength(1);
+  expect(agents[0]?.status).toBe("running");
+  expect(await commandCount(page, "create_managed_agent")).toBe(1);
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByTestId(`persona-agent-row-${KEEPER_PERSONA_ID}`)
+    .getByRole("button", { name: "Message" })
+    .click();
+
+  expect(await managedAgentsForPersona(page, KEEPER_PERSONA_ID)).toHaveLength(
+    1,
+  );
+  expect(await commandCount(page, "create_managed_agent")).toBe(1);
 });
 
 test("Maritime N2 and Logistics each reuse one managed agent and one DM", async ({
