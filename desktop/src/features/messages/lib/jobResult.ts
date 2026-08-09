@@ -140,12 +140,26 @@ function validateReferenceUrl(value: string): boolean | null {
   );
 }
 
+function isPortableRawReference(reference: string): boolean {
+  return (
+    !reference.startsWith("/") &&
+    !reference.startsWith("\\") &&
+    !reference.startsWith("~/") &&
+    !reference.startsWith("~\\") &&
+    !/^[A-Za-z]:/.test(reference) &&
+    !reference.split(/[\\/]/).includes("..")
+  );
+}
+
 function isValidArtifactReference(
   kind: JobArtifactKind,
   reference: string,
 ): boolean {
   const urlValidity = validateReferenceUrl(reference);
   if (urlValidity === false) {
+    return false;
+  }
+  if (urlValidity === null && !isPortableRawReference(reference)) {
     return false;
   }
 
@@ -160,14 +174,7 @@ function isValidArtifactReference(
       if (urlValidity !== null) {
         return urlValidity;
       }
-      return (
-        !reference.startsWith("/") &&
-        !reference.startsWith("\\") &&
-        !reference.startsWith("~/") &&
-        !reference.startsWith("~\\") &&
-        !/^[A-Za-z]:/.test(reference) &&
-        !reference.split(/[\\/]/).includes("..")
-      );
+      return true;
     case "commit":
       if (urlValidity !== null) {
         return urlValidity;
