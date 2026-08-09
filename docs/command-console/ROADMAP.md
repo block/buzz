@@ -34,7 +34,7 @@ each capability.
 | Upstream Buzz refresh | Complete and accepted | [PR #16](https://github.com/NavigatorRAN/buzz/pull/16), merged into the integration line as `f09c3a1ea`; pinned `desktop-v0.5.8` at `f3de86057` | Preserve as the accepted product baseline |
 | Repository baseline promotion | Complete | [PR #17](https://github.com/NavigatorRAN/buzz/pull/17), merged to `main` as `d8dca6d49` | Retain as the authoritative v0.5.8 downstream baseline |
 | V2 Keeper | Typed-memory MVP complete and accepted | [PR #19](https://github.com/NavigatorRAN/buzz/pull/19) at `56a4d7045`; repository specification and Memory MCP entity `buzz-keeper` | Merge the accepted phase, then begin the basic V3 private remote-access pilot |
-| V3 native remote access | Compatibility freeze complete; implementation deferred until after Keeper MVP | [PR #18](https://github.com/NavigatorRAN/buzz/pull/18), merged as `473bcfefd`; repository specification and Memory MCP entity `native-buzz-remote-access-pilot` | Preserve the basic private Tailscale pilot and defer push/wake hardening |
+| V3 native remote access | Automated private pilot implemented; physical iPhone acceptance pending | [PR #20](https://github.com/NavigatorRAN/buzz/pull/20); tailnet-only Tailscale Serve, pairing-only desktop advertisement, and mobile diagnostics | Run the outside-LAN iPhone journey; keep push/wake hardening deferred |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
 tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17
@@ -222,6 +222,14 @@ cleanly.
 Exit gate: from outside the home LAN, the paired phone can reliably exchange a
 message with Command Adviser through the private network, and loss of VPN fails
 closed and visibly.
+
+Implementation record: draft PR #20 adds a separately validated and persisted
+pairing-only `https://*.ts.net` origin, derives private WSS in the trusted Tauri
+command, classifies mobile network versus authentication failures, and provides
+the repeatable acceptance and rollback runbook. Tailscale Serve proxies the
+MacBook's stable tailnet HTTPS name to `127.0.0.1:3000`; status reports
+`tailnet only` and Funnel remains disabled. Automated repository and release
+gates precede the remaining physical iPhone journey.
 
 #### 4.2 Notification, wake, and resilience hardening
 

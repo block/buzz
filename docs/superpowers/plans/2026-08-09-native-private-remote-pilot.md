@@ -287,7 +287,7 @@ git commit -m "feat: explain private relay connection failures"
 - Consumes: the validated desktop pairing setting and mobile failure presentation.
 - Produces: a repeatable Tailscale Serve and iPhone acceptance runbook with rollback.
 
-- [ ] **Step 1: Configure tailnet-private WSS and verify the relay**
+- [x] **Step 1: Configure tailnet-private WSS and verify the relay**
 
 Run with the bundled CLI:
 
@@ -300,11 +300,11 @@ curl --fail --header 'Accept: application/nostr+json' \
 
 Require a tailnet-only HTTPS endpoint returning the existing Buzz NIP-11 document. Record rollback as `tailscale serve reset`. Confirm Funnel remains absent.
 
-- [ ] **Step 2: Write the acceptance runbook**
+- [x] **Step 2: Write the acceptance runbook**
 
 Document exact prerequisites, the advertised URL, QR/SAS pairing, signed DM/history/Command Adviser turn, Tailscale-off fail-closed check, reconnect/no-duplicate check, existing-community regression, and rollback. Clearly mark physical iPhone actions as the only user gate.
 
-- [ ] **Step 3: Run the full repository gate**
+- [x] **Step 3: Run the full repository gate**
 
 ```bash
 . ./bin/activate-hermit
@@ -320,11 +320,14 @@ flutter analyze
 flutter test
 ```
 
-- [ ] **Step 4: Build and verify installable candidates**
+- [x] **Step 4: Build and verify installable candidates**
 
 Build the signed macOS release candidate with `just desktop-release-build aarch64-apple-darwin`. Build/test the native iOS runner only through the repository's supported non-destructive test path; do not invoke forbidden `flutter build` or `flutter run` commands.
 
 - [ ] **Step 5: Update roadmap/specification and record the checkpoint**
+
+Roadmap and specification updates are complete. The Memory MCP write remains
+pending because the configured LAN endpoint was unreachable at handoff.
 
 Mark automated pilot implementation complete and list the physical-device journey as the remaining gate. Record the architecture, Tailscale Serve configuration, tests, and rollback in Memory MCP with agent `CODEX`.
 
