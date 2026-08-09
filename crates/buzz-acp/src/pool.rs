@@ -1205,42 +1205,30 @@ async fn apply_permission_mode(
     Ok(())
 }
 
-/// Prepend the `[Base]` section to a user-message body for legacy agents.
+/// Prepend a legacy agent's standing context to a user-message body.
 ///
-/// Legacy agents (`protocol_version < 2`) don't receive `base_prompt` via the
-/// system role in `session/new`, so it must ride along in the user message.
-/// Agents with `protocol_version >= 2`, or any agent without a `base_prompt`,
-/// get `body` unchanged. The gate lives here so the heartbeat and
-/// initial-message dispatch paths can't drift apart again.
-pub(crate) fn prepend_base_for_legacy(
+/// Legacy agents (`protocol_version < 2`) don't receive standing context via
+/// the system role in `session/new`, so it must ride along in the user message
+/// — in the session's *first* one, and never again. Agents with
+/// `protocol_version >= 2`, or an empty [`StandingContext`], get `body`
+/// unchanged. Both legacy dispatch paths (initial message, heartbeat) go
+/// through this one gate so they can't drift apart again.
+///
+/// A heartbeat passes base only: it has no channel, so there is no core or
+/// canvas to carry, and it has never been given the persona.
+pub(crate) fn prepend_standing_for_legacy(
     protocol_version: u32,
-    base_prompt: Option<&str>,
+    standing: &crate::queue::StandingContext<'_>,
     body: &str,
 ) -> String {
-    match base_prompt {
-        Some(bp) if protocol_version < 2 => {
-            format!("{}\n\n{body}", crate::queue::base_section(bp))
-        }
-        _ => body.to_string(),
+    if protocol_version >= 2 {
+        return body.to_string();
     }
-}
-
-/// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
-///
-/// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
-/// legacy (protocol_version < 2) agents need it injected here so it arrives
-/// before the first prompt — the same "every turn" semantics as per-turn core.
-/// Heartbeats never have an initial_message, so the caller is responsible for
-/// not passing a canvas when `source` is `Heartbeat`.
-pub(crate) fn prepend_canvas_for_legacy(
-    protocol_version: u32,
-    agent_canvas: Option<&str>,
-    body: &str,
-) -> String {
-    match agent_canvas {
-        Some(canvas) if protocol_version < 2 => format!("{canvas}\n\n{body}"),
-        _ => body.to_string(),
+    let sections = standing.sections();
+    if sections.is_empty() {
+        return body.to_string();
     }
+    format!("{}\n\n{body}", sections.join("\n\n"))
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
@@ -1713,6 +1701,22 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // Standing context is fixed for the life of a session. Agents with
+    // systemPrompt support already hold it from session/new; legacy agents
+    // receive it in the session's first user message and never again.
+    //
+    // `is_new_session` comes from the session registry, which is cleared
+    // whenever a session is invalidated — so the replacement session re-delivers
+    // rather than leaving the agent unbriefed.
+    let standing = crate::queue::StandingContext {
+        base_prompt: ctx.base_prompt,
+        system_prompt: ctx.system_prompt.as_deref(),
+        team_instructions: ctx.team_instructions.as_deref(),
+        agent_core: agent_core.as_deref(),
+        agent_canvas: agent_canvas.as_deref(),
+    };
+    let mut standing_context_sent = !is_new_session;
+
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
         {
@@ -1720,29 +1724,14 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // For agents with systemPrompt support (protocol_version >= 2),
-            // base_prompt is delivered via the system role in session/new.
-            // Legacy agents receive it via [Base] in the user message instead.
-            // Canvas is also injected here for legacy agents: protocol-v2 agents
-            // already have it in systemPrompt; legacy agents need it before the
-            // first prompt, matching the "every turn" per-turn delivery semantics.
-            let init_msg = prepend_base_for_legacy(
+            let init_msg = prepend_standing_for_legacy(
                 if agent.has_system_prompt_support() {
                     2
                 } else {
                     1
                 },
-                ctx.base_prompt,
+                &standing,
                 initial_msg,
-            );
-            let init_msg = prepend_canvas_for_legacy(
-                if agent.has_system_prompt_support() {
-                    2
-                } else {
-                    1
-                },
-                agent_canvas.as_deref(),
-                &init_msg,
             );
             let init_result = agent
                 .acp
@@ -1760,6 +1749,9 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message complete for channel {cid}: {stop_reason:?}"
                     );
+                    // The legacy agent has its standing context now; the turn
+                    // prompt below must not repeat it. Every other arm returns.
+                    standing_context_sent = true;
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
@@ -1864,15 +1856,25 @@ pub async fn run_prompt_task(
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
-        let text = prepend_base_for_legacy(
-            if agent.has_system_prompt_support() {
-                2
-            } else {
-                1
-            },
-            ctx.base_prompt,
-            &text,
-        );
+        //
+        // Only the first heartbeat of a session carries `[Base]`; later ticks
+        // reuse the same session, so the agent already has it.
+        let text = if standing_context_sent {
+            text
+        } else {
+            prepend_standing_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                &crate::queue::StandingContext {
+                    base_prompt: ctx.base_prompt,
+                    ..Default::default()
+                },
+                &text,
+            )
+        };
         vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
@@ -1907,15 +1909,16 @@ pub async fn run_prompt_task(
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                agent_core: agent_core.as_deref(),
+                agent_core: standing.agent_core,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
-                base_prompt: ctx.base_prompt,
-                system_prompt: ctx.system_prompt.as_deref(),
-                team_instructions: ctx.team_instructions.as_deref(),
-                agent_canvas: agent_canvas.as_deref(),
+                base_prompt: standing.base_prompt,
+                system_prompt: standing.system_prompt,
+                team_instructions: standing.team_instructions,
+                agent_canvas: standing.agent_canvas,
+                standing_context_sent,
             },
         )
     } else {
@@ -4078,21 +4081,44 @@ mod tests {
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
 
+    fn base_only(base_prompt: Option<&str>) -> crate::queue::StandingContext<'_> {
+        crate::queue::StandingContext {
+            base_prompt,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_initial_message_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): [Base] rides along in the
         // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
-        let composed = prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel");
+        let composed = prepend_standing_for_legacy(
+            1,
+            &base_only(Some("you are a helpful agent")),
+            "hello channel",
+        );
         assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
-        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
 
     #[test]
     fn test_initial_message_modern_agent_omits_base() {
         // protocol_version 2 receives base_prompt via session/new, so the user
         // message is left untouched even when a base_prompt is present.
-        let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
+        let composed = prepend_standing_for_legacy(
+            2,
+            &base_only(Some("you are a helpful agent")),
+            "hello channel",
+        );
         assert_eq!(composed, "hello channel");
+    }
+
+    #[test]
+    fn test_heartbeat_standing_block_is_base_only() {
+        // A heartbeat has no channel, so core and canvas are absent by
+        // construction — and it has never carried the persona. Pin that the
+        // shared helper does not start handing heartbeats [System].
+        let composed = prepend_standing_for_legacy(1, &base_only(Some("be helpful")), "tick");
+        assert_eq!(composed, "[Base]\nbe helpful\n\ntick");
     }
 
     #[test]
@@ -4149,82 +4175,75 @@ mod tests {
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
         // No base_prompt configured: nothing to prepend regardless of version.
-        let composed = prepend_base_for_legacy(1, None, "hello channel");
+        let composed = prepend_standing_for_legacy(1, &base_only(None), "hello channel");
         assert_eq!(composed, "hello channel");
     }
 
-    // ── prepend_canvas_for_legacy ─────────────────────────────────────────────
+    // ── prepend_standing_for_legacy ───────────────────────────────────────────
+
+    fn full_standing() -> crate::queue::StandingContext<'static> {
+        crate::queue::StandingContext {
+            base_prompt: Some("be helpful"),
+            system_prompt: Some("you are Eva"),
+            team_instructions: Some("ship small"),
+            agent_core: Some("[Agent Memory — core]\nremember this"),
+            agent_canvas: Some("[Channel Canvas]\ncanvas content"),
+        }
+    }
 
     #[test]
-    fn test_initial_message_legacy_agent_gets_canvas_prepended() {
-        // Legacy agents (protocol_version < 2) receive the canvas section before
-        // the initial-message body so it arrives before the first prompt.
-        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00Z\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
-        let composed = prepend_canvas_for_legacy(1, Some(canvas), "do the thing");
+    fn test_initial_message_legacy_agent_gets_whole_standing_block() {
+        // The initial message is the legacy agent's first contact, so it must
+        // carry every standing section — not just [Base] and the canvas, which
+        // left the agent acting on its first turn with no persona and no memory.
+        let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
+        let positions: Vec<usize> = [
+            "[Base]",
+            "[System]",
+            "[Team Instructions]",
+            "[Agent Memory — core]",
+            "[Channel Canvas]",
+            "do the thing",
+        ]
+        .iter()
+        .map(|needle| {
+            composed
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle} in: {composed}"))
+        })
+        .collect();
         assert!(
-            composed.starts_with("[Channel Canvas]"),
-            "canvas must precede the body"
-        );
-        assert!(
-            composed.ends_with("do the thing"),
-            "body must follow the canvas"
-        );
-        assert!(
-            composed.contains("\n\ndo the thing"),
-            "canvas and body separated by blank line"
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "sections must match the per-turn order, body last; got: {composed}"
         );
     }
 
     #[test]
-    fn test_initial_message_modern_agent_omits_canvas_from_body() {
-        // Protocol-v2 agents receive canvas in systemPrompt; it must NOT be
-        // duplicated in the initial-message user turn.
-        let canvas = "[Channel Canvas]\nsome section";
-        let composed = prepend_canvas_for_legacy(2, Some(canvas), "do the thing");
+    fn test_initial_message_standing_order_matches_per_turn_order() {
+        // Both legacy paths render through StandingContext, so the initial
+        // message and a first-turn prompt agree section-for-section.
+        let standing = full_standing();
+        let composed = prepend_standing_for_legacy(1, &standing, "do the thing");
         assert_eq!(
-            composed, "do the thing",
-            "modern agent initial message must not contain canvas"
-        );
-        assert!(
-            !composed.contains("[Channel Canvas]"),
-            "canvas must be absent from modern agent initial message"
+            composed,
+            format!("{}\n\ndo the thing", standing.sections().join("\n\n"))
         );
     }
 
     #[test]
-    fn test_initial_message_legacy_agent_no_canvas_is_unchanged() {
-        // No canvas present: body passes through unmodified.
-        let composed = prepend_canvas_for_legacy(1, None, "do the thing");
+    fn test_initial_message_modern_agent_omits_standing_block() {
+        // Protocol-v2 agents hold all of this from session/new; repeating it in
+        // the initial-message user turn would double-render every section.
+        let composed = prepend_standing_for_legacy(2, &full_standing(), "do the thing");
         assert_eq!(composed, "do the thing");
     }
 
     #[test]
-    fn test_initial_message_legacy_canvas_and_base_compose_correctly() {
-        // Verify the full composition order when both base and canvas are present:
-        // [Base] → canvas section → initial-message body.
-        let canvas = "[Channel Canvas]\ncanvas content";
-        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
-        let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
-        assert!(
-            full.starts_with("[Channel Canvas]"),
-            "canvas must be first in composed message"
-        );
-        assert!(
-            full.contains("[Base]"),
-            "base must be present in composed message"
-        );
-        assert!(
-            full.ends_with("do the thing"),
-            "body must be last in composed message"
-        );
-        // Order: canvas → base → body
-        let canvas_pos = full.find("[Channel Canvas]").unwrap();
-        let base_pos = full.find("[Base]").unwrap();
-        let body_pos = full.find("do the thing").unwrap();
-        assert!(
-            canvas_pos < base_pos && base_pos < body_pos,
-            "order must be: canvas → base → body"
-        );
+    fn test_initial_message_legacy_agent_without_standing_is_unchanged() {
+        // Nothing configured: body passes through with no stray blank lines.
+        let composed =
+            prepend_standing_for_legacy(1, &crate::queue::StandingContext::default(), "do it");
+        assert_eq!(composed, "do it");
     }
 
     // Pin the session/new systemPrompt framing: each present prompt carries its
