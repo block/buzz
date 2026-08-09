@@ -267,17 +267,7 @@ export type RelayMember = {
   createdAt: string;
 };
 
-export type RelayAgent = {
-  pubkey: string;
-  name: string;
-  agentType: string;
-  channels: string[];
-  channelIds: string[];
-  capabilities: string[];
-  status: "online" | "away" | "offline";
-  respondTo: RespondToMode | null;
-  respondToAllowlist: string[];
-};
+export type { RelayAgent } from "./relayAgent";
 
 export type ManagedAgentRuntimeLifecycle =
   | "starting"

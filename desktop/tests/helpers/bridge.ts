@@ -57,6 +57,7 @@ type MockSearchProfileSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  model?: string | null;
   agentType?: string;
   capabilities?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
@@ -246,10 +247,14 @@ type MockBridgeOptions = {
   personas?: MockPersonaSeed[];
   /** Community catalog replaceable-event heads returned by relay queries. */
   personaCatalogEvents?: RelayEvent[];
+  /** Shared Team Catalog heads returned by relay queries. */
+  teamCatalogEvents?: RelayEvent[];
   /** Outcomes for successive explicit persona share publications. */
   personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  /** Independent current presence values for relay-agent fixtures. */
+  presenceStatuses?: Record<string, "online" | "away" | "offline">;
   /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;

@@ -15,7 +15,7 @@ export function parseLivePresenceEvent(event: {
   return { pubkey: event.pubkey.toLowerCase(), status };
 }
 
-// Presence query keys are ["presence", ...normalizedSortedPubkeys]; a query
+// Presence query keys are ["presence", relayUrl, ...normalizedSortedPubkeys]; a query
 // "wants" an update only for a pubkey it actually requested.
 export function presenceQueryWantsPubkey(
   queryKey: readonly unknown[],

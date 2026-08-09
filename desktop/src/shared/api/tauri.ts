@@ -105,18 +105,7 @@ type RawSendChannelMessageResult = {
   created_at: number;
 };
 
-type RawRelayAgent = {
-  pubkey: string;
-  name: string;
-  agent_type: string;
-  channels: string[];
-  channel_ids: string[];
-  capabilities: string[];
-  status: RelayAgent["status"];
-  respond_to?: RelayAgent["respondTo"];
-  respond_to_allowlist?: string[];
-};
-
+import { fromRawRelayAgent, type RawRelayAgent } from "./relayAgent";
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
@@ -657,20 +646,6 @@ export async function createAuthEvent(input: {
 }): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("create_auth_event", input);
   return JSON.parse(eventJson) as RelayEvent;
-}
-
-function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
-  return {
-    pubkey: agent.pubkey,
-    name: agent.name,
-    agentType: agent.agent_type,
-    channels: agent.channels,
-    channelIds: agent.channel_ids ?? [],
-    capabilities: agent.capabilities,
-    status: agent.status,
-    respondTo: agent.respond_to ?? null,
-    respondToAllowlist: agent.respond_to_allowlist ?? [],
-  };
 }
 
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {

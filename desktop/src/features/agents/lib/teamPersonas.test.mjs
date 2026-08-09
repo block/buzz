@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   emptyResolvedTeamPersonas,
   getUsableTeams,
+  resolveTeamMembers,
   resolveTeamPersonas,
 } from "./teamPersonas.ts";
 
@@ -91,4 +92,104 @@ test("getUsableTeams keeps only fully-resolved teams with at least one persona",
     getUsableTeams(teams, personas).map((team) => team.id),
     ["team-ready"],
   );
+});
+
+test("resolveTeamMembers keeps local personas deployable", () => {
+  const personas = [createPersona("persona-1", "Local")];
+  const resolution = resolveTeamMembers(
+    createTeam("team-local", ["persona-1"]),
+    personas,
+    [],
+    [],
+  );
+
+  assert.equal(resolution.isComplete, true);
+  assert.equal(resolution.isUsable, true);
+  assert.equal(resolution.hasRemoteMembers, false);
+  assert.deepEqual(resolution.resolvedPersonaIds, ["persona-1"]);
+});
+
+test("resolveTeamMembers marks relay-only matches resolved but not usable", () => {
+  const relayPubkey = "a".repeat(64);
+  const catalogKey = "catalog-member";
+  const resolution = resolveTeamMembers(
+    createTeam("team-remote", [relayPubkey, catalogKey]),
+    [],
+    [{ pubkey: relayPubkey }],
+    [
+      {
+        ownerPubkey: "owner-pubkey",
+        teamDTag: "team-remote",
+        memberKeys: [catalogKey],
+      },
+    ],
+    "owner-pubkey",
+  );
+
+  assert.equal(resolution.hasMissingPersonas, false);
+  assert.equal(resolution.isComplete, true);
+  assert.equal(resolution.isUsable, false);
+  assert.equal(resolution.remoteMemberCount, 2);
+  assert.deepEqual(resolution.resolvedRemoteMemberIds, [
+    relayPubkey,
+    catalogKey,
+  ]);
+  assert.deepEqual(resolution.resolvedPersonas, []);
+});
+
+test("resolveTeamMembers distinguishes local, relay, and missing members", () => {
+  const relayPubkey = "b".repeat(64);
+  const resolution = resolveTeamMembers(
+    createTeam("team-mixed", ["persona-1", relayPubkey, "missing"]),
+    [createPersona("persona-1", "Local")],
+    [{ pubkey: relayPubkey.toUpperCase() }],
+    [],
+  );
+
+  assert.equal(resolution.hasMissingPersonas, true);
+  assert.equal(resolution.isComplete, false);
+  assert.equal(resolution.isUsable, false);
+  assert.equal(resolution.missingPersonaCount, 1);
+  assert.deepEqual(resolution.missingPersonaIds, ["missing"]);
+  assert.deepEqual(resolution.resolvedPersonaIds, ["persona-1"]);
+  assert.deepEqual(resolution.resolvedRemoteMemberIds, [relayPubkey]);
+});
+
+test("resolveTeamMembers ignores catalog members from another team", () => {
+  const resolution = resolveTeamMembers(
+    createTeam("team-local", ["foreign-member"]),
+    [],
+    [],
+    [
+      {
+        ownerPubkey: "owner-pubkey",
+        teamDTag: "team-other",
+        memberKeys: ["foreign-member"],
+      },
+    ],
+    "owner-pubkey",
+  );
+
+  assert.equal(resolution.hasMissingPersonas, true);
+  assert.deepEqual(resolution.missingPersonaIds, ["foreign-member"]);
+  assert.equal(resolution.hasRemoteMembers, false);
+});
+
+test("resolveTeamMembers ignores a matching team from another catalog owner", () => {
+  const resolution = resolveTeamMembers(
+    createTeam("team-local", ["foreign-member"]),
+    [],
+    [],
+    [
+      {
+        ownerPubkey: "other-owner",
+        teamDTag: "team-local",
+        memberKeys: ["foreign-member"],
+      },
+    ],
+    "owner-pubkey",
+  );
+
+  assert.equal(resolution.hasMissingPersonas, true);
+  assert.deepEqual(resolution.missingPersonaIds, ["foreign-member"]);
 });

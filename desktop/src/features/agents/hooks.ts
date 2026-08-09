@@ -65,6 +65,10 @@ import {
   updatePersona,
 } from "@/shared/api/tauriPersonas";
 import { teamsQueryKey } from "@/features/agents/teamHooks";
+import {
+  relayAgentsQueryKey,
+  useRelayAgentsQueryScope,
+} from "@/features/agents/relayAgentsQueryScope";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -87,6 +91,11 @@ import type {
 } from "@/features/agents/channelAgents";
 export { findReusableAgent } from "@/features/agents/agentReuse";
 export {
+  relayAgentsQueryKey,
+  relayAgentsQueryKeyForScope,
+  useRelayAgentsQueryScope,
+} from "@/features/agents/relayAgentsQueryScope";
+export {
   teamsQueryKey,
   useCreateTeamMutation,
   useDeleteTeamMutation,
@@ -105,7 +114,6 @@ export type {
   ProvisionChannelManagedAgentResult,
 } from "@/features/agents/channelAgents";
 
-export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
@@ -322,8 +330,10 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
+  const scope = useRelayAgentsQueryScope();
+
   return useQuery({
-    queryKey: relayAgentsQueryKey,
+    queryKey: scope.queryKey,
     queryFn: listRelayAgents,
     staleTime: 30_000,
     // Relay agent profiles (kind:10100) are near-static and the backing
@@ -336,7 +346,7 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     // keep polling but at a relaxed cadence and pause it while backgrounded.
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
-    enabled: options?.enabled,
+    enabled: (options?.enabled ?? true) && scope.enabled,
   });
 }
 

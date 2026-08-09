@@ -44,6 +44,7 @@ import {
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
+  KIND_TEAM_CATALOG,
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
@@ -110,6 +111,7 @@ type MockManagedAgentRuntimeSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  model?: string | null;
   agentType?: string;
   capabilities?: string[];
   respondTo?: RawRelayAgent["respond_to"];
@@ -285,10 +287,14 @@ type E2eConfig = {
     personas?: MockPersonaSeed[];
     /** Community catalog replaceable-event heads returned by relay queries. */
     personaCatalogEvents?: RelayEvent[];
+    /** Shared Team Catalog heads returned by relay queries. */
+    teamCatalogEvents?: RelayEvent[];
     /** Outcomes for successive explicit persona share publications. */
     personaSharePublicationStatuses?: Array<"published" | "queued">;
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    /** Independent current presence values for relay-agent fixtures. */
+    presenceStatuses?: Record<string, PresenceStatus>;
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
@@ -810,6 +816,7 @@ type RawSendChannelMessageResponse = {
 type RawRelayAgent = {
   pubkey: string;
   name: string;
+  model?: string | null;
   agent_type: string;
   channels: string[];
   channel_ids: string[];
@@ -2261,17 +2268,24 @@ function resetMockRelayAgents(config?: E2eConfig) {
   }));
 
   for (const seed of config?.mock?.relayAgents ?? []) {
+    const seededChannelNames = seed.channelNames ?? [];
     const channels = mockChannels.filter((channel) => {
       return (
         seed.channelIds?.includes(channel.id) ||
-        seed.channelNames?.includes(channel.name)
+        seededChannelNames.includes(channel.name)
       );
     });
     mockRelayAgents.push({
       pubkey: seed.pubkey,
       name: seed.name,
+      model: seed.model ?? null,
       agent_type: seed.agentType ?? "goose",
-      channels: channels.map((channel) => channel.name),
+      channels: [
+        ...new Set([
+          ...channels.map((channel) => channel.name),
+          ...seededChannelNames,
+        ]),
+      ],
       channel_ids: channels.map((channel) => channel.id),
       capabilities: seed.capabilities ?? ["messages", "channels", "mcp"],
       status: seed.status ?? "online",
@@ -2996,6 +3010,7 @@ const deferredSendMessageLiveEchoes: Array<{
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
+const mockTeamCatalogEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
@@ -3037,6 +3052,24 @@ function resetMockPersonaCatalogEvents(config: E2eConfig | undefined) {
       ...event,
       tags: event.tags.map((tag) => [...tag]),
     });
+  }
+}
+
+function resetMockTeamCatalogEvents(config: E2eConfig | undefined) {
+  mockTeamCatalogEvents.length = 0;
+  for (const event of config?.mock?.teamCatalogEvents ?? []) {
+    mockTeamCatalogEvents.push({
+      ...event,
+      tags: event.tags.map((tag) => [...tag]),
+    });
+  }
+}
+
+function resetMockPresence(config: E2eConfig | undefined) {
+  for (const [pubkey, status] of Object.entries(
+    config?.mock?.presenceStatuses ?? {},
+  )) {
+    setMockPresenceStatus(pubkey, status);
   }
 }
 
@@ -9755,6 +9788,36 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.includes(KIND_TEAM_CATALOG)) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      const sourceIds = filter["#d"];
+      const candidates = mockTeamCatalogEvents
+        .filter((event) => {
+          if (authors && !authors.includes(event.pubkey.toLowerCase())) {
+            return false;
+          }
+          if (filter.until !== undefined && event.created_at > filter.until) {
+            return false;
+          }
+          const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+          return (
+            !sourceIds ||
+            (sourceId !== undefined && sourceIds.includes(sourceId))
+          );
+        })
+        .sort(
+          (left, right) =>
+            right.created_at - left.created_at ||
+            left.id.localeCompare(right.id),
+        )
+        .slice(0, filter.limit ?? mockTeamCatalogEvents.length);
+      for (const event of candidates) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag (PR/issue discussions, approvals, review requests).
     if (
@@ -10050,6 +10113,7 @@ export function maybeInstallE2eTauriMocks() {
     : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
+  resetMockPresence(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
   resetMockTeams(config);
@@ -10058,6 +10122,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockMesh();
   resetMockUserStatuses();
   resetMockPersonaCatalogEvents(config);
+  resetMockTeamCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
