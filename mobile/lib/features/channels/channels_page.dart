@@ -175,6 +175,7 @@ class ChannelsPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final channelsAsync = ref.watch(channelsProvider);
     final sessionState = ref.watch(relaySessionProvider);
+    final relayUrl = ref.watch(relayConfigProvider).baseUrl;
     final currentPubkey = ref
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
@@ -362,7 +363,8 @@ class ChannelsPage extends HookConsumerWidget {
         channels: channels,
         channelsAsync: channelsAsync,
         showError: showError.value,
-        sessionStatus: sessionState.status,
+        sessionState: sessionState,
+        relayUrl: relayUrl,
         showConnectionSkeleton: showConnectionSkeleton.value,
         currentPubkey: currentPubkey,
         topSectionHeight: topSectionHeight,

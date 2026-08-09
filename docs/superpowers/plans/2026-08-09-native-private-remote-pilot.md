@@ -218,7 +218,7 @@ git commit -m "feat: configure private iPhone relay pairing"
 - Consumes: existing `RelayAuthRejectedException`, `RelayConfig.baseUrl`, and `SessionStatus`.
 - Produces: `SessionFailureKind { network, authentication }`, optional `SessionState.failureKind`, `isTailnetRelayUrl(String)`, and `relayConnectionPresentation(String, SessionState)`.
 
-- [ ] **Step 1: Write failing relay-state tests**
+- [x] **Step 1: Write failing relay-state tests**
 
 Extend the real session tests to assert:
 
@@ -228,7 +228,7 @@ expect(session.state.failureKind, SessionFailureKind.authentication);
 
 after an auth rejection, and `SessionFailureKind.network` while reconnecting after a socket/network failure. Confirm successful connection clears the failure.
 
-- [ ] **Step 2: Run the relay tests and verify RED**
+- [x] **Step 2: Run the relay tests and verify RED**
 
 Run:
 
@@ -239,11 +239,11 @@ flutter test test/shared/relay/relay_session_test.dart
 
 Expected: compilation fails because `failureKind` and its enum do not exist.
 
-- [ ] **Step 3: Implement failure classification**
+- [x] **Step 3: Implement failure classification**
 
 Add the enum and immutable field. `_handleDisconnected` sets authentication for `RelayAuthRejectedException`; `_scheduleReconnect` sets network. `_handleConnected` clears it. No branch signs out, removes a community, or selects another relay.
 
-- [ ] **Step 4: Write failing presentation tests**
+- [x] **Step 4: Write failing presentation tests**
 
 Test literal presentations for:
 
@@ -252,11 +252,11 @@ Test literal presentations for:
 - authentication rejection: `Authentication failed` plus re-pair guidance; and
 - an ordinary public relay reconnect, which must not mention Tailscale.
 
-- [ ] **Step 5: Implement and surface the presentation**
+- [x] **Step 5: Implement and surface the presentation**
 
 Create a shared immutable presentation record and use it in Settings. In the delayed reconnect skeleton, render the title and detail above the shape placeholders, passing the active relay URL and full `SessionState` rather than only `SessionStatus`. Keep the existing skeleton geometry and accessibility live region.
 
-- [ ] **Step 6: Add the screen behavior test and verify GREEN**
+- [x] **Step 6: Add the screen behavior test and verify GREEN**
 
 Override the active community with a `.ts.net` relay and the session with a network failure. After the existing two-second delay, assert visible `Private relay unavailable` and `Check Tailscale or VPN`. Then switch the session to connected and prove channel content returns.
 
@@ -269,7 +269,7 @@ flutter test test/shared/relay/connection_status_test.dart
 flutter test test/features/channels/channels_page_test.dart
 ```
 
-- [ ] **Step 7: Commit Task 3**
+- [x] **Step 7: Commit Task 3**
 
 ```bash
 git add mobile/lib mobile/test

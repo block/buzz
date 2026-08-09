@@ -2,13 +2,15 @@ part of '../channels_page.dart';
 
 class _ChannelsSkeleton extends StatelessWidget {
   final List<Channel>? channels;
+  final String relayUrl;
+  final SessionState sessionState;
   final double topInset;
-  final SessionStatus status;
 
   const _ChannelsSkeleton({
     required this.channels,
+    required this.relayUrl,
+    required this.sessionState,
     required this.topInset,
-    required this.status,
   });
 
   @override
@@ -43,11 +45,12 @@ class _ChannelsSkeleton extends StatelessWidget {
     final firstSection = widths.take(splitAt).toList();
     final secondSection = widths.skip(splitAt).toList();
 
-    final semanticsLabel = switch (status) {
+    final semanticsLabel = switch (sessionState.status) {
       SessionStatus.connecting => 'Connecting',
       SessionStatus.reconnecting => 'Reconnecting',
       SessionStatus.connected || SessionStatus.disconnected => 'Loading',
     };
+    final connection = relayConnectionPresentation(relayUrl, sessionState);
     return Semantics(
       key: const Key('channels-connection-skeleton'),
       liveRegion: true,
@@ -62,6 +65,24 @@ class _ChannelsSkeleton extends StatelessWidget {
             80,
           ),
           children: [
+            if (sessionState.status == SessionStatus.connecting ||
+                sessionState.status == SessionStatus.reconnecting ||
+                sessionState.failureKind != null) ...[
+              Text(
+                connection.title,
+                key: const Key('channels-connection-title'),
+                style: context.textTheme.titleMedium,
+              ),
+              const SizedBox(height: Grid.quarter),
+              Text(
+                connection.detail,
+                key: const Key('channels-connection-detail'),
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: Grid.xs),
+            ],
             _ChannelSkeletonSection(widths: firstSection),
             const SizedBox(height: Grid.xs),
             _ChannelSkeletonSection(widths: secondSection),
