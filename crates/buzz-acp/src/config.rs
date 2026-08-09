@@ -162,14 +162,13 @@ impl std::fmt::Display for PermissionMode {
 /// One-line operator warning for a permission mode that silently denies the
 /// agent's own reply path. Returns `None` for modes that don't.
 ///
-/// `dontAsk` is the default, and it is applied with `session/set_config_option`
-/// after session creation, so it overrides whatever the agent's own
-/// configuration established. The resulting failure is invisible from the
-/// outside: the denial happens *inside* the agent, so no
-/// `session/request_permission` ever reaches this harness and there is nothing
-/// for it to log. An agent stays connected and subscribed, consumes a full
-/// turn, and publishes nothing — because the bundled `buzz` CLI it is prompted
-/// to reply with is itself an approval-gated tool call.
+/// `dontAsk` is the default. It overrides the agent's configured default mode,
+/// so every tool call not matched by a preauthorization rule is denied without
+/// prompting — including the bundled `buzz` CLI the agent is prompted to reply
+/// with. The resulting failure is invisible from the outside: the denial
+/// happens *inside* the agent, so no `session/request_permission` ever reaches
+/// this harness and there is nothing for it to log. An agent stays connected
+/// and subscribed, consumes a full turn, and publishes nothing.
 ///
 /// Stating it once at startup costs one line and saves operators from
 /// diagnosing an empty channel as a relay or delivery problem.
@@ -178,12 +177,15 @@ impl std::fmt::Display for PermissionMode {
 /// constructing a full [`Config`].
 pub fn unattended_denial_warning(mode: PermissionMode) -> Option<&'static str> {
     matches!(mode, PermissionMode::DontAsk).then_some(
-        "permission_mode=dontAsk — approval-gated tool calls are denied inside the agent, \
-         including the bundled `buzz` CLI agents use to publish replies, so an agent may \
-         consume a full turn and post nothing. This is applied after session creation and \
-         overrides the agent's own permissions configuration. To leave that configuration in \
-         charge, set --permission-mode (BUZZ_ACP_PERMISSION_MODE) to `default`; unattended \
-         permission requests that reach the harness are still rejected either way.",
+        "permission_mode=dontAsk — tool calls not matched by a preauthorization rule are denied \
+         inside the agent without prompting, including the bundled `buzz` CLI agents use to \
+         publish replies, so an agent may consume a full turn and post nothing. Matching \
+         permissions.allow rules do still apply, but Claude Code ignores a project's \
+         .claude/settings.json in a workspace that was never trusted interactively — use \
+         .claude/settings.local.json to preauthorize commands for a headless agent directory. \
+         To leave the agent's own default mode in charge instead, set --permission-mode \
+         (BUZZ_ACP_PERMISSION_MODE) to `default`; unattended permission requests that reach the \
+         harness are still rejected either way.",
     )
 }
 
@@ -455,14 +457,24 @@ pub struct CliArgs {
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
-    /// Defaults to `dontAsk`, which rejects operations that need interactive
-    /// approval because Buzz does not expose a human permission prompt. Note
-    /// that this is applied with `session/set_config_option` *after* the
-    /// session is created, so it overrides any `permissions.defaultMode` or
-    /// `permissions.allow` rules the agent's own configuration established
-    /// (e.g. Claude Code's `settings.json`). Under `dontAsk` that includes the
-    /// bundled `buzz` CLI, which is how agents publish their replies — an
-    /// agent can receive a mention, do the work, and then be denied the send.
+    /// Defaults to `dontAsk`, which denies operations that need interactive
+    /// approval, without prompting, because Buzz does not expose a human
+    /// permission prompt. It is applied with `session/set_config_option`
+    /// *after* the session is created, so it overrides the agent's configured
+    /// **default mode** — but not its preauthorization: matching
+    /// `permissions.allow` rules are still evaluated per tool call, so a
+    /// pre-authorized command runs and only unmatched ones are denied.
+    ///
+    /// One caveat bites headless deployments. Claude Code ignores
+    /// `permissions.allow` from a project's `.claude/settings.json` in a
+    /// workspace that was never trusted interactively — which is every
+    /// desktop-managed agent directory — and says so only on its own stderr.
+    /// `.claude/settings.local.json` is honoured in that case and is the
+    /// reliable target for a seeded rule.
+    ///
+    /// An unmatched call under `dontAsk` includes the bundled `buzz` CLI,
+    /// which is how agents publish their replies — so an agent can receive a
+    /// mention, do the work, and then be denied the send.
     ///
     /// Select `default` to leave the agent's own configuration in charge: the
     /// harness sends no `set_config_option` at all in that mode. This is the
@@ -2345,6 +2357,26 @@ channels = "ALL"
         assert!(
             warning.contains("still rejected"),
             "warning must state the harness guarantee is unchanged, got: {warning}"
+        );
+    }
+
+    #[test]
+    /// The warning must not tell operators that agent-side preauthorization is
+    /// futile — matching allow rules are evaluated per tool call even under
+    /// `dontAsk`. The trap is the workspace-trust gate, which silently drops
+    /// `permissions.allow` from a project `settings.json` in a nest that was
+    /// never opened interactively, so name the file that does work.
+    fn test_unattended_denial_warning_points_at_settings_local() {
+        let warning = unattended_denial_warning(PermissionMode::DontAsk)
+            .expect("dontAsk must produce a warning");
+        assert!(
+            warning.contains("settings.local.json"),
+            "warning must name the settings file honoured in an untrusted workspace, \
+             got: {warning}"
+        );
+        assert!(
+            warning.contains("do still apply"),
+            "warning must not imply allow rules are ineffective under dontAsk, got: {warning}"
         );
     }
 
