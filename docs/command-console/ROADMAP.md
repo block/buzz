@@ -33,7 +33,7 @@ each capability.
 | V4 Living Ship | Complete and merged | [PR #15](https://github.com/NavigatorRAN/buzz/pull/15), merged as `865569bb4` after installed-app acceptance | Included in the v0.5.2 integration line; retain its real-user journey in every release regression |
 | Upstream Buzz refresh | Complete and accepted | [PR #16](https://github.com/NavigatorRAN/buzz/pull/16), merged into the integration line as `f09c3a1ea`; pinned `desktop-v0.5.8` at `f3de86057` | Preserve as the accepted product baseline |
 | Repository baseline promotion | Complete | [PR #17](https://github.com/NavigatorRAN/buzz/pull/17), merged to `main` as `d8dca6d49` | Retain as the authoritative v0.5.8 downstream baseline |
-| V2 Keeper | Typed-memory MVP implemented; installed-app acceptance pending | [PR #19](https://github.com/NavigatorRAN/buzz/pull/19) on `codex/phase-keeper-typed-memory-mvp`; repository specification and Memory MCP entity `buzz-keeper` | Complete the full repository gate, install the candidate app, and run the typed debrief/correction/forget/undo journey |
+| V2 Keeper | Typed-memory MVP complete and accepted | [PR #19](https://github.com/NavigatorRAN/buzz/pull/19) at `56a4d7045`; repository specification and Memory MCP entity `buzz-keeper` | Merge the accepted phase, then begin the basic V3 private remote-access pilot |
 | V3 native remote access | Compatibility freeze complete; implementation deferred until after Keeper MVP | [PR #18](https://github.com/NavigatorRAN/buzz/pull/18), merged as `473bcfefd`; repository specification and Memory MCP entity `native-buzz-remote-access-pilot` | Preserve the basic private Tailscale pilot and defer push/wake hardening |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
@@ -41,9 +41,9 @@ tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17
 placed the accepted product on `main`; PRs #2-13 were closed as superseded and
 PR #1 is retained as merged history. The synchronized application passed
 installed-app acceptance, including live adviser turns and substantive doctrine
-RAG retrieval. PR #18 completed the V2/V3 compatibility freeze. Keeper is
-implemented on draft PR #19 and is awaiting the full repository gate and
-installed-app acceptance.
+RAG retrieval. PR #18 completed the V2/V3 compatibility freeze. Keeper passed
+the full repository gate and installed-app typed debrief, later brief,
+correction, scoped forget, immediate undo, and Living Ship journey on PR #19.
 
 ## Execution sequence
 
@@ -176,8 +176,13 @@ on-demand Message provisioning with managed-agent reuse, and a Living Ship
 projection in Ship's Office. Keeper remains outside the command-brief adviser
 schema and receives no doctrine RAG or World Monitor environment injection.
 Focused Rust, desktop agent, Living Ship domain, provisioning, and Living Ship
-screen journeys pass; installed-app behavioral acceptance remains the phase
-exit gate.
+screen journeys pass. The full repository gate also passed with 4,740 desktop,
+2,584 desktop-native, and 1,261 mobile tests. Installed-app acceptance passed
+using fictional data: Keeper wrote and read back typed memory, retrieved it in a
+later sourced brief, corrected one fact, removed only that fact, immediately
+restored the same fact ID and provenance, and appeared in Living Ship. The
+pre-upgrade app and application-data backups are retained with suffix
+`before-keeper-20260809-130732`.
 
 #### 3.2 Voice capture and playback
 

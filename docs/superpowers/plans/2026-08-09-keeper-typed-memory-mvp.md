@@ -124,8 +124,10 @@
 
   Mark the compatibility freeze complete and Keeper MVP implemented/pending installed-app acceptance. Record the exact test commands and final PR/commit evidence once known.
 
-- [ ] **Step 4: Build and launch the macOS app for user acceptance**
+- [x] **Step 4: Build and launch the macOS app for user acceptance**
 
   Validate the installed journey: open Agents, select Keeper Message, allow the on-demand managed instance to start with the existing default Codex harness, debrief one unambiguous fictional interaction, request a brief in a later turn, correct one fact, forget it, and immediately undo. Confirm Keeper appears in Living Ship after provisioning.
 
   Stop only if macOS requires the user to approve Keychain/privacy access or if the live model/relay path needs a user credential action.
+
+  Result: PASS on 9 August 2026 in the installed `/Applications/Command Adviser.app`. Keeper provisioned once through the default Codex harness, reused its private DM, wrote and read back a fictional person and interaction, produced a later sourced brief, corrected a fact in place, forgot only that fact, and immediately restored the same fact ID and provenance. Keeper appeared in Living Ship and the existing workspace survived the upgrade. Recoverable app and data backups were retained with suffix `before-keeper-20260809-130732`.
