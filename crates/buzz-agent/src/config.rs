@@ -900,7 +900,9 @@ impl Config {
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                env("OPENAI_COMPAT_BASE_URL")
+                    .or_else(|| env("OPENAI_BASE_URL"))
+                    .unwrap_or_else(|| "https://api.openai.com/v1".into()),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
@@ -2969,5 +2971,68 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn base_url_prefers_compat_over_generic() {
+        temp_env::with_vars(
+            [
+                ("BUZZ_AGENT_PROVIDER", Some("openai")),
+                ("OPENAI_COMPAT_API_KEY", Some("sk-test")),
+                ("OPENAI_COMPAT_MODEL", Some("gpt-4")),
+                ("OPENAI_COMPAT_BASE_URL", Some("https://custom-openai.local/v1")),
+                ("OPENAI_BASE_URL", Some("https://generic-openai.local/v1")),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(
+                    config.base_url,
+                    "https://custom-openai.local/v1",
+                    "specific OPENAI_COMPAT_BASE_URL should win over generic OPENAI_BASE_URL"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn base_url_falls_back_to_generic_when_compat_unset() {
+        temp_env::with_vars(
+            [
+                ("BUZZ_AGENT_PROVIDER", Some("openai")),
+                ("OPENAI_COMPAT_API_KEY", Some("sk-test")),
+                ("OPENAI_COMPAT_MODEL", Some("gpt-4")),
+                ("OPENAI_COMPAT_BASE_URL", None),
+                ("OPENAI_BASE_URL", Some("https://generic-openai.local/v1")),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(
+                    config.base_url,
+                    "https://generic-openai.local/v1",
+                    "OPENAI_BASE_URL should be used when OPENAI_COMPAT_BASE_URL is unset"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn base_url_defaults_when_none_set() {
+        temp_env::with_vars(
+            [
+                ("BUZZ_AGENT_PROVIDER", Some("openai")),
+                ("OPENAI_COMPAT_API_KEY", Some("sk-test")),
+                ("OPENAI_COMPAT_MODEL", Some("gpt-4")),
+                ("OPENAI_COMPAT_BASE_URL", None),
+                ("OPENAI_BASE_URL", None),
+            ],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(
+                    config.base_url,
+                    "https://api.openai.com/v1",
+                    "should default when neither env var is set"
+                );
+            },
+        );
     }
 }

@@ -56,3 +56,4 @@ hex = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 tempfile = "3"
+temp-env = "0.3"
