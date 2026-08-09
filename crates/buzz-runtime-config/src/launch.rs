@@ -250,6 +250,24 @@ impl McpLaunchConfigDocument {
                 }
             }
         }
+
+        // Enforce the 64 KiB *encoded* size too, not just the raw string byte
+        // sum above. Raw bytes are a necessary but not sufficient bound: JSON
+        // escaping (e.g. a newline -> `\n`, a quote -> `\"`) only ever expands
+        // a document, so a doc whose raw strings are under the limit can still
+        // encode to more than the wire bound. Because construction (and this
+        // `validate`) is the only gate a `McpLaunchConfigDocument` can pass
+        // through, checking the encoded size here closes the `Serialize` path
+        // where a caller could otherwise `serde_json::to_vec` a constructible
+        // document straight out, bypassing `to_json`'s size check.
+        let encoded =
+            serde_json::to_vec(self).map_err(|err| LaunchMapError::Encode(err.to_string()))?;
+        if encoded.len() as u64 > MCP_CONFIG_MAX_BYTES {
+            return Err(LaunchMapError::Invalid(format!(
+                "MCP config exceeds the {MCP_CONFIG_MAX_BYTES} byte limit after JSON encoding"
+            )));
+        }
+
         Ok(())
     }
 }
@@ -472,6 +490,25 @@ mod tests {
         // 64 KiB in-memory bound is enforced inline rather than after encode.
         let mut server = native("one", "npx", None);
         server.args = vec!["x".repeat(MCP_CONFIG_MAX_BYTES as usize + 1)];
+        let cfg = config(vec![server]);
+        let err = McpLaunchConfigDocument::from_runtime_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn rejects_escape_expansion_past_encoded_limit() {
+        // Regression for the serialization bypass wolfyy970 flagged: raw string
+        // bytes are bounded at construction, but JSON escaping only ever expands
+        // a document. A raw value below the 64 KiB raw limit (e.g. a long string
+        // of newline characters) encodes to more than the wire bound because each
+        // newline becomes the two bytes `\n`. Construction must reject it — not
+        // just `to_json()` — so a caller cannot `serde_json::to_vec` a
+        // constructible-but-over-limit document directly.
+        let mut server = native("one", "npx", None);
+        // 40_000 raw newline bytes: comfortably under 64 KiB raw, but JSON
+        // escaping turns each into `\n` (2 bytes), pushing the encoded
+        // document past the 64 KiB limit.
+        server.args = vec!["\n".repeat(40_000)];
         let cfg = config(vec![server]);
         let err = McpLaunchConfigDocument::from_runtime_config(&cfg).unwrap_err();
         assert!(err.to_string().contains("byte limit"));
