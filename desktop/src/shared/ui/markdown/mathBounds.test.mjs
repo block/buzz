@@ -68,7 +68,10 @@ test("an oversized display formula is neutralised on its own", () => {
     "opening display delimiter escaped",
   );
   assert.ok(content.endsWith("\\$\\$ after"));
-  assert.ok(!/\\$\\$/.test(content), "no contiguous $$ left to tokenise");
+  assert.ok(
+    !content.includes("$$"),
+    "no contiguous $$ remains to tokenise as display math",
+  );
 });
 
 test("only the oversized formula is neutralised; siblings untouched", () => {
