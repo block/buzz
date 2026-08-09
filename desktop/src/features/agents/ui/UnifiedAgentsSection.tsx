@@ -218,25 +218,51 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             />
             {groups.map((group) => {
               const profileAgent = pickProfileAgent(group.agents);
+              const isOwnerPrivateSupportAgent =
+                group.persona.id === "builtin:keeper";
               return (
                 <AgentPersonaCard
-                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
-                    <PersonaActionsMenu
-                      isActionPending={
-                        isActionPending || isEffectiveAvatarLoading
-                      }
-                      isPending={isPersonasPending}
-                      persona={group.persona}
-                      linkedAgent={profileAgent}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
-                      onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onShare={(persona, linkedAgent) =>
-                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
-                      }
-                    />
-                  )}
+                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => {
+                    const actionsMenu = (
+                      <PersonaActionsMenu
+                        isActionPending={
+                          isActionPending || isEffectiveAvatarLoading
+                        }
+                        isPending={isPersonasPending}
+                        persona={group.persona}
+                        linkedAgent={profileAgent}
+                        onDeactivate={onDeactivatePersona}
+                        onDelete={onDeletePersona}
+                        onDuplicate={onDuplicatePersona}
+                        onEdit={onEditPersona}
+                        onShare={(persona, linkedAgent) =>
+                          onSharePersona(
+                            persona,
+                            linkedAgent,
+                            effectiveAvatarUrl,
+                          )
+                        }
+                      />
+                    );
+                    if (!isOwnerPrivateSupportAgent) {
+                      return actionsMenu;
+                    }
+                    return (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          disabled={messagingPersonaIds.has(group.persona.id)}
+                          onClick={() => onMessagePersona(group.persona.id)}
+                          size="sm"
+                          type="button"
+                          variant="secondary"
+                        >
+                          <MessageCircle />
+                          Message
+                        </Button>
+                        {actionsMenu}
+                      </div>
+                    );
+                  }}
                   agent={profileAgent}
                   defaultModel={defaultModel}
                   key={group.persona.id}

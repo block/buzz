@@ -37,7 +37,8 @@ export function LivingShipScreen() {
           </div>
           <h1>HMAS Supply · Living Ship</h1>
           <p>
-            Where your command team is working, collaborating or standing by.
+            Where your command team and support agents are working,
+            collaborating or standing by.
           </p>
         </div>
         <fieldset
@@ -66,7 +67,7 @@ export function LivingShipScreen() {
       ) : null}
       {agents.length === 0 ? (
         <div className="living-ship-empty">
-          No Command Adviser agents are configured on this ship yet.
+          No Command Adviser or support agents are configured on this ship yet.
         </div>
       ) : (
         <div className="living-ship-workspace">

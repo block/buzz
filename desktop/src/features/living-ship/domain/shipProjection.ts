@@ -1,6 +1,5 @@
 import type { AgentWorkingState } from "@/features/agents/agentWorkingSignal";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
-import type { AdviserId } from "@/features/command-console/domain/briefContracts";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -8,6 +7,7 @@ import {
   type AgentLocationReason,
   type CollaborationContext,
   LIVING_SHIP_ADVISERS,
+  type LivingShipAgentId,
   type ShipLocationId,
   type ShipRoomId,
   SHIP_ROOMS,
@@ -20,7 +20,7 @@ type ManagedAgentProjectionInput = Pick<
 >;
 
 export type LivingShipAgentPresentation = {
-  adviser: AdviserId;
+  adviser: LivingShipAgentId;
   personaId: string;
   pubkey: string;
   name: string;

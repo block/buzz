@@ -12,6 +12,7 @@ export type ShipRoomId =
 
 export type ShipLocationId = ShipRoomId | "personnel-strip";
 export type AgentLifecycle = "online" | "waking" | "offline";
+export type LivingShipAgentId = AdviserId | "keeper";
 
 export type CollaborationContext =
   | "operations"
@@ -127,7 +128,7 @@ export const SHIP_ROOMS = Object.freeze([
 ] as const satisfies readonly ShipRoom[]);
 
 export type LivingShipAdviser = {
-  adviser: AdviserId;
+  adviser: LivingShipAgentId;
   personaId: string;
   label: string;
   shortLabel: string;
@@ -200,6 +201,14 @@ export const LIVING_SHIP_ADVISERS = Object.freeze([
     homeRoom: "plans",
     spriteColumn: 7,
   },
+  {
+    adviser: "keeper",
+    personaId: "builtin:keeper",
+    label: "Keeper",
+    shortLabel: "KEEP",
+    homeRoom: "ships-office",
+    spriteColumn: 5,
+  },
 ] as const satisfies readonly LivingShipAdviser[]);
 
 const ADVISER_BY_ID = new Map(
@@ -225,7 +234,7 @@ export type AgentLocationReason =
   | "collaboration-context";
 
 export function resolveAgentLocation(input: {
-  adviser: AdviserId;
+  adviser: LivingShipAgentId;
   lifecycle: AgentLifecycle;
   working: boolean;
   collaboration?: {

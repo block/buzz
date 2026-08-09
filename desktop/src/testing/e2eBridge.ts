@@ -2445,6 +2445,14 @@ function resetMockPersonas(config?: E2eConfig) {
       system_prompt: "You are the Plans Adviser.",
       default_active: true,
     },
+    {
+      id: "builtin:keeper",
+      display_name: "Keeper",
+      avatar_url: null,
+      system_prompt:
+        "You are Keeper, the owner's private relationship-memory assistant.",
+      default_active: true,
+    },
   ];
   mockPersonas = builtInPersonas.map((persona) => ({
     id: persona.id,
