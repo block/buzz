@@ -648,6 +648,46 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
 /// `DedupMode::Queue`: `DedupMode::Drop` discards events during the cancel drain
 /// window, which would produce incomplete merged prompts. `Queue` handling
 /// imposes no constraint.
+/// Fall back to a `buzz-dev-mcp` binary installed NEXT TO the running
+/// `buzz-acp` executable when no MCP command was configured.
+///
+/// Without an MCP server the agent has no keyed channel back to the relay:
+/// `BUZZ_PRIVATE_KEY` / `BUZZ_RELAY_URL` are injected only into the MCP
+/// server's environment at `session/new` (see `build_mcp_servers`), so a
+/// harness spawned with an empty `mcp_command` — which Desktop currently does
+/// for Claude Code, whose `KnownAcpRuntime.mcp_command` is `None` — can run a
+/// full turn and then have no way to publish its reply.
+///
+/// The fallback is deliberately NOT an env/config knob: the sibling path is
+/// derived from the trusted install directory of the running executable, so it
+/// adds no user-controllable code-execution surface (the reason
+/// `BUZZ_ACP_MCP_COMMAND` is a Desktop-reserved key). When no sibling exists
+/// (e.g. under `cargo test`), the command is left empty and behaviour is
+/// unchanged.
+fn resolve_mcp_command_with_sibling_fallback(configured: String) -> String {
+    if !configured.is_empty() {
+        return configured;
+    }
+    let sibling = std::env::current_exe().ok().and_then(|exe| {
+        let candidate = exe.with_file_name(if cfg!(windows) {
+            "buzz-dev-mcp.exe"
+        } else {
+            "buzz-dev-mcp"
+        });
+        candidate.is_file().then(|| candidate.display().to_string())
+    });
+    match sibling {
+        Some(path) => {
+            tracing::info!(
+                mcp_command = %path,
+                "mcp_command empty; using sibling buzz-dev-mcp fallback"
+            );
+            path
+        }
+        None => configured,
+    }
+}
+
 fn validate_multiple_event_handling(
     handling: MultipleEventHandling,
     dedup: DedupMode,
@@ -1059,7 +1099,7 @@ impl Config {
             relay_url: args.relay_url,
             agent_command,
             agent_args,
-            mcp_command: args.mcp_command,
+            mcp_command: resolve_mcp_command_with_sibling_fallback(args.mcp_command),
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1430,6 +1470,24 @@ mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
+
+    #[test]
+    fn sibling_fallback_keeps_a_configured_command() {
+        // A non-empty command is authoritative and must never be overridden.
+        assert_eq!(
+            resolve_mcp_command_with_sibling_fallback("explicit-mcp".to_string()),
+            "explicit-mcp"
+        );
+    }
+
+    #[test]
+    fn sibling_fallback_is_absent_when_no_sibling_binary_exists() {
+        // No `buzz-dev-mcp` sits beside the test executable, so an empty
+        // command stays empty rather than pointing at a nonexistent path. The
+        // populated path is exercised in the packaged desktop layout and
+        // verified there via the `mcp_command empty; using sibling` log line.
+        assert_eq!(resolve_mcp_command_with_sibling_fallback(String::new()), "");
+    }
 
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
