@@ -17,7 +17,6 @@ import {
   filterCachedAgentSuggestions,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
@@ -253,9 +252,6 @@ export function useMentions(
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
-        return;
-      }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
         return;
       }
       if (
