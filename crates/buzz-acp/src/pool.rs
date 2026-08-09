@@ -1861,6 +1861,10 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    // Structured channel/sender identity for the batch, attached to the
+    // `session/prompt` request as `_meta.buzz`. `None` for heartbeats and
+    // other batch-less prompts.
+    let mut prompt_meta: Option<serde_json::Value> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1903,6 +1907,8 @@ pub async fn run_prompt_task(
                 "slash-command pass-through"
             );
         }
+
+        prompt_meta = Some(crate::queue::build_prompt_meta(b, channel_info.as_ref()));
 
         crate::queue::format_prompt(
             b,
@@ -1980,6 +1986,7 @@ pub async fn run_prompt_task(
                 result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    prompt_meta.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -1991,6 +1998,7 @@ pub async fn run_prompt_task(
                 result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
+                    prompt_meta.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,

@@ -1146,6 +1146,45 @@ pub(crate) fn format_event_block(
     block
 }
 
+/// Build the `_meta.buzz` value attached to the `session/prompt` request for
+/// a [`FlushBatch`].
+///
+/// Exposes the channel and sender identity that [`format_event_block`] already
+/// renders into the prompt *text*, but structured, so ACP agents can key
+/// memory, authorization, or routing on it without parsing the rendered
+/// prompt. Additive metadata only — the prompt text is unchanged, and agents
+/// that ignore `_meta` see no difference.
+///
+/// `channelType` is included only when channel metadata is resolved; consumers
+/// must not assume a type when the key is absent. `cancelledEvents` is omitted
+/// (rather than empty) for normal, non-merge batches.
+pub(crate) fn build_prompt_meta(
+    batch: &FlushBatch,
+    channel_info: Option<&PromptChannelInfo>,
+) -> serde_json::Value {
+    fn event_meta(be: &BatchEvent) -> serde_json::Value {
+        serde_json::json!({
+            "id": be.event.id.to_hex(),
+            "sender": be.event.pubkey.to_hex(),
+            "kind": be.event.kind.as_u16(),
+            "createdAt": be.event.created_at.as_secs(),
+        })
+    }
+
+    let mut meta = serde_json::json!({
+        "channelId": batch.channel_id,
+        "events": batch.events.iter().map(event_meta).collect::<Vec<_>>(),
+    });
+    if let Some(ci) = channel_info {
+        meta["channelType"] = serde_json::Value::String(ci.channel_type.clone());
+    }
+    if !batch.cancelled_events.is_empty() {
+        meta["cancelledEvents"] =
+            serde_json::Value::Array(batch.cancelled_events.iter().map(event_meta).collect());
+    }
+    meta
+}
+
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
 /// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
@@ -1895,6 +1934,83 @@ mod tests {
         assert!(prompt.contains("Event ID:"));
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
+    }
+
+    #[test]
+    fn test_build_prompt_meta_multi_event_batch_with_cancelled() {
+        let ch = Uuid::new_v4();
+        let e1 = make_event("first message");
+        let e2 = make_event("second message");
+        let cancelled = make_event("the original task");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                BatchEvent {
+                    event: e1.clone(),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: e2.clone(),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![BatchEvent {
+                event: cancelled.clone(),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+        let info = PromptChannelInfo {
+            name: "general".into(),
+            channel_type: "dm".into(),
+        };
+
+        let meta = build_prompt_meta(&batch, Some(&info));
+
+        let expect_event = |e: &Event| {
+            serde_json::json!({
+                "id": e.id.to_hex(),
+                "sender": e.pubkey.to_hex(),
+                "kind": 9,
+                "createdAt": e.created_at.as_secs(),
+            })
+        };
+        assert_eq!(
+            meta,
+            serde_json::json!({
+                "channelId": ch,
+                "channelType": "dm",
+                "events": [expect_event(&e1), expect_event(&e2)],
+                "cancelledEvents": [expect_event(&cancelled)],
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_meta_omits_channel_type_and_cancelled_when_absent() {
+        // No resolved channel metadata → no channelType key (consumers must
+        // not assume a type); no cancelled events → no cancelledEvents key.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hello"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let meta = build_prompt_meta(&batch, None);
+
+        assert!(meta.get("channelType").is_none());
+        assert!(meta.get("cancelledEvents").is_none());
+        assert_eq!(meta["channelId"], serde_json::json!(ch));
+        assert_eq!(meta["events"].as_array().unwrap().len(), 1);
     }
 
     /// Helper: build a merged (cancel + re-prompt) batch with one cancelled

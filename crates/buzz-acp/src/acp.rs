@@ -749,6 +749,7 @@ impl AcpClient {
         self.session_prompt_blocks_with_idle_timeout(
             session_id,
             std::slice::from_ref(&prompt_text),
+            None,
             idle_timeout,
             max_duration,
         )
@@ -756,7 +757,8 @@ impl AcpClient {
     }
 
     /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
-    /// but sends each entry in `prompt_blocks` as a separate text content block.
+    /// but sends each entry in `prompt_blocks` as a separate text content block,
+    /// optionally attaching structured batch metadata as `_meta.buzz`.
     ///
     /// Used for slash-command pass-through: ACP connectors detect commands via
     /// the **first** block's text starting with `/`, so the harness sends
@@ -765,10 +767,11 @@ impl AcpClient {
         &mut self,
         session_id: &str,
         prompt_blocks: &[&str],
+        meta: Option<&serde_json::Value>,
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        let params = build_prompt_params(session_id, prompt_blocks, meta);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -1967,15 +1970,27 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
-fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+///
+/// When `meta` is provided it is attached under `_meta.buzz` — nested under a
+/// `buzz` key to keep the `_meta` root clean, matching the `_meta.goose.*`
+/// pattern. `None` leaves `_meta` off the params entirely.
+fn build_prompt_params(
+    session_id: &str,
+    prompt_blocks: &[&str],
+    meta: Option<&serde_json::Value>,
+) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
-    })
+    });
+    if let Some(meta) = meta {
+        params["_meta"]["buzz"] = meta.clone();
+    }
+    params
 }
 
 /// Build `_goose/unstable/session/steer` params from one or more text
@@ -2489,6 +2504,7 @@ mod tests {
                 "/goal ship it",
                 "[Buzz event: @mention]\nContent: @Eva /goal ship it",
             ],
+            None,
         );
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
@@ -2496,6 +2512,35 @@ mod tests {
         assert_eq!(prompt[0]["text"].as_str(), Some("/goal ship it"));
         assert!(prompt[0]["text"].as_str().unwrap().starts_with('/'));
         assert_eq!(prompt[1]["type"].as_str(), Some("text"));
+    }
+
+    #[test]
+    fn session_prompt_params_omit_meta_entirely_when_none() {
+        // Batch-less prompts (heartbeats, initial_message) must not grow an
+        // empty `_meta` object — the key is absent, not null.
+        let params = build_prompt_params("sess_abc123", &["hello"], None);
+        assert!(params.get("_meta").is_none());
+        assert_eq!(params["sessionId"].as_str(), Some("sess_abc123"));
+        assert_eq!(params["prompt"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn session_prompt_params_nest_meta_under_buzz_key() {
+        let meta = serde_json::json!({
+            "channelId": "7f3a2b10-0000-0000-0000-000000000000",
+            "channelType": "dm",
+            "events": [
+                { "id": "ab".repeat(32), "sender": "cd".repeat(32), "kind": 9, "createdAt": 1785840000u64 }
+            ],
+        });
+        let params = build_prompt_params("sess_abc123", &["hello"], Some(&meta));
+        // Nested under `buzz` to keep the `_meta` root clean, matching the
+        // `_meta.goose.*` pattern.
+        assert_eq!(params["_meta"]["buzz"], meta);
+        // The prompt blocks are unaffected by the metadata.
+        let prompt = params["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), 1);
+        assert_eq!(prompt[0]["text"].as_str(), Some("hello"));
     }
 
     #[test]
