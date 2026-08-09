@@ -17,6 +17,14 @@ use buzz_runtime_config::McpServerConfig;
 fn redacted_json(doc: &McpLaunchConfigDocument) -> serde_json::Value {
     let mut value = serde_json::to_value(doc).expect("doc serializes");
     for server in value["servers"].as_array_mut().expect("servers array") {
+        // Arguments may carry secrets too (e.g. an API key passed as a CLI
+        // flag), so redact both args and environment values before emitting
+        // a shareable sample.
+        if let Some(args) = server["args"].as_array_mut() {
+            for arg in args.iter_mut() {
+                *arg = serde_json::Value::String("***".to_string());
+            }
+        }
         if let Some(env) = server["env"].as_object_mut() {
             for val in env.values_mut() {
                 *val = serde_json::Value::String("***".to_string());
@@ -46,9 +54,9 @@ fn main() {
             path.display()
         )
     });
-    let doc = McpLaunchConfigDocument::from_runtime_config(&native);
-    doc.validate()
-        .unwrap_or_else(|err| panic!("mapped document is invalid: {err}"));
+    let doc = McpLaunchConfigDocument::from_runtime_config(&native).unwrap_or_else(|err| {
+        panic!("mapped document is invalid (no launch document can be built): {err}")
+    });
 
     let total = native.servers.len();
     let enabled = native
