@@ -127,7 +127,7 @@ git commit -m "feat: advertise a private mobile relay for pairing"
 - Consumes: `startPairing(advertisedRelayUrl?: string)` from Task 1.
 - Produces: `normalizePrivateMobileRelay(raw: string): { value: string; error: string | null }`, storage key `command-adviser.private-mobile-relay.v1`, and a separate Settings card that does not alter existing QR layout geometry.
 
-- [ ] **Step 1: Write failing URL-helper tests**
+- [x] **Step 1: Write failing URL-helper tests**
 
 Test literal outcomes:
 
@@ -143,7 +143,7 @@ assert.deepEqual(
 
 Also cover a complete HTTPS input, surrounding whitespace, blank-as-disabled, and rejection of HTTP, public domains, credentials, paths, query strings, and fragments.
 
-- [ ] **Step 2: Run the helper test and verify RED**
+- [x] **Step 2: Run the helper test and verify RED**
 
 Run:
 
@@ -154,11 +154,11 @@ pnpm test -- src/features/settings/lib/privateMobileRelay.test.mjs
 
 Expected: module-not-found failure.
 
-- [ ] **Step 3: Implement normalization and safe persistence**
+- [x] **Step 3: Implement normalization and safe persistence**
 
 Keep the helper pure. In `MobilePairingCard`, initialize from localStorage, validate on change, and persist only a valid normalized origin or remove the key when blank. A storage exception must leave the in-memory value usable and must not block ordinary local pairing.
 
-- [ ] **Step 4: Add the separate private-relay Settings row**
+- [x] **Step 4: Add the separate private-relay Settings row**
 
 Render a `SettingsOptionGroup` before the unchanged QR group with:
 
@@ -169,7 +169,7 @@ Render a `SettingsOptionGroup` before the unchanged QR group with:
 
 Call `startPairing(normalized.value || undefined)` and disable Start only when a non-empty value is invalid.
 
-- [ ] **Step 5: Write and run the Playwright behavior test**
+- [x] **Step 5: Write and run the Playwright behavior test**
 
 Seed the input with `https://matthews-macbook-pro-1.tailf29f2c.ts.net`, start pairing, and assert the real Tauri mock command log contains:
 
@@ -185,7 +185,7 @@ Seed the input with `https://matthews-macbook-pro-1.tailf29f2c.ts.net`, start pa
 
 Reload Settings and prove the value persists. First run must fail because the field and argument do not exist; after implementation the focused Playwright project must pass.
 
-- [ ] **Step 6: Run desktop focused gates and commit Task 2**
+- [x] **Step 6: Run desktop focused gates and commit Task 2**
 
 ```bash
 cd desktop

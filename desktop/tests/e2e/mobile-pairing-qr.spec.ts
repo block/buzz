@@ -35,6 +35,39 @@ async function emitPairingEvent(page: Page, event: string, payload?: unknown) {
   );
 }
 
+test("private iPhone relay is normalized, passed to pairing, and persisted", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+
+  const relayInput = page.getByTestId("private-mobile-relay-input");
+  await relayInput.fill("matthews-macbook-pro-1.tailf29f2c.ts.net");
+  await page.getByTestId("start-pairing-button").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).find(
+          (entry) => entry.command === "start_pairing",
+        ),
+      ),
+    )
+    .toEqual({
+      command: "start_pairing",
+      payload: {
+        advertisedRelayUrl: "https://matthews-macbook-pro-1.tailf29f2c.ts.net/",
+      },
+    });
+
+  await page.reload();
+  await expect(page.getByTestId("private-mobile-relay-input")).toHaveValue(
+    "https://matthews-macbook-pro-1.tailf29f2c.ts.net/",
+  );
+});
+
 test("mobile pairing starts on demand and reveals the QR code", async ({
   page,
 }) => {
@@ -177,9 +210,9 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   expect(stepsBox).not.toBeNull();
   expect(qrCardBox).not.toBeNull();
   expect(qrBox?.x ?? 0).toBeLessThan(stepsBox?.x ?? 0);
-  expect(Math.abs((stepsBox?.y ?? 0) - (initialStepsBox?.y ?? 0))).toBeLessThan(
-    0.5,
-  );
+  const initialStepsOffset = (initialStepsBox?.y ?? 0) - (cardBox?.y ?? 0);
+  const qrStepsOffset = (stepsBox?.y ?? 0) - (qrCardBox?.y ?? 0);
+  expect(Math.abs(qrStepsOffset - initialStepsOffset)).toBeLessThan(0.5);
   expect(
     Math.abs((qrCardBox?.height ?? 0) - (cardBox?.height ?? 0)),
   ).toBeLessThan(0.5);

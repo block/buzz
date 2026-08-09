@@ -17,7 +17,9 @@ import {
 } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { StyledQrCode } from "@/shared/ui/styled-qr-code";
+import { normalizePrivateMobileRelay } from "../lib/privateMobileRelay";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
@@ -33,6 +35,16 @@ type PairingStep =
   | "error";
 
 const PAIRING_CODE_DIGIT_POSITIONS = [0, 1, 2, 3, 4, 5] as const;
+const PRIVATE_MOBILE_RELAY_STORAGE_KEY =
+  "command-adviser.private-mobile-relay.v1";
+
+function storedPrivateMobileRelay() {
+  try {
+    return localStorage.getItem(PRIVATE_MOBILE_RELAY_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 
 function pairingErrorMessage(error: unknown) {
   const message =
@@ -248,6 +260,11 @@ export function MobilePairingCard({
   const [qrUri, setQrUri] = useState<string | null>(null);
   const [sasCode, setSasCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [privateMobileRelay, setPrivateMobileRelay] = useState(
+    storedPrivateMobileRelay,
+  );
+  const normalizedPrivateMobileRelay =
+    normalizePrivateMobileRelay(privateMobileRelay);
   const requestIdRef = useRef(0);
   const pairingActiveRef = useRef(false);
   const stepRef = useRef(step);
@@ -261,7 +278,7 @@ export function MobilePairingCard({
     setSasCode(null);
     setError(null);
 
-    startPairing().then(
+    startPairing(normalizedPrivateMobileRelay.value || undefined).then(
       (uri) => {
         if (requestId === requestIdRef.current) {
           setQrUri(uri);
@@ -276,7 +293,25 @@ export function MobilePairingCard({
         }
       },
     );
-  }, []);
+  }, [normalizedPrivateMobileRelay.value]);
+
+  function handlePrivateMobileRelayChange(value: string) {
+    setPrivateMobileRelay(value);
+    const normalized = normalizePrivateMobileRelay(value);
+
+    try {
+      if (!value.trim()) {
+        localStorage.removeItem(PRIVATE_MOBILE_RELAY_STORAGE_KEY);
+      } else if (!normalized.error) {
+        localStorage.setItem(
+          PRIVATE_MOBILE_RELAY_STORAGE_KEY,
+          normalized.value,
+        );
+      }
+    } catch {
+      // Pairing remains usable when browser storage is unavailable.
+    }
+  }
 
   useEffect(() => {
     ++requestIdRef.current;
@@ -396,6 +431,49 @@ export function MobilePairingCard({
       />
 
       <SettingsOptionGroup
+        className="mb-4 w-full"
+        data-testid="private-mobile-relay-group"
+      >
+        <SettingsOptionRow className="flex-col items-stretch gap-3">
+          <div>
+            <label
+              className="text-sm font-medium"
+              htmlFor="private-mobile-relay"
+            >
+              Private iPhone relay
+            </label>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Tailscale must be active on both devices. This address is used
+              only when creating a mobile pairing code.
+            </p>
+          </div>
+          <Input
+            aria-describedby="private-mobile-relay-help"
+            aria-invalid={Boolean(normalizedPrivateMobileRelay.error)}
+            data-testid="private-mobile-relay-input"
+            id="private-mobile-relay"
+            onChange={(event) =>
+              handlePrivateMobileRelayChange(event.currentTarget.value)
+            }
+            placeholder="https://your-mac.tailnet.ts.net"
+            value={privateMobileRelay}
+          />
+          <p
+            className={cn(
+              "text-xs",
+              normalizedPrivateMobileRelay.error
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+            id="private-mobile-relay-help"
+          >
+            {normalizedPrivateMobileRelay.error ??
+              "Leave blank to use the current workspace relay."}
+          </p>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
+
+      <SettingsOptionGroup
         className="w-full [container-type:inline-size]"
         data-testid="mobile-pairing-card"
       >
@@ -495,6 +573,7 @@ export function MobilePairingCard({
                 currentPubkey ? (
                   <Button
                     data-testid="start-pairing-button"
+                    disabled={Boolean(normalizedPrivateMobileRelay.error)}
                     onClick={beginPairing}
                     type="button"
                   >
