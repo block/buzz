@@ -223,6 +223,7 @@ fn parse_nvidia_smi_catalog_output(output: &str) -> Option<(Vec<String>, u64)> {
 #[serde(rename_all = "PascalCase")]
 struct WindowsVideoController {
     name: Option<String>,
+    #[serde(rename = "AdapterRAM")]
     adapter_ram: Option<serde_json::Value>,
 }
 
