@@ -28,6 +28,10 @@ pub struct SharedState {
     pub shim: Shim,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
+    /// Whether the active model route can accept MCP image content. The agent
+    /// supplies this explicitly when it starts the dev MCP; direct users retain
+    /// the historical vision-capable default unless they opt out.
+    pub image_input_supported: bool,
     /// The shell resolved at construction: `Ok((path, display_name))` when a shell
     /// is available, `Err(msg)` when none was found. Stored once so both the
     /// bootstrap hint and every `run()` call read the SAME resolution — no drift.
@@ -51,11 +55,18 @@ impl SharedState {
             Err(_) => "bash",
         };
         let bootstrap_instructions = build_bootstrap(&cwd, shell_hint);
+        // `buzz-agent` declares its capability explicitly. Retain the original
+        // behavior for standalone dev-MCP use and other hosts that do not set it.
+        let image_input_supported = !matches!(
+            std::env::var("BUZZ_MCP_IMAGE_INPUT_SUPPORTED").as_deref(),
+            Ok("false" | "0")
+        );
         Ok(Self {
             cwd,
             shim,
             session_dir,
             bootstrap_instructions,
+            image_input_supported,
             resolved_shell,
             artifacts: Mutex::new(VecDeque::with_capacity(ARTIFACT_RING_SIZE)),
             next_call_id: Mutex::new(0),
@@ -69,6 +80,12 @@ impl SharedState {
         };
         *g += 1;
         *g
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_image_input_supported(mut self, supported: bool) -> Self {
+        self.image_input_supported = supported;
+        self
     }
 }
 

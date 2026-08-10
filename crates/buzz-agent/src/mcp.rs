@@ -756,6 +756,10 @@ async fn spawn_one(
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+    // This agent advertises `promptCapabilities.image: false`; make that
+    // capability available to MCP tools so image-producing tools can fail
+    // locally with an actionable result instead of sending an unusable payload.
+    cmd.env("BUZZ_MCP_IMAGE_INPUT_SUPPORTED", "false");
     cmd.current_dir(&spec.cwd);
     cmd.stderr(std::process::Stdio::inherit());
 

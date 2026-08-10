@@ -86,6 +86,12 @@ struct PreparedImage {
 }
 
 pub async fn run(state: &SharedState, p: ViewImageParams) -> Result<CallToolResult, ErrorData> {
+    if !state.image_input_supported {
+        return Ok(CallToolResult::error(vec![Content::text(
+            "This model cannot see images: its active route does not support image input. `view_image` cannot inspect this image for you. Do not retry this tool; use OCR or other text-based inspection tools instead.".to_string(),
+        )]));
+    }
+
     let max_dim = p
         .max_dim
         .unwrap_or(DEFAULT_MAX_DIM)
@@ -710,6 +716,39 @@ mod tests {
             .unwrap();
         fs::write(path, &bytes).unwrap();
         bytes
+    }
+
+    #[tokio::test]
+    async fn rejects_view_image_before_reading_when_model_lacks_vision() {
+        let dir = tempdir().unwrap();
+        let state = make_state(dir.path());
+        // A missing source proves the capability error is returned before the
+        // tool touches the filesystem or attempts image decoding.
+        let res = run(
+            &state.with_image_input_supported(false),
+            ViewImageParams {
+                source: "does-not-exist.png".into(),
+                max_dim: None,
+                workdir: Some(dir.path().display().to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.is_error, Some(true));
+        let text = res
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .expect("text error result")
+            .text
+            .as_str();
+        assert!(text.contains("cannot see images"), "{text}");
+        assert!(text.contains("Do not retry"), "{text}");
+        assert!(res
+            .content
+            .iter()
+            .all(|content| content.as_image().is_none()));
     }
 
     #[tokio::test]
