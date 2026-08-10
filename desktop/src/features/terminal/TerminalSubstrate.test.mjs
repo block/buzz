@@ -823,6 +823,57 @@ test("control chords keep reaching the PTY instead of the tab layer", async () =
   );
 });
 
+test("Windows paste chords reach paste instead of sending ^V", async (t) => {
+  Object.defineProperty(dom.window.navigator, "platform", {
+    configurable: true,
+    value: "Win32",
+  });
+  t.after(() => {
+    Object.defineProperty(dom.window.navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+  });
+
+  const subject = await revealed({ bracketedPaste: true });
+  const input = subject.view.getByLabelText("Terminal input");
+  const keyDown = (shiftKey) => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "KeyV",
+      ctrlKey: true,
+      key: "v",
+      shiftKey,
+    });
+    act(() => input.dispatchEvent(event));
+    return event;
+  };
+
+  const plain = keyDown(false);
+  assert.equal(plain.defaultPrevented, false);
+  assert.deepEqual(subject.calls.input, [], "Ctrl+V must not send ^V");
+  fireEvent.paste(input, {
+    clipboardData: { getData: () => "first" },
+  });
+
+  const shifted = keyDown(true);
+  assert.equal(shifted.defaultPrevented, false);
+  assert.deepEqual(
+    subject.calls.input,
+    ["\u001b[200~first\u001b[201~"],
+    "Ctrl+Shift+V must not send ^V",
+  );
+  fireEvent.paste(input, {
+    clipboardData: { getData: () => "second" },
+  });
+
+  assert.deepEqual(subject.calls.input, [
+    "\u001b[200~first\u001b[201~",
+    "\u001b[200~second\u001b[201~",
+  ]);
+});
+
 test("⌘W on an already-closing tab does not re-fire close", async () => {
   const subject = await revealed({
     sessions: [
