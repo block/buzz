@@ -94,8 +94,11 @@ impl LaneKey {
             return Ok(Self::channel(channel_id));
         }
 
-        let mut roots = HashSet::new();
-        let mut replies = HashSet::new();
+        // Vec, not HashSet: a set collapses two IDENTICAL required tags into one
+        // entry, so a duplicated `root`/`reply` looked well-formed and resolved a
+        // lane instead of failing closed. Duplicates are counted here.
+        let mut roots: Vec<String> = Vec::new();
+        let mut replies: Vec<String> = Vec::new();
         let mut positional = Vec::new();
         for tag in event.tags.iter() {
             let parts = tag.as_slice();
@@ -103,20 +106,24 @@ impl LaneKey {
                 continue;
             }
             let marker = parts.get(3).map(String::as_str);
-            if !matches!(marker, Some("root" | "reply") | None | Some("")) {
-                continue;
+            match marker {
+                // `mention` is standard NIP-10 and explicitly NON-AUTHORITATIVE:
+                // it names an event without making it this event's thread, so it
+                // is ignored rather than treated as malformed.
+                Some("mention") => continue,
+                Some("root") | Some("reply") | None | Some("") => {}
+                // An unrecognised marker is REJECTED, never skipped. Skipping it
+                // can hide the only thread tag on a reply, and the event then
+                // derives a top-level lane and runs in the wrong lane entirely.
+                Some(_) => return Err(LaneResolveError::MalformedRequiredTag),
             }
             let id = parts.get(1).ok_or(LaneResolveError::MalformedRequiredTag)?;
             if !valid_event_id(id) {
                 return Err(LaneResolveError::InvalidEventId(id.clone()));
             }
             match marker {
-                Some("root") => {
-                    roots.insert(id.to_ascii_lowercase());
-                }
-                Some("reply") => {
-                    replies.insert(id.to_ascii_lowercase());
-                }
+                Some("root") => roots.push(id.to_ascii_lowercase()),
+                Some("reply") => replies.push(id.to_ascii_lowercase()),
                 None | Some("") => positional.push(id.to_ascii_lowercase()),
                 _ => unreachable!("marker filtered above"),
             }
@@ -576,6 +583,7 @@ impl EventQueue {
             .filter(|(lane, cancelled)| {
                 !cancelled.is_empty()
                     && !self.in_flight_channels.contains(*lane)
+                    && self.retry_after.get(*lane).is_none_or(|&t| t <= now)
                     && eligible(lane)
                     && !self.queues.get(*lane).is_some_and(|queue| {
                         !queue.is_empty() && self.retry_after.get(*lane).is_none_or(|&t| t <= now)
@@ -605,17 +613,41 @@ impl EventQueue {
         };
 
         if !drain_queue {
-            let cancelled = self.cancelled_batches.remove(&lane).unwrap_or_default();
-            let cancel_reason = self.cancel_reasons.remove(&lane);
+            let (events, clear_cancelled_state) =
+                if matches!(self.affinity_policy, AffinityPolicy::RootThread) {
+                    let cancelled = self
+                        .cancelled_batches
+                        .get_mut(&lane)
+                        .expect("selected cancelled lane must retain work");
+                    let oldest_index = cancelled
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, event)| event.received_at)
+                        .map(|(index, _)| index)
+                        .expect("selected cancelled lane must be non-empty");
+                    let event = cancelled.remove(oldest_index);
+                    (vec![event], cancelled.is_empty())
+                } else {
+                    (
+                        self.cancelled_batches.remove(&lane).unwrap_or_default(),
+                        true,
+                    )
+                };
+            let cancel_reason = if clear_cancelled_state {
+                self.cancelled_batches.remove(&lane);
+                self.cancel_reasons.remove(&lane)
+            } else {
+                self.cancel_reasons.get(&lane).copied()
+            };
             self.in_flight_channels.insert(lane.clone());
             self.in_flight_deadlines
                 .insert(lane.clone(), now + self.in_flight_deadline);
             self.in_flight_batch_sizes
-                .insert(lane.clone(), cancelled.len());
+                .insert(lane.clone(), events.len());
             return Some(FlushBatch {
                 channel_id: lane.channel_id,
                 lane,
-                events: cancelled,
+                events,
                 cancelled_events: vec![],
                 cancel_reason,
             });
@@ -673,15 +705,12 @@ impl EventQueue {
         self.in_flight_batch_sizes.remove(lane);
         self.in_flight_turn_ids.remove(lane);
         let now = Instant::now();
-        match self.retry_after.get(lane) {
-            Some(&deadline) if deadline > now => {}
-            Some(_) => {
-                self.retry_after.remove(lane);
-                self.retry_counts.remove(lane);
-            }
-            None => {
-                self.retry_counts.remove(lane);
-            }
+        if self
+            .retry_after
+            .get(lane)
+            .is_some_and(|deadline| *deadline <= now)
+        {
+            self.retry_after.remove(lane);
         }
     }
 
@@ -718,6 +747,8 @@ impl EventQueue {
     }
 
     /// Complete a lane only if `turn_id` still owns its current generation.
+    /// Retry-attempt history is preserved for cancellation and other nonterminal
+    /// release paths; use [`Self::mark_lane_settled_for_turn`] for terminal work.
     pub fn mark_lane_complete_for_turn(&mut self, lane: &LaneKey, turn_id: &str) -> bool {
         if !self.lane_turn_matches(lane, turn_id) {
             tracing::warn!(
@@ -728,6 +759,24 @@ impl EventQueue {
             );
             return false;
         }
+        self.mark_lane_complete(lane);
+        true
+    }
+
+    /// Terminally settle the current lane generation and reset its retry budget.
+    /// A stale generation cannot mutate the replacement lane's retry state.
+    pub fn mark_lane_settled_for_turn(&mut self, lane: &LaneKey, turn_id: &str) -> bool {
+        if !self.lane_turn_matches(lane, turn_id) {
+            tracing::warn!(
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                turn_id,
+                "ignoring stale lane settlement"
+            );
+            return false;
+        }
+        self.retry_after.remove(lane);
+        self.retry_counts.remove(lane);
         self.mark_lane_complete(lane);
         true
     }
@@ -948,10 +997,11 @@ impl EventQueue {
                 && !self.in_flight_channels.contains(id)
                 && self.retry_after.get(id).is_none_or(|&t| t <= now)
                 && eligible(id)
-        }) || self
-            .cancelled_batches
-            .keys()
-            .any(|id| !self.in_flight_channels.contains(id) && eligible(id))
+        }) || self.cancelled_batches.keys().any(|id| {
+            !self.in_flight_channels.contains(id)
+                && self.retry_after.get(id).is_none_or(|&t| t <= now)
+                && eligible(id)
+        })
     }
 
     fn expire_claimable_in_flight_lanes<F>(&mut self, now: Instant, eligible: &F)
@@ -1012,6 +1062,12 @@ impl EventQueue {
     pub fn set_retry_count_for_test(&mut self, channel_id: Uuid, count: u32) {
         self.retry_counts
             .insert(LaneKey::channel(channel_id), count);
+    }
+
+    /// Read an exact lane's retry-attempt counter in tests.
+    #[cfg(test)]
+    pub fn retry_count_for_test(&self, lane: &LaneKey) -> Option<u32> {
+        self.retry_counts.get(lane).copied()
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
@@ -2158,6 +2214,120 @@ mod tests {
     }
 
     #[test]
+    fn root_thread_lane_rejects_duplicate_required_and_unknown_markers() {
+        let channel_id = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let duplicate_root = make_event_with_tags(
+            "duplicate root",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+            ],
+        );
+        let unknown_marker = make_event_with_tags(
+            "unknown marker",
+            vec![vec![
+                "e".into(),
+                root_id.clone(),
+                "".into(),
+                "thread-root".into(),
+            ]],
+        );
+        let mention = make_event_with_tags(
+            "valid mention",
+            vec![vec!["e".into(), root_id, "".into(), "mention".into()]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &duplicate_root,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::ConflictingRequiredTags),
+        );
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &unknown_marker,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::MalformedRequiredTag),
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &mention, AffinityPolicy::RootThread, false),
+            Ok(LaneKey::new(channel_id, mention.id.to_hex())),
+            "the standard NIP-10 mention marker is non-authoritative, not malformed",
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_duplicate_identical_reply_marker() {
+        // A HashSet collapses two identical `reply` tags into one entry, so a
+        // duplicate looks like a single well-formed reply and the lane resolves
+        // instead of failing closed.
+        let channel_id = Uuid::new_v4();
+        let reply_id = "c".repeat(64);
+        let duplicate_reply = make_event_with_tags(
+            "duplicate reply",
+            vec![
+                vec!["e".into(), reply_id.clone(), "".into(), "reply".into()],
+                vec!["e".into(), reply_id, "".into(), "reply".into()],
+            ],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &duplicate_reply,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::ConflictingRequiredTags),
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_unknown_marker_that_would_hide_a_reply() {
+        // The dangerous shape: the ONLY thread tag carries an unrecognised
+        // marker. Skipping it silently derives a top-level lane for what is
+        // actually a reply, so the event runs in the wrong lane entirely.
+        let channel_id = Uuid::new_v4();
+        let parent = "d".repeat(64);
+        let hidden_reply = make_event_with_tags(
+            "unknown marker hiding a reply",
+            vec![vec![
+                "e".into(),
+                parent.clone(),
+                "".into(),
+                "in-reply-to".into(),
+            ]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &hidden_reply, AffinityPolicy::RootThread, false),
+            Err(LaneResolveError::MalformedRequiredTag),
+            "an unknown marker must fail closed, never fall through to a top-level lane",
+        );
+
+        // And it must not be rescued by an accompanying valid root: an event
+        // carrying an unparseable thread tag is malformed regardless.
+        let mixed = make_event_with_tags(
+            "unknown marker beside a valid root",
+            vec![
+                vec!["e".into(), parent.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent, "".into(), "in-reply-to".into()],
+            ],
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &mixed, AffinityPolicy::RootThread, false),
+            Err(LaneResolveError::MalformedRequiredTag),
+        );
+    }
+
+    #[test]
     fn root_thread_lane_accepts_direct_reply_marker_as_canonical_root() {
         let channel_id = Uuid::new_v4();
         let root_id = "b".repeat(64);
@@ -3131,6 +3301,39 @@ mod tests {
     }
 
     #[test]
+    fn retry_throttle_blocks_cancelled_half_of_failed_merged_prompt() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "original work"));
+        let original = queue.flush_next().expect("original batch");
+        queue.push(make_queued(channel_id, "steering update"));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(channel_id);
+
+        let merged = queue.flush_next().expect("merged prompt");
+        assert!(queue.requeue(merged).is_none());
+        queue.mark_complete(channel_id);
+        assert!(
+            queue
+                .retry_after
+                .get(&lane)
+                .is_some_and(|deadline| *deadline > Instant::now()),
+            "failed merged work must establish a future retry deadline"
+        );
+
+        assert!(
+            !queue.has_flushable_work(),
+            "cancelled context must observe the same retry deadline as ordinary work"
+        );
+        assert!(
+            queue.flush_next().is_none(),
+            "cancelled context must not bypass retry throttling"
+        );
+    }
+
+    #[test]
     fn cancelled_only_lane_competes_in_global_fifo_order() {
         let mut queue = EventQueue::new(DedupMode::Queue);
         let cancelled_channel = Uuid::new_v4();
@@ -3157,6 +3360,107 @@ mod tests {
             "cancelled-only work must compete with queued work by received_at"
         );
         assert_eq!(next.events[0].event.content, "cancelled-old");
+    }
+
+    #[test]
+    fn root_cancelled_only_lane_dispatches_one_primary_event() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let first = make_queued_at(channel_id, "cancelled-first", Duration::from_secs(2));
+        let second = make_queued_at(channel_id, "cancelled-second", Duration::from_secs(1));
+
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                lane: lane.clone(),
+                channel_id,
+                events: vec![
+                    BatchEvent {
+                        event: first.event,
+                        prompt_tag: first.prompt_tag,
+                        received_at: first.received_at,
+                    },
+                    BatchEvent {
+                        event: second.event,
+                        prompt_tag: second.prompt_tag,
+                        received_at: second.received_at,
+                    },
+                ],
+                cancelled_events: Vec::new(),
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            CancelReason::Steer,
+        );
+
+        let batch = queue.flush_next().expect("cancelled-only root batch");
+        assert_eq!(
+            batch.events.len(),
+            1,
+            "RootThread must never dispatch multiple primary events in one batch"
+        );
+        assert_eq!(batch.events[0].event.content, "cancelled-first");
+        assert_eq!(
+            queue.cancelled_batches.get(&lane).map(Vec::len),
+            Some(1),
+            "the later retained event must remain queued for global FIFO scheduling"
+        );
+    }
+
+    #[test]
+    fn root_cancelled_only_events_preserve_global_fifo_between_dispatches() {
+        let cancelled_channel = Uuid::new_v4();
+        let queued_channel = Uuid::new_v4();
+        let cancelled_lane = LaneKey::new(cancelled_channel, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let oldest = make_queued_at(
+            cancelled_channel,
+            "cancelled-oldest",
+            Duration::from_secs(3),
+        );
+        let newest = make_queued_at(
+            cancelled_channel,
+            "cancelled-newest",
+            Duration::from_secs(1),
+        );
+
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                lane: cancelled_lane.clone(),
+                channel_id: cancelled_channel,
+                events: [oldest, newest]
+                    .into_iter()
+                    .map(|event| BatchEvent {
+                        event: event.event,
+                        prompt_tag: event.prompt_tag,
+                        received_at: event.received_at,
+                    })
+                    .collect(),
+                cancelled_events: Vec::new(),
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            CancelReason::Steer,
+        );
+        queue.push_resolved(
+            make_queued_at(queued_channel, "queued-middle", Duration::from_secs(2)),
+            LaneKey::new(queued_channel, "b".repeat(64)),
+        );
+
+        let first = queue.flush_next().expect("oldest cancelled work");
+        assert_eq!(first.events[0].event.content, "cancelled-oldest");
+        assert!(
+            first
+                .events
+                .iter()
+                .all(|event| event.event.content != "cancelled-newest"),
+            "later cancelled work must not be bundled ahead of globally older queued work"
+        );
+        queue.mark_lane_complete(&cancelled_lane);
+
+        let second = queue.flush_next().expect("middle queued work");
+        assert_eq!(
+            second.events[0].event.content, "queued-middle",
+            "later cancelled work must not jump ahead of globally older queued work"
+        );
     }
 
     #[test]
@@ -3910,6 +4214,57 @@ mod tests {
         // Retry state is cleared so fresh traffic isn't throttled.
         assert!(!q.retry_counts.contains_key(&LaneKey::channel(ch)));
         assert!(!q.retry_after.contains_key(&LaneKey::channel(ch)));
+    }
+
+    #[test]
+    fn cancellation_after_retry_preserves_attempt_count() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "poison work"));
+        let first = queue.flush_next().expect("first attempt");
+        assert!(queue.requeue(first).is_none());
+        queue.mark_complete(channel_id);
+        assert_eq!(queue.retry_counts.get(&lane), Some(&1));
+
+        queue
+            .retry_after
+            .insert(lane.clone(), Instant::now() - Duration::from_secs(1));
+        let retry = queue.flush_next().expect("retry attempt");
+        queue.requeue_as_cancelled(retry, CancelReason::Steer);
+        queue.mark_complete(channel_id);
+
+        assert_eq!(
+            queue.retry_counts.get(&lane),
+            Some(&1),
+            "cancellation must not reset the failure budget for poison work"
+        );
+    }
+
+    #[test]
+    fn terminal_settlement_clears_retry_attempt_state() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "eventually succeeds"));
+        let first = queue.flush_next().expect("first attempt");
+        assert!(queue.bind_lane_turn(&lane, "first-turn"));
+        assert!(queue.requeue(first).is_none());
+        assert!(queue.mark_lane_complete_for_turn(&lane, "first-turn"));
+        assert_eq!(queue.retry_counts.get(&lane), Some(&1));
+
+        queue
+            .retry_after
+            .insert(lane.clone(), Instant::now() - Duration::from_secs(1));
+        queue.flush_next().expect("retry attempt");
+        assert!(queue.bind_lane_turn(&lane, "retry-turn"));
+        assert!(queue.mark_lane_settled_for_turn(&lane, "retry-turn"));
+
+        assert!(!queue.retry_counts.contains_key(&lane));
+        assert!(!queue.retry_after.contains_key(&lane));
+        assert!(!queue.is_lane_in_flight(&lane));
     }
 
     #[test]
@@ -4689,9 +5044,12 @@ mod tests {
             Instant::now() - Duration::from_secs(1),
         );
         let _batch2 = q.flush_next().unwrap();
-        // Now mark_complete with no active throttle — clears retry_counts.
-        q.mark_complete(ch);
-        assert!(!q.retry_counts.contains_key(&LaneKey::channel(ch)));
+        // Terminal success is explicit and generation-qualified; ordinary
+        // mark_complete intentionally preserves retry history for cancellation.
+        let lane = LaneKey::channel(ch);
+        assert!(q.bind_lane_turn(&lane, "successful-retry"));
+        assert!(q.mark_lane_settled_for_turn(&lane, "successful-retry"));
+        assert!(!q.retry_counts.contains_key(&lane));
 
         // Re-create the orphan scenario: manually insert stale retry_counts
         // with no queue, no throttle, and no in-flight.

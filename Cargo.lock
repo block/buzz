@@ -813,6 +813,7 @@ dependencies = [
  "httparse",
  "nix 0.31.3",
  "nostr",
+ "process-wrap",
  "reqwest 0.13.4",
  "rustls",
  "serde",
@@ -827,6 +828,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]

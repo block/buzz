@@ -1405,6 +1405,75 @@ struct RespawnResult {
     result: Result<(AcpClient, u32, String)>,
 }
 
+/// Await a background slot respawn as a first-class runtime wake source.
+/// Keeping this as a named seam prevents the main loop from regressing to
+/// opportunistic `try_recv()` polling that can strand work on quiet relays.
+async fn recv_respawn_wake(rx: &mut mpsc::Receiver<RespawnResult>) -> Option<RespawnResult> {
+    rx.recv().await
+}
+
+/// Account for one completed slot respawn and install a healthy replacement.
+/// Returns `true` only when a live agent was returned to the pool.
+fn install_respawn_result(
+    pool: &mut AgentPool,
+    crash_history: &mut [SlotCircuit],
+    config: &Config,
+    rr: RespawnResult,
+) -> bool {
+    crash_history[rr.index].respawn_in_flight = false;
+    match rr.result {
+        Ok((acp, protocol_version, agent_name)) => {
+            let agent = OwnedAgent {
+                index: rr.index,
+                acp,
+                state: SessionState::default(),
+                model_capabilities: None,
+                desired_model: config.model.clone(),
+                model_overridden: false,
+                agent_name,
+                goose_system_prompt_supported: None,
+                protocol_version,
+            };
+            pool.return_agent(agent);
+            tracing::info!(agent = rr.index, "respawn complete");
+            true
+        }
+        Err(error) => {
+            crash_history[rr.index].mark_spawn_failed();
+            tracing::warn!(
+                agent = rr.index,
+                "respawn failed: {error} — circuit re-opened"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod respawn_wake_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delayed_respawn_result_wakes_idle_runtime_without_external_input() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            tx.send(RespawnResult {
+                index: 7,
+                result: Err(anyhow::anyhow!("expected test failure")),
+            })
+            .await
+            .expect("runtime receiver remains live");
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(1), recv_respawn_wake(&mut rx))
+            .await
+            .expect("respawn completion must wake an otherwise-idle runtime")
+            .expect("respawn channel remains open");
+        assert_eq!(result.index, 7);
+    }
+}
+
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
 /// watcher task (which awaits the `SteerRequest.ack_tx` oneshot) back to
 /// the main loop's `select!`. The main loop drives queue side-effects from
@@ -2124,6 +2193,7 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        Respawn(Box<RespawnResult>),
         Wake(u32, Result<AgentPool, String>),
     }
 
@@ -2208,29 +2278,7 @@ async fn tokio_main() -> Result<()> {
 
         let mut respawn_collected = false;
         while let Ok(rr) = respawn_rx.try_recv() {
-            crash_history[rr.index].respawn_in_flight = false;
-            match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
-                    let agent = OwnedAgent {
-                        index: rr.index,
-                        acp,
-                        state: SessionState::default(),
-                        model_capabilities: None,
-                        desired_model: config.model.clone(),
-                        model_overridden: false,
-                        agent_name,
-                        goose_system_prompt_supported: None,
-                        protocol_version,
-                    };
-                    pool.return_agent(agent);
-                    tracing::info!(agent = rr.index, "respawn complete");
-                    respawn_collected = true;
-                }
-                Err(e) => {
-                    crash_history[rr.index].mark_spawn_failed();
-                    tracing::warn!(agent = rr.index, "respawn failed: {e} — circuit re-opened");
-                }
-            }
+            respawn_collected |= install_respawn_result(&mut pool, &mut crash_history, &config, rr);
         }
         // Flush requeued events that were waiting for a live agent. Without
         // this, batches requeued during crash recovery sit idle until the
@@ -2270,6 +2318,9 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some(rr) = recv_respawn_wake(&mut respawn_rx) => {
+                    Some(PoolEvent::Respawn(Box::new(rr)))
                 }
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
@@ -2515,11 +2566,13 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
+                            let command_owner = owner_cache.get();
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
                                 kind_u32,
                                 "!shutdown",
                                 &pubkey_hex,
+                                command_owner,
                             );
                             if is_shutdown {
                                 let owner = owner_cache.get();
@@ -2551,6 +2604,7 @@ async fn tokio_main() -> Result<()> {
                                 kind_u32,
                                 "!cancel",
                                 &pubkey_hex,
+                                command_owner,
                             );
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
@@ -2610,6 +2664,7 @@ async fn tokio_main() -> Result<()> {
                                 kind_u32,
                                 "!rotate",
                                 &pubkey_hex,
+                                command_owner,
                             );
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
@@ -3103,6 +3158,22 @@ async fn tokio_main() -> Result<()> {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
+            // clippy::collapsible_match wants this `if` lifted into a match guard,
+            // which is impossible here: `install_respawn_result` consumes the
+            // RespawnResult (it destructures `rr.result` by value), and a guard
+            // only borrows, so moving out of the Box in a guard is E0507. The
+            // Box itself is required by clippy::large_enum_variant. The two
+            // lints cannot both be satisfied; ownership wins.
+            Some(PoolEvent::Respawn(rr)) => {
+                #[allow(clippy::collapsible_match)]
+                if install_respawn_result(&mut pool, &mut crash_history, &config, *rr) {
+                    for (channel_id, thread_tags) in
+                        dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    {
+                        typing_channels.insert(channel_id, thread_tags);
+                    }
+                }
+            }
             Some(PoolEvent::Wake(attempt, result)) => {
                 let completion = result.as_ref().map(|_| ()).map_err(|error| error.clone());
                 if let Err(error) =
@@ -3290,10 +3361,12 @@ fn is_owner_control_command(
     kind_u32: u32,
     command: &str,
     agent_pubkey_hex: &str,
+    owner_pubkey_hex: Option<&str>,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
+        && owner_pubkey_hex.is_some_and(|owner| event.pubkey.to_hex() == owner)
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -3634,7 +3707,7 @@ fn dispatch_pending(
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
-        let agent_pid = agent.acp.process_id();
+        let agent_process_identity = agent.acp.process_identity();
 
         // Mid-turn non-cancelling steer seam: install the per-turn steer
         // receiver on the read loop so the main loop's mode-gate fork
@@ -3693,8 +3766,8 @@ fn dispatch_pending(
                 steer_tx,
             },
         );
-        if let Some(pid) = agent_pid {
-            pool.register_task_process(task_id, pid);
+        if let Some(identity) = agent_process_identity {
+            pool.register_task_process(task_id, identity);
         }
         dispatched_channels.push((
             task_lane,
@@ -3832,12 +3905,11 @@ async fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let mut terminally_settled = matches!(&result.outcome, PromptOutcome::Ok(_));
 
-    // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
-    // deadline, and mark_complete() checks for it to decide whether to preserve
-    // retry_counts. If mark_complete runs first, retry_counts is cleared and
-    // every retry starts at attempt 1 — defeating exponential backoff and
-    // dead-letter protection.
+    // Classify the batch fate before releasing the lane generation. Requeue and
+    // cancellation are nonterminal and preserve retry history; successful or
+    // dead-lettered work terminally settles and resets that history.
     if let Some(batch) = result.batch.take() {
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
@@ -3880,6 +3952,7 @@ async fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                terminally_settled = true;
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -3898,6 +3971,7 @@ async fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    terminally_settled = true;
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
@@ -3916,6 +3990,7 @@ async fn handle_prompt_result(
                     "⚠️ I couldn't process this request because its thread root is missing, invalid, or belongs to another channel. Please reply from a valid channel thread."
                         .to_string(),
                 );
+                terminally_settled = true;
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -3931,6 +4006,7 @@ async fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                terminally_settled = true;
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -3945,6 +4021,7 @@ async fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                terminally_settled = true;
             }
         } else if stale_lane_generation {
             tracing::warn!(
@@ -3966,7 +4043,11 @@ async fn handle_prompt_result(
 
     match &result.source {
         PromptSource::Lane(lane) => {
-            queue.mark_lane_complete_for_turn(lane, &result.turn_id);
+            if terminally_settled {
+                queue.mark_lane_settled_for_turn(lane, &result.turn_id);
+            } else {
+                queue.mark_lane_complete_for_turn(lane, &result.turn_id);
+            }
         }
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
@@ -4254,9 +4335,9 @@ async fn recover_panicked_agent(
     rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
-    let (meta, process_id) = pool.take_task_for_panic(task_id);
-    if let Some(pid) = process_id {
-        acp::retire_orphaned_process(pid).await;
+    let (meta, process_identity) = pool.take_task_for_panic(task_id);
+    if let Some(identity) = process_identity {
+        acp::retire_orphaned_process(identity).await;
     }
     let Some(meta) = meta else {
         tracing::error!("panic for unknown task {task_id:?} — bug");
@@ -4434,7 +4515,7 @@ fn dispatch_heartbeat(
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
-    let agent_pid = agent.acp.process_id();
+    let agent_process_identity = agent.acp.process_identity();
     let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
 
@@ -4465,8 +4546,8 @@ fn dispatch_heartbeat(
             steer_tx: None,
         },
     );
-    if let Some(pid) = agent_pid {
-        pool.register_task_process(task_id, pid);
+    if let Some(identity) = agent_process_identity {
+        pool.register_task_process(task_id, identity);
     }
     *heartbeat_in_flight = true;
     tracing::info!(agent = agent_index, "heartbeat_fired");
@@ -5241,47 +5322,74 @@ mod owner_control_command_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn make_event(kind: u32, content: &str, p_hex: Option<&str>) -> nostr::Event {
-        let keys = Keys::generate();
+    fn make_event(keys: &Keys, kind: u32, content: &str, p_hex: Option<&str>) -> nostr::Event {
         let tags = match p_hex {
             Some(hex) => vec![Tag::parse(["p", hex]).expect("p tag")],
             None => vec![],
         };
         EventBuilder::new(Kind::Custom(kind as u16), content)
             .tags(tags)
-            .sign_with_keys(&keys)
+            .sign_with_keys(keys)
             .unwrap()
     }
 
     #[test]
-    fn owner_control_command_requires_kind_content_and_agent_mention() {
+    fn owner_control_command_requires_authorized_owner_kind_content_and_agent_mention() {
         let agent = "ab".repeat(32);
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
 
-        let event = make_event(KIND_STREAM_MESSAGE, " !rotate ", Some(&agent));
+        let event = make_event(&owner_keys, KIND_STREAM_MESSAGE, " !rotate ", Some(&agent));
         assert!(is_owner_control_command(
             &event,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            Some(&owner),
         ));
 
-        let wrong_kind = make_event(1, "!rotate", Some(&agent));
-        assert!(!is_owner_control_command(&wrong_kind, 1, "!rotate", &agent));
+        let stranger_keys = Keys::generate();
+        let stranger = make_event(&stranger_keys, KIND_STREAM_MESSAGE, "!rotate", Some(&agent));
+        assert!(!is_owner_control_command(
+            &stranger,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent,
+            Some(&owner),
+        ));
+        assert!(!is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent,
+            None,
+        ));
 
-        let wrong_content = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
+        let wrong_kind = make_event(&owner_keys, 1, "!rotate", Some(&agent));
+        assert!(!is_owner_control_command(
+            &wrong_kind,
+            1,
+            "!rotate",
+            &agent,
+            Some(&owner),
+        ));
+
+        let wrong_content = make_event(&owner_keys, KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
         assert!(!is_owner_control_command(
             &wrong_content,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            Some(&owner),
         ));
 
-        let no_mention = make_event(KIND_STREAM_MESSAGE, "!rotate", None);
+        let no_mention = make_event(&owner_keys, KIND_STREAM_MESSAGE, "!rotate", None);
         assert!(!is_owner_control_command(
             &no_mention,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            Some(&owner),
         ));
     }
 
@@ -7798,7 +7906,7 @@ mod error_outcome_emission_tests {
                 steer_tx: None,
             },
         );
-        pool.register_task_process(task_id, orphan_pid);
+        pool.register_task_process(task_id, acp::ProcessIdentity::capture(orphan_pid));
         started_rx.await.unwrap();
         abort_handle.abort();
         let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
@@ -8070,6 +8178,157 @@ mod error_outcome_emission_tests {
             crash_budget_untouched,
             "planned recycling must not trip crash accounting"
         );
+    }
+
+    #[tokio::test]
+    async fn successful_prompt_result_terminally_resets_retry_budget() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+        let agent = dummy_agent(0).await;
+        let event = EventBuilder::new(Kind::Custom(9), "successful retry")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            lane: lane.clone(),
+            channel_id,
+            events: vec![BatchEvent {
+                event: event.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.set_retry_count_for_test(channel_id, 2);
+        bind_batch_generation(&mut queue, &batch, "successful-retry-turn");
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                lane: Some(lane.clone()),
+                turn_id: "successful-retry-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Lane(lane.clone()),
+                turn_id: "successful-retry-turn".into(),
+                outcome: PromptOutcome::Ok(acp::StopReason::EndTurn),
+                batch: None,
+            },
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            queue.retry_count_for_test(&lane),
+            None,
+            "authoritative success must reset the lane's retry budget"
+        );
+        shutdown_agent_pool(&mut pool).await;
+    }
+
+    #[tokio::test]
+    async fn non_retryable_terminal_failure_resets_retry_budget() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+        let agent = dummy_agent(0).await;
+        let batch = FlushBatch {
+            lane: lane.clone(),
+            channel_id,
+            events: vec![BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), "invalid terminal request")
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue.set_retry_count_for_test(channel_id, 2);
+        bind_batch_generation(&mut queue, &batch, "invalid-terminal-turn");
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                lane: Some(lane.clone()),
+                turn_id: "invalid-terminal-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Lane(lane.clone()),
+                turn_id: "invalid-terminal-turn".into(),
+                outcome: PromptOutcome::Error(acp::AcpError::InvalidInput("invalid root".into())),
+                batch: Some(batch),
+            },
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            queue.retry_count_for_test(&lane),
+            None,
+            "terminal non-retryable failure must reset the lane's retry budget"
+        );
+        shutdown_agent_pool(&mut pool).await;
     }
 
     /// hard-cap timeout dead-letters immediately (no requeue); idle timeout is requeued.

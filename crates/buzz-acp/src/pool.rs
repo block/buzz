@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
-    StopReason, SystemPromptTransport,
+    ProcessIdentity, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -349,9 +349,10 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
-    /// PID registry kept outside `TaskMeta` so panic recovery can reap an ACP
-    /// child after the task-owned `AcpClient` has unwound and been dropped.
-    task_processes: HashMap<tokio::task::Id, u32>,
+    /// Stable process-generation registry kept outside `TaskMeta` so panic
+    /// recovery can reap an ACP child after the task-owned `AcpClient` unwinds
+    /// without granting authority to a potentially reused numeric PID.
+    task_processes: HashMap<tokio::task::Id, ProcessIdentity>,
 }
 
 /// Result returned by a completed prompt task.
@@ -986,21 +987,21 @@ impl AgentPool {
         &mut self.task_map
     }
 
-    pub fn register_task_process(&mut self, task_id: tokio::task::Id, pid: u32) {
-        self.task_processes.insert(task_id, pid);
+    pub fn register_task_process(&mut self, task_id: tokio::task::Id, identity: ProcessIdentity) {
+        self.task_processes.insert(task_id, identity);
     }
 
     pub fn take_task_for_panic(
         &mut self,
         task_id: tokio::task::Id,
-    ) -> (Option<TaskMeta>, Option<u32>) {
+    ) -> (Option<TaskMeta>, Option<ProcessIdentity>) {
         (
             self.task_map.remove(&task_id),
             self.task_processes.remove(&task_id),
         )
     }
 
-    /// Remove the authoritative metadata and PID for a normally completed task.
+    /// Remove authoritative task metadata and process identity on normal completion.
     pub fn remove_tasks_for_agent(&mut self, agent_index: usize) -> usize {
         let task_ids: Vec<_> = self
             .task_map

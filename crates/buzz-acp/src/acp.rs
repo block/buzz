@@ -10,11 +10,21 @@
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout};
+#[cfg(not(windows))]
+use tokio::process::Child;
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
+
+#[cfg(windows)]
+use process_wrap::tokio::ChildWrapper;
 
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
+
+#[cfg(not(windows))]
+type ManagedChild = Child;
+#[cfg(windows)]
+type ManagedChild = Box<dyn ChildWrapper>;
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -141,7 +151,7 @@ fn build_initialize_params() -> serde_json::Value {
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
-    child: Child,
+    child: ManagedChild,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -396,9 +406,71 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Stable-enough process generation identity for panic recovery on Linux.
+/// A numeric PID alone is never authority to kill: it may have been reused
+/// after the task-owned `AcpClient` unwound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessIdentity {
+    pid: u32,
+    linux_start_time_ticks: Option<u64>,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn capture(pid: u32) -> Self {
+        Self {
+            pid,
+            linux_start_time_ticks: linux_process_start_time(pid),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_current(self) -> bool {
+        process_generation_matches(
+            self.linux_start_time_ticks,
+            linux_process_start_time(self.pid),
+        )
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn is_current(self) -> bool {
+        false
+    }
+}
+
+/// Parse field 22 (`starttime`) from `/proc/<pid>/stat`.
+/// The command name in field 2 may contain spaces and `)`, so split after its
+/// final closing parenthesis rather than splitting the whole line on spaces.
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_proc_start_time(stat: &str) -> Option<u64> {
+    let after_comm = stat.rsplit_once(')')?.1.trim_start();
+    // `after_comm` starts at field 3 (`state`); field 22 is zero-based index 19.
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn process_generation_matches(expected: Option<u64>, current: Option<u64>) -> bool {
+    matches!((expected, current), (Some(expected), Some(current)) if expected == current)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_linux_proc_start_time(&stat)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
 impl AcpClient {
+    #[cfg(test)]
     pub(crate) fn process_id(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    pub(crate) fn process_identity(&self) -> Option<ProcessIdentity> {
+        self.child.id().map(ProcessIdentity::capture)
     }
 
     /// Kill the agent subprocess and wait for it to exit (no zombies).
@@ -407,13 +479,15 @@ impl AcpClient {
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
+        // Unix children own a process group. Windows children own a Job Object;
+        // its ChildWrapper::start_kill terminates the entire owned tree.
+        #[cfg(windows)]
+        {
+            if let Err(error) = self.child.start_kill() {
+                tracing::warn!(%error, "failed to terminate Windows ACP job object");
+            }
+        }
+        #[cfg(not(windows))]
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -509,18 +583,42 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Suppress the console window that Windows otherwise allocates for every
-        // console-subsystem child process spawned from a GUI/non-console parent.
-        configure_no_window(&mut cmd);
-
+        #[cfg(not(windows))]
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        let mut child = {
+            use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
+            use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
+            // Spawn suspended, attach the process to a Windows Job Object, then
+            // resume it. KILL_ON_JOB_CLOSE gives this client one stable OS
+            // ownership handle for the leader and every descendant; PID reuse
+            // never participates in Windows termination authority.
+            let mut wrapped = CommandWrap::from(cmd);
+            wrapped.wrap(CreationFlags(CREATE_NO_WINDOW));
+            wrapped.wrap(KillOnDrop);
+            wrapped.wrap(JobObject);
+            wrapped.spawn()?
+        };
+
+        #[cfg(not(windows))]
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdin".into()))?;
+        #[cfg(windows)]
+        let stdin = child
+            .stdin()
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stdin".into()))?;
+        #[cfg(not(windows))]
         let stdout = child
             .stdout
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
+        #[cfg(windows)]
+        let stdout = child
+            .stdout()
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
@@ -2055,9 +2153,16 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
-        // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
-        // Kill the process group when possible so subprocesses don't leak.
+        // Best-effort kill + reap. We cannot await in Drop (sync context).
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
+        #[cfg(windows)]
+        {
+            // JobObject + KillOnDrop closes stable ownership over the complete
+            // process tree. start_kill is synchronous TerminateJobObject; no PID
+            // lookup or shell helper participates in termination authority.
+            let _ = self.child.start_kill();
+        }
+        #[cfg(not(windows))]
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -2073,12 +2178,21 @@ impl Drop for AcpClient {
 /// Kill and reap a child whose `AcpClient` was dropped during panic unwind.
 /// The lane owner must not be released until this future resolves.
 #[cfg(unix)]
-pub(crate) async fn retire_orphaned_process(pid: u32) {
+pub(crate) async fn retire_orphaned_process(identity: ProcessIdentity) {
     let _ = tokio::task::spawn_blocking(move || {
         use nix::sys::signal::{kill, Signal};
         use nix::sys::wait::waitpid;
         use nix::unistd::Pid;
 
+        let pid = identity.pid;
+        if !identity.is_current() {
+            tracing::warn!(
+                pid,
+                expected_start_time = ?identity.linux_start_time_ticks,
+                "refusing to kill orphan by reused or unverifiable raw PID"
+            );
+            return;
+        }
         if !kill_process_group(pid) {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         }
@@ -2091,7 +2205,7 @@ pub(crate) async fn retire_orphaned_process(pid: u32) {
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn retire_orphaned_process(_pid: u32) {}
+pub(crate) async fn retire_orphaned_process(_identity: ProcessIdentity) {}
 
 /// Send SIGKILL to an entire process group. Returns `true` if the signal was sent.
 ///
@@ -2110,29 +2224,128 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
+/// Fallback for platforms with neither Unix process groups nor Windows Job
+/// Objects: only the direct child can be killed.
 /// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
-}
-
-/// Suppress the console window that Windows otherwise allocates for every
-/// console-subsystem child process spawned from a GUI (non-console) parent.
-/// No-op on non-Windows platforms.
-fn configure_no_window(cmd: &mut tokio::process::Command) {
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_proc_stat_parser_reads_start_time_after_complex_comm() {
+        let fields_4_through_21 = (4..=21)
+            .map(|field| field.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stat = format!("4242 (worker ) with spaces) S {fields_4_through_21} 987654 23 24");
+        assert_eq!(parse_linux_proc_start_time(&stat), Some(987654));
+    }
+
+    #[test]
+    fn raw_pid_kill_generation_gate_fails_closed_on_reuse_or_unknown_identity() {
+        assert!(process_generation_matches(Some(12345), Some(12345)));
+        assert!(!process_generation_matches(Some(12345), Some(54321)));
+        assert!(!process_generation_matches(None, Some(12345)));
+        assert!(!process_generation_matches(Some(12345), None));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stale_process_generation_cannot_kill_live_reused_pid_fixture() {
+        let mut child = std::process::Command::new("setsid")
+            .args(["sleep", "60"])
+            .spawn()
+            .expect("spawn live process-generation fixture");
+        let pid = child.id();
+        let live = ProcessIdentity::capture(pid);
+        let stale = ProcessIdentity {
+            pid,
+            linux_start_time_ticks: live.linux_start_time_ticks.map(|ticks| ticks + 1),
+        };
+
+        retire_orphaned_process(stale).await;
+        assert!(
+            child.try_wait().expect("query fixture status").is_none(),
+            "a mismatched process generation must never authorize a raw-PID kill"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_job_object_shutdown_retires_real_grandchild() {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        fn pid_is_running(pid: u32) -> bool {
+            let filter = format!("PID eq {pid}");
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .expect("query Windows process status");
+            String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+        }
+
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-job-object-grandchild-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let marker_ps = marker.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$c=Start-Process ping.exe -ArgumentList '-t','127.0.0.1' \
+             -PassThru -WindowStyle Hidden; Set-Content -LiteralPath \
+             '{marker_ps}' -Value $c.Id -NoNewline; Wait-Process -Id $c.Id"
+        );
+        let args = vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            script,
+        ];
+        let mut client = AcpClient::spawn("powershell.exe", &args, &[], false)
+            .await
+            .expect("spawn Job Object process-tree fixture");
+        let parent_pid = client.process_id().expect("fixture parent pid");
+
+        let mut grandchild_pid = None;
+        for _ in 0..100 {
+            if let Ok(raw) = std::fs::read_to_string(&marker) {
+                grandchild_pid = raw.trim().parse::<u32>().ok();
+                if grandchild_pid.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let grandchild_pid = grandchild_pid.expect("fixture must publish grandchild pid");
+        assert!(pid_is_running(parent_pid));
+        assert!(pid_is_running(grandchild_pid));
+
+        client.shutdown().await;
+        let parent_gone = !pid_is_running(parent_pid);
+        let grandchild_gone = !pid_is_running(grandchild_pid);
+        if !grandchild_gone {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &grandchild_pid.to_string(), "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+        }
+        let _ = std::fs::remove_file(marker);
+
+        assert!(parent_gone, "Job Object shutdown must reap the leader");
+        assert!(
+            grandchild_gone,
+            "Job Object shutdown must terminate and reap the real grandchild"
+        );
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {

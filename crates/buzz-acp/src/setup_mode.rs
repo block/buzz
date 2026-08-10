@@ -386,7 +386,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let channel_info = crate::pool::ChannelInfoResolver::new(channel_info_map, rest_client.clone());
 
     // Deduplicate by event-id so reconnect replay cannot double-nudge.
-    let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
+    let mut nudged_event_ids = NudgeDedup::new(NUDGE_DEDUP_LIMIT);
 
     loop {
         let Some(buzz_event) = relay.next_event().await else {
@@ -483,6 +483,61 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     Ok(())
 }
 
+/// Bounded de-duplication of nudged event IDs.
+///
+/// Setup mode must not double-nudge an event that reconnect replay redelivers,
+/// but the raw `HashSet` this replaces was insert-only: it grew one entry per
+/// mentioned event for the lifetime of the process, and the events are supplied
+/// by other participants. Same two-generation rotation the relay uses for
+/// `seen_ids` (`TwoGenDedup`): recent history is retained for replay, total
+/// residency is capped.
+#[derive(Debug)]
+pub(crate) struct NudgeDedup {
+    current: HashSet<EventId>,
+    previous: HashSet<EventId>,
+    limit: usize,
+}
+
+impl NudgeDedup {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            current: HashSet::new(),
+            previous: HashSet::new(),
+            limit: limit.max(2),
+        }
+    }
+
+    fn contains(&self, id: &EventId) -> bool {
+        self.current.contains(id) || self.previous.contains(id)
+    }
+
+    /// Insert `id`; `true` when it was new.
+    fn insert(&mut self, id: EventId) -> bool {
+        if self.contains(&id) {
+            return false;
+        }
+        self.current.insert(id);
+        if self.current.len() >= self.limit / 2 {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.current.len() + self.previous.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Cap on retained nudge IDs. Mirrors the relay's `SEEN_ID_LIMIT` intent at the
+/// smaller scale setup mode operates at.
+pub(crate) const NUDGE_DEDUP_LIMIT: usize = 4_096;
+
 /// Outcome of the pure per-event gate checks in setup mode.
 ///
 /// Callers compute the async gates (`author_allowed`, `filter::match_event`)
@@ -496,7 +551,7 @@ pub(crate) fn should_nudge_for_event(
     event_id: EventId,
     author_allowed: bool,
     filter_matched: bool,
-    nudged_event_ids: &mut HashSet<EventId>,
+    nudged_event_ids: &mut NudgeDedup,
 ) -> bool {
     if !author_allowed {
         tracing::debug!("setup-mode: event filtered by author gate");
@@ -1000,7 +1055,7 @@ mod tests {
     #[test]
     fn test_non_allowlisted_author_returns_no_nudge() {
         // author_allowed = false → should return false regardless of other args.
-        let mut dedup: HashSet<EventId> = HashSet::new();
+        let mut dedup = NudgeDedup::new(NUDGE_DEDUP_LIMIT);
         let event_id = fake_event_id(0xAA);
 
         let result = should_nudge_for_event(
@@ -1021,7 +1076,7 @@ mod tests {
     fn test_same_event_id_twice_nudges_exactly_once() {
         // The first call with a given event-id should return true; the second
         // call with the identical id must return false (replay dedup).
-        let mut dedup: HashSet<EventId> = HashSet::new();
+        let mut dedup = NudgeDedup::new(NUDGE_DEDUP_LIMIT);
         let event_id = fake_event_id(0xBB);
 
         let first = should_nudge_for_event(
@@ -1130,6 +1185,40 @@ mod tests {
         assert!(
             sentinel_json.contains(r#""availability":"not_installed""#),
             "sentinel must carry availability=not_installed; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn setup_mode_nudge_dedup_is_bounded() {
+        // Invariant: "Persistent channel, dedup, membership, and setup state is
+        // bounded." `nudged_event_ids` was insert-only with no eviction, so a
+        // long-lived setup-mode process grew one entry per mentioned event for
+        // the lifetime of the process. Unbounded growth in a listener that an
+        // untrusted party can drive is a resource-exhaustion path.
+        let mut dedup = NudgeDedup::new(64);
+        for i in 0..10_000u32 {
+            let mut raw = [0u8; 32];
+            raw[..4].copy_from_slice(&i.to_be_bytes());
+            let id = EventId::from_slice(&raw).expect("32-byte event id");
+            assert!(
+                should_nudge_for_event(id, true, true, &mut dedup),
+                "each distinct event must nudge exactly once"
+            );
+        }
+        assert!(
+            dedup.len() <= 64,
+            "nudge dedup must stay bounded; grew to {}",
+            dedup.len()
+        );
+
+        // And it must still deduplicate the recent past, or reconnect replay
+        // would double-nudge - the reason the set exists at all.
+        let mut raw = [0u8; 32];
+        raw[..4].copy_from_slice(&9_999u32.to_be_bytes());
+        let recent = EventId::from_slice(&raw).expect("32-byte event id");
+        assert!(
+            !should_nudge_for_event(recent, true, true, &mut dedup),
+            "a just-seen event must still be deduplicated"
         );
     }
 }
