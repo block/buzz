@@ -11021,6 +11021,26 @@ export function maybeInstallE2eTauriMocks() {
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_serving_usage":
         return mockMeshState.servingUsage;
+      case "mesh_snapshot":
+        return {
+          sharingDeviceCount: mockMeshState.nodeMode === "serve" ? 1 : 0,
+          sharedCapacityGb: mockMeshState.nodeMode === "serve" ? 32 : null,
+          models: mockMeshState.activeModel
+            ? [mockMeshState.activeModel.id]
+            : [],
+          devices: [],
+          includesSelf: mockMeshState.nodeMode === "serve",
+          memberCount: 1,
+          reason:
+            mockMeshState.nodeMode === "serve" ? null : "No one is sharing",
+        };
+      case "mesh_live_view":
+        return {
+          connected: mockMeshState.nodeState === "running",
+          selfCapacityGb: mockMeshState.nodeMode === "serve" ? 32 : null,
+          selfModelSizeGb: mockMeshState.nodeMode === "serve" ? 3.5 : null,
+          peers: [],
+        };
       case "mesh_start_node": {
         const req = (
           payload as {

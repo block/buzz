@@ -11,6 +11,7 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
+import { SidebarMeshComputeRow } from "@/features/mesh-compute/ui/SidebarMeshComputeRow";
 
 type SidebarSelectedView =
   | "home"
@@ -37,6 +38,7 @@ type AppSidebarPinnedHeaderProps = {
 
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
+  onOpenComputeSettings?: () => void;
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -82,6 +84,7 @@ export function AppSidebarPinnedHeader({
 
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
+  onOpenComputeSettings,
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
@@ -173,6 +176,7 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        <SidebarMeshComputeRow onOpenComputeSettings={onOpenComputeSettings} />
         <FeatureGate feature="workflows">
           <SidebarMenuItem>
             <SidebarMenuButton
