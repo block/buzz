@@ -334,7 +334,35 @@ fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
                     for name in WINDOWS_MESH_RUNTIME_DEP_DLLS {
                         let src = dependency_dir.join(name);
                         let dst = lib_dir.join(name);
-                        let _ = std::fs::copy(src, dst);
+                        if dst.is_file() {
+                            append_mesh_debug_log(
+                                app,
+                                format!(
+                                    "windows mesh runtime dependency already present; not replacing file={}",
+                                    dst.display()
+                                ),
+                            );
+                            continue;
+                        }
+                        match std::fs::copy(&src, &dst) {
+                            Ok(_) => append_mesh_debug_log(
+                                app,
+                                format!(
+                                    "copied windows mesh runtime dependency src={} dst={}",
+                                    src.display(),
+                                    dst.display()
+                                ),
+                            ),
+                            Err(error) => append_mesh_debug_log(
+                                app,
+                                format!(
+                                    "failed to copy windows mesh runtime dependency src={} dst={} error={}",
+                                    src.display(),
+                                    dst.display(),
+                                    error
+                                ),
+                            ),
+                        }
                     }
                 }
             }

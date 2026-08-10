@@ -18,18 +18,44 @@ $candidateDirs = @(
   'C:\Program Files\Git\mingw64\bin'
 )
 
-foreach ($name in $required) {
-  $source = $null
+function Find-MeshRuntimeDependency($name) {
   foreach ($dir in $candidateDirs) {
     $path = Join-Path $dir $name
     if (Test-Path -LiteralPath $path -PathType Leaf) {
-      $source = $path
-      break
+      return $path
     }
   }
-  if (-not $source) {
-    throw "Missing Windows MeshLLM runtime dependency: $name"
+  return $null
+}
+
+function Get-MissingMeshRuntimeDependencies {
+  $required | Where-Object { -not (Find-MeshRuntimeDependency $_) }
+}
+
+$missing = @(Get-MissingMeshRuntimeDependencies)
+if ($missing.Count -gt 0) {
+  Write-Host "Missing Windows MeshLLM runtime dependencies before bootstrap: $($missing -join ', ')"
+  $pacman = 'C:\msys64\usr\bin\pacman.exe'
+  if (Test-Path -LiteralPath $pacman -PathType Leaf) {
+    & $pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc
   }
+}
+
+$missing = @(Get-MissingMeshRuntimeDependencies)
+if ($missing.Count -gt 0) {
+  $choco = Get-Command choco -ErrorAction SilentlyContinue
+  if ($choco) {
+    & $choco.Source install mingw -y --no-progress | Out-Null
+  }
+}
+
+$missing = @(Get-MissingMeshRuntimeDependencies)
+if ($missing.Count -gt 0) {
+  throw "Missing Windows MeshLLM runtime dependencies after bootstrap: $($missing -join ', ')"
+}
+
+foreach ($name in $required) {
+  $source = Find-MeshRuntimeDependency $name
   Copy-Item -LiteralPath $source -Destination (Join-Path $dest $name) -Force
   Write-Host "Bundled $name from $source"
 }
