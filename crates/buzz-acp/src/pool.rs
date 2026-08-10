@@ -40,7 +40,7 @@ use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
-use crate::relay::{ChannelInfo, RestClient};
+use crate::relay::{ChannelInfo, RelayEventPublisher, RestClient};
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -564,6 +564,64 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Relay publisher used by the optional ACP-output bridge.
+    pub event_publisher: Option<RelayEventPublisher>,
+    /// Publish collected ACP agent text as a Buzz reply after successful turns.
+    pub publish_agent_output: bool,
+}
+
+async fn publish_agent_output(
+    ctx: &PromptContext,
+    batch: &FlushBatch,
+    content: &str,
+) -> anyhow::Result<()> {
+    let triggering_event = &batch
+        .events
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("cannot publish agent output for empty batch"))?
+        .event;
+    let event =
+        build_agent_output_event(&ctx.agent_keys, batch.channel_id, triggering_event, content)?;
+    ctx.event_publisher
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("agent output publisher is not configured"))?
+        .publish_event(event)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to publish agent output reply: {e}"))?;
+    Ok(())
+}
+
+fn build_agent_output_event(
+    agent_keys: &nostr::Keys,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    content: &str,
+) -> anyhow::Result<nostr::Event> {
+    use buzz_sdk::ThreadRef;
+
+    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
+    let reply_id = match thread_tags.root_event_id {
+        Some(root) => nostr::EventId::from_hex(&root)
+            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?,
+        None => triggering_event.id,
+    };
+    let thread_ref = ThreadRef {
+        root_event_id: reply_id,
+        parent_event_id: reply_id,
+    };
+    let author = triggering_event.pubkey.to_hex();
+    let builder = buzz_sdk::build_message(
+        channel_id,
+        content,
+        Some(&thread_ref),
+        &[&author],
+        false,
+        &[],
+    )
+    .map_err(|e| anyhow::anyhow!("failed to build agent output reply: {e}"))?;
+    builder
+        .sign_with_keys(agent_keys)
+        .map_err(|e| anyhow::anyhow!("failed to sign agent output reply: {e}"))
 }
 
 impl AgentPool {
@@ -2172,6 +2230,21 @@ pub async fn run_prompt_task(
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
+            let agent_output = agent.acp.take_agent_output();
+            if ctx.publish_agent_output {
+                if let (PromptSource::Channel(_), Some(batch)) = (&source, batch.as_ref()) {
+                    let content = agent_output.trim();
+                    if !content.is_empty() {
+                        if let Err(e) = publish_agent_output(&ctx, batch, content).await {
+                            tracing::error!(
+                                agent_index = agent.index,
+                                channel_id = %batch.channel_id,
+                                "{e}"
+                            );
+                        }
+                    }
+                }
+            }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -6494,6 +6567,44 @@ mod tests {
         make_prompt_context_impl(&agent_keys, None)
     }
 
+    #[test]
+    fn agent_output_event_replies_to_triggering_conversation() {
+        use buzz_sdk::ThreadRef;
+
+        let channel_id = Uuid::new_v4();
+        let author_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let root = buzz_sdk::build_message(channel_id, "root", None, &[], false, &[])
+            .unwrap()
+            .sign_with_keys(&author_keys)
+            .unwrap();
+        let thread_ref = ThreadRef {
+            root_event_id: root.id,
+            parent_event_id: root.id,
+        };
+        let trigger =
+            buzz_sdk::build_message(channel_id, "question", Some(&thread_ref), &[], false, &[])
+                .unwrap()
+                .sign_with_keys(&author_keys)
+                .unwrap();
+
+        let output = build_agent_output_event(&agent_keys, channel_id, &trigger, "answer")
+            .expect("agent output event");
+        let value = serde_json::to_value(output).unwrap();
+        let tags = value["tags"].as_array().unwrap();
+
+        assert_eq!(value["content"], "answer");
+        assert!(tags
+            .iter()
+            .any(|tag| tag[0] == "h" && tag[1] == channel_id.to_string()));
+        assert!(tags
+            .iter()
+            .any(|tag| tag[0] == "e" && tag[1] == root.id.to_hex()));
+        assert!(tags
+            .iter()
+            .any(|tag| { tag[0] == "p" && tag[1] == author_keys.public_key().to_hex() }));
+    }
+
     fn make_prompt_context_with_owner(
         agent_keys: &nostr::Keys,
         owner_pubkey: nostr::PublicKey,
@@ -6542,6 +6653,8 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            event_publisher: None,
+            publish_agent_output: false,
         }
     }
 

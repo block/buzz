@@ -211,6 +211,9 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text emitted through `agent_message_chunk` notifications during the
+    /// current turn. Drained by the harness when auto-publish is enabled.
+    agent_output: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +553,7 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_output: String::new(),
         })
     }
 
@@ -768,6 +772,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.agent_output.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -879,6 +884,11 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Drain text emitted by the agent during the most recent prompt turn.
+    pub fn take_agent_output(&mut self) -> String {
+        std::mem::take(&mut self.agent_output)
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1732,6 +1742,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.agent_output.push_str(text);
                 }
                 false
             }
@@ -3552,6 +3563,31 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_are_collected_for_turn_output() {
+        let mut client = spawn_inert_client().await;
+        for text in ["Hello", " from", " Goose"] {
+            let msg = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "test-session",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text},
+                    },
+                }
+            });
+            let _ = client.handle_session_update(&msg);
+        }
+
+        assert_eq!(client.take_agent_output(), "Hello from Goose");
+        assert!(
+            client.take_agent_output().is_empty(),
+            "taking drains output"
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
