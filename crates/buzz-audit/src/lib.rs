@@ -32,4 +32,4 @@ pub use action::AuditAction;
 pub use entry::{AuditEntry, NewAuditEntry};
 pub use error::AuditError;
 pub use hash::{compute_hash, GENESIS_HASH};
-pub use service::AuditService;
+pub use service::{verify_entries, AuditService, ChainVerification};
