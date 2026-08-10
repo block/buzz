@@ -3114,29 +3114,81 @@ pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let archived = state.db.list_archived(tenant.community()).await?;
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let mut attempt = 0_u8;
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
+    loop {
+        attempt = attempt.saturating_add(1);
+        // Re-read the canonical archive set on every retry. A concurrent
+        // publisher may have won with a newer snapshot after this call began;
+        // retrying stale tags with a later timestamp would roll that state back.
+        let archived = state.db.list_archived(tenant.community()).await?;
+        let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
+        tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
+        for identity in &archived {
+            tags.push(
+                Tag::parse(["p", &identity.pubkey])
+                    .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
+            );
+        }
 
-    for identity in &archived {
-        tags.push(
-            Tag::parse(["p", &identity.pubkey])
-                .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-        );
-    }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let previous = state
+            .db
+            .get_latest_global_replaceable(
+                tenant.community(),
+                KIND_IA_ARCHIVED_LIST as i32,
+                state.relay_keypair.public_key().to_bytes().as_slice(),
+            )
+            .await?
+            .map(|event| event.event.created_at.as_secs());
 
-    let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+        let Some(ts) = next_replaceable_snapshot_timestamp(now, previous) else {
+            // Keep relay-authored snapshots within the documented client skew
+            // window. Once the wall clock catches up, retry from canonical DB
+            // state instead of publishing an ever-further-future event.
+            tracing::warn!(
+                attempt,
+                previous_snapshot_timestamp = previous,
+                wall_clock_timestamp = now,
+                "NIP-IA archived identities snapshot reached the future-skew limit"
+            );
+            if !nipia_snapshot_retry_allowed(attempt) {
+                anyhow::bail!(
+                    "NIP-IA archived identities snapshot remained above the future-skew limit after {attempt} attempts"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        };
 
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
+        let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(ts))
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
+
+        let (stored, was_inserted) = state
+            .db
+            .replace_addressable_event(tenant.community(), &event, None)
+            .await?;
+        if !was_inserted {
+            tracing::warn!(
+                attempt,
+                snapshot_timestamp = ts,
+                "NIP-IA archived identities snapshot lost a concurrent replacement race"
+            );
+            if !nipia_snapshot_retry_allowed(attempt) {
+                anyhow::bail!(
+                    "NIP-IA archived identities snapshot lost {attempt} consecutive replacement races"
+                );
+            }
+            continue;
+        }
+
         dispatch_persistent_event(
             tenant,
             state,
@@ -3146,13 +3198,26 @@ pub async fn publish_nipia_archival_list(
             None,
         )
         .await;
+        info!(
+            archived_count = archived.len(),
+            "NIP-IA archived identities list published"
+        );
+        return Ok(());
     }
+}
 
-    info!(
-        archived_count = archived.len(),
-        "NIP-IA archived identities list published"
-    );
-    Ok(())
+const MAX_NIPIA_SNAPSHOT_FUTURE_SKEW_SECS: u64 = 60;
+const MAX_NIPIA_SNAPSHOT_PUBLISH_ATTEMPTS: u8 = 8;
+
+fn next_replaceable_snapshot_timestamp(now: u64, previous: Option<u64>) -> Option<u64> {
+    let timestamp = previous
+        .map(|timestamp| timestamp.saturating_add(1).max(now))
+        .unwrap_or(now);
+    (timestamp <= now.saturating_add(MAX_NIPIA_SNAPSHOT_FUTURE_SKEW_SECS)).then_some(timestamp)
+}
+
+fn nipia_snapshot_retry_allowed(attempt: u8) -> bool {
+    attempt < MAX_NIPIA_SNAPSHOT_PUBLISH_ATTEMPTS
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
@@ -3371,6 +3436,60 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rapid_replaceable_snapshots_receive_strictly_increasing_timestamps() {
+        let now = 1_000;
+        let mut previous = None;
+        let mut timestamps = Vec::new();
+
+        for _ in 0..6 {
+            let timestamp = next_replaceable_snapshot_timestamp(now, previous)
+                .expect("six updates remain within the future-skew window");
+            timestamps.push(timestamp);
+            previous = Some(timestamp);
+        }
+
+        assert_eq!(timestamps, vec![1_000, 1_001, 1_002, 1_003, 1_004, 1_005]);
+    }
+
+    #[test]
+    fn wall_clock_catch_up_advances_snapshot_timestamp() {
+        assert_eq!(
+            next_replaceable_snapshot_timestamp(2_000, Some(1_000)),
+            Some(2_000)
+        );
+    }
+
+    #[test]
+    fn snapshot_timestamp_pauses_at_future_skew_limit() {
+        let now = 1_000;
+        assert_eq!(
+            next_replaceable_snapshot_timestamp(
+                now,
+                Some(now + MAX_NIPIA_SNAPSHOT_FUTURE_SKEW_SECS - 1)
+            ),
+            Some(now + MAX_NIPIA_SNAPSHOT_FUTURE_SKEW_SECS)
+        );
+        assert_eq!(
+            next_replaceable_snapshot_timestamp(
+                now,
+                Some(now + MAX_NIPIA_SNAPSHOT_FUTURE_SKEW_SECS)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn snapshot_publication_retry_budget_is_bounded() {
+        assert!(nipia_snapshot_retry_allowed(1));
+        assert!(nipia_snapshot_retry_allowed(
+            MAX_NIPIA_SNAPSHOT_PUBLISH_ATTEMPTS - 1
+        ));
+        assert!(!nipia_snapshot_retry_allowed(
+            MAX_NIPIA_SNAPSHOT_PUBLISH_ATTEMPTS
+        ));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
