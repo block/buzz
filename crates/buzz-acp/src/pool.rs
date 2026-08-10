@@ -1986,9 +1986,10 @@ pub async fn run_prompt_task(
         } else {
             None
         };
-        let triggering_ids: HashSet<String> = b
+        let rendered_batch_ids: HashSet<String> = b
             .events
             .iter()
+            .chain(b.cancelled_events.iter())
             .map(|event| event.event.id.to_hex())
             .collect();
         let delivered_ids = agent
@@ -2005,8 +2006,8 @@ pub async fn run_prompt_task(
                     .any(|event_id| delivered_ids.contains(event_id))
             });
         let conversation_context =
-            conversation_context_delta(conversation_context, &delivered_ids, &triggering_ids);
-        pending_delivered_event_ids.extend(triggering_ids);
+            conversation_context_delta(conversation_context, &delivered_ids, &rendered_batch_ids);
+        pending_delivered_event_ids.extend(rendered_batch_ids);
         pending_delivered_event_ids.extend(conversation_context_event_ids(
             conversation_context.as_ref(),
         ));
@@ -5694,6 +5695,175 @@ done"#
             !prompt_text(2).contains("[Base]\nstanding-once"),
             "turn after channel ACP success must omit standing context"
         );
+    }
+
+    #[tokio::test]
+    async fn merged_cancel_prompt_commits_and_deduplicates_all_rendered_event_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+        let carry_over = EventBuilder::new(Kind::Custom(9), "merged carry-over sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let carry_over_id = carry_over.id.to_hex();
+        let new_event = EventBuilder::new(Kind::Custom(9), "merged new-event sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let new_event_id = new_event.id.to_hex();
+        let next_event = EventBuilder::new(Kind::Custom(9), "ordinary next-turn sentinel")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let merged_batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: new_event.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![crate::queue::BatchEvent {
+                event: carry_over.clone(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancel_reason: Some(crate::queue::CancelReason::Steer),
+        };
+        let next_batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: next_event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        // Return both merged events as DM history. They must be excluded from
+        // the merged prompt's context and, after success, from the next turn.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind context server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let response_body = serde_json::to_string(&vec![carry_over, new_event]).unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 16 * 1024];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(), response_body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-merged-delivery-wire-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn wire-capture ACP");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(channel_id, ChannelDeliveryState::default());
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.context_message_limit = 10;
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "test-dm".into(),
+                    channel_type: "dm".into(),
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for (turn_id, batch) in [("merged-turn", merged_batch), ("next-turn", next_batch)] {
+            run_prompt_task(
+                agent,
+                Some(batch),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                turn_id.into(),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            agent = result.agent;
+        }
+        let delivery = &agent.state.deliveries[&channel_id];
+        assert!(delivery.delivered_event_ids.contains(&carry_over_id));
+        assert!(delivery.delivered_event_ids.contains(&new_event_id));
+        agent.acp.shutdown().await;
+        server.abort();
+
+        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read captured prompts")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured prompt JSON"))
+            .collect();
+        std::fs::remove_file(&capture).expect("remove prompt capture");
+        assert_eq!(requests.len(), 2);
+        let wire = |index: usize| {
+            requests[index]["params"]["prompt"]
+                .as_array()
+                .expect("prompt blocks")
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let merged_wire = wire(0);
+        assert_eq!(merged_wire.matches("merged carry-over sentinel").count(), 1);
+        assert_eq!(merged_wire.matches("merged new-event sentinel").count(), 1);
+        let next_wire = wire(1);
+        assert!(next_wire.contains("ordinary next-turn sentinel"));
+        assert!(!next_wire.contains("merged carry-over sentinel"));
+        assert!(!next_wire.contains("merged new-event sentinel"));
+        assert!(!next_wire.contains(&carry_over_id));
+        assert!(!next_wire.contains(&new_event_id));
     }
 
     #[tokio::test]
