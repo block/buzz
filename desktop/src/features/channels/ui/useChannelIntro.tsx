@@ -93,7 +93,7 @@ export function useChannelIntro({
         actions.push({
           description: "Add an agent here.",
           icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create agent",
+          label: "Add agents",
           onClick: onAddAgent,
           testId: "channel-intro-action-create-agent",
         });

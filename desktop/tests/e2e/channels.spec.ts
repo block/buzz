@@ -1712,6 +1712,9 @@ test("empty channel shows intro actions", async ({ page }) => {
     page.getByTestId("channel-intro-action-create-agent"),
   ).toBeVisible();
   await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toContainText("Add agents");
+  await expect(
     page.getByTestId("channel-intro-action-add-people"),
   ).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
