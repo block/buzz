@@ -19,6 +19,29 @@ per-Agent configuration:
 This integration requires `@nxtlinq/authorization-gateway` 0.3.0 or newer so
 Buzz can delegate setup verification to the Gateway's `--check` command.
 
+## Current deployment model
+
+The current integration is a **local deployment MVP**. Buzz Desktop, the
+Gateway, the ACP runtime, the trust store, and the protected workspace are
+expected to be available on the same execution host. Paths stored by Buzz,
+including the trusted-signers path, are paths on that host; they are not URLs
+or references to files that remain on a separate operator computer.
+
+Two distinctions are important:
+
+- The project owner and the Agent are cryptographically separated. The signing
+  private key stays outside Buzz, and the Agent cannot replace its wrapper or
+  grant itself trust through Agent environment variables.
+- The local human who can edit Buzz's Nxtlinq Settings is currently also the
+  deployment operator. That person can select a different trust store or
+  receipt root. This MVP therefore protects the authorization boundary from
+  the Agent, but does not enforce a hard administrative separation between an
+  end user and an operator who controls the same Buzz installation.
+
+For a single-user development machine this is intentional and explicit. A
+managed installation where an administrator provisions trust and end users
+cannot alter it is deferred; see **Managed operator/end-user separation**.
+
 ## Prepare and sign a project
 
 The project owner prepares the project before an Agent can enable the Gateway:
@@ -198,6 +221,35 @@ Re-sign the manifest after changing its capabilities.
 - Full binary provenance/update lifecycle, remote trust-bundle distribution,
   Guardian policy composition, and a receipts timeline are intentionally
   deferred from this installation MVP.
+
+## Managed operator/end-user separation (deferred)
+
+A future managed deployment should make the deployment operator a real
+administrative role instead of assuming that the local Buzz user performs both
+roles. This is a follow-up feature, not a completion condition for the current
+integration.
+
+The managed design should:
+
+- provision an operator-approved trust bundle onto every machine that actually
+  runs the Gateway;
+- treat `trusted-signers.json` and its referenced public keys as one versioned,
+  atomically deployed bundle;
+- lock the trust-store and receipt-root configuration so ordinary end users
+  can view status but cannot replace either path;
+- distinguish an explicit **Local developer** mode from an administrator-owned
+  **Managed** mode;
+- configure trust on the remote execution host when the Agent runs remotely,
+  rather than storing a Desktop-local path that the remote host cannot resolve;
+- support signer rotation and revocation without editing every Agent; and
+- expose bundle source, version, validation state, and last update for audit and
+  troubleshooting.
+
+The minimum acceptance criteria are that an end user cannot expand the trusted
+signer set, the Agent cannot write operator configuration or trust material,
+and every wrapper launch resolves only the bundle provisioned for its execution
+host. Local developer mode may remain available, but it must be visibly marked
+as a mode in which the local user is also the operator.
 
 See the Gateway's `docs/acp-host-integration.md` for its policy, receipt, and
 conformance contract.
