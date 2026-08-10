@@ -430,6 +430,16 @@ export function extractToolResult(update: Record<string, unknown>): string {
   return extractBlockText(update.rawOutput);
 }
 
+export function extractToolContentBlocks(
+  update: Record<string, unknown>,
+): unknown[] {
+  if (Array.isArray(update.content)) return update.content;
+  if (update.content && typeof update.content === "object") {
+    return [update.content];
+  }
+  return [];
+}
+
 export function extractTriggeringEventIds(payload: unknown): string[] {
   const record = asRecord(payload);
   return Array.isArray(record.triggeringEventIds)

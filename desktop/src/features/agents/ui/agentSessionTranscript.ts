@@ -22,6 +22,7 @@ import {
   extractPromptText,
   extractTriggeringEventIds,
   extractToolArgs,
+  extractToolContentBlocks,
   extractToolIdentity,
   extractToolResult,
   parsePromptText,
@@ -613,6 +614,7 @@ function upsertTool(
   status: ToolStatus,
   args: Record<string, unknown>,
   result: string,
+  contentBlocks: unknown[],
   isError: boolean,
   timestamp: string,
   ctx: TranscriptItemContext,
@@ -634,6 +636,8 @@ function upsertTool(
     const mergedStatus = mergeToolStatus(existing.status, status);
     const updatedArgs = Object.keys(args).length > 0 ? args : existing.args;
     const updatedResult = result || existing.result;
+    const updatedContentBlocks =
+      contentBlocks.length > 0 ? contentBlocks : existing.contentBlocks;
     const updatedIsError = isError || existing.isError;
     const descriptor = classifyTool({
       title: updatedTitle,
@@ -653,6 +657,7 @@ function upsertTool(
       status: mergedStatus,
       args: updatedArgs,
       result: updatedResult,
+      contentBlocks: updatedContentBlocks,
       isError: updatedIsError,
       completedAt:
         isTerminalToolStatus(mergedStatus) && existing.completedAt == null
@@ -686,6 +691,7 @@ function upsertTool(
     status,
     args,
     result,
+    contentBlocks,
     isError,
     timestamp,
     startedAt: timestamp,
@@ -989,6 +995,7 @@ export function processTranscriptEvent(
           normalizeToolStatus(asString(update.status) ?? "executing"),
           extractToolArgs(update),
           extractToolResult(update),
+          extractToolContentBlocks(update),
           false,
           event.timestamp,
           ctx,
@@ -1009,6 +1016,7 @@ export function processTranscriptEvent(
           status,
           extractToolArgs(update),
           extractToolResult(update),
+          extractToolContentBlocks(update),
           status === "failed",
           event.timestamp,
           ctx,

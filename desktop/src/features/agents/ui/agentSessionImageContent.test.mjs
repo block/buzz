@@ -48,6 +48,7 @@ test("buildImageContent accepts http and data image sources", () => {
   );
   assert.deepEqual(http, {
     src: "https://example.com/image.png",
+    localPath: null,
     title: "screenshot.png",
   });
 
@@ -68,4 +69,40 @@ test("buildImageContent rejects local filesystem paths", () => {
     ),
     null,
   );
+});
+
+test("buildImageContent retains absolute local resource links for Tauri preview", () => {
+  const image = buildImageContent(
+    makeTool({
+      contentBlocks: [
+        {
+          type: "resource_link",
+          name: "probe.png",
+          uri: "C:\\workspace\\probe.png",
+        },
+      ],
+    }),
+    imageDescriptor,
+  );
+  assert.deepEqual(image, {
+    src: null,
+    localPath: "C:\\workspace\\probe.png",
+    title: "probe.png",
+  });
+});
+
+test("buildImageContent converts ACP image blocks to data URLs", () => {
+  const image = buildImageContent(
+    makeTool({
+      contentBlocks: [
+        { type: "image", data: "abc", mimeType: "image/png" },
+      ],
+    }),
+    imageDescriptor,
+  );
+  assert.deepEqual(image, {
+    src: "data:image/png;base64,abc",
+    localPath: null,
+    title: "screenshot.png",
+  });
 });

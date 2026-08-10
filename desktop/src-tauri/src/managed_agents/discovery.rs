@@ -278,6 +278,18 @@ pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntim
     })
 }
 
+/// Resolve the MCP sidecar for an effective agent command.
+///
+/// Catalog metadata remains authoritative for known runtimes. A custom command
+/// can still retain the instance's configured sidecar, which is useful for
+/// wrapper binaries that preserve an existing runtime's ACP contract.
+pub(crate) fn resolve_effective_mcp_command(command: &str, configured: &str) -> String {
+    known_acp_runtime(command)
+        .and_then(|runtime| runtime.mcp_command)
+        .map(str::to_string)
+        .unwrap_or_else(|| configured.trim().to_string())
+}
+
 pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }

@@ -8,8 +8,8 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        resolve_effective_mcp_command, spawn_key_refusal, KnownAcpRuntime,
+        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -291,10 +291,8 @@ pub fn build_managed_agent_summary(
             env: Default::default(),
         }
     });
-    let effective_mcp_command = known_acp_runtime(&descriptor.command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("")
-        .to_string();
+    let effective_mcp_command =
+        resolve_effective_mcp_command(&descriptor.command, &record.mcp_command);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -414,9 +412,9 @@ pub fn spawn_agent_child(
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     // Resolve the effective harness (agent command) from the linked persona, so
     // persona harness edits propagate on the next spawn; an explicit per-agent
-    // override wins. `agent_args` and `mcp_command` are pure derivations of the
-    // command, so we recompute them from the effective value rather than the
-    // frozen record snapshot. Mirrors the model resolution below.
+    // override wins. `agent_args` is derived from that effective command. MCP
+    // metadata is catalog-derived for known runtimes and falls back to the
+    // configured value for explicit custom wrappers.
     let personas = super::load_personas(app).unwrap_or_default();
     let teams = super::load_teams(app).unwrap_or_default();
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
@@ -475,13 +473,12 @@ pub fn spawn_agent_child(
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let effective_mcp_command = known_acp_runtime(effective_command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("");
+    let effective_mcp_command =
+        resolve_effective_mcp_command(effective_command, &record.mcp_command);
     let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
         None
     } else {
-        match resolve_command(effective_mcp_command) {
+        match resolve_command(&effective_mcp_command) {
             Some(path) => Some(path),
             None => {
                 eprintln!(

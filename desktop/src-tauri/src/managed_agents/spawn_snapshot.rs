@@ -32,7 +32,7 @@ use serde::Serialize;
 
 use super::{
     effective_config::{resolve_effective_config, EffectiveConfigResult},
-    known_acp_runtime, normalize_agent_args,
+    normalize_agent_args, resolve_effective_mcp_command,
     persona_events::preview_prospective_persona_snapshot,
     readiness::EffectiveHarnessDescriptor,
     runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
@@ -97,7 +97,7 @@ pub(crate) struct SpawnConfigSnapshot {
     /// The effective agent command the harness drives.
     pub command: String,
     pub args: Vec<String>,
-    /// Catalog-derived from `command`; `""` when the runtime has none.
+    /// Catalog-derived for known runtimes, with configured fallback for custom wrappers.
     pub mcp_command: String,
     /// Fully layered process env: baked floor -> runtime metadata ->
     /// definition -> global -> persona -> agent.
@@ -141,10 +141,10 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: known_acp_runtime(&descriptor.command)
-                .and_then(|runtime| runtime.mcp_command)
-                .unwrap_or("")
-                .to_string(),
+            mcp_command: resolve_effective_mcp_command(
+                &descriptor.command,
+                &record.mcp_command,
+            ),
             env: descriptor.env.clone(),
             relay_url: relay_url.to_string(),
             team_instructions: team_instructions.map(str::to_string),

@@ -133,6 +133,8 @@ export type TranscriptItem =
       status: ToolStatus;
       args: Record<string, unknown>;
       result: string;
+      /** Structured ACP content retained for local previews and resource links. */
+      contentBlocks?: unknown[];
       isError: boolean;
       timestamp: string;
       startedAt: string;

@@ -172,6 +172,36 @@ test("buildTranscript keeps read_file activity categorized by the actual tool wh
   assert.match(item.result, /delete_message/);
 });
 
+test("buildTranscript preserves structured image resource blocks", () => {
+  const resource = {
+    type: "resource_link",
+    name: "probe.png",
+    uri: "C:\\workspace\\probe.png",
+  };
+  const [item] = toolItems([
+    acpToolUpdate(12, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-view-image",
+      status: "executing",
+      title: "View Image",
+      kind: "imageView",
+      rawInput: { path: "C:\\workspace\\probe.png" },
+    }),
+    acpToolUpdate(13, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-view-image",
+      status: "completed",
+      title: "View Image",
+      kind: "imageView",
+      rawInput: { path: "C:\\workspace\\probe.png" },
+      content: [resource],
+    }),
+  ]);
+
+  assert.deepEqual(item.contentBlocks, [resource]);
+  assert.equal(item.result, "");
+});
+
 test("buildTranscript keeps shell activity categorized by the actual tool when grep output names Buzz tools", () => {
   const [item] = toolItems([
     acpToolUpdate(20, {

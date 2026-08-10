@@ -7,8 +7,8 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
-    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    resolve_effective_mcp_command, try_record_agent_command, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -37,6 +37,23 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
         managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
         Some(CLAUDE_CODE_AVATAR_URL.to_string())
     );
+}
+
+#[test]
+fn effective_mcp_command_prefers_catalog_for_known_runtime() {
+    assert_eq!(
+        resolve_effective_mcp_command("codex-acp", "stale-sidecar"),
+        "buzz-dev-mcp"
+    );
+}
+
+#[test]
+fn effective_mcp_command_preserves_configured_sidecar_for_custom_wrapper() {
+    assert_eq!(
+        resolve_effective_mcp_command(r"C:\Tools\codex-acp-buzz.exe", "buzz-dev-mcp"),
+        "buzz-dev-mcp"
+    );
+    assert_eq!(resolve_effective_mcp_command("custom-acp", "  "), "");
 }
 
 #[test]

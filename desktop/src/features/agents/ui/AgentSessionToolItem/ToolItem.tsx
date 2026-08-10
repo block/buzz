@@ -1,4 +1,5 @@
 import * as React from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import {
   resolveUserLabel,
@@ -39,6 +40,25 @@ export function ToolItem({
   const canonicalToolName = item.buzzToolName ?? item.toolName;
   const buzzTool = getBuzzToolInfo(canonicalToolName);
   const compactSummary = buildCompactToolSummary(item);
+  const localImagePath = compactSummary.imageContent?.localPath ?? null;
+  const [localImageSrc, setLocalImageSrc] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    setLocalImageSrc(null);
+    if (!localImagePath) return;
+    void invoke<string>("read_agent_preview_image", { path: localImagePath })
+      .then((src) => {
+        if (!cancelled) setLocalImageSrc(src);
+      })
+      .catch(() => {
+        if (!cancelled) setLocalImageSrc(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [localImagePath]);
+  const resolvedImageSrc =
+    compactSummary.imageContent?.src ?? localImageSrc ?? null;
   const duration = getToolDurationDisplay(item);
   const messageLink = getSentMessageLink(item);
   const timestampTitle = formatTranscriptTimestampTitle(item.timestamp);
@@ -123,7 +143,7 @@ export function ToolItem({
             fileEditSummary={compactSummary.fileEditSummary}
             kind={compactSummary.kind}
             preview={compactSummary.preview}
-            thumbnailSrc={compactSummary.thumbnailSrc}
+            thumbnailSrc={resolvedImageSrc}
             label={compactSummary.label}
           />
         </summary>
@@ -136,10 +156,10 @@ export function ToolItem({
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
-            compactSummary.imageContent != null && isExpanded
+            resolvedImageSrc != null && isExpanded
               ? {
-                  src: compactSummary.imageContent.src,
-                  title: compactSummary.imageContent.title,
+                  src: resolvedImageSrc,
+                  title: compactSummary.imageContent?.title ?? null,
                 }
               : null
           }
