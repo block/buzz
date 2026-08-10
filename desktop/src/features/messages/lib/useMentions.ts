@@ -15,10 +15,8 @@ import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
   filterCachedAgentSuggestions,
-  getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
-  isAgentMentionChannelType,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
@@ -41,6 +39,7 @@ import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
+import { useMentionableAgentPubkeys } from "./useMentionableAgentPubkeys";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -194,28 +193,16 @@ export function useMentions(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
   );
-  const mentionChannelId = isAgentMentionChannelType(options?.channelType)
-    ? channelId
-    : null;
-  const mentionableAgentPubkeys = React.useMemo(
-    () =>
-      getMentionableAgentPubkeys({
-        currentPubkey,
-        eligibilityScope: mentionChannelId
-          ? { type: "channel", channelId: mentionChannelId }
-          : { type: "managed-only" },
-        managedAgentPubkeys,
-        relayAgents: relayAgentsQuery.data,
-        sharedChannelIds,
-      }),
-    [
-      currentPubkey,
-      managedAgentPubkeys,
-      mentionChannelId,
-      relayAgentsQuery.data,
-      sharedChannelIds,
-    ],
-  );
+  const mentionableAgentPubkeys = useMentionableAgentPubkeys({
+    channelId,
+    channelMembers: members,
+    channelType: options?.channelType,
+    currentPubkey,
+    managedAgentPubkeys,
+    profiles,
+    relayAgents: relayAgentsQuery.data,
+    sharedChannelIds,
+  });
   const personaNameByPubkey = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
     const personas = personasQuery.data ?? [];

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   coalesceAgentAutocompleteCandidates,
   filterCachedAgentSuggestions,
+  getChannelOwnedAgentPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
@@ -198,6 +199,141 @@ test("getMentionableAgentPubkeys: scopes channel composers and fails closed with
       eligibilityScope: { type: "managed-only" },
     }),
     new Set([PUB_A]),
+  );
+});
+
+test("getMentionableAgentPubkeys: admits same-owner remote agents only in the active channel", () => {
+  const base = {
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [PUB_A],
+    channelOwnedAgentPubkeys: [PUB_B],
+    relayAgents: [],
+    sharedChannelIds: new Set(["general"]),
+  };
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "channel", channelId: "general" },
+    }),
+    new Set([PUB_A, PUB_B]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "community" },
+    }),
+    new Set([PUB_A]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "managed-only" },
+    }),
+    new Set([PUB_A]),
+  );
+});
+
+test("getMentionableAgentPubkeys: owner admission overrides ordinary modes but not nobody", () => {
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      eligibilityScope: { type: "channel", channelId: "general" },
+      managedAgentPubkeys: [],
+      channelOwnedAgentPubkeys: [PUB_B],
+      relayAgents: undefined,
+      sharedChannelIds: new Set(["general"]),
+    }),
+    new Set(),
+    "owner admission must wait for a successful relay-directory response",
+  );
+
+  for (const respondTo of [
+    undefined,
+    null,
+    "owner-only",
+    "allowlist",
+    "anyone",
+    "future-mode",
+  ]) {
+    const relayAgents =
+      respondTo === undefined
+        ? []
+        : [
+            {
+              pubkey: PUB_B,
+              respondTo,
+              respondToAllowlist: [],
+              channelIds: ["other"],
+            },
+          ];
+    assert.deepEqual(
+      getMentionableAgentPubkeys({
+        currentPubkey: CURRENT_PUBKEY,
+        eligibilityScope: { type: "channel", channelId: "general" },
+        managedAgentPubkeys: [],
+        channelOwnedAgentPubkeys: [PUB_B.toUpperCase()],
+        relayAgents,
+        sharedChannelIds: new Set(["general"]),
+      }),
+      new Set([PUB_B]),
+      `owner admission should allow ${String(respondTo)}`,
+    );
+  }
+
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      eligibilityScope: { type: "channel", channelId: "general" },
+      managedAgentPubkeys: [],
+      channelOwnedAgentPubkeys: [PUB_B],
+      relayAgents: [
+        {
+          pubkey: PUB_B,
+          respondTo: "nobody",
+          respondToAllowlist: [],
+          channelIds: ["general"],
+        },
+      ],
+      sharedChannelIds: new Set(["general"]),
+    }),
+    new Set(),
+  );
+});
+
+test("getChannelOwnedAgentPubkeys: requires verified matching ownership and an agent signal", () => {
+  assert.deepEqual(
+    getChannelOwnedAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY.toUpperCase(),
+      channelMembers: [
+        { pubkey: PUB_A.toUpperCase(), role: "bot", isAgent: false },
+        { pubkey: PUB_B, role: "member", isAgent: true },
+        { pubkey: PUB_C, role: "member", isAgent: false },
+        { pubkey: PUB_D, role: "member", isAgent: false },
+      ],
+      profiles: {
+        [PUB_A]: { ownerPubkey: CURRENT_PUBKEY },
+        [PUB_B]: { ownerPubkey: CURRENT_PUBKEY },
+        [PUB_C]: { ownerPubkey: CURRENT_PUBKEY, isAgent: true },
+        [PUB_D]: { ownerPubkey: OTHER_OWNER_PUBKEY },
+      },
+    }),
+    new Set([PUB_A, PUB_B, PUB_C]),
+  );
+
+  assert.deepEqual(
+    getChannelOwnedAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      channelMembers: [
+        { pubkey: PUB_A, role: "member", isAgent: false },
+        { pubkey: PUB_B, role: "bot", isAgent: true },
+      ],
+      profiles: {
+        [PUB_A]: { ownerPubkey: CURRENT_PUBKEY, isAgent: false },
+        [PUB_B]: { ownerPubkey: OTHER_OWNER_PUBKEY, isAgent: true },
+      },
+    }),
+    new Set(),
   );
 });
 

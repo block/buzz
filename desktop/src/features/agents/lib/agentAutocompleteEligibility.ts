@@ -46,13 +46,71 @@ export type AgentEligibilityScope =
   | { type: "channel"; channelId: string }
   | { type: "managed-only" };
 
+/**
+ * Returns agent identities that are both present in the active channel and
+ * cryptographically owned by the viewer. The caller must supply ownerPubkey
+ * values verified from NIP-OA profile events; display names and local persona
+ * cards are never ownership evidence.
+ *
+ * This set may override normal relay response policy only for channel mention
+ * routing after the relay directory has loaded successfully. It must not be
+ * used to seed community search or direct messages.
+ */
+export function getChannelOwnedAgentPubkeys({
+  channelMembers,
+  currentPubkey,
+  profiles,
+}: {
+  channelMembers:
+    | readonly {
+        pubkey: string;
+        role?: string | null;
+        isAgent?: boolean;
+      }[]
+    | undefined;
+  currentPubkey?: string | null;
+  profiles:
+    | Readonly<
+        Record<string, { ownerPubkey?: string | null; isAgent?: boolean }>
+      >
+    | undefined;
+}) {
+  const ownedAgentPubkeys = new Set<string>();
+  if (!currentPubkey) return ownedAgentPubkeys;
+
+  const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
+  for (const member of channelMembers ?? []) {
+    const pubkey = normalizePubkey(member.pubkey);
+    const profile = profiles?.[pubkey];
+    const isAgent =
+      member.role === "bot" ||
+      member.isAgent === true ||
+      profile?.isAgent === true;
+    if (
+      isAgent &&
+      profile?.ownerPubkey &&
+      normalizePubkey(profile.ownerPubkey) === normalizedCurrentPubkey
+    ) {
+      ownedAgentPubkeys.add(pubkey);
+    }
+  }
+
+  return ownedAgentPubkeys;
+}
+
+function relayAgentIsHeartbeatOnly(agent: Pick<RelayAgent, "respondTo">) {
+  return agent.respondTo === "nobody";
+}
+
 export function getMentionableAgentPubkeys({
+  channelOwnedAgentPubkeys,
   currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
 }: {
+  channelOwnedAgentPubkeys?: Iterable<string>;
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
   managedAgentPubkeys: Iterable<string>;
@@ -62,6 +120,23 @@ export function getMentionableAgentPubkeys({
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
+
+  // A missing directory is not equivalent to an empty one: until a successful
+  // response proves there is no `nobody` entry, remote-owner admission must
+  // fail closed. Locally managed identities remain available above.
+  if (eligibilityScope.type === "channel" && relayAgents !== undefined) {
+    const heartbeatOnlyPubkeys = new Set(
+      (relayAgents ?? [])
+        .filter(relayAgentIsHeartbeatOnly)
+        .map((agent) => normalizePubkey(agent.pubkey)),
+    );
+    for (const pubkey of channelOwnedAgentPubkeys ?? []) {
+      const normalized = normalizePubkey(pubkey);
+      if (!heartbeatOnlyPubkeys.has(normalized)) {
+        pubkeys.add(normalized);
+      }
+    }
+  }
 
   for (const agent of relayAgents ?? []) {
     const isAllowed =

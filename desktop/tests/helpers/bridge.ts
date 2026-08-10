@@ -59,7 +59,7 @@ type MockRelayAgentSeed = {
   name: string;
   agentType?: string;
   capabilities?: string[];
-  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondTo?: string;
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];

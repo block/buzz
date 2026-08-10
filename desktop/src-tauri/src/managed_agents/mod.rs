@@ -26,6 +26,7 @@ mod personas;
 mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
+mod relay_agent_info;
 mod relay_mesh;
 mod repos;
 mod restore;
@@ -70,6 +71,7 @@ pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
     AgentReadiness, Requirement,
 };
+pub use relay_agent_info::*;
 pub use relay_mesh::*;
 pub use repos::{
     effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,
