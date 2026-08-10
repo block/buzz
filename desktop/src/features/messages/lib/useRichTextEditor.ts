@@ -7,6 +7,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
 import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
@@ -141,6 +142,59 @@ function unwrapExactHttpLink(text: string): string | null {
   const match = /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i.exec(text);
   return match?.[1] ?? match?.[2] ?? null;
 }
+
+/** Strong RTL characters: Hebrew, Arabic (+ presentation forms), Syriac, Thaana. */
+const RTL_STRONG = /[֐-ࣿיִ-﷽ﹰ-ﻼ]/;
+/** Strong LTR characters: Latin, Greek, Cyrillic (and Latin extensions). */
+const LTR_STRONG = /[A-Za-zÀ-ɏͰ-ӿ]/;
+
+/** First-strong-character direction of a block's text, or null if neutral. */
+function firstStrongDirection(text: string): "rtl" | "ltr" | null {
+  for (const ch of text) {
+    if (RTL_STRONG.test(ch)) return "rtl";
+    if (LTR_STRONG.test(ch)) return "ltr";
+  }
+  return null;
+}
+
+/**
+ * Stamp an explicit `dir` on every top-level block, resolved from the block's
+ * own first strong character. An explicit dir gives the WebView unambiguous
+ * caret and punctuation behavior for RTL input — `dir="auto"` alone is not
+ * reliably honored inside contenteditable by WebKit.
+ */
+const BidiBlockDirection = Extension.create({
+  name: "bidiBlockDirection",
+  addProseMirrorPlugins() {
+    type Doc = Parameters<typeof DecorationSet.create>[0];
+    const build = (doc: Doc) => {
+      const decorations: Decoration[] = [];
+      doc.forEach((node, offset) => {
+        const dir = firstStrongDirection(node.textContent);
+        if (dir !== null) {
+          decorations.push(
+            Decoration.node(offset, offset + node.nodeSize, { dir }),
+          );
+        }
+      });
+      return DecorationSet.create(doc, decorations);
+    };
+    return [
+      new Plugin({
+        state: {
+          init: (_config, state) => build(state.doc),
+          apply: (tr, old, _oldState, newState) =>
+            tr.docChanged ? build(newState.doc) : old,
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state);
+          },
+        },
+      }),
+    ];
+  },
+});
 
 const LinkPasteTrailingSpace = Extension.create({
   name: "linkPasteTrailingSpace",
@@ -492,6 +546,7 @@ export function useRichTextEditor({
           transformCopiedText: true,
           breaks: true,
         }),
+        BidiBlockDirection,
       ],
       editorProps: {
         handleDOMEvents: {
