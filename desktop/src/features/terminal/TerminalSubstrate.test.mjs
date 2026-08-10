@@ -874,6 +874,54 @@ test("Windows paste chords reach paste instead of sending ^V", async (t) => {
   ]);
 });
 
+test("Linux keeps Ctrl+V quote-next and lets Ctrl+Shift+V paste", async (t) => {
+  Object.defineProperty(dom.window.navigator, "platform", {
+    configurable: true,
+    value: "Linux x86_64",
+  });
+  t.after(() => {
+    Object.defineProperty(dom.window.navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+  });
+
+  const subject = await revealed({ bracketedPaste: true });
+  const input = subject.view.getByLabelText("Terminal input");
+  const keyDown = (shiftKey) => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "KeyV",
+      ctrlKey: true,
+      key: "v",
+      shiftKey,
+    });
+    act(() => input.dispatchEvent(event));
+    return event;
+  };
+
+  const quoteNext = keyDown(false);
+  assert.equal(quoteNext.defaultPrevented, true);
+  assert.deepEqual(subject.calls.input, ["\u0016"]);
+
+  const pasteChord = keyDown(true);
+  assert.equal(pasteChord.defaultPrevented, false);
+  assert.deepEqual(
+    subject.calls.input,
+    ["\u0016"],
+    "Ctrl+Shift+V must wait for the paste event",
+  );
+  fireEvent.paste(input, {
+    clipboardData: { getData: () => "from Linux" },
+  });
+
+  assert.deepEqual(subject.calls.input, [
+    "\u0016",
+    "\u001b[200~from Linux\u001b[201~",
+  ]);
+});
+
 test("⌘W on an already-closing tab does not re-fire close", async () => {
   const subject = await revealed({
     sessions: [
