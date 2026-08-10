@@ -13,6 +13,56 @@ pub(crate) fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>
     }
 }
 
+/// Reveal a DGX Spark AppImage without handing its first WebKit surface to
+/// Mutter. GNOME Remote Login's virtual display can crash GNOME Shell when the
+/// initial XWayland surface is managed immediately. Realize and map it outside
+/// window-manager control, then hand the same window back after one frame.
+#[cfg(target_os = "linux")]
+pub(crate) fn reveal_initial_linux_window<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    needs_unmanaged_first_map: bool,
+) {
+    if !needs_unmanaged_first_map {
+        reveal_initial_window(window);
+        return;
+    }
+
+    use gtk::prelude::*;
+
+    let gtk_window = match window.gtk_window() {
+        Ok(window) => window,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to obtain GTK main window: {error}");
+            reveal_initial_window(window);
+            return;
+        }
+    };
+
+    gtk_window.realize();
+    let Some(gdk_window) = gtk_window.window() else {
+        eprintln!("buzz-desktop: GTK main window has no realized GDK window");
+        reveal_initial_window(window);
+        return;
+    };
+
+    gdk_window.set_override_redirect(true);
+    gtk_window.show_all();
+    gdk_window.raise();
+    eprintln!("buzz-desktop: DGX Spark first map bypassed Mutter");
+
+    let tauri_window = window.clone();
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+        gdk_window.hide();
+        gdk_window.set_override_redirect(false);
+        gdk_window.show();
+        gdk_window.raise();
+        if let Err(error) = tauri_window.set_focus() {
+            eprintln!("buzz-desktop: failed to focus remapped main window: {error}");
+        }
+        eprintln!("buzz-desktop: DGX Spark window handed back to Mutter");
+    });
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
     // The window remains transparent at runtime for vibrancy. Use an opaque

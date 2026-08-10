@@ -214,9 +214,9 @@ GitHub Release or a stable `mobile-vX.Y.Z` alias.
 The release workflow builds **two separate macOS DMGs**: Apple
 Silicon (`darwin-aarch64`, the `release` job) and Intel
 (`darwin-x86_64`, the `release-macos-x64` job), an unsigned Windows x64
-NSIS installer (its filename includes `_alpha-unsigned`), and Linux `.deb` and
-`.AppImage` packages. Both macOS DMGs are codesigned, notarized, and attached
-to the same `desktop-v<version>` release. Intel users
+NSIS installer (its filename includes `_alpha-unsigned`), and Linux x86_64 and
+ARM64 `.deb` and `.AppImage` packages. Both macOS DMGs are codesigned,
+notarized, and attached to the same `desktop-v<version>` release. Intel users
 download the `_x64.dmg`.
 
 The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
@@ -224,9 +224,9 @@ which strips infra libraries over-bundled by linuxdeploy (they crash on
 Mesa 25+ / GLib 2.88 distros; see
 [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665))
 and re-signs the artifact. As a result the AppImage relies on the
-host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
-(Ubuntu 22.04 or newer). The `release-linux` job builds inside a
-`ubuntu:22.04` container for broad GLIBC compatibility.
+host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72 and
+GLIBC >= 2.39 (Ubuntu 24.04 or newer). The `release-linux` matrix builds both
+architectures inside a pinned `ubuntu:24.04` container.
 
 ---
 
@@ -315,7 +315,7 @@ candidate tags must remain immutable.
 
 ### Auto-updater reports "no update available"
 Verify that the `buzz-desktop-latest` release exists and contains a
-valid `latest.json`. The manifest covers all four platform keys
-(`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`,
+valid `latest.json`. The manifest covers all five platform keys
+(`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`, `linux-aarch64`,
 `windows-x86_64`); a missing entry usually means that platform's
 release job failed. Check the workflow run.

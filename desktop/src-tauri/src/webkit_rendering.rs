@@ -16,7 +16,10 @@
 //! no second chance later in the same process. This module therefore decides
 //! from cheap preflight signals instead of reacting to a crash:
 //!
-//! * an NVIDIA GPU, the driver family behind most upstream reports; and
+//! * an NVIDIA GPU, the driver family behind most upstream reports;
+//! * an NVIDIA DGX Spark AppImage, where GNOME Remote Login's virtual Wayland
+//!   monitor can crash Mutter when WebKit submits an accelerated XWayland
+//!   surface; and
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
 //!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
 //!
@@ -38,6 +41,12 @@ const NVIDIA_PCI_VENDOR: &str = "0x10de";
 
 /// Where DRM devices advertise their PCI vendor.
 const DRM_ROOT: &str = "/sys/class/drm";
+
+/// DMI product name exposed by Linux on the DGX Spark.
+const DMI_PRODUCT_NAME: &str = "/sys/devices/virtual/dmi/id/product_name";
+
+/// Product name reported by current DGX Spark firmware.
+const DGX_SPARK_PRODUCT_NAME: &str = "NVIDIA_DGX_Spark";
 
 /// Prefer shared-memory dmabuf transport. The #3654 replacement for
 /// `WEBKIT_DISABLE_DMABUF_RENDERER` on current WebKitGTK.
@@ -92,10 +101,21 @@ enum Plan {
 ///
 /// `Err` carries a user-facing diagnostic; the caller reports it and exits.
 pub fn apply() -> Result<(), String> {
+    // linuxdeploy's GTK AppRun hook pins every AppImage to X11. That is unsafe
+    // for GNOME Remote Login on a DGX Spark: presenting any Buzz XWayland
+    // surface crashes the remote Mutter process. Select the native Wayland
+    // backend before GTK initializes; physical/local sessions retain the
+    // packaging default and the two-stage X11 map below.
+    if needs_dgx_spark_window_workaround() && is_remote_login_session() {
+        std::env::set_var("GDK_BACKEND", "wayland");
+        eprintln!("buzz-desktop: GDK_BACKEND=wayland — remote NVIDIA DGX Spark AppImage");
+    }
+
     match plan(
         std::env::args_os(),
         &|key| std::env::var_os(key),
         Path::new(DRM_ROOT),
+        Path::new(DMI_PRODUCT_NAME),
     ) {
         Plan::Apply { vars, why } => {
             for var in vars {
@@ -114,12 +134,45 @@ pub fn apply() -> Result<(), String> {
     }
 }
 
+/// Whether this launch needs the DGX Spark/Mutter initial-map workaround.
+///
+/// Keep this predicate identical to the special case in [`plan`]. Rendering
+/// preflight runs before Tauri is built; the result is also used to prepare
+/// the initial native window and to choose its reveal path.
+pub(crate) fn needs_dgx_spark_window_workaround() -> bool {
+    std::env::var_os("APPIMAGE").is_some() && dgx_spark(Path::new(DMI_PRODUCT_NAME))
+}
+
+/// Whether the current login session is remote according to systemd-logind.
+///
+/// `loginctl ... auto` resolves the session that owns this process. It works
+/// both when Buzz is launched from GNOME and when an operator starts it from a
+/// remote shell. Non-systemd distributions simply fall back to `false`.
+pub(crate) fn is_remote_login_session() -> bool {
+    std::process::Command::new("loginctl")
+        .args(["show-session", "auto", "--property=Remote", "--value"])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .eq_ignore_ascii_case("yes")
+        })
+}
+
+/// Whether GTK will create an X11/XWayland rather than native Wayland window.
+pub(crate) fn uses_x11_backend() -> bool {
+    std::env::var_os("GDK_BACKEND")
+        .is_some_and(|backend| backend.eq_ignore_ascii_case(OsStr::new("x11")))
+}
+
 /// The whole decision, as a pure function of argv, the environment, and the DRM
 /// device tree.
 fn plan(
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     env: EnvLookup<'_>,
     drm_root: &Path,
+    dmi_product_name: &Path,
 ) -> Plan {
     let safe_rendering = args
         .into_iter()
@@ -165,10 +218,23 @@ fn plan(
         };
     }
 
-    let signals = [
-        (nvidia_gpu(drm_root), "NVIDIA GPU"),
-        (env("APPIMAGE").is_some(), "AppImage"),
-    ];
+    let appimage = env("APPIMAGE").is_some();
+
+    // Ubuntu 24.04 GNOME Remote Login creates a virtual Wayland monitor. On a
+    // DGX Spark, the AppImage's XWayland surface can make Mutter itself
+    // segfault as soon as Buzz's accelerated WebKit view appears, ending the
+    // whole remote session. Shared-memory transport alone is not sufficient;
+    // the existing safe-rendering mode also disables WebKit compositing and
+    // avoids the accelerated path that preceded the crash. Scope the cost to
+    // the exact product and package combination observed in the field.
+    if appimage && dgx_spark(dmi_product_name) {
+        return Plan::Apply {
+            vars: &SAFE_VARS,
+            why: "NVIDIA DGX Spark AppImage".to_string(),
+        };
+    }
+
+    let signals = [(nvidia_gpu(drm_root), "NVIDIA GPU"), (appimage, "AppImage")];
     let hits: Vec<&str> = signals
         .iter()
         .filter_map(|(hit, label)| hit.then_some(*label))
@@ -215,6 +281,12 @@ fn nvidia_gpu(drm_root: &Path) -> bool {
         std::fs::read_to_string(entry.path().join("device/vendor"))
             .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case(NVIDIA_PCI_VENDOR))
     })
+}
+
+/// Whether Linux DMI identifies this machine as an NVIDIA DGX Spark.
+fn dgx_spark(product_name: &Path) -> bool {
+    std::fs::read_to_string(product_name)
+        .is_ok_and(|name| name.trim().eq_ignore_ascii_case(DGX_SPARK_PRODUCT_NAME))
 }
 
 /// The diagnostic for `--safe-rendering` against a user-set owned variable.

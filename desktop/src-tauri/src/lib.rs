@@ -112,6 +112,16 @@ pub fn run() {
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
+    let dgx_spark_x11_window_workaround = webkit_rendering::needs_dgx_spark_window_workaround()
+        && webkit_rendering::uses_x11_backend();
+    let window_state_flags = if dgx_spark_x11_window_workaround {
+        // Restoring a saved maximized/decorated state before the two-stage map
+        // sends the Spark window back through the crashing Mutter path.
+        StateFlags::empty()
+    } else {
+        StateFlags::all() & !StateFlags::VISIBLE
+    };
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
@@ -132,12 +142,12 @@ pub fn run() {
             tauri_plugin_window_state::Builder::default()
                 // Visibility is excluded: the native reveal plugin below
                 // shows the window after saved geometry has been restored.
-                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .with_state_flags(window_state_flags)
                 .build(),
         )
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
-                .on_webview_ready(|webview| {
+                .on_webview_ready(move |webview| {
                     if webview.label() != "main" {
                         return;
                     }
@@ -183,7 +193,15 @@ pub fn run() {
                         });
                     }
 
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(target_os = "linux")]
+                    {
+                        reveal_initial_linux_window(
+                            &window,
+                            dgx_spark_x11_window_workaround,
+                        );
+                    }
+
+                    #[cfg(target_os = "windows")]
                     {
                         reveal_initial_window(&window);
                     }
@@ -915,7 +933,27 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
         ])
-        .build(tauri::generate_context!())
+        .build({
+            let mut context = tauri::generate_context!();
+            if dgx_spark_x11_window_workaround {
+                // The normal cross-platform config is transparent and starts
+                // maximized for macOS vibrancy. A Spark's first Linux map must
+                // instead be opaque, normal-sized, and client-decorated so the
+                // two-stage GTK reveal can safely transfer it to Mutter.
+                if let Some(window) = context
+                    .config_mut()
+                    .app
+                    .windows
+                    .iter_mut()
+                    .find(|window| window.label == "main")
+                {
+                    window.transparent = false;
+                    window.maximized = false;
+                    window.decorations = false;
+                }
+            }
+            context
+        })
         .expect("error while building tauri application");
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
