@@ -1,5 +1,4 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import * as React from "react";
 
 import {
   getGlobalNotes,
@@ -13,37 +12,7 @@ import {
 import { allPulseTimelinesQueryKey } from "@/features/profile/hooks";
 import { withoutProjectComments } from "@/features/pulse/lib/projectComments";
 import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
-
-function isDocumentVisible() {
-  return typeof document === "undefined"
-    ? true
-    : document.visibilityState === "visible";
-}
-
-function useDocumentVisible() {
-  const [visible, setVisible] = React.useState(isDocumentVisible);
-
-  React.useEffect(() => {
-    if (typeof document === "undefined") {
-      return;
-    }
-
-    function handleVisibilityChange() {
-      setVisible(isDocumentVisible());
-    }
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, []);
-
-  return visible;
-}
-
-function useVisibleRefetchInterval(intervalMs: number) {
-  return useDocumentVisible() ? intervalMs : false;
-}
+import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
 // ── Query keys ──────────────────────────────────────────────────────────────
 
@@ -74,6 +43,7 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -89,6 +59,7 @@ export function useMyNotesQuery(pubkey?: string) {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -105,6 +76,7 @@ export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -141,6 +113,7 @@ export function usePulseReactionsQuery(
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -165,6 +138,7 @@ export function useGlobalNotesQuery(enabled: boolean) {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

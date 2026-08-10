@@ -7,6 +7,7 @@ import {
 } from "@/features/reminders/hooks";
 import { dueSince } from "@/features/reminders/lib/reminderFilters";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import {
   requestDockBounce,
   sendDesktopNotification,
@@ -62,6 +63,7 @@ export function useReminderNotifications(
 ): void {
   const reminders = useRemindersQuery(pubkey).data;
   const queryClient = useQueryClient();
+  const documentVisible = useDocumentVisible();
   const remindersRef = React.useRef<Reminder[]>([]);
   remindersRef.current = reminders ?? [];
   const settingsRef = React.useRef(settings);
@@ -116,7 +118,7 @@ export function useReminderNotifications(
   });
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !documentVisible) return;
 
     const check = () => {
       // Defer until the query has resolved at least once — an empty array from
@@ -147,5 +149,5 @@ export function useReminderNotifications(
     check();
     const interval = window.setInterval(check, POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [pubkey, queryClient]);
+  }, [documentVisible, pubkey, queryClient]);
 }
