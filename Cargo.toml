@@ -148,8 +148,8 @@ buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 # release optimization (warm from main's cache; they carry the runtime hot
 # path: tokio/sqlx/axum). Workspace crates build at opt-level 1 — enough for
 # stable e2e timing (PR #307 flakiness was opt-0 + debug-assertions) at
-# roughly half the codegen cost. `incremental` is irrelevant in CI:
-# rust-cache exports CARGO_INCREMENTAL=0 and never caches member artifacts.
+# roughly half the codegen cost. Incremental stays disabled: rust-cache exports
+# CARGO_INCREMENTAL=0, and the CI compiler cache requires non-incremental units.
 [profile.ci]
 inherits = "release"
 lto = false
