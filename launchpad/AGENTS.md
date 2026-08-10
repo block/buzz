@@ -106,17 +106,27 @@ Milestone  (M0, M1)
 └── PRD                    the approvable unit; holds acceptance criteria
     ├── Task               executable child: one branch, one PR
     ├── Bug                found while building
-    └── Enhancement        deferred improvement
+    ├── Enhancement        deferred improvement
+    └── ADR                an open question the PRD cannot proceed without
 
-ADR ───────────────────────  outside the hierarchy entirely
+ADR ───────────────────────  standalone only when no PRD raised it
 ```
 
 1. **An ADR is never a work item and never has children.** Work a decision creates is
    filed separately afterwards and linked back.
-2. **A Task never has children.** If a Task grows children, it was a PRD — relabel it.
-3. **Bug and Enhancement** are children of a PRD if found while building it, standalone
+2. **A PRD's open questions are raised as ADR issues, parented to that PRD.** Use
+   `--parent`, exactly as for a Task. An open question that stays in a PRD body is
+   invisible on the board, and gets decided by accident inside whichever task hits it
+   first — which buries a decision with real consequences in a task nobody reads again.
+   An ADR that no PRD raised is filed standalone.
+3. **A resolved ADR is written to `launchpad/decisions/ADR-XXXX-slug.md` in the same PR
+   that closes its issue.** A decision that exists only in a closed issue is lost to the
+   noise. Closing the issue without writing the document is not done. This does not make
+   an ADR a work item — no code or config moves; the decision record is the only artifact.
+4. **A Task never has children.** If a Task grows children, it was a PRD — relabel it.
+5. **Bug and Enhancement** are children of a PRD if found while building it, standalone
    if found later against shipped work.
-4. **An Enhancement against unshipped work is a scope change to its PRD, not an
+6. **An Enhancement against unshipped work is a scope change to its PRD, not an
    Enhancement.** Comment on the PRD instead. Without this rule, Enhancement becomes the
    dumping ground for "we didn't finish", and PRDs look done while their gaps live in a
    parallel queue.
@@ -168,7 +178,8 @@ gh issue create \
 ```
 
 Note `--parent` — that creates a real GitHub sub-issue link. Use it for every Task under
-a PRD.
+a PRD, and for every ADR raised from a PRD's open questions. Only an ADR that no PRD
+raised is filed without one.
 
 Do **not** pass `--type`; that is GitHub's org-level Issue Types feature, which this org
 has not configured. **Type is a label.**

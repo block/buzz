@@ -142,3 +142,13 @@ The last four arrive with the PRDs that create them.
 No `TODO` comments, no `PLANNED.md`, no roadmap files. If it isn't true yet, it's an
 issue. If it is true, it's documentation. A decision still being argued is an ADR issue;
 once made it becomes `decisions/ADR-XXXX-slug.md` and the issue closes.
+
+Two consequences that are easy to skip, both spelled out in
+[`AGENTS.md`](AGENTS.md#how-the-types-relate):
+
+- **A PRD's open questions get raised as ADR issues, with the PRD as their parent.** An
+  open question left sitting in a PRD body is invisible on the board, and ends up decided
+  by accident inside whichever task runs into it first.
+- **Closing an ADR means writing `decisions/ADR-XXXX-slug.md` in the same PR.** A decision
+  recorded only in a closed issue is lost. The issue is where it gets argued; the document
+  is where it survives.
