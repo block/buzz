@@ -10,6 +10,7 @@ import {
   setCustomEmoji,
 } from "@/shared/api/customEmoji";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 /**
@@ -28,13 +29,16 @@ export const customEmojiQueryKey = ["custom-emoji"] as const;
 export const ownCustomEmojiQueryKey = ["custom-emoji-own"] as const;
 
 export function useCustomEmojiQuery() {
+  const refetchInterval = useFocusedRefetchInterval(120_000);
+
   return useQuery<CustomEmoji[]>({
     queryKey: customEmojiQueryKey,
     queryFn: listCustomEmoji,
     // The palette changes rarely; avoid refetch storms while the picker is open,
     // but poll every 2 minutes as a backstop for any missed live event.
     staleTime: 60_000,
-    refetchInterval: 120_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

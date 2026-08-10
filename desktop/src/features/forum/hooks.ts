@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type {
@@ -19,6 +20,8 @@ export function forumThreadQueryKey(channelId: string, eventId: string) {
 }
 
 export function useForumPostsQuery(channel: Channel | null) {
+  const refetchInterval = useFocusedRefetchInterval(15_000);
+
   const channelId = channel?.id ?? "";
   const enabled = channel !== null && channel.channelType === "forum";
   const relaySelfPubkey = useRelaySelfQuery(enabled).data;
@@ -28,7 +31,8 @@ export function useForumPostsQuery(channel: Channel | null) {
     queryKey: [...forumPostsQueryKey(channelId), relaySelfPubkey ?? null],
     queryFn: () => getForumPosts(channelId, 50, undefined, relaySelfPubkey),
     staleTime: 15_000,
-    refetchInterval: 15_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -36,6 +40,8 @@ export function useForumThreadQuery(
   channelId: string | null,
   eventId: string | null,
 ) {
+  const refetchInterval = useFocusedRefetchInterval(10_000);
+
   const enabled = channelId !== null && eventId !== null;
   const relaySelfPubkey = useRelaySelfQuery(enabled).data;
 
@@ -54,7 +60,8 @@ export function useForumThreadQuery(
         relaySelfPubkey,
       ),
     staleTime: 10_000,
-    refetchInterval: 10_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

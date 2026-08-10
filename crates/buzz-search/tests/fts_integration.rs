@@ -305,6 +305,67 @@ async fn kind0_search_by_display_name_works_without_flattening() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "short-profile-prefix.example").await;
+    let exact_id = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        exact_id,
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"jm"}"#,
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    // These profiles all match jm:* and are newer than the exact name. Without
+    // exact-lexeme priority they consume the entire bounded first page.
+    for (i, display_name) in ["jma", "jmbravo", "jmcharlie", "jmdelta"]
+        .iter()
+        .enumerate()
+    {
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            0,
+            &format!(r#"{{"display_name":"{display_name}"}}"#),
+            None,
+            1_700_000_100 + i as i64,
+        )
+        .await;
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let first_page = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "jm".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 3,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("short profile prefix search ok");
+
+    assert_eq!(first_page.hits.len(), 3);
+    assert_eq!(first_page.hits[0].event_id, exact_id);
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
     let (pool, schema) = setup().await;
 

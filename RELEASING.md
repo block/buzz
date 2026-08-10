@@ -173,10 +173,10 @@ for distributable builds or builds from an immutable release tag.
 `release.yml` has no manual dispatch and cannot build from `main` or another
 caller-selected ref. If a run for an existing immutable
 `desktop-v<version>` tag fails, rerun that failed workflow from GitHub Actions
-(or use `gh run rerun <run-id> --failed --repo block/buzz`). A stable rerun also
-repairs `buzz-desktop-latest/latest.json` if the original run published the
-versioned release but failed during that final rolling-manifest upload. Do not
-recreate, move, or push the immutable tag again.
+(or use `gh run rerun <run-id> --failed --repo block/buzz`). A rerun
+repairs the versioned draft if publication did not complete. It does not
+promote that version to the auto-updater; promotion is a separate manual
+action. Do not recreate, move, or push the immutable tag again.
 
 Mobile intentionally has no branch or arbitrary-ref fallback. The private
 Buildkite pipeline accepts only an exact candidate tag.
@@ -200,8 +200,25 @@ for the rest of the private pipeline contract.
 
 Desktop publishes two GitHub releases:
 
-1. **`desktop-v<version>`**: the user-facing release with installers.
-2. **`buzz-desktop-latest`**: the rolling auto-updater release.
+1. **`desktop-v<version>`**: the user-facing release with installers and the
+   exact `updater-manifest.json` promotion candidate. Publishing this release
+   does not expose it through in-app auto-update.
+2. **`buzz-desktop-latest`**: the rolling auto-updater release. Its
+   `latest.json` changes only through the manual promotion workflow.
+
+### Promote an OSS desktop release to auto-update
+
+After installing and testing the published `desktop-v<version>` artifacts, run
+**Promote OSS Desktop Auto-Update** from the `main` branch and enter the exact
+stable `X.Y.Z` version. The workflow validates the immutable tag and release,
+the retained manifest and every referenced updater asset, and requires the
+version to be newer than the currently promoted version before replacing
+`buzz-desktop-latest/latest.json`. Same-version retries succeed only when the
+manifest is identical; downgrades are rejected.
+
+Withholding promotion leaves existing clients on the previous version. If a
+promoted release is bad, ship and promote a higher patch version; changing the
+manifest to an older version does not downgrade clients that already updated.
 
 Mobile publishes only annotated `mobile-vX.Y.Z-rc.N` git tags. Store artifacts
 and rollout records retain the exact tag they used. Mobile does not publish a
