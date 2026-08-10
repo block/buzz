@@ -529,6 +529,12 @@ export function useRichTextEditor({
           autocorrect: "off",
           class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
+          // Resolve typing direction from the first strong character so RTL
+          // input gets native caret and punctuation behavior. Rendered
+          // messages get the same treatment per-block via `unicode-bidi:
+          // plaintext` in globals.css; that property is not used here because
+          // it fights ProseMirror's caret placement.
+          dir: "auto",
           spellcheck: "true",
         },
         // ArrowUp in an empty composer → edit your last message (Slack
