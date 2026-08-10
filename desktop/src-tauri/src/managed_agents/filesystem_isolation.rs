@@ -33,6 +33,9 @@ const RUNS_DIR: &str = "buzz-agent-runs";
 const RECEIPTS_DIR: &str = ".receipts";
 const CONTROL_SOCKET: &str = "/private/tmp/buzz-isolation-control-v1.sock";
 
+mod prepared;
+pub use prepared::*;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FilesystemIsolationAttestation {
     pub version: u8,
@@ -43,6 +46,23 @@ pub struct FilesystemIsolationAttestation {
     pub allowed_read_roots: Vec<PathBuf>,
     pub allowed_write_roots: Vec<PathBuf>,
     pub denied_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedFilesystemIsolation {
+    pub identity_pubkey: String,
+    pub run_id: String,
+    pub run_root: PathBuf,
+    pub attestation: FilesystemIsolationAttestation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum IsolationRunPhase {
+    Prepared,
+    Spawning,
+    Bound,
 }
 
 #[derive(Debug)]
@@ -69,6 +89,7 @@ impl FilesystemIsolationRun {
             return Err("filesystem isolation cannot bind an invalid process id".to_string());
         }
         self.ownership.agent_pid = Some(pid);
+        self.ownership.phase = Some(IsolationRunPhase::Bound);
         write_ownership_receipt(&self.ownership_path, &self.ownership, false)?;
         self.control.bind_pid(pid)?;
         Ok(())
@@ -131,6 +152,23 @@ struct IsolationRunOwnership {
     run_root: PathBuf,
     desktop_pid: u32,
     agent_pid: Option<u32>,
+    /// `None` is a legacy receipt. Legacy unbound receipts remain ambiguous
+    /// and are never reclaimed automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase: Option<IsolationRunPhase>,
+}
+
+#[derive(Debug)]
+struct PreparedIsolationRun {
+    run: FilesystemIsolationRun,
+    profile: FilesystemIsolationProfile,
+    desktop_instance_id: String,
+    acp_command: PathBuf,
+}
+
+fn prepared_isolation_registry() -> &'static Mutex<HashMap<String, PreparedIsolationRun>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, PreparedIsolationRun>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug)]
@@ -155,7 +193,10 @@ impl IsolationControlPlane {
             .lock()
             .map_err(|error| format!("isolation registry lock poisoned: {error}"))?;
         if registry.contains_key(&self.run_id) {
-            return Err(format!("isolation run {} is already registered", self.run_id));
+            return Err(format!(
+                "isolation run {} is already registered",
+                self.run_id
+            ));
         }
         registry.insert(
             self.run_id.clone(),
@@ -207,9 +248,8 @@ fn ensure_control_server() -> Result<(), String> {
             }
             let listener = UnixListener::bind(path)
                 .map_err(|error| format!("failed to bind isolation control socket: {error}"))?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-                format!("failed to protect isolation control socket: {error}")
-            })?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("failed to protect isolation control socket: {error}"))?;
             thread::Builder::new()
                 .name("buzz-isolation-control".into())
                 .spawn(move || {
@@ -250,15 +290,13 @@ fn serve_control_request(mut stream: UnixStream) {
         registry
             .values()
             .find(|run| {
-                process_is_live(run.root_pid)
-                    && process_is_descendant_of(peer_pid, run.root_pid)
+                process_is_live(run.root_pid) && process_is_descendant_of(peer_pid, run.root_pid)
             })
             .map(|run| run.attestation.clone())
     });
     let response = match receipt {
-        Some(receipt) => serde_json::to_vec(&receipt).unwrap_or_else(|_| {
-            b"{\"error\":\"failed to serialize Desktop receipt\"}".to_vec()
-        }),
+        Some(receipt) => serde_json::to_vec(&receipt)
+            .unwrap_or_else(|_| b"{\"error\":\"failed to serialize Desktop receipt\"}".to_vec()),
         None => b"{\"error\":\"peer is not a tracked isolated process\"}".to_vec(),
     };
     let _ = stream.write_all(&response);
@@ -333,113 +371,16 @@ fn process_is_live(pid: u32) -> bool {
 /// The returned `Command` launches the existing ACP harness through the host
 /// boundary. Callers configure stdio and environment on it exactly as they do
 /// for an unisolated harness, then retain the guard for the process lifetime.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn isolated_agent_command(
     profile: &FilesystemIsolationProfile,
     identity_pubkey: &str,
     desktop_instance_id: &str,
     acp_command: &Path,
 ) -> Result<(Command, FilesystemIsolationRun), String> {
-    let FilesystemIsolationProfile::Ephemeral { read_only_roots } = profile;
-    validate_identity(identity_pubkey)?;
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (read_only_roots, desktop_instance_id, acp_command);
-        return Err(
-            "ephemeral filesystem isolation is currently supported only on macOS".to_string(),
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // Reconcile crash residue before every isolated spawn as well as at
-        // startup. A startup warning must never silently degrade the next run.
-        recover_abandoned_isolation_runs()?;
-        let sandbox_exec = Path::new("/usr/bin/sandbox-exec");
-        if !sandbox_exec.is_file() {
-            return Err("macOS filesystem isolation requires /usr/bin/sandbox-exec".to_string());
-        }
-
-        let (base, run_id, root) = create_run_root(identity_pubkey)?;
-        let result = (|| {
-            let home = root.join("home");
-            let temp = root.join("tmp");
-            create_private_dir(&home)?;
-            create_private_dir(&temp)?;
-
-            let denied_roots = denied_roots()?;
-            let mut allowed_read_roots = system_read_roots();
-            allowed_read_roots.extend(validate_read_only_roots(
-                read_only_roots,
-                &protected_data_roots()?,
-            )?);
-            allowed_read_roots.extend(executable_read_roots(acp_command)?);
-            allowed_read_roots.push(root.clone());
-            normalize_paths(&mut allowed_read_roots);
-
-            let allowed_write_roots = vec![root.clone()];
-            let attestation = FilesystemIsolationAttestation {
-                version: 1,
-                enforcement: "macos_seatbelt_process_tree_control_plane_v1",
-                identity_pubkey: identity_pubkey.to_ascii_lowercase(),
-                run_id: run_id.clone(),
-                run_root: root.clone(),
-                allowed_read_roots: allowed_read_roots.clone(),
-                allowed_write_roots: allowed_write_roots.clone(),
-                denied_roots,
-            };
-            let profile_text = seatbelt_profile(&attestation)?;
-            let control = IsolationControlPlane::start(&attestation)?;
-            let receipts = receipts_dir(&base)?;
-            let ownership_path = receipts.join(format!("{run_id}.json"));
-            let ownership = IsolationRunOwnership {
-                version: 1,
-                identity_pubkey: identity_pubkey.to_ascii_lowercase(),
-                desktop_instance_id: desktop_instance_id.to_string(),
-                run_id,
-                run_root: root.clone(),
-                desktop_pid: std::process::id(),
-                agent_pid: None,
-            };
-            write_ownership_receipt(&ownership_path, &ownership, true)?;
-
-            let mut command = Command::new(sandbox_exec);
-            command
-                .arg("-p")
-                .arg(profile_text)
-                .arg(acp_command)
-                .current_dir(&root)
-                .env("HOME", &home)
-                .env("TMPDIR", &temp)
-                .env("XDG_CACHE_HOME", home.join(".cache"))
-                .env("XDG_CONFIG_HOME", home.join(".config"))
-                .env("XDG_DATA_HOME", home.join(".local/share"))
-                .env(ISOLATION_RUN_ROOT_ENV, &root)
-                .env(
-                    ISOLATION_ATTESTATION_ENV,
-                    serde_json::to_string(&attestation).map_err(|error| {
-                        format!("failed to serialize isolation receipt: {error}")
-                    })?,
-                );
-
-            Ok((
-                command,
-                FilesystemIsolationRun {
-                    root: root.clone(),
-                    base: base.clone(),
-                    ownership_path,
-                    ownership,
-                    control,
-                    attestation,
-                },
-            ))
-        })();
-
-        if result.is_err() {
-            let _ = remove_run_root(&base, &root);
-        }
-        result
-    }
+    let mut run = create_isolation_run(profile, identity_pubkey, desktop_instance_id, acp_command)?;
+    let command = command_for_prepared_run(&mut run, acp_command)?;
+    Ok((command, run))
 }
 
 /// Validate an owner-authored profile without creating a run root.
@@ -544,9 +485,10 @@ fn reject_protected_overlap(path: &Path) -> Result<(), String> {
         path.file_name()
             .ok_or_else(|| format!("isolation base has no name: {}", path.display()))?,
     );
-    if protected_data_roots()?.iter().any(|protected| {
-        canonical.starts_with(protected) || protected.starts_with(&canonical)
-    }) {
+    if protected_data_roots()?
+        .iter()
+        .any(|protected| canonical.starts_with(protected) || protected.starts_with(&canonical))
+    {
         return Err(format!(
             "filesystem isolation base overlaps protected Buzz data: {}",
             canonical.display()
@@ -562,9 +504,8 @@ fn receipts_dir(base: &Path) -> Result<PathBuf, String> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(
-                    |error| format!("failed to protect isolation receipts: {error}"),
-                )?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("failed to protect isolation receipts: {error}"))?;
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -576,7 +517,10 @@ fn receipts_dir(base: &Path) -> Result<PathBuf, String> {
         .symlink_metadata()
         .map_err(|error| format!("failed to inspect isolation receipts: {error}"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(format!("refusing unsafe isolation receipts {}", path.display()));
+        return Err(format!(
+            "refusing unsafe isolation receipts {}",
+            path.display()
+        ));
     }
     Ok(path)
 }
@@ -613,7 +557,10 @@ fn write_ownership_receipt(
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     let mut file = options.open(&temp).map_err(|error| {
-        format!("failed to create isolation ownership {}: {error}", temp.display())
+        format!(
+            "failed to create isolation ownership {}: {error}",
+            temp.display()
+        )
     })?;
     #[cfg(unix)]
     {
@@ -767,6 +714,37 @@ pub fn recover_abandoned_isolation_runs() -> Result<Vec<PathBuf>, String> {
     recover_abandoned_isolation_runs_in(&temp.join(RUNS_DIR), process_is_live)
 }
 
+fn ensure_no_existing_isolation_receipt(identity_pubkey: &str) -> Result<(), String> {
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve temporary directory: {error}"))?;
+    let base = temp.join(RUNS_DIR);
+    if !base.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(receipts_dir(&base)?)
+        .map_err(|error| format!("failed to read isolation receipts: {error}"))?
+        .flatten()
+    {
+        let Ok(bytes) = fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_slice::<IsolationRunOwnership>(&bytes) else {
+            continue;
+        };
+        if receipt
+            .identity_pubkey
+            .eq_ignore_ascii_case(identity_pubkey)
+        {
+            return Err(format!(
+                "agent {identity_pubkey} already has a durable filesystem-isolation receipt ({})",
+                receipt.run_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn recover_abandoned_isolation_runs_in(
     base: &Path,
     is_live: impl Fn(u32) -> bool,
@@ -787,7 +765,10 @@ fn recover_abandoned_isolation_runs_in(
         .map_err(|error| format!("failed to read isolation receipts: {error}"))?;
     for entry in entries.flatten() {
         let receipt_path = entry.path();
-        if receipt_path.extension().is_none_or(|extension| extension != "json") {
+        if receipt_path
+            .extension()
+            .is_none_or(|extension| extension != "json")
+        {
             continue;
         }
         let Ok(metadata) = receipt_path.symlink_metadata() else {
@@ -815,18 +796,34 @@ fn recover_abandoned_isolation_runs_in(
             || !receipt.run_root.starts_with(base)
             || receipt_path.file_stem().and_then(|stem| stem.to_str())
                 != Some(receipt.run_id.as_str())
-            || !receipt.run_root.file_name().is_some_and(|name| {
-                name.to_string_lossy().ends_with(&receipt.run_id)
-            })
+            || !receipt
+                .run_root
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(&receipt.run_id))
         {
             continue;
         }
+        let owner_live = is_live(receipt.desktop_pid);
+        if receipt.phase == Some(IsolationRunPhase::Prepared) {
+            if owner_live {
+                continue;
+            }
+            remove_run_root(base, &receipt.run_root)?;
+            fs::remove_file(&receipt_path).map_err(|error| {
+                format!(
+                    "failed to remove recovered prepared isolation receipt {}: {error}",
+                    receipt_path.display()
+                )
+            })?;
+            removed.push(receipt.run_root);
+            continue;
+        }
         let Some(agent_pid) = receipt.agent_pid else {
-            // Desktop may have crashed after spawn but before the exact child
-            // PID was fsynced. Preserve this ambiguous root fail-closed.
+            // `spawning` and legacy-unbound receipts may represent a Desktop
+            // crash after spawn but before PID fsync. Preserve them as
+            // ambiguous; only an explicit prepared phase is safe to reclaim.
             continue;
         };
-        let owner_live = is_live(receipt.desktop_pid);
         let agent_live = is_live(agent_pid);
         if owner_live || agent_live {
             continue;
@@ -884,227 +881,5 @@ fn remove_run_root(base: &Path, root: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn broad_and_buzz_overlapping_read_roots_fail_closed() {
-        let protected = protected_data_roots().unwrap();
-        assert!(validate_read_only_roots(&[PathBuf::from("/")], &protected).is_err());
-        if let Some(home) = dirs::home_dir() {
-            assert!(validate_read_only_roots(std::slice::from_ref(&home), &protected).is_err());
-            let buzz = home.join(".buzz");
-            if buzz.is_dir() {
-                assert!(validate_read_only_roots(&[buzz], &protected).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn invalid_identity_is_rejected_before_creating_a_run_root() {
-        let profile = FilesystemIsolationProfile::Ephemeral {
-            read_only_roots: Vec::new(),
-        };
-        let error =
-            isolated_agent_command(&profile, "not-a-pubkey", "test", Path::new("/bin/sh"))
-                .unwrap_err();
-        assert!(error.contains("exact 64-character"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_receipt_never_allows_home_or_shared_buzz_root() {
-        let profile = FilesystemIsolationProfile::Ephemeral {
-            read_only_roots: Vec::new(),
-        };
-        let (_command, run) =
-            isolated_agent_command(&profile, &"ab".repeat(32), "test", Path::new("/bin/sh"))
-                .unwrap();
-        let home = dirs::home_dir().unwrap();
-        assert!(!run.attestation.allowed_read_roots.contains(&home));
-        assert!(!run
-            .attestation
-            .allowed_read_roots
-            .iter()
-            .any(|root| root == &home.join(".buzz")));
-        assert!(run.attestation.denied_roots.contains(&PathBuf::from("/Users")));
-        assert!(run
-            .root()
-            .starts_with(std::env::temp_dir().canonicalize().unwrap()));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_denies_sibling_markers_and_nested_children_across_fresh_runs() {
-        let operator = tempfile::tempdir().unwrap();
-        let outside = operator.path().join("outside.txt");
-        let outside_write = operator.path().join("outside-write.txt");
-        fs::write(&outside, "OUTSIDE-TOKEN").unwrap();
-        assert!(outside.metadata().unwrap().is_file());
-
-        let profile = FilesystemIsolationProfile::Ephemeral {
-            read_only_roots: Vec::new(),
-        };
-        let mut previous_root = None;
-        for _ in 0..2 {
-            let (mut command, mut run) = isolated_agent_command(
-                &profile,
-                &"ab".repeat(32),
-                "test",
-                Path::new("/bin/sh"),
-            )
-            .unwrap();
-            let run_root = run.root().to_path_buf();
-            if let Some(previous) = &previous_root {
-                assert_ne!(previous, &run_root);
-            }
-            let inside = run_root.join("inside.txt");
-            fs::write(&inside, "INSIDE-TOKEN").unwrap();
-
-            command
-                .arg("-c")
-                .arg(
-                    r#"
-cat "$1" > "$3/inside.out"
-inside_status=$?
-cat "$2" > "$3/outside.out" 2>&1
-outside_status=$?
-printf x > "$3/inside-write.txt"
-inside_write_status=$?
-printf x > "$4" 2>/dev/null
-outside_write_status=$?
-/bin/sh -c 'cat "$1"' probe "$2" > "$3/nested.out" 2>&1
-nested_status=$?
-printf 'EXPLAIN\n' | /usr/bin/nc -U /private/tmp/buzz-isolation-control-v1.sock > "$3/receipt.json" 2>&1
-control_status=$?
-printf '%s %s %s %s %s %s' "$inside_status" "$outside_status" "$inside_write_status" "$outside_write_status" "$nested_status" "$control_status"
-"#,
-                )
-                .arg("probe")
-                .arg(&inside)
-                .arg(&outside)
-                .arg(&run_root)
-                .arg(&outside_write)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let child = command.spawn().unwrap();
-            run.bind_pid(child.id()).unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "status={:?} stdout={:?} stderr={:?}",
-                output.status,
-                output.stdout,
-                output.stderr
-            );
-            assert_eq!(String::from_utf8_lossy(&output.stdout), "0 1 0 1 1 0");
-            assert_eq!(
-                fs::read_to_string(run_root.join("inside.out")).unwrap(),
-                "INSIDE-TOKEN"
-            );
-            assert!(!fs::read_to_string(run_root.join("outside.out"))
-                .unwrap()
-                .contains("OUTSIDE-TOKEN"));
-            assert!(!fs::read_to_string(run_root.join("nested.out"))
-                .unwrap()
-                .contains("OUTSIDE-TOKEN"));
-            assert!(!outside_write.exists());
-            let receipt: serde_json::Value =
-                serde_json::from_slice(&fs::read(run_root.join("receipt.json")).unwrap()).unwrap();
-            assert_eq!(receipt["identity_pubkey"], "ab".repeat(32));
-            assert_eq!(receipt["run_root"], run_root.to_string_lossy().as_ref());
-
-            drop(run);
-            assert!(!run_root.exists());
-            previous_root = Some(run_root);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn bind_failure_terminates_and_reaps_spawned_harness_before_cleanup() {
-        use std::os::unix::process::CommandExt;
-
-        let profile = FilesystemIsolationProfile::Ephemeral {
-            read_only_roots: Vec::new(),
-        };
-        let (mut command, mut run) = isolated_agent_command(
-            &profile,
-            &"ab".repeat(32),
-            "test",
-            Path::new("/bin/sh"),
-        )
-        .unwrap();
-        let root = run.root().to_path_buf();
-        command
-            .arg("-c")
-            .arg("while :; do :; done")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-        let pid = child.id();
-
-        // Pre-register the same run to force the post-fsync control-registry
-        // collision path inside bind_pid.
-        run.control.bind_pid(pid).unwrap();
-        let error = bind_isolation_process(&mut run, &mut child).unwrap_err();
-        assert!(error.contains("failed to bind filesystem isolation"));
-        assert!(!process_is_live(pid), "bind failure left child {pid} live");
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "bind failure did not reap child {pid}"
-        );
-
-        drop(run);
-        assert!(!root.exists(), "normal run cleanup left residue");
-    }
-
-    #[test]
-    fn startup_recovery_preserves_spawn_window_and_live_runs() {
-        let operator = tempfile::tempdir().unwrap();
-        let base = operator.path().join(RUNS_DIR);
-        create_private_dir(&base).unwrap();
-        let receipts = receipts_dir(&base).unwrap();
-
-        let make_run = |run_id: &str, desktop_pid: u32, agent_pid: Option<u32>| {
-            let root = base.join(format!("abababababababab-{run_id}"));
-            create_private_dir(&root).unwrap();
-            fs::write(root.join("residue"), "test").unwrap();
-            let receipt = IsolationRunOwnership {
-                version: 1,
-                identity_pubkey: "ab".repeat(32),
-                desktop_instance_id: "test".into(),
-                run_id: run_id.into(),
-                run_root: root.clone(),
-                desktop_pid,
-                agent_pid,
-            };
-            write_ownership_receipt(
-                &receipts.join(format!("{run_id}.json")),
-                &receipt,
-                true,
-            )
-            .unwrap();
-            root
-        };
-
-        let abandoned = make_run(&"a".repeat(32), 10, Some(11));
-        let unbound_spawn_window = make_run(&"b".repeat(32), 10, None);
-        let live_desktop = make_run(&"c".repeat(32), 20, Some(21));
-        let live_agent = make_run(&"d".repeat(32), 10, Some(30));
-        let removed = recover_abandoned_isolation_runs_in(&base, |pid| pid == 20 || pid == 30)
-            .unwrap();
-
-        assert_eq!(removed, vec![abandoned.clone()]);
-        assert!(!abandoned.exists());
-        assert!(unbound_spawn_window.exists());
-        assert!(
-            receipts.join(format!("{}.json", "b".repeat(32))).exists(),
-            "ambiguous crash-between-spawn-and-bind receipt was removed"
-        );
-        assert!(live_desktop.exists());
-        assert!(live_agent.exists());
-    }
-}
+#[path = "filesystem_isolation/tests.rs"]
+mod tests;

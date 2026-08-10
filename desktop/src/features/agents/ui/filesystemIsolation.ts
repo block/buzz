@@ -1,14 +1,28 @@
 import * as React from "react";
-import type { FilesystemIsolationProfile } from "@/shared/api/types";
-import type { ManagedAgent } from "@/shared/api/types";
+import {
+  abortManagedAgentIsolation,
+  getPreparedManagedAgentIsolation,
+  prepareManagedAgentIsolation,
+} from "@/shared/api/tauriManagedAgents";
+import type {
+  FilesystemIsolationProfile,
+  ManagedAgent,
+  PreparedFilesystemIsolation,
+} from "@/shared/api/types";
 import { isMacPlatform } from "@/shared/lib/platform";
 
 export type FilesystemIsolationFieldProps = {
   available: boolean;
   enabled: boolean;
   readOnlyRoots: string;
+  prepared: PreparedFilesystemIsolation | null;
+  prepareError: string | null;
+  preparePending: boolean;
+  canPrepare: boolean;
   onEnabledChange: (value: boolean) => void;
   onReadOnlyRootsChange: (value: string) => void;
+  onPrepare: () => Promise<void>;
+  onAbort: () => Promise<void>;
 };
 
 export function parseIsolationReadOnlyRoots(value: string): string[] {
@@ -73,6 +87,10 @@ export function useFilesystemIsolationDraft(
   const [readOnlyRoots, setReadOnlyRoots] = React.useState(
     agent.filesystemIsolation?.readOnlyRoots.join("\n") ?? "",
   );
+  const [prepared, setPrepared] =
+    React.useState<PreparedFilesystemIsolation | null>(null);
+  const [prepareError, setPrepareError] = React.useState<string | null>(null);
+  const [preparePending, setPreparePending] = React.useState(false);
 
   // Polling refreshes must not wipe an in-progress edit.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset only on open or identity switch
@@ -80,9 +98,49 @@ export function useFilesystemIsolationDraft(
     if (!open) return;
     setEnabled(agent.filesystemIsolation?.mode === "ephemeral");
     setReadOnlyRoots(agent.filesystemIsolation?.readOnlyRoots.join("\n") ?? "");
+    setPrepareError(null);
+    void getPreparedManagedAgentIsolation(agent.pubkey)
+      .then(setPrepared)
+      .catch((error) =>
+        setPrepareError(error instanceof Error ? error.message : String(error)),
+      );
   }, [open, agent.pubkey]);
 
   const parsedRoots = parseIsolationReadOnlyRoots(readOnlyRoots);
+
+  const update = resolveFilesystemIsolationUpdate(
+    enabled,
+    readOnlyRoots,
+    agent.filesystemIsolation,
+  );
+  const canPrepare =
+    enabled && agent.filesystemIsolation !== null && update === undefined;
+
+  async function prepare() {
+    setPreparePending(true);
+    setPrepareError(null);
+    try {
+      setPrepared(await prepareManagedAgentIsolation(agent.pubkey));
+    } catch (error) {
+      setPrepareError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPreparePending(false);
+    }
+  }
+
+  async function abort() {
+    if (!prepared) return;
+    setPreparePending(true);
+    setPrepareError(null);
+    try {
+      await abortManagedAgentIsolation(agent.pubkey, prepared.runId);
+      setPrepared(null);
+    } catch (error) {
+      setPrepareError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPreparePending(false);
+    }
+  }
 
   return {
     fieldProps: {
@@ -92,14 +150,16 @@ export function useFilesystemIsolationDraft(
       ),
       enabled,
       readOnlyRoots,
+      prepared,
+      prepareError,
+      preparePending,
+      canPrepare,
       onEnabledChange: setEnabled,
       onReadOnlyRootsChange: setReadOnlyRoots,
+      onPrepare: prepare,
+      onAbort: abort,
     },
     valid: !enabled || isolationReadOnlyRootsAreAbsolute(parsedRoots),
-    update: resolveFilesystemIsolationUpdate(
-      enabled,
-      readOnlyRoots,
-      agent.filesystemIsolation,
-    ),
+    update,
   };
 }

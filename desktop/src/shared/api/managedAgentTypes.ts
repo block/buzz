@@ -30,5 +30,23 @@ export type FilesystemIsolationProfile = {
   readOnlyRoots: string[];
 };
 
+export type FilesystemIsolationAttestation = {
+  version: number;
+  enforcement: string;
+  identity_pubkey: string;
+  run_id: string;
+  run_root: string;
+  allowed_read_roots: string[];
+  allowed_write_roots: string[];
+  denied_roots: string[];
+};
+
+export type PreparedFilesystemIsolation = {
+  identityPubkey: string;
+  runId: string;
+  runRoot: string;
+  attestation: FilesystemIsolationAttestation;
+};
+
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";

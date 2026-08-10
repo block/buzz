@@ -5,6 +5,7 @@ import type {
 } from "./managedAgentTypes";
 export type {
   FilesystemIsolationProfile,
+  PreparedFilesystemIsolation,
   ManagedAgentBackend,
   ManagedAgentRuntimeLifecycle,
   ManagedAgentRuntimeStatus,

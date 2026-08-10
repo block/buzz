@@ -252,6 +252,55 @@ export function EditAgentAdvancedFields({
               `/`, your home directory, and protected Buzz data are always
               rejected. Restart the agent after saving to apply this boundary.
             </p>
+            <div className="space-y-2 rounded-md border border-border/70 p-3">
+              <p className="text-xs text-muted-foreground">
+                Prepare creates the fresh root without starting the agent. Add
+                and verify preflight markers there, then use Start to consume
+                this exact root once.
+              </p>
+              {filesystemIsolation.prepared ? (
+                <div className="space-y-1">
+                  <p className="break-all font-mono text-xs">
+                    {filesystemIsolation.prepared.runRoot}
+                  </p>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    Run {filesystemIsolation.prepared.runId}
+                  </p>
+                </div>
+              ) : null}
+              <button
+                className="rounded-md border border-input px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={
+                  disabled ||
+                  filesystemIsolation.preparePending ||
+                  (!filesystemIsolation.prepared &&
+                    !filesystemIsolation.canPrepare)
+                }
+                onClick={() =>
+                  void (filesystemIsolation.prepared
+                    ? filesystemIsolation.onAbort()
+                    : filesystemIsolation.onPrepare())
+                }
+                type="button"
+              >
+                {filesystemIsolation.preparePending
+                  ? "Working…"
+                  : filesystemIsolation.prepared
+                    ? "Abort prepared run"
+                    : "Prepare isolated run"}
+              </button>
+              {!filesystemIsolation.canPrepare &&
+              !filesystemIsolation.prepared ? (
+                <p className="text-xs text-muted-foreground">
+                  Save the enabled isolation profile before preparing a run.
+                </p>
+              ) : null}
+              {filesystemIsolation.prepareError ? (
+                <p className="text-xs text-destructive">
+                  {filesystemIsolation.prepareError}
+                </p>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </div>

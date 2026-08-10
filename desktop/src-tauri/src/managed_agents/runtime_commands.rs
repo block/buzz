@@ -3,13 +3,14 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::{
-    agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
-    load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    abort_prepared_isolated_agent_run, agent_readiness, append_log_marker, current_instance_id,
+    find_managed_agent_mut, get_prepared_isolated_agent_run, load_global_agent_config,
+    load_managed_agents, load_personas, managed_agent_runtime_log_path, missing_command_message,
+    prepare_isolated_agent_run, process_is_running, record_agent_command, resolve_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -225,6 +226,77 @@ pub(crate) fn start_managed_agent_runtime_pair_lazy(
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     start_pair(pubkey, relay_url, true, None, app)
+}
+
+#[tauri::command]
+pub fn prepare_managed_agent_isolation(
+    pubkey: String,
+    app: AppHandle,
+) -> Result<super::PreparedFilesystemIsolation, String> {
+    let state = app.state::<AppState>();
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if state.shutdown_started.load(Ordering::Acquire) {
+        return Err("desktop shutdown has started".into());
+    }
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let records = load_managed_agents(&app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    if record.backend != BackendKind::Local {
+        return Err("filesystem isolation requires a local agent".into());
+    }
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if runtimes.iter_mut().any(|(key, runtime)| {
+        key.pubkey.eq_ignore_ascii_case(&record.pubkey)
+            && runtime.child.try_wait().ok().flatten().is_none()
+    }) {
+        return Err("stop every runtime for this agent before preparing isolation".into());
+    }
+    drop(runtimes);
+    let profile = record
+        .filesystem_isolation
+        .as_ref()
+        .ok_or_else(|| "filesystem isolation is not enabled for this agent".to_string())?;
+    let acp_command = resolve_command(&record.acp_command)
+        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
+    prepare_isolated_agent_run(
+        profile,
+        &record.pubkey,
+        &current_instance_id(&app),
+        &acp_command,
+    )
+}
+
+#[tauri::command]
+pub fn abort_managed_agent_isolation(
+    pubkey: String,
+    run_id: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    abort_prepared_isolated_agent_run(&pubkey, &run_id)
+}
+
+#[tauri::command]
+pub fn get_prepared_managed_agent_isolation(
+    pubkey: String,
+) -> Result<Option<super::PreparedFilesystemIsolation>, String> {
+    get_prepared_isolated_agent_run(&pubkey)
 }
 
 #[tauri::command]

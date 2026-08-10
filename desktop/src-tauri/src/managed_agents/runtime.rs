@@ -459,21 +459,6 @@ pub fn spawn_agent_child(
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
-    let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
-    append_log_marker(
-        &log_path,
-        &format!(
-            "\n=== starting {} ({}) at {} ===",
-            record.name,
-            record.pubkey,
-            now_iso()
-        ),
-    )?;
-
-    let stdout = open_log_file(&log_path)?;
-    let stderr = stdout
-        .try_clone()
-        .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
@@ -523,13 +508,12 @@ pub fn spawn_agent_child(
     // runtime, MCP/tool servers, shells, and background descendants.
     let (mut command, isolation_run) = match &record.filesystem_isolation {
         Some(profile) => {
-            let (command, run) =
-                super::isolated_agent_command(
-                    profile,
-                    &record.pubkey,
-                    &current_instance_id(app),
-                    &resolved_acp_command,
-                )?;
+            let (command, run) = super::consume_prepared_isolated_agent_command(
+                profile,
+                &record.pubkey,
+                &current_instance_id(app),
+                &resolved_acp_command,
+            )?;
             (command, Some(run))
         }
         None => {
@@ -540,6 +524,22 @@ pub fn spawn_agent_child(
             (command, None)
         }
     };
+    // Consume the prepared root before the first spawn-side mutation. A start
+    // without an exact lease must not even append a log marker.
+    let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
+    append_log_marker(
+        &log_path,
+        &format!(
+            "\n=== starting {} ({}) at {} ===",
+            record.name,
+            record.pubkey,
+            now_iso()
+        ),
+    )?;
+    let stdout = open_log_file(&log_path)?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("failed to clone log handle: {error}"))?;
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
