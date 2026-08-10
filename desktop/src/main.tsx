@@ -18,6 +18,7 @@ import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
+import { isLinuxPlatform } from "@/shared/lib/platform";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -118,9 +119,16 @@ async function installE2eBridgeIfConfigured() {
   maybeInstallE2eTauriMocks();
 }
 
+function tagPlatformClass() {
+  if (isLinuxPlatform()) {
+    document.documentElement.classList.add("platform-linux");
+  }
+}
+
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
   configureDevE2eBridgeFromUrl();
+  tagPlatformClass();
   recoverLocalStorageQuotaOnStartup();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();

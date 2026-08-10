@@ -117,3 +117,9 @@
 ::view-transition-new(root) {
   animation: none;
 }
+
+/* Linux WebKitGTK has no GPU-accelerated backdrop-filter — disable it. */
+.platform-linux * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
