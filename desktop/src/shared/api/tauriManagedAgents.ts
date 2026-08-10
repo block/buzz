@@ -15,6 +15,16 @@ export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
   return fromRawManagedAgent(response);
 }
 
+export async function redeployManagedAgent(
+  pubkey: string,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "redeploy_managed_agent",
+    { pubkey },
+  );
+  return fromRawManagedAgent(response);
+}
+
 export async function stopManagedAgent(pubkey: string): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("stop_managed_agent", {
     pubkey,

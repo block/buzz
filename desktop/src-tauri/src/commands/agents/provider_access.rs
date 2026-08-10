@@ -1,12 +1,12 @@
 //! Upgrade reconciliation for provider-backed managed-agent access.
 
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        find_managed_agent_mut, load_managed_agents, save_managed_agents, BackendKind,
-        ManagedAgentRecord,
+        build_managed_agent_summary, find_managed_agent_mut, load_managed_agents, load_personas,
+        save_managed_agents, BackendKind, ManagedAgentRecord, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -193,4 +193,89 @@ mod tests {
             collect_targets_with(records, false, |_| { Ok(serde_json::Value::Null) }).is_empty()
         );
     }
+}
+
+pub(super) fn redeploy_provider_target(
+    pubkey: &str,
+    record: &ManagedAgentRecord,
+) -> Result<(String, serde_json::Value, Option<String>), String> {
+    match (&record.backend, record.backend_agent_id.as_deref()) {
+        (BackendKind::Provider { id, config }, Some(_)) => Ok((
+            id.clone(),
+            config.clone(),
+            record.provider_binary_path.clone(),
+        )),
+        (BackendKind::Provider { .. }, None) => Err(format!(
+            "agent {pubkey} has not been deployed yet; deploy it before redeploying"
+        )),
+        _ => Err(format!(
+            "agent {pubkey} is not provider-backed and cannot be redeployed"
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn redeploy_managed_agent(
+    pubkey: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ManagedAgentSummary, String> {
+    let (record, provider_id, config, cached_binary_path) = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        let (provider_id, config, cached_binary_path) = redeploy_provider_target(&pubkey, record)?;
+        (record.clone(), provider_id, config, cached_binary_path)
+    };
+
+    let agent_json = match super::build_deploy_payload(&app, &state, &record) {
+        Ok(agent_json) => agent_json,
+        Err(error) => {
+            persist_failure(&app, &state, &pubkey, &error)?;
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = super::deploy_to_provider(
+        &app,
+        &state,
+        &pubkey,
+        &provider_id,
+        &config,
+        agent_json,
+        cached_binary_path.as_deref(),
+    )
+    .await
+    {
+        persist_failure(&app, &state, &pubkey, &error)?;
+        return Err(error);
+    }
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let records = load_managed_agents(&app)?;
+    let runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    let personas = load_personas(&app).unwrap_or_default();
+    build_managed_agent_summary(
+        &app,
+        record,
+        &runtimes,
+        &personas,
+        &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+    )
 }

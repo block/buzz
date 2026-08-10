@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import {
   isManagedAgentActive,
+  redeployManagedAgentWithRules,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -14,12 +15,14 @@ export function useAgentLifecycleActions({
   channels,
   managedAgent,
   relayAgents,
+  redeployManagedAgent,
   startManagedAgent,
   stopManagedAgent,
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
+  redeployManagedAgent: (pubkey: string) => Promise<unknown>;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
@@ -81,5 +84,25 @@ export function useAgentLifecycleActions({
     }
   }, [managedAgent, startManagedAgent, stopManagedAgent]);
 
-  return { handleAgentPrimaryAction, handleAgentRestart };
+  const handleAgentRedeploy = React.useCallback(async () => {
+    if (!managedAgent) return;
+
+    try {
+      await redeployManagedAgentWithRules({
+        agent: managedAgent,
+        redeployManagedAgent,
+      });
+      toast.success(`Redeployed ${managedAgent.name}.`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Agent redeploy failed.",
+      );
+    }
+  }, [managedAgent, redeployManagedAgent]);
+
+  return {
+    handleAgentPrimaryAction,
+    handleAgentRedeploy,
+    handleAgentRestart,
+  };
 }

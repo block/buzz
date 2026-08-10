@@ -1353,7 +1353,7 @@ pub async fn delete_managed_agent(
 // No backend Tauri command needed. Presence IS the status.
 #[path = "agents_deploy.rs"]
 mod deploy;
-pub(super) mod provider_access;
+pub(crate) mod provider_access;
 use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};

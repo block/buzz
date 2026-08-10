@@ -14,6 +14,7 @@ type DeleteManagedAgentInput = {
 
 type StartManagedAgent = (pubkey: string) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
+type RedeployManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
 
 type ManagedAgentChannelContext = {
@@ -45,6 +46,18 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   }
 
   return "Start agent";
+}
+
+export type ManagedAgentSecondaryAction = "restart" | "redeploy";
+
+export function getManagedAgentSecondaryAction(
+  agent: ManagedAgent,
+): ManagedAgentSecondaryAction | null {
+  if (agent.backend.type === "provider") {
+    return agent.backendAgentId ? "redeploy" : null;
+  }
+
+  return isManagedAgentActive(agent) ? "restart" : null;
 }
 
 export function resolveManagedAgentChannelId(
@@ -86,6 +99,20 @@ export async function startManagedAgentWithRules({
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
   await startManagedAgent(agent.pubkey);
+}
+
+export async function redeployManagedAgentWithRules({
+  agent,
+  redeployManagedAgent,
+}: {
+  agent: ManagedAgent;
+  redeployManagedAgent: RedeployManagedAgent;
+}) {
+  if (getManagedAgentSecondaryAction(agent) !== "redeploy") {
+    throw new Error("Agent is not deployed on a provider.");
+  }
+
+  await redeployManagedAgent(agent.pubkey);
 }
 
 export async function respawnManagedAgentWithRules({

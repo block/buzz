@@ -638,6 +638,30 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
 }
 
 #[test]
+fn redeploy_guard_requires_provider_backend_and_existing_deployment() {
+    use crate::managed_agents::BackendKind;
+
+    let mut record = bare_agent_record(None, None, None);
+    let error = provider_access::redeploy_provider_target("agent", &record).unwrap_err();
+    assert!(error.contains("not provider-backed"));
+
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({"region": "test"}),
+    };
+    let error = provider_access::redeploy_provider_target("agent", &record).unwrap_err();
+    assert!(error.contains("has not been deployed yet"));
+
+    record.backend_agent_id = Some("existing-provider-agent".to_string());
+    let (provider_id, config, cached_binary_path) =
+        provider_access::redeploy_provider_target("agent", &record)
+            .expect("deployed provider target");
+    assert_eq!(provider_id, "provider");
+    assert_eq!(config["region"], "test");
+    assert_eq!(cached_binary_path, None);
+}
+
+#[test]
 fn owner_only_access_deploy_payload_clamps_stale_access() {
     use crate::managed_agents::{BackendKind, RespondTo};
 

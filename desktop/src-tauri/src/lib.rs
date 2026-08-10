@@ -770,6 +770,7 @@ pub fn run() {
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
+            commands::agents::provider_access::redeploy_managed_agent,
             stop_managed_agent,
             set_agent_managed_profiles,
             set_managed_agent_start_on_app_launch,

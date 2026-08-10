@@ -68,6 +68,11 @@ export function RunOnSummarySection({
         runs can&apos;t be changed afterwards — create a new agent to run
         somewhere else.
       </p>
+      {summary.location === "local" ? null : (
+        <p className="text-xs text-muted-foreground">
+          Saved changes don&apos;t reach a deployed agent until you redeploy it.
+        </p>
+      )}
     </div>
   );
 }

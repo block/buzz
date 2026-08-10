@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentSecondaryAction,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -79,6 +80,36 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("deployed provider agents expose redeploy as their secondary action", () => {
+  assert.equal(
+    getManagedAgentSecondaryAction(
+      agent({
+        backend: { type: "provider", id: "provider", config: {} },
+        backendAgentId: "remote-agent",
+        status: "deployed",
+      }),
+    ),
+    "redeploy",
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(
+      agent({
+        backend: { type: "provider", id: "provider", config: {} },
+        status: "not_deployed",
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(agent({ status: "running" })),
+    "restart",
+  );
+  assert.equal(
+    getManagedAgentSecondaryAction(agent({ status: "stopped" })),
+    null,
+  );
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

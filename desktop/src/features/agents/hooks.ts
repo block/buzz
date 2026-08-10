@@ -188,7 +188,7 @@ function isCachedDmChannel(
   );
 }
 
-function invalidateManagedAgentQueriesInBackground(
+export function invalidateManagedAgentQueriesInBackground(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   refreshAgentQueriesInBackground(() =>
