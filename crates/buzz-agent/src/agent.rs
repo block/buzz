@@ -669,6 +669,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
+                    reasoning: response.reasoning,
                     reasoning_details: response.reasoning_details,
                 });
                 if max_tokens_recoveries >= self.cfg.max_token_recoveries {
@@ -699,6 +700,7 @@ impl RunCtx<'_> {
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
+                    reasoning: response.reasoning.clone(),
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
@@ -752,6 +754,7 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
                 tool_calls: calls.clone(),
+                reasoning: response.reasoning,
                 reasoning_details: response.reasoning_details,
             });
 
@@ -1220,6 +1223,7 @@ pub(crate) fn push_hook_outputs_as_tool_results(
                 // preserve.
                 provider_extra: Default::default(),
             }],
+            reasoning: String::new(),
             reasoning_details: None,
         });
         history.push(HistoryItem::ToolResult(ToolResult {
@@ -1315,6 +1319,7 @@ mod tests {
             history.push(HistoryItem::Assistant {
                 text: format!("a{i} {}", "y".repeat(1000)),
                 tool_calls: vec![],
+                reasoning: String::new(),
                 reasoning_details: None,
             });
         }
@@ -1446,12 +1451,14 @@ mod tests {
             HistoryItem::Assistant {
                 text: "first answer".into(),
                 tool_calls: vec![],
+                reasoning: String::new(),
                 reasoning_details: Some(big_reasoning),
             },
             HistoryItem::User("second question".into()),
             HistoryItem::Assistant {
                 text: "second answer".into(),
                 tool_calls: vec![],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
         ];
@@ -1492,6 +1499,7 @@ mod tests {
                     arguments: json!({ "source": "spec.png" }),
                     provider_extra: Default::default(),
                 }],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
             HistoryItem::ToolResult(ToolResult {
@@ -1529,6 +1537,7 @@ mod tests {
             HistoryItem::Assistant {
                 text: "hello".into(),
                 tool_calls: vec![],
+                reasoning: String::new(),
                 reasoning_details: None,
             },
         ];
