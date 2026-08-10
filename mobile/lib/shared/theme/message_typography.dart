@@ -88,8 +88,14 @@ const contentListBodyTextStyle = TextStyle(
 /// Timestamps in compact content lists.
 const contentListTimestampTextStyle = messageMetadataTextStyle;
 
-/// Filter chip labels use the compact 15sp type ramp.
-const filterChipTextStyle = messageMetadataTextStyle;
+/// Filter chip labels use a tighter 15sp Inter treatment.
+const filterChipTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 15,
+  fontWeight: FontWeight.w400,
+  height: 1,
+  letterSpacing: 0,
+);
 
 /// Search fields use the primary 15sp body treatment.
 const searchInputTextStyle = messageBodyTextStyle;

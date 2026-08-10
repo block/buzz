@@ -3,9 +3,12 @@ import test from "node:test";
 
 import {
   parseSelfProfileCache,
+  MAX_SELF_PROFILE_CACHES,
+  MAX_SELF_PROFILE_CACHES_PER_RELAY,
   resolveAvatarDataUrl,
   shouldFetchAvatar,
   storageKey,
+  writeSelfProfileCache,
 } from "./selfProfileStorage.ts";
 
 test("storageKey: includes pubkey in result", () => {
@@ -46,6 +49,75 @@ test("storageKey: different pubkeys produce different keys", () => {
   const a = storageKey("https://relay.example.com", "pubkey-a");
   const b = storageKey("https://relay.example.com", "pubkey-b");
   assert.notEqual(a, b);
+});
+
+function installStorage(onGetItem = () => {}) {
+  const values = new Map();
+  globalThis.window = {
+    dispatchEvent: () => true,
+    localStorage: {
+      get length() {
+        return values.size;
+      },
+      getItem: (key) => {
+        onGetItem(key);
+        return values.get(key) ?? null;
+      },
+      key: (index) => [...values.keys()][index] ?? null,
+      removeItem: (key) => values.delete(key),
+      setItem: (key, value) => values.set(key, String(value)),
+    },
+  };
+  globalThis.CustomEvent ??= class CustomEvent {};
+  return values;
+}
+
+test("writeSelfProfileCache caps each relay and the global cache by updatedAt", () => {
+  const values = installStorage();
+  const relayA = "wss://relay-a.example";
+  for (let index = 0; index < MAX_SELF_PROFILE_CACHES_PER_RELAY + 1; index++) {
+    assert.equal(
+      writeSelfProfileCache(
+        relayA,
+        `pubkey-${index}`,
+        makeCache({ updatedAt: index }),
+      ),
+      true,
+    );
+  }
+  assert.equal(values.has(storageKey(relayA, "pubkey-0")), false);
+  assert.equal(values.has(storageKey(relayA, "pubkey-8")), true);
+
+  for (let index = 0; index < MAX_SELF_PROFILE_CACHES + 1; index++) {
+    writeSelfProfileCache(
+      `wss://relay-${index}.example`,
+      `global-${index}`,
+      makeCache({ updatedAt: index + 100 }),
+    );
+  }
+  const profileKeys = [...values.keys()].filter((key) =>
+    key.startsWith("buzz-self-profile.v1:"),
+  );
+  assert.equal(profileKeys.length, MAX_SELF_PROFILE_CACHES);
+  assert.equal(values.has(storageKey(relayA, "pubkey-1")), false);
+});
+
+test("writeSelfProfileCache does not read existing payloads below both caps", () => {
+  const readKeys = [];
+  const values = installStorage((key) => readKeys.push(key));
+  const relay = "wss://relay.example";
+  const existingKey = storageKey(relay, "existing");
+  const writtenKey = storageKey(relay, "written");
+  values.set(existingKey, JSON.stringify(makeCache({ updatedAt: 1 })));
+
+  assert.equal(
+    writeSelfProfileCache(relay, "written", makeCache({ updatedAt: 2 })),
+    true,
+  );
+
+  assert.deepEqual(readKeys, [writtenKey]);
+  assert.equal(values.has(existingKey), true);
+  assert.equal(values.has(writtenKey), true);
 });
 
 test("parseSelfProfileCache: valid v1 payload round-trips", () => {

@@ -181,6 +181,36 @@ function getAuthorAvatarUrl(input: {
   return profiles?.[authorPubkey.toLowerCase()]?.avatarUrl ?? null;
 }
 
+export function hasLinkPreviewSuppression(
+  tags: string[][] | undefined,
+): boolean {
+  return (
+    tags?.some(
+      (tag) =>
+        tag[0] === "link-preview" && tag[1] === "none" && tag.length === 2,
+    ) ?? false
+  );
+}
+
+function isAuthorizedMessageEdit(
+  edit: RelayEvent,
+  target: RelayEvent,
+  profiles: UserProfileLookup | undefined,
+  relaySelfPubkey?: string | null,
+): boolean {
+  const author = normalizePubkey(
+    resolveEventAuthorPubkey({
+      event: target,
+      preferActorTag: true,
+      relaySelfPubkey,
+      requireChannelTagForPTags: true,
+    }),
+  );
+  const signer = normalizePubkey(edit.pubkey);
+  if (signer === author) return true;
+  return normalizePubkey(profiles?.[author]?.ownerPubkey ?? "") === signer;
+}
+
 export function formatTimelineMessages(
   events: RelayEvent[],
   channel: Channel | null,
@@ -219,8 +249,14 @@ export function formatTimelineMessages(
     }
   }
 
-  // Build a map of latest edit per original message: targetId → { content, tags, createdAt }.
-  // When multiple edits exist for the same message, the most recent one wins.
+  const timelineEventsById = new Map(
+    events.filter(isTimelineContentEvent).map((event) => [event.id, event]),
+  );
+  const previewSuppressedTargetIds = new Set<string>();
+
+  // Build a map of latest authorized edit per original message. Preview
+  // suppression is monotonic: any authorized edit carrying the marker wins
+  // forever, independent of which edit supplies the latest body.
   // The edit's own tags are kept so the renderer can overlay imeta tags
   // (attachments) from the edit onto the original event — non-imeta tags on
   // the original (`h`, `p` mentions, etc.) stay untouched.
@@ -239,6 +275,16 @@ export function formatTimelineMessages(
     const targetId = getReactionTargetId(event.tags);
     if (!targetId || deletedEventIds.has(targetId)) {
       continue;
+    }
+    const target = timelineEventsById.get(targetId);
+    if (
+      !target ||
+      !isAuthorizedMessageEdit(event, target, profiles, relaySelfPubkey)
+    ) {
+      continue;
+    }
+    if (hasLinkPreviewSuppression(event.tags)) {
+      previewSuppressedTargetIds.add(targetId);
     }
 
     const existing = editsByTargetId.get(targetId);
@@ -469,7 +515,18 @@ export function formatTimelineMessages(
       // imeta tags. All non-imeta tags on the original are preserved.
       // Logic lives in `applyEditTagOverlay.mjs` so prod and tests share
       // a single source.
-      tags: applyEditTagOverlay(event.tags, edit?.tags),
+      tags: (() => {
+        const effectiveTags = applyEditTagOverlay(event.tags, edit?.tags);
+        if (
+          hasLinkPreviewSuppression(event.tags) ||
+          previewSuppressedTargetIds.has(event.id)
+        ) {
+          return hasLinkPreviewSuppression(effectiveTags)
+            ? effectiveTags
+            : [...effectiveTags, ["link-preview", "none"]];
+        }
+        return effectiveTags;
+      })(),
       reactions: (() => {
         const reactions = reactionsByEventId.get(event.id);
         if (!reactions) return undefined;

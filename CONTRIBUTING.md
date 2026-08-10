@@ -98,6 +98,37 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
 versions in the table above.
 
+#### Linux: Tauri system libraries
+
+Hermit pins language toolchains, not system libraries. On Linux, the desktop
+app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
+`just desktop-tauri-*` recipe) needs these installed system-wide first. On
+Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  build-essential curl file libasound2-dev libayatana-appindicator3-dev \
+  libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+  patchelf wget
+```
+
+This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
+it locally keeps your results comparable to CI. Other distributions ship these
+under different package names — see the
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
+equivalents.
+
+Without them, `just ci` fails partway through `just check` with a pkg-config
+error such as:
+
+```
+The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
+```
+
+If you're only touching the relay, CLI, or other server-side crates, you can
+skip this and run the narrower recipes instead — `just fmt-check`, `just
+clippy`, `just test-unit`, and `just test` need no GTK.
+
 ### First-Time Setup
 
 ```bash

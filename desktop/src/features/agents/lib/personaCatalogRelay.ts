@@ -93,12 +93,33 @@ function isSafeHttpUrl(value: unknown): value is string {
 const INLINE_SVG_AVATAR_PREFIX = "data:image/svg+xml,";
 const MAX_INLINE_SVG_AVATAR_LENGTH = 8_192;
 
+/**
+ * Shared persona heads can carry an uploaded avatar as an inline raster. Keep
+ * those self-contained images renderable without accepting arbitrary `data:`
+ * URLs: only the raster MIME types browsers decode in `<img>`, strict base64
+ * shape, and a bound no larger than the relay's event-content ceiling.
+ */
+const MAX_INLINE_RASTER_AVATAR_LENGTH = 256 * 1_024;
+const INLINE_RASTER_AVATAR_RE =
+  /^data:image\/(?:png|jpeg|gif|webp);base64,([A-Za-z0-9+/]+={0,2})$/u;
+
 function isInlineSvgAvatar(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.startsWith(INLINE_SVG_AVATAR_PREFIX) &&
     value.length <= MAX_INLINE_SVG_AVATAR_LENGTH
   );
+}
+
+function isInlineRasterAvatar(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length > MAX_INLINE_RASTER_AVATAR_LENGTH
+  ) {
+    return false;
+  }
+  const match = INLINE_RASTER_AVATAR_RE.exec(value);
+  return match !== null && (match[1]?.length ?? 0) % 4 === 0;
 }
 
 function optionalString(value: unknown): string | null {
@@ -121,7 +142,9 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
   }
 
   const avatarUrl =
-    isSafeHttpUrl(parsed.avatar_url) || isInlineSvgAvatar(parsed.avatar_url)
+    isSafeHttpUrl(parsed.avatar_url) ||
+    isInlineSvgAvatar(parsed.avatar_url) ||
+    isInlineRasterAvatar(parsed.avatar_url)
       ? parsed.avatar_url
       : null;
   const namePool = Array.isArray(parsed.name_pool)
@@ -266,8 +289,14 @@ function publicationToPersona(
   isOwn: boolean,
 ): CatalogPersona {
   const timestamp = new Date(publication.createdAt * 1_000).toISOString();
-  const basePersona: AgentPersona = localPersona ?? {
-    id: `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
+  // The publication remains authoritative for catalog presentation. An added
+  // local copy contributes only the linkage id and selected state; merging the
+  // whole copy would leak local edits (notably its avatar) into the publisher's
+  // catalog entry.
+  const basePersona: AgentPersona = {
+    id:
+      localPersona?.id ??
+      `catalog:${publication.ownerPubkey}:${publication.sourcePersonaId}`,
     displayName: publication.agent.displayName,
     avatarUrl: publication.agent.avatarUrl,
     systemPrompt: publication.agent.systemPrompt,
@@ -276,7 +305,7 @@ function publicationToPersona(
     provider: publication.agent.provider,
     namePool: publication.agent.namePool,
     isBuiltIn: false,
-    isActive: false,
+    isActive: localPersona?.isActive ?? false,
     shared: true,
     sourceTeam: null,
     envVars: {},

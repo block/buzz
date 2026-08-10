@@ -68,6 +68,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     }
 
     containerView.backgroundColor = .clear
+    containerView.clipsToBounds = true
     if #available(iOS 17.0, *) {
       installPicker()
     }
@@ -120,6 +121,7 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
       picker.didMove(toParent: parentViewController)
     }
     pickerViewController = picker
+    containerView.layoutIfNeeded()
   }
 
   private func exportPickerResult(_ result: PHPickerResult) async throws -> String {

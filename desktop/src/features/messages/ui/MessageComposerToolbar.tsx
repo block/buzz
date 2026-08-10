@@ -179,7 +179,7 @@ export const MessageComposerToolbar = React.memo(
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
-                      aria-label="Attach image"
+                      aria-label="Attach file"
                       disabled={composerDisabled || isUploading}
                       onClick={onPaperclip}
                       onMouseDown={onCaptureSelection}
@@ -190,7 +190,7 @@ export const MessageComposerToolbar = React.memo(
                       <Paperclip />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Attach image</TooltipContent>
+                  <TooltipContent>Attach file</TooltipContent>
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}

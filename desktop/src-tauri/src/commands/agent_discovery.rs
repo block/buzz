@@ -21,25 +21,13 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
+/// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
-/// minimum supported version.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
+/// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
+/// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
+/// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
+/// Pure planning function: never spawns a process. Tests use it to assert commands without real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
@@ -167,7 +155,6 @@ pub async fn save_custom_harness(
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
-        // Security: no user-supplied avatar URL in catalog entries.
         avatar_url: String::new(),
         availability,
         command: command_opt,
@@ -177,6 +164,9 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
         install_hint: definition.install_hint,
         install_instructions_url: definition.install_instructions_url,
         can_auto_install: false,
@@ -186,8 +176,8 @@ pub async fn save_custom_harness(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Custom,
-        // Carry definition env back so the edit form can read and preserve it.
         definition_env: definition.env,
+        max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
     })
 }
 
@@ -236,10 +226,12 @@ pub async fn install_acp_runtime(
     // returns (Guard impl Drop) — so Phase 2's restart path runs outside
     // the guard and cannot re-enter the mutex.
     let runtime_id_clone = runtime_id.clone();
-    let install_result =
-        tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id_clone))
-            .await
-            .map_err(|e| format!("install task panicked: {e}"))??;
+    let app_clone = app.clone();
+    let install_result = tokio::task::spawn_blocking(move || {
+        install_acp_runtime_blocking(&runtime_id_clone, &app_clone)
+    })
+    .await
+    .map_err(|e| format!("install task panicked: {e}"))??;
 
     if !install_result.success {
         return Ok(install_result);
@@ -259,12 +251,21 @@ pub async fn install_acp_runtime(
         steps: install_result.steps,
         restarted_count,
         failed_restart_count,
+        log_path: install_result.log_path,
     })
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
-fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+///
+/// The reporter is built here rather than by the caller so this run's log
+/// session starts only once the concurrency guard is held and the runtime id is
+/// resolved to its canonical catalog form: a rejected install must not rotate a
+/// running one's log, and the log filename is derived from that id.
+fn install_acp_runtime_blocking(
+    runtime_id: &str,
+    app: &tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
     // Re-fetch the login-shell PATH so a Node.js installation that happened
     // after app launch (or after a previous failed install) is visible to this
     // run and to the subsequent discover_acp_providers call.
@@ -297,6 +298,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     let runtime = crate::managed_agents::known_acp_runtime_exact(runtime_id)
         .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
 
+    let reporter = InstallReporter::for_run(app, runtime.id);
+
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
@@ -306,16 +309,11 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command_with_retry("cli", cmd);
+                let result = run_install_command_with_retry("cli", cmd, &reporter);
                 let success = result.success;
                 steps.push(result);
                 if !success {
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    return Ok(reporter.failed(steps));
                 }
             }
         }
@@ -325,10 +323,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     // For the codex runtime, "found" is not enough — the resolved binary must also
     // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
     // the new npm install so the CODEX_CONFIG spawn contract works correctly.
-    let adapter_path = runtime
-        .commands
-        .iter()
-        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    let adapter_path = resolve_adapter_path(runtime.commands, runtime.adapter_install_commands);
     let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
@@ -340,13 +335,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
         if use_managed_npm {
             if let Err(step) = ensure_managed_node_runtime_blocking() {
-                steps.push(*step);
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                reporter.record_step(&mut steps, *step);
+                return Ok(reporter.failed(steps));
             }
         }
 
@@ -359,40 +349,31 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                 Ok(Some(command)) => command,
                 Ok(None) => cmd.to_string(),
                 Err(step) => {
-                    steps.push(*step);
-                    return Ok(InstallRuntimeResult {
-                        success: false,
-                        steps,
-                        restarted_count: 0,
-                        failed_restart_count: 0,
-                    });
+                    reporter.record_step(&mut steps, *step);
+                    return Ok(reporter.failed(steps));
                 }
             };
 
-            let mut result = run_install_command_with_retry("adapter", &planned);
+            let mut result = run_install_command_with_retry("adapter", &planned, &reporter);
             if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
                 result.hint = npm_eacces_hint(&result.stderr, cmd);
             }
             let success = result.success;
             steps.push(result);
             if !success {
-                return Ok(InstallRuntimeResult {
-                    success: false,
-                    steps,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
+                return Ok(reporter.failed(steps));
             }
         }
     }
 
-    post_install_verification::run(runtime_id, &mut steps);
+    post_install_verification::run(runtime_id, &mut steps, &reporter);
 
     Ok(InstallRuntimeResult {
         success: steps.iter().all(|step| step.success),
         steps,
         restarted_count: 0,
         failed_restart_count: 0,
+        log_path: reporter.log_path(),
     })
 }
 
@@ -1016,14 +997,17 @@ fn build_install_command(command: &str) -> Result<std::process::Command, String>
 }
 
 // ── install command execution ─────────────────────────────────────────────────
+mod install_capture;
 mod install_exec;
+mod install_report;
 use install_exec::run_install_command_with_retry;
+use install_report::InstallReporter;
 
 // ── managed Node/npm runtime ──────────────────────────────────────────────────
 mod managed_node;
 use managed_node::{
     ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
-    npm_eacces_hint,
+    npm_eacces_hint, resolve_adapter_path,
 };
 
 #[tauri::command]
@@ -1744,7 +1728,7 @@ mod tests {
     #[test]
     fn test_powershell_command_argv_exact() {
         // Catalog format: body wrapped in one outer double-quote pair (Bash-layer serialization).
-        let body = "irm https://chatgpt.com/codex/install.ps1 | iex";
+        let body = "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-codex.ps1'; Invoke-RestMethod https://chatgpt.com/codex/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE";
         let cmd = super::install_powershell_command(&format!(
             r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "{body}""#
         ));
@@ -1774,12 +1758,12 @@ mod tests {
         );
     }
 
-    /// Claude Code catalog command (discovery.rs:107) must dequote to the bare pipeline.
+    /// Claude Code catalog command must dequote to the two-step download-then-execute body.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_claude_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -1790,22 +1774,22 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "irm https://claude.ai/install.ps1 | iex",
+                "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Claude catalog command must be dequoted correctly"
         );
     }
 
-    /// Goose Windows catalog command (discovery.rs:78) must dequote to a bare pipeline
-    /// with a literal `$env:` prefix — no backslash before the dollar sign.
-    /// This proves the `\$` → `$` escape fix: post-#2750 the spawn is native and
+    /// Goose Windows catalog command must dequote to the two-step download-then-execute body
+    /// with the `$env:CONFIGURE` prefix intact — no backslash before the dollar sign.
+    /// This proves the `\$` → `$` contract: post-#2750 the spawn is native and
     /// PowerShell receives the body verbatim, so a residual `\` would produce
     /// `\$env:CONFIGURE='false'` which is a malformed statement.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_goose_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -1816,7 +1800,7 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
+                "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Goose catalog command must dequote with bare $env: (no backslash before $)"
         );

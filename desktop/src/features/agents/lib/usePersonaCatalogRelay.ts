@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/lib/personaCatalogRelay";
 import { invalidatePersonaEditCaches } from "@/features/agents/lib/personaEditCaches";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
   setPersonaShared,
   updatePersonaAndPublish,
@@ -19,12 +20,14 @@ export function personaCatalogQueryKey(communityId: string | null) {
 }
 
 export function usePersonaCatalogQuery(communityId: string | null) {
+  const refetchInterval = useFocusedRefetchInterval(120_000);
   return useQuery<PersonaCatalogPublication[]>({
     enabled: communityId !== null,
     queryKey: personaCatalogQueryKey(communityId),
     queryFn: fetchPersonaCatalogPublications,
     staleTime: 30_000,
-    refetchInterval: 120_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

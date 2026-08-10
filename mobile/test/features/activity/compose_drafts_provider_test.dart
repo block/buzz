@@ -34,6 +34,35 @@ void main() {
     return container;
   }
 
+  test(
+    'an invite-joined community keeps its drafts after origin canonicalization',
+    () async {
+      // Written by a build that stored the invite link's wss:// origin
+      // verbatim; RelayConfig now canonicalizes that to https://, so the key
+      // the app computes no longer matches the key on disk.
+      const legacyKey = 'compose_drafts_v1:wss://relay-a.example:pk_a';
+      const canonicalKey = 'compose_drafts_v1:https://relay-a.example:pk_a';
+      SharedPreferences.setMockInitialValues({
+        legacyKey:
+            '[{"key":"ch1","channel_id":"ch1","text":"unsent work",'
+            '"updated_at":1700000000}]',
+      });
+
+      final container = await containerWithPrefs(
+        relayUrl: 'wss://relay-a.example',
+      );
+
+      final drafts = container.read(composeDraftsProvider);
+      expect(drafts, hasLength(1), reason: 'draft survives the upgrade');
+      expect(drafts.single.text, 'unsent work');
+
+      await Future<void>.delayed(Duration.zero);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(canonicalKey), isNotNull);
+      expect(prefs.getString(legacyKey), isNull);
+    },
+  );
+
   test('composeDraftKey separates channel and thread composers', () {
     expect(composeDraftKey('ch1'), 'ch1');
     expect(composeDraftKey('ch1', threadHeadId: 't1'), 'ch1:t1');

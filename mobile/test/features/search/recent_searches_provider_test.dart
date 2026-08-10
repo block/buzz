@@ -35,6 +35,27 @@ void main() {
     return container;
   }
 
+  test('an invite-joined community keeps its recent searches after '
+      'origin canonicalization', () async {
+    const legacyKey = 'recent_searches_v1:wss://relay-a.example:pk-a';
+    const canonicalKey = 'recent_searches_v1:https://relay-a.example:pk-a';
+    SharedPreferences.setMockInitialValues({
+      legacyKey: <String>['nostr', 'relays'],
+    });
+
+    final container = await containerWithPrefs(
+      relayUrl: 'wss://relay-a.example',
+      pubkey: 'pk-a',
+    );
+
+    expect(container.read(recentSearchesProvider), ['nostr', 'relays']);
+
+    await Future<void>.delayed(Duration.zero);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList(canonicalKey), ['nostr', 'relays']);
+    expect(prefs.getStringList(legacyKey), isNull);
+  });
+
   test(
     'normalizes, deduplicates, caps, and persists submitted queries',
     () async {

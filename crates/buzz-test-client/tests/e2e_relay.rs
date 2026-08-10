@@ -2201,6 +2201,10 @@ async fn create_private_channel_ws(client: &mut BuzzTestClient, keys: &Keys) -> 
 }
 
 /// Submit a kind:9000 PUT_USER event over WebSocket.
+///
+/// `allow_self_tagging` keeps self-targeted adds working: EventBuilder otherwise
+/// drops a `p` tag matching the signer (nostr-0.44.3 builder.rs:435-449) and the
+/// event fails as "missing p tag" instead of exercising the authority check.
 async fn add_member_ws(
     client: &mut BuzzTestClient,
     channel_id: &str,
@@ -2210,6 +2214,7 @@ async fn add_member_ws(
     let h_tag = Tag::parse(["h", channel_id]).unwrap();
     let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
     let event = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
         .tags([h_tag, p_tag])
         .sign_with_keys(signer)
         .unwrap();
@@ -2219,6 +2224,8 @@ async fn add_member_ws(
 }
 
 /// Submit a kind:9000 PUT_USER event with a role tag over WebSocket.
+///
+/// See [`add_member_ws`] for why `allow_self_tagging` is required.
 async fn add_member_with_role_ws(
     client: &mut BuzzTestClient,
     channel_id: &str,
@@ -2230,6 +2237,7 @@ async fn add_member_with_role_ws(
     let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
     let role_tag = Tag::parse(["role", role]).unwrap();
     let event = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
         .tags([h_tag, p_tag, role_tag])
         .sign_with_keys(signer)
         .unwrap();
@@ -2241,14 +2249,17 @@ async fn add_member_with_role_ws(
     (ok.accepted, ok.message)
 }
 
-/// Any member of a private channel can invite another user (Slack model).
+/// Any active member can add any ordinary role to a private channel.
 #[tokio::test]
 #[ignore]
 async fn test_private_channel_any_member_can_invite() {
     let url = relay_url();
     let owner_keys = Keys::generate();
-    let member_keys = Keys::generate();
-    let invitee_keys = Keys::generate();
+    let actors = [
+        ("member", Keys::generate()),
+        ("guest", Keys::generate()),
+        ("bot", Keys::generate()),
+    ];
 
     // Connect as owner and create a private channel.
     let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
@@ -2256,36 +2267,114 @@ async fn test_private_channel_any_member_can_invite() {
         .expect("connect as owner");
     let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
 
-    // Owner adds member_keys as a regular member.
-    let (accepted, msg) = add_member_ws(
+    // Seed one actor for each ordinary active role.
+    for (role, keys) in &actors {
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &keys.public_key().to_hex(),
+            role,
+            &owner_keys,
+        )
+        .await;
+        assert!(accepted, "owner should add {role} actor, got: {msg}");
+    }
+
+    // Exercise the full ordinary-role target matrix. Relay and DB authorization
+    // both run here, unlike the Desktop/mobile policy-unit-test mirrors.
+    for (actor_role, actor_keys) in &actors {
+        let mut actor_client = BuzzTestClient::connect(&url, actor_keys)
+            .await
+            .unwrap_or_else(|err| panic!("connect as {actor_role}: {err}"));
+
+        for target_role in ["member", "guest", "bot"] {
+            let target_keys = Keys::generate();
+            let target_pubkey_hex = target_keys.public_key().to_hex();
+            let (accepted, msg) = add_member_with_role_ws(
+                &mut actor_client,
+                &channel_id,
+                &target_pubkey_hex,
+                target_role,
+                actor_keys,
+            )
+            .await;
+            assert!(
+                accepted,
+                "private-channel {actor_role} should add {target_role}, got: {msg}"
+            );
+            assert_eq!(
+                member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
+                Some(target_role.to_string()),
+                "private-channel {actor_role} add must persist the {target_role} role"
+            );
+        }
+
+        // Re-adding oneself stays idempotent — the huddle bot-add and kind:9021
+        // paths depend on a self-targeted PUT_USER working.
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut actor_client,
+            &channel_id,
+            &actor_keys.public_key().to_hex(),
+            actor_role,
+            actor_keys,
+        )
+        .await;
+        assert!(
+            accepted,
+            "self-targeted {actor_role} re-add must stay idempotent, got: {msg}"
+        );
+
+        actor_client
+            .disconnect()
+            .await
+            .unwrap_or_else(|err| panic!("disconnect {actor_role}: {err}"));
+    }
+
+    owner_client.disconnect().await.expect("disconnect owner");
+}
+
+/// An admin — not just the owner — can still add to a private channel.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_admin_can_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let admin_keys = Keys::generate();
+    let invitee_keys = Keys::generate();
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let (accepted, msg) = add_member_with_role_ws(
         &mut owner_client,
         &channel_id,
-        &member_keys.public_key().to_hex(),
+        &admin_keys.public_key().to_hex(),
+        "admin",
         &owner_keys,
     )
     .await;
-    assert!(accepted, "owner should add member, got: {msg}");
+    assert!(accepted, "owner should add an admin, got: {msg}");
 
-    // Connect as the regular member.
-    let mut member_client = BuzzTestClient::connect(&url, &member_keys)
+    let mut admin_client = BuzzTestClient::connect(&url, &admin_keys)
         .await
-        .expect("connect as member");
+        .expect("connect as admin");
 
-    // Regular member invites a third user — this should succeed.
     let (accepted, msg) = add_member_ws(
-        &mut member_client,
+        &mut admin_client,
         &channel_id,
         &invitee_keys.public_key().to_hex(),
-        &member_keys,
+        &admin_keys,
     )
     .await;
     assert!(
         accepted,
-        "regular member should be able to invite to private channel, got: {msg}"
+        "admin should be able to add to a private channel, got: {msg}"
     );
 
     owner_client.disconnect().await.expect("disconnect owner");
-    member_client.disconnect().await.expect("disconnect member");
+    admin_client.disconnect().await.expect("disconnect admin");
 }
 
 /// A non-member cannot invite someone to a private channel.

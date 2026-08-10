@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -39,10 +40,10 @@ void main() {
           .value!;
       expect(messages.map((event) => event.id), ['history', 'live']);
       expect(relaySession.operations, ['subscribe', 'query', 'fetch']);
-      expect(
-        relaySession.liveFilters.single.kinds,
-        EventKind.channelEventKinds,
-      );
+      expect(relaySession.liveFilters.single.kinds, [
+        ...EventKind.channelEventKinds,
+        EventKind.channelThreadSummary,
+      ]);
       expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
       expect(relaySession.liveFilters.single.limit, 200);
       expect(
@@ -56,6 +57,47 @@ void main() {
         EventKind.channelEventKinds,
       );
       expect(relaySession.historyFilters.first.tags['#h'], [_channelId]);
+    },
+  );
+
+  test(
+    'buffers a live thread summary until the initial window is installed',
+    () async {
+      final window = Completer<List<NostrEvent>>();
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [window.future],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+
+      relaySession.emit(_summary(rootId: 'root', replyCount: 2));
+      await _pumpEventQueue();
+      expect(
+        container.read(channelMessagesProvider(_channelId)).isLoading,
+        isTrue,
+      );
+
+      window.complete([
+        _event(id: 'root', createdAt: 10),
+        _summary(rootId: 'root', replyCount: 1, createdAt: 10),
+        _bounds(),
+      ]);
+      await _pumpEventQueue();
+
+      expect(notifier.threadSummaries['root']?.replyCount, 2);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['root'],
+      );
     },
   );
 
@@ -241,6 +283,42 @@ void main() {
       ['history'],
     );
   });
+
+  test(
+    'live thread summary survives rolling back an unrelated local row',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      notifier.addLocalMessage(_event(id: 'local', createdAt: 20));
+
+      relaySession.emit(_summary(rootId: 'root', replyCount: 2));
+      await _pumpEventQueue();
+      expect(notifier.threadSummaries['root']?.replyCount, 2);
+
+      notifier.removeLocalMessage('local');
+
+      expect(notifier.threadSummaries['root']?.replyCount, 2);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['root'],
+      );
+    },
+  );
 
   test('reconnect hydration cannot retain a rolled-back local row', () async {
     final relaySession = _RecordingRelaySessionNotifier(
@@ -495,6 +573,106 @@ void main() {
     },
   );
 
+  test(
+    'a live reply reaches the store so its parent badge can count it',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'root', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+
+      relaySession.emit(
+        _event(
+          id: 'reply',
+          createdAt: 20,
+          extraTags: const [
+            ['e', 'root', '', 'reply'],
+          ],
+        ),
+      );
+      await _pumpEventQueue();
+
+      // The reply is retained as the local half of the summary merge. It is
+      // filtered out of the main timeline by `buildMainTimelineEntries`, which
+      // owns reply visibility.
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['root', 'reply'],
+      );
+      expect(
+        buildMainTimelineEntries(
+          formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).value!,
+          ),
+          relaySummaries: container
+              .read(channelMessagesProvider(_channelId).notifier)
+              .threadSummaries,
+        ).map((entry) => entry.message.id),
+        ['root'],
+      );
+    },
+  );
+
+  test('a reply newer than the relay recount raises the badge', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [_event(id: 'root', createdAt: 10), _bounds()],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    relaySession.emit(
+      _event(
+        id: 'reply-1',
+        createdAt: 20,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    );
+    relaySession.emit(_summary(rootId: 'root', replyCount: 1, createdAt: 20));
+    // A second reply lands, and its recount is lost or still in flight.
+    relaySession.emit(
+      _event(
+        id: 'reply-2',
+        createdAt: 21,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      ),
+    );
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.threadSummaries['root']?.replyCount, 1);
+    final entries = buildMainTimelineEntries(
+      formatTimeline(
+        container.read(channelMessagesProvider(_channelId)).value!,
+      ),
+      relaySummaries: notifier.threadSummaries,
+    );
+    expect(entries.single.message.id, 'root');
+    expect(entries.single.summary!.replyCount, 2);
+    expect(entries.single.summary!.lastReplyAt, 21);
+  });
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
@@ -558,6 +736,30 @@ NostrEvent _event({
       ...extraTags,
     ],
     content: id,
+    sig: 'sig',
+  );
+}
+
+NostrEvent _summary({
+  required String rootId,
+  required int replyCount,
+  int createdAt = 20,
+}) {
+  return NostrEvent(
+    id: 'summary-$rootId-$createdAt-$replyCount',
+    pubkey: 'relay',
+    createdAt: createdAt,
+    kind: EventKind.channelThreadSummary,
+    tags: [
+      ['h', _channelId],
+      ['e', rootId],
+    ],
+    content: jsonEncode({
+      'reply_count': replyCount,
+      'descendant_count': replyCount,
+      'last_reply_at': 20,
+      'participants': ['alice'],
+    }),
     sig: 'sig',
   );
 }
@@ -629,6 +831,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     if (_queryResults.isEmpty) throw Exception('unsupported');
     final result = _queryResults.removeFirst();
     if (result is Exception) throw result;
+    if (result is Future<List<NostrEvent>>) return await result;
     return (result as List<NostrEvent>).toList();
   }
 

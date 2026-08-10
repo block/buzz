@@ -16,6 +16,7 @@ import {
   getInboxItemConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
+import { useInboxEditMessage } from "@/features/home/useInboxEditMessage";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
   filterInboxItems,
@@ -52,6 +53,7 @@ import {
 } from "@/features/messages/hooks";
 import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
+import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -167,6 +169,7 @@ export function HomeView({
   );
   const { goChannel } = useAppNavigation();
   const openDmMutation = useOpenDmMutation();
+  const openDm = openDmMutation.mutateAsync;
   const handleUserSelectItem = React.useCallback(
     (itemId: string | null) => {
       setAutoSelectedEventId(null);
@@ -209,13 +212,15 @@ export function HomeView({
     [applyInboxSearchPatch],
   );
   const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
+  const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
+  const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
   const [isSendingReply, setIsSendingReply] = React.useState(false);
   const handleOpenDm = React.useCallback(
     async (pubkeys: string[]) => {
-      const dm = await openDmMutation.mutateAsync({ pubkeys });
+      const dm = await openDm({ pubkeys });
       await goChannel(dm.id);
     },
-    [goChannel, openDmMutation],
+    [goChannel, openDm],
   );
   const { activeReminderEventIds, openReminder } = useRemindLater();
   const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
@@ -234,13 +239,16 @@ export function HomeView({
     inboxListWidthPx,
   } = useResizableInboxListWidth();
   const {
+    clearChannelUnreadSource,
     getChannelReadAt,
     getThreadReadAt,
     getMessageReadAt,
     feedItemState,
     markChannelRead,
+    markChannelUnread,
     markMessageRead,
     markThreadRead,
+    recordThreadInteraction,
     readStateVersion,
   } = useAppShell();
   const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
@@ -300,6 +308,10 @@ export function HomeView({
       hasChannelLoadError: channelMessagesQuery.isError,
       isChannelLoading: channelMessagesQuery.isPending,
     },
+  );
+  const { editMessage, isEditingMessage } = useInboxEditMessage(
+    selectedChannel,
+    threadContext.refreshStructuralEvents,
   );
 
   const feedProfilePubkeys = React.useMemo(
@@ -383,7 +395,9 @@ export function HomeView({
       readStateVersion,
       localDoneSet: doneSet,
       localUnreadSet: unreadSet,
+      clearChannelUnreadSource,
       markChannelRead,
+      markChannelUnread,
       markMessageRead,
       markThreadRead,
       markDoneLocal: markDone,
@@ -442,6 +456,25 @@ export function HomeView({
     }
     return null;
   }, [filteredItems, selectedConversationId, selectedEventId]);
+  const deleteInboxMessage = React.useCallback(
+    async (eventId: string) => {
+      const channelId = selectedItem?.item.channelId;
+      if (!channelId) return;
+      setIsDeletingMessage(true);
+      try {
+        await deleteMessage(channelId, eventId);
+        await threadContext.refreshStructuralEvents();
+        onRefresh();
+      } finally {
+        setIsDeletingMessage(false);
+      }
+    },
+    [
+      onRefresh,
+      selectedItem?.item.channelId,
+      threadContext.refreshStructuralEvents,
+    ],
+  );
   const unreadBoundaryEventId = React.useMemo(() => {
     if (!selectedItem) return null;
     if (unreadBoundary?.conversationId === selectedItem.conversationId) {
@@ -460,6 +493,7 @@ export function HomeView({
     selectedChannel,
     selectedEventId,
     selectedItem,
+    structuralEvents: threadContext.structuralEvents,
   });
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
@@ -485,6 +519,8 @@ export function HomeView({
 
   React.useEffect(() => {
     void selectedConversationId;
+    setEmptyDeleteId(null);
+    setEditTargetId(null);
     setIsDeletingMessage(false);
     setIsSendingReply(false);
   }, [selectedConversationId]);
@@ -602,6 +638,19 @@ export function HomeView({
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+      <DeleteMessageConfirmDialog
+        onConfirm={() => {
+          if (emptyDeleteId) {
+            setEditTargetId(null);
+            void deleteInboxMessage(emptyDeleteId);
+          }
+          setEmptyDeleteId(null);
+        }}
+        onOpenChange={(open) => {
+          if (!open) setEmptyDeleteId(null);
+        }}
+        open={emptyDeleteId !== null}
+      />
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <div
           className={cn(
@@ -745,6 +794,7 @@ export function HomeView({
               currentPubkey={currentPubkey}
               disabledReplyReason={disabledReplyReason}
               isDeletingMessage={isDeletingMessage}
+              isEditingMessage={isEditingMessage}
               isSendingReply={isSendingReply}
               isSinglePanelView={isSinglePanelDetailView}
               hasThreadContextLoadError={threadContext.hasLoadError}
@@ -755,6 +805,8 @@ export function HomeView({
               profiles={feedProfiles}
               selectedEventId={selectedEventId}
               unreadBoundaryEventId={unreadBoundaryEventId}
+              editTargetId={editTargetId}
+              onEditTargetChange={setEditTargetId}
               onBack={
                 isSinglePanelDetailView
                   ? () => {
@@ -763,27 +815,15 @@ export function HomeView({
                   : undefined
               }
               onDelete={() => {
-                if (!selectedItem || !canDelete) {
-                  return;
-                }
-                const channelId = selectedItem.item.channelId;
-                if (!channelId) {
-                  return;
-                }
-
-                setIsDeletingMessage(true);
-                void deleteMessage(channelId, selectedItem.id)
-                  .then(() => {
-                    onRefresh();
-                  })
-                  .finally(() => {
-                    setIsDeletingMessage(false);
-                  });
+                if (!selectedItem || !canDelete) return;
+                void deleteInboxMessage(selectedItem.id);
               }}
               onManageChannel={(channelId) => {
                 handleCloseProfilePanel();
                 setManagedChannelId(channelId);
               }}
+              onEditSave={editMessage}
+              onRequestEmptyEditDelete={setEmptyDeleteId}
               onOpenContext={onOpenContext}
               onSendReply={async ({
                 content,
@@ -838,7 +878,7 @@ export function HomeView({
                     id: result.eventId,
                     parentId: result.parentEventId,
                     rootId: result.rootEventId,
-                    tags: emojiTags,
+                    tags: [...imetaTags, ...emojiTags, ...mentionTags],
                     timeLabel: formatTime(result.createdAt),
                   };
                   setLocalRepliesByItemId((current) => ({
@@ -861,6 +901,13 @@ export function HomeView({
                         eventId: message.id,
                         remove,
                       });
+                      if (!remove) {
+                        recordThreadInteraction(
+                          selectedItem?.conversationId ??
+                            message.rootId ??
+                            message.id,
+                        );
+                      }
                       await threadContext.refreshReactions();
                       await channelMessagesQuery.refetch();
                       onRefresh();

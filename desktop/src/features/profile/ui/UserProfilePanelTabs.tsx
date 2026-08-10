@@ -9,7 +9,12 @@ import {
   Wrench,
 } from "lucide-react";
 
-import type { ManagedAgent } from "@/shared/api/types";
+import type { ManagedAgent, RestartDiffEntry } from "@/shared/api/types";
+import {
+  AUTO_RESTART_OFF_BLURB,
+  AUTO_RESTART_ON_BLURB,
+  RestartDiffList,
+} from "@/features/agents/ui/RestartDiffBadge";
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
@@ -809,6 +814,7 @@ export function ProfileRuntimeTabContent({
   diagnosticsFields,
   diagnosticsSummary,
   needsRestart = false,
+  restartDiff = [],
   onOpenDiagnostics,
   onOpenInstructions,
   runtimeConfigurationFields,
@@ -823,6 +829,8 @@ export function ProfileRuntimeTabContent({
   diagnosticsSummary: React.ReactNode;
   /** True when the running agent's config has drifted from what it was spawned with. */
   needsRestart?: boolean;
+  /** The full itemised diff — shown uncapped in the Runtime banner. */
+  restartDiff?: RestartDiffEntry[];
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
   runtimeConfigurationFields: ProfileField[];
@@ -844,7 +852,8 @@ export function ProfileRuntimeTabContent({
     statusDiagnosticsFields.length === 0 &&
     detailDiagnosticsFields.length === 0 &&
     !showDiagnosticsIngress &&
-    !showInstructionBlock
+    !showInstructionBlock &&
+    !needsRestart
   ) {
     return null;
   }
@@ -863,9 +872,12 @@ export function ProfileRuntimeTabContent({
             </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {autoRestartEnabled
-                ? "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or stop and respawn it to apply now."
-                : "Configuration changed since this agent started. Automatic restart is off for this agent \u2014 stop and respawn it to apply the changes."}
+                ? AUTO_RESTART_ON_BLURB
+                : AUTO_RESTART_OFF_BLURB}
             </p>
+            {/* Full uncapped diff list — Runtime banner is the only surface
+                where all entries show without truncation. */}
+            <RestartDiffList restartDiff={restartDiff} />
           </div>
         </div>
       ) : null}

@@ -148,6 +148,105 @@ pub fn goose_session_update(sid: &str, update: Value) -> Value {
     })
 }
 
+/// Build the `usage_update` payload for a `_goose/unstable/session/update`.
+///
+/// Shared by the two places that report usage — after each LLM round inside a
+/// turn, and once more when the turn completes — so the wire shape cannot drift
+/// between them. A consumer takes the high-water mark per session, so the
+/// mid-turn payloads are supersets of each other and the final one wins; a
+/// divergence in field names or units between the two call sites would instead
+/// show up as tokens silently vanishing, which is the failure this reporting
+/// exists to prevent.
+///
+/// All counts are SESSION-cumulative, matching goose, so buzz-acp's
+/// `UsageTracker` can compute per-turn deltas symmetrically for both agents.
+///
+/// ## `_goose/unstable/session/update` contract (ACP)
+///
+/// | Field | Type | Semantics |
+/// |---|---|---|
+/// | `sessionUpdate` | `"usage_update"` | Discriminant |
+/// | `used` | `u64` | `input + output`; context-usage proxy |
+/// | `contextLimit` | `u64` | `0` — buzz-agent has no context limit tracking |
+/// | `accumulatedInputTokens` | `u64?` | Session-cumulative inclusive input tokens; **absent** when overflow-poisoned |
+/// | `accumulatedOutputTokens` | `u64?` | Session-cumulative output tokens; **absent** when overflow-poisoned |
+/// | `accumulatedCachedInputTokens` | `u64?` | Session-cumulative cache-read tokens; **absent** when never observed (harness restart, goose, or first turn); `0` when provider confirmed no cache hits |
+/// | `accumulatedCacheWriteTokens` | `u64?` | Session-cumulative cache-write tokens; **absent** when never observed (same rules as cached-read) |
+/// | `accumulatedTotalTokens` | `u64?` | Session-cumulative provider total; absent unless every turn reported one |
+/// | `model` | `string` | Effective model id |
+///
+/// **Absence vs explicit zero**: both cache fields are omitted (never `null`)
+/// when the running session has never observed a value for them. An old-harness
+/// consumer that does not recognise these fields ignores them cleanly; a new
+/// consumer that receives them absent treats them as unknown, not zero.
+///
+/// **Overflow poison**: `accumulatedInputTokens` and `accumulatedOutputTokens`
+/// are omitted (never `null`, never `u64::MAX`) when the session-cumulative sum
+/// has overflowed.  A consumer that receives them absent treats them as
+/// incomplete, consistent with the `accumulatedTotalTokens` contract.
+///
+/// **Monotonic within a session**: each notification carries a cumulative
+/// snapshot that can only increase. A consumer that takes the high-water mark
+/// always ends up at the final value.
+///
+/// **Per-category independent**: a session where `accumulatedCacheWriteTokens`
+/// is absent but `accumulatedCachedInputTokens` is present is valid — the two
+/// categories are tracked independently. Either can become absent (e.g. after
+/// a provider switch) without poisoning the other.
+pub fn usage_update_payload(
+    accumulated_input_tokens: Option<u64>,
+    accumulated_output_tokens: Option<u64>,
+    accumulated_cached_input_tokens: Option<u64>,
+    accumulated_cache_write_tokens: Option<u64>,
+    accumulated_total: crate::types::TurnTotalState,
+    model: &str,
+    pricing_identity: Option<&crate::types::PricingIdentity>,
+) -> Value {
+    let mut update = json!({
+        "sessionUpdate": "usage_update",
+        // used: total tokens as a context-usage proxy; saturate when either
+        // side is absent or poisoned (display-only, ACP treats it as dead code).
+        // contextLimit: 0 (buzz-agent has no context limit tracking).
+        "used": accumulated_input_tokens.unwrap_or(0).saturating_add(accumulated_output_tokens.unwrap_or(0)),
+        "contextLimit": 0u64,
+        "model": model,
+    });
+    // accumulatedInputTokens / accumulatedOutputTokens: omitted (never null,
+    // never u64::MAX) when the session-cumulative sum has overflowed.
+    if let Some(input) = accumulated_input_tokens {
+        update["accumulatedInputTokens"] = json!(input);
+    }
+    if let Some(output) = accumulated_output_tokens {
+        update["accumulatedOutputTokens"] = json!(output);
+    }
+    // accumulatedCachedInputTokens: a subset of accumulatedInputTokens, not an
+    // addition to it. Extends goose's usage_update shape; a consumer that does
+    // not know the field ignores it and prices exactly as it did before.
+    // Absent (never emitted as null) when the session has never observed a
+    // cached-input value — goose never emits it, so old-harness compat is clean.
+    if let Some(cached) = accumulated_cached_input_tokens {
+        update["accumulatedCachedInputTokens"] = json!(cached);
+    }
+    // accumulatedCacheWriteTokens: a subset of accumulatedInputTokens, not an
+    // addition to it. Absent when never observed (same provenance rules as
+    // accumulatedCachedInputTokens).
+    if let Some(written) = accumulated_cache_write_tokens {
+        update["accumulatedCacheWriteTokens"] = json!(written);
+    }
+    // Only when the cumulative is exactly known — never when Unseen (no total
+    // ever observed) or Unknown (at least one turn lacked a total). A goose
+    // consumer that doesn't recognise the field ignores it.
+    if let Some(total) = accumulated_total.exact_value() {
+        update["accumulatedTotalTokens"] = json!(total);
+    }
+    // pricingIdentity: present only when the publisher proved applicability.
+    // Absent (never null) when unproven — old consumers ignore the field.
+    if let Some(pi) = pricing_identity {
+        update["pricingIdentity"] = serde_json::to_value(pi).unwrap_or(serde_json::Value::Null);
+    }
+    update
+}
+
 /// A `session/update` notification carrying a `update._meta.goose.<key>` field.
 /// Used to advertise `activeRunId` (so steer-capable clients can target the
 /// in-flight run) and `queuedSteer` (so they can correlate an accepted steer
@@ -289,5 +388,150 @@ mod tests {
         });
         let params: SessionNewParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.system_prompt, Some(String::new()));
+    }
+
+    // ── usage_update_payload: pricingIdentity emission ───────────────────────
+
+    fn make_pi(authority: &str, model: &str) -> crate::types::PricingIdentity {
+        crate::types::PricingIdentity {
+            authority: authority.to_string(),
+            model: model.to_string(),
+            cache_class: None,
+        }
+    }
+
+    /// When a proven identity is passed, the wire payload MUST include a
+    /// `pricingIdentity` object with camelCase keys, and it MUST NOT be null.
+    #[test]
+    fn usage_update_payload_includes_pricing_identity_when_proven() {
+        let pi = make_pi("api.anthropic.com", "claude-opus-4-5");
+        let payload = usage_update_payload(
+            Some(1000),
+            Some(200),
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "claude-opus-4-5",
+            Some(&pi),
+        );
+
+        let pi_wire = &payload["pricingIdentity"];
+        assert!(
+            !pi_wire.is_null(),
+            "pricingIdentity must be present when identity is proven"
+        );
+        assert_eq!(pi_wire["authority"], serde_json::json!("api.anthropic.com"));
+        assert_eq!(pi_wire["model"], serde_json::json!("claude-opus-4-5"));
+        // cacheClass absent when None (skip_serializing_if)
+        assert!(pi_wire.get("cacheClass").is_none() || pi_wire["cacheClass"].is_null());
+    }
+
+    /// When `pricing_identity` is `None` (unproven: custom endpoint, mixed
+    /// identities, etc.), the field MUST be absent from the wire payload.
+    /// It must never appear as `null`.
+    #[test]
+    fn usage_update_payload_omits_pricing_identity_when_absent() {
+        let payload = usage_update_payload(
+            Some(500),
+            Some(100),
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "some-model",
+            None, // no proven identity
+        );
+
+        assert!(
+            payload.get("pricingIdentity").is_none(),
+            "pricingIdentity must be absent (never null) when identity is unproven"
+        );
+    }
+
+    /// A custom endpoint (Databricks, corporate proxy) must not produce a
+    /// wire `pricingIdentity` — it must be absent.
+    ///
+    /// This relies on the caller passing `None`; the payload builder must not
+    /// inject a default. This test documents the contract.
+    #[test]
+    fn usage_update_payload_no_pricing_identity_for_custom_endpoint() {
+        // Custom endpoint → caller passes None (pricing_authority returned None).
+        let payload = usage_update_payload(
+            Some(800),
+            Some(150),
+            Some(200),
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "databricks-llama-4",
+            None,
+        );
+
+        assert!(
+            payload.get("pricingIdentity").is_none(),
+            "custom endpoint: pricingIdentity must not appear on the wire"
+        );
+        // Cache field must still be present (independent).
+        assert_eq!(
+            payload["accumulatedCachedInputTokens"],
+            serde_json::json!(200)
+        );
+    }
+
+    /// When input is overflow-poisoned (None), the wire payload must omit
+    /// `accumulatedInputTokens` entirely — never null, never u64::MAX.
+    #[test]
+    fn usage_update_payload_omits_input_when_poisoned() {
+        let payload = usage_update_payload(
+            None, // overflow-poisoned
+            Some(150),
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "model",
+            None,
+        );
+        assert!(
+            payload.get("accumulatedInputTokens").is_none(),
+            "poisoned accumulatedInputTokens must be absent, not null or MAX"
+        );
+        // output still present
+        assert_eq!(payload["accumulatedOutputTokens"], serde_json::json!(150));
+    }
+
+    /// When output is overflow-poisoned (None), the wire payload must omit
+    /// `accumulatedOutputTokens` entirely — never null, never u64::MAX.
+    #[test]
+    fn usage_update_payload_omits_output_when_poisoned() {
+        let payload = usage_update_payload(
+            Some(800),
+            None, // overflow-poisoned
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "model",
+            None,
+        );
+        assert!(
+            payload.get("accumulatedOutputTokens").is_none(),
+            "poisoned accumulatedOutputTokens must be absent, not null or MAX"
+        );
+        // input still present
+        assert_eq!(payload["accumulatedInputTokens"], serde_json::json!(800));
+    }
+
+    /// When both are present and exact, the wire payload emits both at their
+    /// values (unchanged goose-compatible behavior).
+    #[test]
+    fn usage_update_payload_emits_both_when_exact() {
+        let payload = usage_update_payload(
+            Some(1000),
+            Some(200),
+            None,
+            None,
+            crate::types::TurnTotalState::Unseen,
+            "model",
+            None,
+        );
+        assert_eq!(payload["accumulatedInputTokens"], serde_json::json!(1000));
+        assert_eq!(payload["accumulatedOutputTokens"], serde_json::json!(200));
     }
 }

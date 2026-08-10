@@ -29,6 +29,11 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
 
+/// Request for the writer to flush a restart close and report the result.
+pub(crate) struct RestartClose {
+    pub(crate) flushed: tokio::sync::oneshot::Sender<bool>,
+}
+
 /// Maximum outbound data frames buffered into the websocket sink before one flush.
 const MAX_WS_SEND_BATCH: usize = 64;
 
@@ -161,6 +166,11 @@ async fn handle_active_connection(
     // even when the data buffer is full.
     let (ctrl_tx, ctrl_rx) = mpsc::channel::<WsMessage>(8);
 
+    // Dedicated restart-close channel carries a flush acknowledgement. Keeping
+    // ordinary control frames unchanged avoids coupling heartbeat/ban traffic
+    // to graceful-shutdown delivery tracking.
+    let (restart_tx, restart_rx) = mpsc::channel::<RestartClose>(1);
+
     let backpressure_count = Arc::new(AtomicU8::new(0));
     let subscriptions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -205,6 +215,7 @@ async fn handle_active_connection(
         conn_id,
         tx.clone(),
         ctrl_tx.clone(),
+        Some(restart_tx),
         cancel.clone(),
         conn.tenant.community(),
         Arc::clone(&backpressure_count),
@@ -215,7 +226,7 @@ async fn handle_active_connection(
     let (ws_send, ws_recv) = socket.split();
 
     let send_cancel = cancel.child_token();
-    let send_task = tokio::spawn(send_loop(ws_send, rx, ctrl_rx, send_cancel));
+    let send_task = tokio::spawn(send_loop(ws_send, rx, ctrl_rx, restart_rx, send_cancel));
 
     let missed_pongs = Arc::new(AtomicU8::new(0));
     let heartbeat_cancel = cancel.clone();
@@ -297,15 +308,17 @@ async fn send_loop(
     ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
     data_rx: mpsc::Receiver<WsMessage>,
     ctrl_rx: mpsc::Receiver<WsMessage>,
+    restart_rx: mpsc::Receiver<RestartClose>,
     cancel: CancellationToken,
 ) {
-    send_loop_inner(ws_send, data_rx, ctrl_rx, cancel).await;
+    send_loop_inner(ws_send, data_rx, ctrl_rx, restart_rx, cancel).await;
 }
 
 async fn send_loop_inner<S>(
     mut ws_send: S,
     mut data_rx: mpsc::Receiver<WsMessage>,
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
+    mut restart_rx: mpsc::Receiver<RestartClose>,
     cancel: CancellationToken,
 ) where
     S: Sink<WsMessage> + Unpin,
@@ -319,9 +332,21 @@ async fn send_loop_inner<S>(
         }
 
         tokio::select! {
-            // Biased: cancel > control > data. Cancel must win immediately
-            // so backpressure-triggered shutdown isn't starved by queued data.
+            // Biased: restart > cancel > ordinary control > data. A restart
+            // command owns shutdown delivery and must flush its 1012 before
+            // cancellation can fall back to an unacknowledged close.
             biased;
+            Some(restart) = restart_rx.recv() => {
+                let sent = ws_send
+                    .send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::RESTART,
+                        reason: axum::extract::ws::Utf8Bytes::from_static("relay restarting"),
+                    })))
+                    .await
+                    .is_ok();
+                let _ = restart.flushed.send(sent);
+                break;
+            }
             _ = cancel.cancelled() => {
                 // Drain any queued control frames before closing. A ban
                 // disconnect queues its `OK false "blocked: …"` reason frame on
@@ -797,7 +822,8 @@ mod tests {
         }
 
         let (sink, state) = MockSink::new(Some(1));
-        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
@@ -817,7 +843,8 @@ mod tests {
             .expect("queue data frame");
 
         let (sink, state) = MockSink::new(Some(1));
-        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
@@ -842,7 +869,8 @@ mod tests {
             .expect("queue control frame");
 
         let (sink, state) = MockSink::new(Some(2));
-        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 2);
@@ -850,6 +878,57 @@ mod tests {
             text_payloads(&state.messages),
             vec!["control", "data-0", "data-1"]
         );
+    }
+
+    #[tokio::test]
+    async fn send_loop_acknowledges_restart_after_flushing_exactly_one_1012() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (restart_tx, restart_rx) = mpsc::channel(1);
+        let (flushed_tx, flushed_rx) = tokio::sync::oneshot::channel();
+        restart_tx
+            .send(RestartClose {
+                flushed: flushed_tx,
+            })
+            .await
+            .expect("queue restart close");
+
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+
+        assert_eq!(flushed_rx.await, Ok(true));
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1, "ack follows the close flush");
+        assert_eq!(state.messages.len(), 1, "writer exits after restart close");
+        match &state.messages[0] {
+            WsMessage::Close(Some(close)) => {
+                assert_eq!(close.code, axum::extract::ws::close_code::RESTART);
+                assert_eq!(close.reason.as_str(), "relay restarting");
+            }
+            other => panic!("expected one 1012 restart close, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_loop_reports_restart_flush_failure() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (restart_tx, restart_rx) = mpsc::channel(1);
+        let (flushed_tx, flushed_rx) = tokio::sync::oneshot::channel();
+        restart_tx
+            .send(RestartClose {
+                flushed: flushed_tx,
+            })
+            .await
+            .expect("queue restart close");
+
+        let (sink, state) = MockSink::new(Some(1));
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, CancellationToken::new()).await;
+
+        assert_eq!(flushed_rx.await, Ok(false));
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(state.messages.len(), 1, "no fallback close is appended");
     }
 
     #[tokio::test]
@@ -871,7 +950,8 @@ mod tests {
         cancel.cancel();
 
         let (sink, state) = MockSink::new(None);
-        send_loop_inner(sink, data_rx, ctrl_rx, cancel).await;
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        send_loop_inner(sink, data_rx, ctrl_rx, restart_rx, cancel).await;
 
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(

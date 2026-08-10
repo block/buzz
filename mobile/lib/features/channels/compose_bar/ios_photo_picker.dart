@@ -9,12 +9,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
   final VoidCallback onBack;
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
+  final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
   final Widget fallback;
 
   const _IOSInlinePhotoPicker({
     required this.onBack,
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
+    required this.onChooseAllPhotos,
     required this.fallback,
   });
 
@@ -97,7 +99,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
       try {
         final photos = await onPickAllPhotos();
         if (photos.isNotEmpty) {
-          await onChoosePhotos(photos);
+          await onChooseAllPhotos(photos);
         }
       } catch (_) {
         if (context.mounted) {
@@ -146,7 +148,9 @@ class _IOSInlinePhotoPicker extends HookWidget {
                 ),
                 child: IconButton(
                   key: const ValueKey('ios-inline-photo-picker-back'),
-                  onPressed: isProcessing.value ? null : onBack,
+                  onPressed: isProcessing.value
+                      ? null
+                      : () => _runComposerAction(onBack),
                   tooltip: 'Back to attachment options',
                   icon: const Icon(
                     LucideIcons.chevronLeft,
@@ -164,11 +168,12 @@ class _IOSInlinePhotoPicker extends HookWidget {
               child: FilledButton(
                 key: const ValueKey('ios-inline-photo-picker-select'),
                 onPressed: canSelect
-                    ? submitSelection
+                    ? () =>
+                          _runComposerAction(() => unawaited(submitSelection()))
                     : selectedCount.value == 0 &&
                           !isPreparingSelection.value &&
                           !isProcessing.value
-                    ? openAllPhotos
+                    ? () => _runComposerAction(() => unawaited(openAllPhotos()))
                     : null,
                 style: FilledButton.styleFrom(
                   backgroundColor: Colors.black.withValues(alpha: 0.76),
