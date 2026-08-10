@@ -26,6 +26,42 @@ pub(crate) use metadata::{
     DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
+/// Exclusive intent for one managed-agent pair while its child is prepared
+/// and spawned outside every runtime-management lock.
+///
+/// The reservation mutex is never held beyond insertion/removal. Keeping the
+/// key in the set prevents concurrent start/restore paths from creating a
+/// second child during the deliberately unlocked spawn phase.
+pub struct ManagedAgentStartReservation<'a> {
+    state: &'a crate::app_state::AppState,
+    key: ManagedAgentRuntimeKey,
+}
+
+impl Drop for ManagedAgentStartReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut reservations) = self.state.managed_agent_start_reservations.lock() {
+            reservations.remove(&self.key);
+        }
+    }
+}
+
+pub fn reserve_managed_agent_start<'a>(
+    state: &'a crate::app_state::AppState,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<ManagedAgentStartReservation<'a>, String> {
+    let mut reservations = state
+        .managed_agent_start_reservations
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if !reservations.insert(key.clone()) {
+        return Err("managed-agent runtime start is already in progress".into());
+    }
+    Ok(ManagedAgentStartReservation {
+        state,
+        key: key.clone(),
+    })
+}
+
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
@@ -34,14 +70,23 @@ mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
 mod process;
+#[cfg(any(windows, test))]
+pub(crate) use process::descendant_process_waves;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,
     terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
-    current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    current_instance_id, managed_process_identity, process_belongs_to_us, process_has_buzz_marker,
+    process_is_running, terminate_managed_process, terminate_process,
+    terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+};
+#[cfg(windows)]
+pub(crate) use process::{
+    next_verified_windows_descendants, terminate_if_windows_identity_matches,
+    terminate_process_with_identity, WindowsIdentityObservation, WindowsProcessIdentity,
+    WindowsProcessSnapshotEntry,
 };
 
 mod orphan_sweep;
@@ -891,7 +936,7 @@ pub fn spawn_agent_child(
     // Windows: assign the harness to a Job Object so its whole tree dies with
     // the handle. The Unix process-group equivalent is set above.
     #[cfg(windows)]
-    return Ok(super::process_lifecycle::finish_spawn(
+    return super::process_lifecycle::finish_spawn(
         child,
         log_path,
         spawn_config,
@@ -899,7 +944,7 @@ pub fn spawn_agent_child(
         spawned_adapter_availability,
         start_nonce,
         &record.name,
-    ));
+    );
     #[cfg(not(windows))]
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
@@ -951,20 +996,8 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
     let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(app),
-        started_at: now.clone(),
-    };
-    if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-        let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
-        return Err(error);
-    }
-
     record.updated_at = now.clone();
     record.last_started_at = Some(now);
     record.last_stopped_at = None;

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     sync::{
         atomic::{AtomicBool, AtomicU16, AtomicU8},
@@ -52,6 +52,10 @@ pub struct AppState {
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
+    /// Per-pair intent tokens spanning the unlocked process-preparation/spawn
+    /// phase. The mutex is held only to insert/remove a key; no filesystem,
+    /// readiness, or child-process work may run while it is held.
+    pub managed_agent_start_reservations: Mutex<HashSet<ManagedAgentRuntimeKey>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
     /// Tauri app handle — stored after setup so huddle commands can emit
@@ -215,6 +219,7 @@ pub fn build_app_state() -> AppState {
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
+        managed_agent_start_reservations: Mutex::new(HashSet::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),

@@ -4,8 +4,8 @@ use tauri::AppHandle;
 
 use super::{
     append_log_marker, current_instance_id, now_iso, process_belongs_to_us,
-    process_has_buzz_marker, process_is_running, terminate_process, ManagedAgentPairRuntime,
-    ManagedAgentRecord, ManagedAgentRuntimeKey,
+    process_has_buzz_marker, process_is_running, terminate_managed_process, terminate_process,
+    ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
 };
 
 pub(crate) fn managed_agent_runtime_keys<T>(
@@ -47,21 +47,7 @@ fn stop_managed_agent_pair(
         return Ok(());
     };
     let result = (|| -> Result<(), String> {
-        #[cfg(unix)]
-        terminate_process(runtime.child.id())?;
-        #[cfg(windows)]
-        match runtime.job.take() {
-            Some(job) => drop(job),
-            None => runtime
-                .child
-                .kill()
-                .map_err(|error| format!("failed to kill agent process: {error}"))?,
-        }
-        #[cfg(not(any(unix, windows)))]
-        runtime
-            .child
-            .kill()
-            .map_err(|error| format!("failed to kill agent process: {error}"))?;
+        terminate_managed_process(&mut runtime.process)?;
         let status = runtime
             .child
             .wait()

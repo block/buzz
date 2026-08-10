@@ -235,6 +235,8 @@ fn await_install_child(
     // Save the PID before moving `child` into the wait thread so we can
     // kill the process on timeout.
     let child_pid = child.id();
+    #[cfg(windows)]
+    let child_identity = crate::managed_agents::child_process_identity(&child).ok();
 
     std::thread::spawn(move || {
         let _ = events_tx.send(Settled::Exited(child.wait()));
@@ -257,6 +259,11 @@ fn await_install_child(
         // was still running and this is a timeout — the status the kill produces
         // moments later describes the kill, not the install, so it is discarded.
         let install_finished = settle.status.is_some();
+        #[cfg(unix)]
+        terminate_install_group(child_pid);
+        #[cfg(windows)]
+        terminate_install_group(child_pid, child_identity);
+        #[cfg(not(any(unix, windows)))]
         terminate_install_group(child_pid);
         // Reaping the child and finishing the drains share one bound. Both
         // normally complete within microseconds of the kill, which closes the
@@ -427,13 +434,20 @@ fn signal_reaches(target: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Windows has no process groups on this path: `terminate_process` runs
-/// `taskkill /T /F`, which is already tree-wide and unconditional, so there is
-/// no escalation to get wrong.
-#[cfg(not(unix))]
-fn terminate_install_group(pid: u32) {
-    let _ = crate::managed_agents::terminate_process(pid);
+/// Windows binds cleanup to the creation identity captured from the spawned
+/// child's stable handle. If metadata could not be read, teardown fails closed
+/// rather than acting on a potentially recycled PID.
+#[cfg(windows)]
+fn terminate_install_group(pid: u32, process_identity: Option<u64>) {
+    if let Err(error) =
+        crate::managed_agents::terminate_process_with_identity(pid, process_identity)
+    {
+        eprintln!("buzz-desktop: bounded Windows installer cleanup failed: {error}");
+    }
 }
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_install_group(_pid: u32) {}
 
 /// A failure carrying whatever the drains captured, with `reason` leading
 /// stderr so the surfaced message names the failure before the install's own

@@ -482,6 +482,10 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
+    /// Win32 creation timestamp read from the stable `Child` process handle at
+    /// spawn time. Used to reject recycled PIDs before native teardown.
+    #[cfg(windows)]
+    pub process_identity: u64,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`

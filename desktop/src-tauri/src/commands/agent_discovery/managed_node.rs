@@ -121,8 +121,9 @@ pub(super) fn managed_node_runtime_ready() -> bool {
 ///
 /// Cleanup: the child runs in its own process group on Unix (`process_group(0)`)
 /// so an unconditional group SIGKILL on every exit path terminates all
-/// descendants.  On Windows, `terminate_process` issues `taskkill /T /F` for
-/// tree-wide cleanup.  SIGKILL to an already-dead group returns ESRCH (no-op).
+/// descendants. On Windows, it is spawned suspended, assigned to a dedicated
+/// kill-on-close Job Object, and only then resumed. SIGKILL to an already-dead
+/// Unix group returns ESRCH (no-op).
 pub(super) fn probe_node(
     executable: &std::path::Path,
     expected_version: &str,
@@ -148,8 +149,15 @@ pub(super) fn probe_node(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let Ok(mut child) = cmd.spawn() else {
-        return false;
+    #[cfg(windows)]
+    let (mut child, mut probe_job) = match crate::managed_agents::spawn_probe_in_job(&mut cmd) {
+        Ok(contained) => contained,
+        Err(_) => return false,
+    };
+    #[cfg(not(windows))]
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
     };
 
     let deadline = std::time::Instant::now() + timeout;
@@ -158,14 +166,22 @@ pub(super) fn probe_node(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    kill_probe_group(child.id());
+                    let _ = terminate_probe_group(
+                        &mut child,
+                        #[cfg(windows)]
+                        &mut probe_job,
+                    );
                     let _ = child.wait();
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => {
-                kill_probe_group(child.id());
+                let _ = terminate_probe_group(
+                    &mut child,
+                    #[cfg(windows)]
+                    &mut probe_job,
+                );
                 let _ = child.wait();
                 return false;
             }
@@ -173,7 +189,13 @@ pub(super) fn probe_node(
     };
 
     // Group-kill unconditionally: SIGKILL to a dead group is ESRCH (no-op).
-    kill_probe_group(child.id());
+    if !terminate_probe_group(
+        &mut child,
+        #[cfg(windows)]
+        &mut probe_job,
+    ) {
+        return false;
+    }
 
     if !exit_status.success() {
         return false;
@@ -188,18 +210,31 @@ pub(super) fn probe_node(
 
 /// Kill the probe's process group/tree unconditionally (no TERM grace — this
 /// is a probe, not an agent session).  ESRCH on a dead group is fine.
-fn kill_probe_group(pid: u32) {
+fn terminate_probe_group(
+    child: &mut std::process::Child,
+    #[cfg(windows)] probe_job: &mut crate::managed_agents::JobHandle,
+) -> bool {
     #[cfg(unix)]
     unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+        true
     }
     #[cfg(windows)]
     {
-        let _ = crate::managed_agents::terminate_process(pid);
+        let cleaned = match probe_job.terminate_and_wait(Duration::from_secs(1)) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("buzz-desktop: managed Node readiness cleanup failed: {error}");
+                false
+            }
+        };
+        let _ = child.kill();
+        cleaned
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = pid;
+        let _ = child;
+        true
     }
 }
 

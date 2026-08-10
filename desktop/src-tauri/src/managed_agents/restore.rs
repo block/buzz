@@ -21,10 +21,9 @@ enum SpawnOutcome {
     /// Boxed: the spawned process carries its full spawn-config snapshot, so an
     /// inline variant would make every `Skipped`/`Failed` outcome pay for it.
     Spawned(super::ManagedAgentRuntimeKey, Box<ManagedAgentProcess>),
-    Skipped,
     Failed(String),
 }
-type AgentSpawnResult = (String, SpawnOutcome);
+type AgentSpawnResult = (String, String, SpawnOutcome);
 
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
@@ -276,93 +275,96 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // Serialize spawning and runtime registration with shutdown cleanup. The
-    // shutdown flag is rechecked after taking the lock so shutdown either
-    // prevents this transition or waits until every child is tracked and can
-    // be terminated.
-    let restore_transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|error| error.to_string())?;
-    if shutdown_started.load(Ordering::SeqCst) {
+    // Phase A: reserve each absent pair under the transition/process locks,
+    // then release every runtime-management mutex before command discovery,
+    // readiness probes, or child spawning. The reservation keys serialize
+    // concurrent restore/reconcile/manual starts without carrying a guard.
+    let reserved_agents = {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if shutdown_started.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+        let mut reserved = Vec::new();
+        for record in agents_to_start {
+            let relay_url =
+                crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay);
+            let key = super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
+            if runtimes
+                .get_mut(&key)
+                .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+            {
+                continue;
+            }
+            runtimes.remove(&key);
+            let reservation = super::reserve_managed_agent_start(&state, &key)?;
+            reserved.push((record, key, reservation));
+        }
+        reserved
+    };
+    if reserved_agents.is_empty() {
         return Ok(());
     }
 
-    // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
+    // Phase B: resolve commands and spawn in parallel with all lifecycle,
+    // store, process-map, and reservation mutex guards released.
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
-        let handles: Vec<_> = agents_to_start
+        let handles: Vec<_> = reserved_agents
             .iter()
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
+            .map(|(record, key, _reservation)| {
+                let pubkey = record.pubkey.clone();
+                let expected_updated_at = record.updated_at.clone();
                 let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
                     let outcome =
-                        match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
-                        {
-                            Ok(key) => {
-                                // F2: if a concurrent startup reconcile already
-                                // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
-                                // live-child guard in `start_pair`.
-                                let already_live = app
-                                    .state::<AppState>()
-                                    .managed_agent_processes
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
-                                        })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
-                                } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                            )
-                                        }) {
-                                        Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
-                                        }
-                                        Err(error) => SpawnOutcome::Failed(error),
-                                    }
-                                }
-                            }
-                            Err(error) => SpawnOutcome::Failed(error),
-                        };
-                    (record.pubkey.clone(), outcome)
+                        super::terminate_untracked_pair_runtime(app, key).and_then(|()| {
+                            // Restore is lazy, matching reconcile/manual pair start.
+                            spawn_agent_child(app, record, &key.relay_url, true, owner_hex_ref)
+                        });
+                    let outcome = match outcome {
+                        Ok(process) => SpawnOutcome::Spawned(key.clone(), Box::new(process)),
+                        Err(error) => SpawnOutcome::Failed(error),
+                    };
+                    (record.pubkey.clone(), record.updated_at.clone(), outcome)
                 });
-                handle
+                (pubkey, expected_updated_at, handle)
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .map(
+                |(pubkey, expected_updated_at, handle)| match handle.join() {
+                    Ok(result) => result,
+                    Err(_) => (
+                        pubkey,
+                        expected_updated_at,
+                        SpawnOutcome::Failed("managed runtime spawn worker panicked".into()),
+                    ),
+                },
+            )
+            .collect()
     });
 
     if spawn_results.is_empty() {
         return Ok(());
     }
 
-    // ── Phase C (re-acquire lock): write back PIDs and status to records ──
+    // Phase C: re-acquire briefly, generation-check every result, and register
+    // it. Shutdown or a concurrent record edit wins; discarded children are
+    // terminated after the guards are dropped.
+    let restore_transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -374,28 +376,38 @@ pub async fn restore_managed_agents_on_launch(
         .map_err(|error| error.to_string())?;
 
     let mut successfully_spawned: Vec<String> = Vec::new();
+    let mut discarded_processes = Vec::new();
+    let mut registered_keys = Vec::new();
 
-    for (pubkey, outcome) in spawn_results {
+    for (pubkey, expected_updated_at, outcome) in spawn_results {
         match outcome {
-            // Skipped means a concurrent reconcile already owns a live child for
-            // this pair; leave its runtime and record state untouched.
-            SpawnOutcome::Skipped => continue,
-            SpawnOutcome::Spawned(key, mut process) => {
+            SpawnOutcome::Spawned(key, process) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
+                    discarded_processes.push((key, process, false));
                     continue;
                 };
+                if shutdown_started.load(Ordering::SeqCst)
+                    || record.updated_at != expected_updated_at
+                    || runtimes
+                        .get_mut(&key)
+                        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+                {
+                    discarded_processes.push((key, process, false));
+                    continue;
+                }
+                runtimes.remove(&key);
                 let now = util::now_iso();
                 let receipt = super::ManagedAgentRuntimeReceipt {
                     key: key.clone(),
                     pid: process.child.id(),
+                    process_identity: super::managed_process_identity(&process),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
                 };
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-                    let _ = super::terminate_process(process.child.id());
-                    let _ = process.child.wait();
                     record.updated_at = now;
                     record.last_error = Some(error);
+                    discarded_processes.push((key, process, false));
                     continue;
                 }
                 record.updated_at = now.clone();
@@ -404,13 +416,20 @@ pub async fn restore_managed_agents_on_launch(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(*process));
+                runtimes.insert(
+                    key.clone(),
+                    super::ManagedAgentPairRuntime::starting(*process),
+                );
+                registered_keys.push(key);
                 successfully_spawned.push(pubkey);
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
+                if record.updated_at != expected_updated_at {
+                    continue;
+                }
                 record.updated_at = util::now_iso();
                 record.last_error = Some(error);
             }
@@ -448,10 +467,26 @@ pub async fn restore_managed_agents_on_launch(
             })
             .collect();
 
-    save_managed_agents(app, &records)?;
+    let save_result = save_managed_agents(app, &records);
+    if save_result.is_err() {
+        for key in registered_keys {
+            if let Some(runtime) = runtimes.remove(&key) {
+                discarded_processes.push((key, Box::new(runtime.process), true));
+            }
+        }
+    }
     drop(runtimes);
     drop(_store_guard);
     drop(restore_transition);
+
+    for (key, mut process, wrote_receipt) in discarded_processes {
+        let _ = super::terminate_managed_process(&mut process);
+        let _ = process.child.wait();
+        if wrote_receipt {
+            super::remove_agent_runtime_receipt(app, &key);
+        }
+    }
+    save_result?;
 
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
     // Spawn background tasks to ensure each restored agent's kind:0 profile is

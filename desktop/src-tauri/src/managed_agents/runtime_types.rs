@@ -115,6 +115,11 @@ pub struct ManagedAgentCommunityTarget {
 pub struct ManagedAgentRuntimeReceipt {
     pub key: ManagedAgentRuntimeKey,
     pub pid: u32,
+    /// Stable Win32 creation timestamp for this exact process instance. Older
+    /// receipts and non-Windows builds omit it; Windows teardown then fails
+    /// closed rather than acting on a PID alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_identity: Option<u64>,
     pub desktop_instance_id: String,
     pub started_at: String,
 }

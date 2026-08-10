@@ -7,8 +7,8 @@ use crate::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        reserve_managed_agent_start, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
@@ -395,56 +395,169 @@ pub(super) async fn start_local_agent_with_preflight(
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let record = find_managed_agent_mut(&mut records, pubkey)?;
-    if record.backend != BackendKind::Local {
-        return Err(format!("agent {pubkey} is no longer a local agent"));
-    }
-    // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider,
-    // runtime). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. See `apply_persona_snapshot` for the precedence and
-    // env-override self-heal rules.
-    // Load personas once: used for snapshot application below and summary build
-    // at the end — avoids a second disk read for the same file in the same call.
+    // Phase A: snapshot the record and reserve its workspace pair. No lock is
+    // carried into command discovery, readiness, or process spawning.
     let personas = load_personas(app).unwrap_or_default();
-    if let Some(persona_id) = record.persona_id.clone() {
-        match personas.iter().find(|p| p.id == persona_id) {
-            Some(persona) => {
-                crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
-                record.updated_at = crate::util::now_iso();
-            }
-            None => {
-                return Err(
-                    crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string(),
-                );
+    let workspace_relay = crate::relay::relay_ws_url_with_override(state);
+    let (mut staged_record, base_updated_at, key, _reservation) = {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if state
+            .shutdown_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("desktop shutdown has started".into());
+        }
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        if record.backend != BackendKind::Local {
+            return Err(format!("agent {pubkey} is no longer a local agent"));
+        }
+        let mut staged = record.clone();
+        let base_updated_at = record.updated_at.clone();
+        if let Some(persona_id) = staged.persona_id.clone() {
+            match personas.iter().find(|p| p.id == persona_id) {
+                Some(persona) => {
+                    crate::managed_agents::persona_events::apply_persona_snapshot(
+                        &mut staged,
+                        persona,
+                    );
+                    staged.updated_at = crate::util::now_iso();
+                }
+                None => {
+                    return Err(
+                        crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR
+                            .to_string(),
+                    );
+                }
             }
         }
-    }
-    start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;
-    save_managed_agents(app, &records)?;
-    if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
-        retain_managed_agent_pending(app, state, saved_record);
-    }
-    let record = records
-        .iter()
-        .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(
+        let relay_url =
+            crate::relay::effective_agent_relay_url(&staged.relay_url, &workspace_relay);
+        let key =
+            crate::managed_agents::ManagedAgentRuntimeKey::new(staged.pubkey.clone(), &relay_url)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if runtimes
+            .get_mut(&key)
+            .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+        {
+            return build_managed_agent_summary(app, record, &runtimes, &personas, &global);
+        }
+        runtimes.remove(&key);
+        let reservation = reserve_managed_agent_start(state, &key)?;
+        (staged, base_updated_at, key, reservation)
+    };
+
+    // Phase B: reuse the established spawn helper against an isolated
+    // staging map. It may run a login probe and spawn buzz-acp, so this phase
+    // deliberately holds none of the transition/store/process mutexes.
+    let mut staged_runtimes = std::collections::HashMap::new();
+    start_managed_agent_process(
         app,
-        record,
-        &runtimes,
-        &personas,
-        &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
-    )
+        &mut staged_record,
+        &mut staged_runtimes,
+        Some(owner_hex),
+    )?;
+    let mut staged_process = staged_runtimes.remove(&key).map(|runtime| runtime.process);
+    if staged_process.is_none() {
+        return Err("managed runtime spawn did not produce the reserved pair".into());
+    }
+
+    // Phase C: register only if the record generation and shutdown state still
+    // match Phase A. A concurrent edit/stop wins, and cleanup happens below
+    // after all runtime locks have been released.
+    let mut wrote_receipt = false;
+    let registration = (|| -> Result<ManagedAgentSummary, String> {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if state
+            .shutdown_started
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("desktop shutdown started while managed runtime was spawning".into());
+        }
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(app)?;
+        let record = find_managed_agent_mut(&mut records, pubkey)?;
+        if record.updated_at != base_updated_at {
+            return Err("managed agent changed while runtime was spawning".into());
+        }
+        if record.backend != BackendKind::Local {
+            return Err(format!("agent {pubkey} is no longer a local agent"));
+        }
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if runtimes
+            .get_mut(&key)
+            .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+        {
+            return build_managed_agent_summary(app, record, &runtimes, &personas, &global);
+        }
+        runtimes.remove(&key);
+        *record = staged_record.clone();
+        let process = staged_process
+            .as_ref()
+            .ok_or_else(|| "managed runtime spawn result was already consumed".to_string())?;
+        let receipt = crate::managed_agents::ManagedAgentRuntimeReceipt {
+            key: key.clone(),
+            pid: process.child.id(),
+            process_identity: crate::managed_agents::managed_process_identity(process),
+            desktop_instance_id: current_instance_id(app),
+            started_at: record
+                .last_started_at
+                .clone()
+                .unwrap_or_else(crate::util::now_iso),
+        };
+        crate::managed_agents::write_agent_runtime_receipt(app, &receipt)?;
+        wrote_receipt = true;
+        let Some(process) = staged_process.take() else {
+            return Err("managed runtime spawn result was already consumed".into());
+        };
+        runtimes.insert(
+            key.clone(),
+            crate::managed_agents::ManagedAgentPairRuntime::starting(process),
+        );
+        if let Err(error) = save_managed_agents(app, &records) {
+            staged_process = runtimes.remove(&key).map(|runtime| runtime.process);
+            return Err(error);
+        }
+        if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
+            retain_managed_agent_pending(app, state, saved_record);
+        }
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        build_managed_agent_summary(app, record, &runtimes, &personas, &global)
+    })();
+
+    if let Some(mut process) = staged_process {
+        let _ = crate::managed_agents::terminate_managed_process(&mut process);
+        let _ = process.child.wait();
+        if wrote_receipt {
+            crate::managed_agents::remove_agent_runtime_receipt(app, &key);
+        }
+    }
+    registration
 }
 
 /// Deploy an agent to a provider backend. Resolves the binary, calls deploy via

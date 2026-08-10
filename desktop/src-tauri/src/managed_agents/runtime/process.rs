@@ -30,6 +30,120 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
 /// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
 pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
 
+/// Expand a process snapshot into descendant generations rooted at `root`.
+/// Kept platform-independent so the Windows recovery teardown topology can be
+/// unit-tested on every CI host.
+#[cfg(any(windows, test))]
+pub(crate) fn descendant_process_waves(entries: &[(u32, u32)], root: u32) -> Vec<Vec<u32>> {
+    let mut known = std::collections::HashSet::from([root]);
+    let mut waves = Vec::new();
+    loop {
+        let mut wave_seen = std::collections::HashSet::new();
+        let wave = entries
+            .iter()
+            .filter_map(|(pid, parent)| {
+                (*pid != root
+                    && !known.contains(pid)
+                    && known.contains(parent)
+                    && wave_seen.insert(*pid))
+                .then_some(*pid)
+            })
+            .collect::<Vec<_>>();
+        if wave.is_empty() {
+            break;
+        }
+        known.extend(wave.iter().copied());
+        waves.push(wave);
+    }
+    waves
+}
+
+/// Stable identity for one Windows process instance. Windows may recycle a
+/// numeric PID as soon as the prior process object is released, while the
+/// creation time remains unique for the lifetime of that process instance.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WindowsProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) creation_time: u64,
+}
+
+/// Identity observation made immediately before a destructive Windows action.
+/// `Unverified` is deliberately distinct from `Exited`: callers must fail
+/// closed when access is denied or metadata cannot be read.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowsIdentityObservation {
+    Verified(WindowsProcessIdentity),
+    Exited,
+    Unverified,
+}
+
+/// Run `terminate` only when the currently opened Windows process object still
+/// has the expected creation identity. This small platform-independent seam is
+/// used by the native implementation and makes the no-kill-on-reuse rule
+/// directly testable on non-Windows CI.
+#[cfg(any(windows, test))]
+pub(crate) fn terminate_if_windows_identity_matches(
+    expected: WindowsProcessIdentity,
+    observed: WindowsIdentityObservation,
+    terminate: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    match observed {
+        WindowsIdentityObservation::Verified(actual) if actual == expected => {
+            terminate()?;
+            Ok(true)
+        }
+        WindowsIdentityObservation::Exited => Ok(false),
+        WindowsIdentityObservation::Verified(actual) => Err(format!(
+            "refusing to terminate recycled Windows PID {}: expected creation {}, observed {}",
+            expected.pid, expected.creation_time, actual.creation_time
+        )),
+        WindowsIdentityObservation::Unverified => Err(format!(
+            "refusing to terminate Windows PID {} because process identity could not be verified",
+            expected.pid
+        )),
+    }
+}
+
+/// One identity-bearing ToolHelp row. `identity: None` means the PID was
+/// visible but its stable identity could not be queried; such a row can be
+/// reported as a bounded cleanup failure but must never become a kill target.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowsProcessSnapshotEntry {
+    pub(crate) pid: u32,
+    pub(crate) parent_pid: u32,
+    pub(crate) identity: Option<WindowsProcessIdentity>,
+}
+
+/// Find the next direct descendant generation whose parent is already bound
+/// to a verified, open process object. Existing identities are never replaced
+/// by a same-PID/different-creation-time row.
+#[cfg(any(windows, test))]
+pub(crate) fn next_verified_windows_descendants(
+    entries: &[WindowsProcessSnapshotEntry],
+    known: &std::collections::HashMap<u32, WindowsProcessIdentity>,
+) -> (Vec<WindowsProcessIdentity>, Vec<u32>) {
+    let mut verified = Vec::new();
+    let mut unverified = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in entries {
+        if entry.pid == 0
+            || known.contains_key(&entry.pid)
+            || !known.contains_key(&entry.parent_pid)
+            || !seen.insert(entry.pid)
+        {
+            continue;
+        }
+        match entry.identity {
+            Some(identity) if identity.pid == entry.pid => verified.push(identity),
+            _ => unverified.push(entry.pid),
+        }
+    }
+    (verified, unverified)
+}
+
 /// Check if a process name matches any of our known agent binaries.
 /// Uses exact match or prefix-with-separator to avoid false positives
 /// (e.g. `"goose"` must not match `"mongoose"`).
@@ -262,15 +376,61 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
 
 #[cfg(windows)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
-    // No job handle is available on this path (e.g. after an app restart, when
-    // we only recovered the PID from the record), so fall back to taskkill on
-    // the whole tree.
-    super::super::process_lifecycle::taskkill_tree(pid)
+    Err(format!(
+        "refusing to terminate Windows process tree {pid} without a stable process identity"
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn terminate_process_with_identity(
+    pid: u32,
+    process_identity: Option<u64>,
+) -> Result<(), String> {
+    super::super::process_lifecycle::terminate_process_tree(pid, process_identity)
 }
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn terminate_process(_pid: u32) -> Result<(), String> {
     Err("managed agent shutdown after app restart is not supported on this platform".to_string())
+}
+
+pub(crate) fn managed_process_identity(process: &super::super::ManagedAgentProcess) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        return Some(process.process_identity);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = process;
+        None
+    }
+}
+
+/// Terminate a process that is still represented by its stable `Child`
+/// generation. Windows prefers the existing Job Object; if assignment failed,
+/// native fallback remains bound to the creation identity captured at spawn.
+pub(crate) fn terminate_managed_process(
+    process: &mut super::super::ManagedAgentProcess,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        terminate_process(process.child.id())
+    }
+    #[cfg(windows)]
+    {
+        if let Some(job) = process.job.take() {
+            job.terminate_and_wait(std::time::Duration::from_secs(1))
+        } else {
+            terminate_process_with_identity(process.child.id(), Some(process.process_identity))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        process
+            .child
+            .kill()
+            .map_err(|error| format!("failed to kill managed process: {error}"))
+    }
 }
 
 /// Send SIGTERM to all given PIDs (as process groups), wait, then SIGKILL
@@ -384,6 +544,22 @@ pub(crate) fn valid_agent_runtime_receipt(
     receipt: &super::super::ManagedAgentRuntimeReceipt,
     instance_id: &str,
 ) -> bool {
+    #[cfg(windows)]
+    {
+        let Ok(canonical) =
+            ManagedAgentRuntimeKey::new(receipt.key.pubkey.clone(), &receipt.key.relay_url)
+        else {
+            return false;
+        };
+        return canonical == receipt.key
+            && path.file_name().and_then(|name| name.to_str())
+                == Some(&format!("{}.json", receipt.key.runtime_id()))
+            && receipt.desktop_instance_id == instance_id
+            && receipt.process_identity.is_some_and(|identity| {
+                super::super::process_lifecycle::process_identity_matches(receipt.pid, identity)
+            });
+    }
+    #[cfg(not(windows))]
     valid_agent_runtime_receipt_with(
         path,
         receipt,
@@ -462,8 +638,162 @@ pub(crate) fn terminate_untracked_pair_runtime(
     terminate_runtime_receipt_with(
         &path,
         &receipt,
-        terminate_process,
-        process_is_running,
+        |pid| {
+            #[cfg(windows)]
+            {
+                terminate_process_with_identity(pid, receipt.process_identity)
+            }
+            #[cfg(not(windows))]
+            {
+                terminate_process(pid)
+            }
+        },
+        |pid| {
+            #[cfg(windows)]
+            {
+                receipt.process_identity.is_some_and(|identity| {
+                    super::super::process_lifecycle::process_identity_matches(pid, identity)
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                process_is_running(pid)
+            }
+        },
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+#[cfg(test)]
+mod windows_identity_tests {
+    use super::{
+        next_verified_windows_descendants, terminate_if_windows_identity_matches,
+        WindowsIdentityObservation, WindowsProcessIdentity, WindowsProcessSnapshotEntry,
+    };
+    use std::{cell::Cell, collections::HashMap};
+
+    fn identity(pid: u32, creation_time: u64) -> WindowsProcessIdentity {
+        WindowsProcessIdentity { pid, creation_time }
+    }
+
+    #[test]
+    fn root_pid_reuse_never_invokes_termination() {
+        let calls = Cell::new(0);
+        let result = terminate_if_windows_identity_matches(
+            identity(10, 100),
+            WindowsIdentityObservation::Verified(identity(10, 200)),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn descendant_pid_reuse_is_not_rediscovered_or_terminated() {
+        let root = identity(10, 100);
+        let child = identity(11, 110);
+        let mut known = HashMap::from([(root.pid, root)]);
+        let first = [WindowsProcessSnapshotEntry {
+            pid: child.pid,
+            parent_pid: root.pid,
+            identity: Some(child),
+        }];
+        let (discovered, unverified) = next_verified_windows_descendants(&first, &known);
+        assert_eq!(discovered, vec![child]);
+        assert!(unverified.is_empty());
+        known.insert(child.pid, child);
+
+        let replacement = identity(child.pid, 999);
+        let second = [WindowsProcessSnapshotEntry {
+            pid: replacement.pid,
+            parent_pid: root.pid,
+            identity: Some(replacement),
+        }];
+        let (discovered, unverified) = next_verified_windows_descendants(&second, &known);
+        assert!(discovered.is_empty());
+        assert!(unverified.is_empty());
+
+        let calls = Cell::new(0);
+        assert!(terminate_if_windows_identity_matches(
+            child,
+            WindowsIdentityObservation::Verified(replacement),
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .is_err());
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn descendants_created_during_teardown_are_discovered_by_generation() {
+        let root = identity(10, 100);
+        let child = identity(11, 110);
+        let grandchild = identity(12, 120);
+        let mut known = HashMap::from([(root.pid, root)]);
+        let first = [WindowsProcessSnapshotEntry {
+            pid: child.pid,
+            parent_pid: root.pid,
+            identity: Some(child),
+        }];
+        let (first_wave, _) = next_verified_windows_descendants(&first, &known);
+        assert_eq!(first_wave, vec![child]);
+        known.insert(child.pid, child);
+
+        let later = [WindowsProcessSnapshotEntry {
+            pid: grandchild.pid,
+            parent_pid: child.pid,
+            identity: Some(grandchild),
+        }];
+        let (second_wave, _) = next_verified_windows_descendants(&later, &known);
+        assert_eq!(second_wave, vec![grandchild]);
+    }
+
+    #[test]
+    fn natural_exit_race_is_harmless_and_idempotent() {
+        let calls = Cell::new(0);
+        for _ in 0..2 {
+            assert_eq!(
+                terminate_if_windows_identity_matches(
+                    identity(10, 100),
+                    WindowsIdentityObservation::Exited,
+                    || {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    },
+                ),
+                Ok(false)
+            );
+        }
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn unverifiable_identity_never_invokes_termination() {
+        let calls = Cell::new(0);
+        let result = terminate_if_windows_identity_matches(
+            identity(10, 100),
+            WindowsIdentityObservation::Unverified,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 0);
+
+        let known = HashMap::from([(10, identity(10, 100))]);
+        let entries = [WindowsProcessSnapshotEntry {
+            pid: 11,
+            parent_pid: 10,
+            identity: None,
+        }];
+        let (verified, unverified) = next_verified_windows_descendants(&entries, &known);
+        assert!(verified.is_empty());
+        assert_eq!(unverified, vec![11]);
+    }
 }
