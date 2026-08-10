@@ -108,12 +108,14 @@ pub enum AnthropicThinking {
 /// Unknown/unverified models return `None`: callers must omit thinking fields
 /// rather than guessing a request shape. Catalog prefixes are stripped by
 /// locating the first `claude-` token, matching the native runner's historical
-/// behavior for Databricks and Goose model IDs.
+/// behavior for Databricks and Goose model IDs. A trailing context-window
+/// annotation such as `[1m]` is metadata, not part of the model family, and is
+/// removed before classification.
 pub fn resolve_anthropic_thinking(
     effective_model: &str,
     effort: ThinkingEffort,
 ) -> Option<AnthropicThinking> {
-    let model = strip_claude_catalog_prefix(effective_model);
+    let model = normalize_claude_model_id(effective_model);
     if is_manual_budget_model(model) {
         return Some(AnthropicThinking::ManualBudget {
             budget_tokens: effort.anthropic_budget_tokens(),
@@ -129,13 +131,13 @@ pub fn resolve_anthropic_thinking(
 
 /// Whether a recognized Anthropic model uses a manual token budget.
 pub fn is_manual_budget_model(effective_model: &str) -> bool {
-    let model = strip_claude_catalog_prefix(effective_model);
+    let model = normalize_claude_model_id(effective_model);
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
 
 /// Whether a recognized Anthropic model uses adaptive thinking.
 pub fn is_adaptive_thinking_model(effective_model: &str) -> bool {
-    let model = strip_claude_catalog_prefix(effective_model);
+    let model = normalize_claude_model_id(effective_model);
     model.starts_with("claude-opus-4-6")
         || model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
@@ -149,7 +151,7 @@ pub fn is_adaptive_thinking_model(effective_model: &str) -> bool {
 
 /// Whether an adaptive Anthropic model supports `xhigh`.
 pub fn anthropic_model_supports_xhigh(effective_model: &str) -> bool {
-    let model = strip_claude_catalog_prefix(effective_model);
+    let model = normalize_claude_model_id(effective_model);
     model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
         || model.starts_with("claude-opus-5")
@@ -170,6 +172,17 @@ pub fn clamp_adaptive_effort(effective_model: &str, effort: ThinkingEffort) -> T
 fn strip_claude_catalog_prefix(model: &str) -> &str {
     let lower = model.to_ascii_lowercase();
     lower.find("claude-").map_or(model, |index| &model[index..])
+}
+
+fn strip_context_window_suffix(model: &str) -> &str {
+    if !model.ends_with(']') {
+        return model;
+    }
+    model.rfind('[').map_or(model, |index| &model[..index])
+}
+
+fn normalize_claude_model_id(model: &str) -> &str {
+    strip_context_window_suffix(strip_claude_catalog_prefix(model))
 }
 
 #[cfg(test)]
@@ -206,6 +219,39 @@ mod tests {
             Some(AnthropicThinking::ManualBudget {
                 budget_tokens: 8_192
             })
+        );
+    }
+
+    #[test]
+    fn context_window_suffix_is_removed_before_family_classification() {
+        for model in [
+            "claude-fable-5[1m]",
+            "claude-opus-5[1m]",
+            "goose-claude-fable-5[1m]",
+            "claude-opus-5[200k]",
+            "claude-opus-5[]",
+        ] {
+            assert_eq!(
+                resolve_anthropic_thinking(model, ThinkingEffort::Medium),
+                Some(AnthropicThinking::Adaptive {
+                    effort: ThinkingEffort::Medium
+                }),
+                "model: {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_context_window_suffix_does_not_break_classification() {
+        assert_eq!(
+            resolve_anthropic_thinking("claude-opus-5[1m", ThinkingEffort::Medium),
+            Some(AnthropicThinking::Adaptive {
+                effort: ThinkingEffort::Medium
+            })
+        );
+        assert_eq!(
+            resolve_anthropic_thinking("opus[1m", ThinkingEffort::Medium),
+            None
         );
     }
 }

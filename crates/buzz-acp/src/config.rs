@@ -50,6 +50,8 @@ pub enum ConfigError {
 
 /// Shared effort selector used by the native runner and external ACP harnesses.
 pub const THINKING_EFFORT_ENV: &str = "BUZZ_AGENT_THINKING_EFFORT";
+const CLAUDE_UNRESOLVED_MODEL_MESSAGE: &str =
+    "resolved BUZZ_AGENT_THINKING_EFFORT for Claude: model name does not identify a versioned Claude family, omitting thinking options; use a canonical model ID through Custom model... (for example, claude-opus-5[1m])";
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
     Mentions,
@@ -785,7 +787,7 @@ fn resolve_thinking_effort(
                 None => tracing::info!(
                     effort = effort.as_str(),
                     model = model.unwrap_or("<unset>"),
-                    "resolved BUZZ_AGENT_THINKING_EFFORT for Claude: model unrecognized, omitting thinking options"
+                    "{CLAUDE_UNRESOLVED_MODEL_MESSAGE}"
                 ),
             }
         }
@@ -3140,6 +3142,35 @@ channels = "ALL"
         assert_eq!(claude_thinking_options("claude-future-9", Max), None);
         assert_eq!(claude_thinking_options("claude-opus-4-8", NoEffort), None);
         assert_eq!(claude_thinking_options("claude-opus-4-8", Minimal), None);
+    }
+
+    #[test]
+    fn claude_context_suffixes_produce_named_adaptive_effort() {
+        use buzz_core::reasoning::ThinkingEffort::Medium;
+        for model in [
+            "claude-fable-5[1m]",
+            "claude-opus-5[1m]",
+            "goose-claude-fable-5[1m]",
+        ] {
+            let options = claude_thinking_options(model, Medium).unwrap();
+            assert_eq!(options["thinking"]["type"], "adaptive", "model: {model}");
+            assert_eq!(options["effort"], "medium", "model: {model}");
+        }
+    }
+
+    #[test]
+    fn unresolved_claude_alias_omits_options_with_actionable_message() {
+        use buzz_core::reasoning::ThinkingEffort::Medium;
+        for alias in ["opus", "opus[1m]", "sonnet", "haiku"] {
+            assert_eq!(
+                claude_thinking_options(alias, Medium),
+                None,
+                "alias: {alias}"
+            );
+        }
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("versioned Claude family"));
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("Custom model..."));
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("claude-opus-5[1m]"));
     }
 
     #[test]
