@@ -30,6 +30,11 @@ void main() {
     );
     await relaySession.subscribed;
     expect(relaySession.liveFilters.single.kinds, const [10100]);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    expect(
+      relaySession.liveFilters.single.since,
+      inInclusiveRange(now - 6, now),
+    );
 
     relaySession.emit(_agentProfileEvent(displayName: 'Johnny5'));
     await _pumpEventQueue();
@@ -38,6 +43,22 @@ void main() {
       (await container.read(agentDirectoryProvider.future)).single.displayName,
       'Johnny5',
     );
+  });
+
+  test('disposes the live agent-directory subscription', () async {
+    final relaySession = _AgentDirectoryRelaySessionNotifier([
+      _agentProfileEvent(displayName: 'Johnny5'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    container.listen(agentDirectoryProvider, (_, _) {}, fireImmediately: true);
+
+    await container.read(agentDirectoryProvider.future);
+    await relaySession.subscribed;
+    container.dispose();
+
+    expect(relaySession.unsubscribeCount, 1);
   });
 
   test('refreshes channel bot roles from live membership updates', () async {
@@ -189,7 +210,7 @@ NostrEvent _membershipEvent({required String role}) => NostrEvent(
 NostrEvent _agentProfileEvent({required String displayName}) => NostrEvent(
   id: 'agent-profile-$displayName',
   pubkey: _agentPubkey,
-  createdAt: 1,
+  createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
   kind: 10100,
   tags: const [],
   content: '{"display_name":"$displayName"}',
@@ -255,6 +276,7 @@ class _AgentDirectoryRelaySessionNotifier extends RelaySessionNotifier {
   final List<_LiveSubscription> _subscriptions = [];
   final Completer<void> _subscribed = Completer<void>();
   var _profileIndex = 0;
+  var unsubscribeCount = 0;
 
   _AgentDirectoryRelaySessionNotifier(this._profiles);
 
@@ -281,7 +303,10 @@ class _AgentDirectoryRelaySessionNotifier extends RelaySessionNotifier {
     final subscription = _LiveSubscription(filter, onEvent);
     _subscriptions.add(subscription);
     if (!_subscribed.isCompleted) _subscribed.complete();
-    return () => _subscriptions.remove(subscription);
+    return () {
+      unsubscribeCount++;
+      _subscriptions.remove(subscription);
+    };
   }
 
   void emit(NostrEvent event) {

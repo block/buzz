@@ -83,7 +83,7 @@ class _AgentDirectorySubscription extends Notifier<int> {
     try {
       _unsubscribe = session.subscribeImmediately(
         NostrFilters.agentProfiles().copyWithSince(
-          DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5,
         ),
         (_) {
           if (_isCurrent(subscriptionVersion)) state++;
