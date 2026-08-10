@@ -1034,6 +1034,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "webbrowser",
 ]
