@@ -78,6 +78,10 @@ jobs:
         run: scripts/test-release-ref-contract.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
+      - name: OSS desktop promotion contract
+        run: |
+          scripts/test-oss-desktop-promotion.sh
+          scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
         run: |
           scripts/test-mobile-release-contract.sh

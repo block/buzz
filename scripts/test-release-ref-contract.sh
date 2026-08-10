@@ -155,15 +155,11 @@ grep -Fq "needs.release-macos-x64.result == 'success'" "$release_workflow"
 grep -Fq "needs.release-linux.result == 'success'" "$release_workflow"
 grep -Fq "needs.release-windows.result == 'success'" "$release_workflow"
 grep -Fq "refs/tags/desktop-v{0}" "$release_workflow"
-grep -Fq "if: \${{ !contains(needs.setup.outputs.version, '-') }}" "$release_workflow"
-if grep -Fq "env.already_published != 'true' && !contains(needs.setup.outputs.version, '-')" "$release_workflow"; then
-  echo "rolling updater retry is incorrectly gated by versioned publication state" >&2; exit 1
-fi
 grep -Fq 'group: desktop-release-${{ github.ref }}' "$release_workflow"
 grep -Fq 'cancel-in-progress: false' "$release_workflow"
 grep -Fq 'release artifact basename collision' "$release_workflow"
-[[ "$(grep -c 'gh release upload' "$release_workflow")" -eq 2 ]] || {
-  echo "only the final writer may upload versioned and rolling release assets" >&2; exit 1;
+[[ "$(grep -c 'gh release upload' "$release_workflow")" -eq 1 ]] || {
+  echo "desktop release must only upload versioned release assets" >&2; exit 1;
 }
 grep -Fq 'if: env.already_published' "$release_workflow"
 grep -Fq 'if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then' "$auto_tag"
