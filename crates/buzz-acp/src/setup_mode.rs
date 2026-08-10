@@ -631,6 +631,46 @@ fn setup_nudge_thread_ref(target_event_id: &str) -> Result<buzz_sdk::ThreadRef> 
     })
 }
 
+/// Resolve the flat reply anchor for a setup-mode nudge. This is the exact
+/// routing seam used by [`publish_setup_nudge`]; `original` is `None` only
+/// when the bounded relay fetch for a kind:40003 edit failed.
+fn setup_nudge_anchor(triggering_event: &nostr::Event, original: Option<&nostr::Event>) -> String {
+    match crate::queue::edit_target_id(triggering_event) {
+        Some(target) => original
+            .and_then(|event| crate::queue::parse_thread_tags(event).root_event_id)
+            .unwrap_or(target),
+        None => crate::queue::parse_thread_tags(triggering_event)
+            .root_event_id
+            .unwrap_or_else(|| triggering_event.id.to_hex()),
+    }
+}
+
+/// Build the signed setup nudge event at the supplied resolved anchor.
+/// Kept separate so the production path and output tests share event building.
+fn build_setup_nudge_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    payload: &SetupPayload,
+    anchor_event_id: &str,
+) -> Result<nostr::Event> {
+    let thread_ref = Some(setup_nudge_thread_ref(anchor_event_id)?);
+    let body = payload.nudge_body();
+    let author_hex = triggering_event.pubkey.to_hex();
+    let event_builder = buzz_sdk::build_message(
+        channel_id,
+        &body,
+        thread_ref.as_ref(),
+        &[&author_hex],
+        false,
+        &[],
+    )
+    .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
+    event_builder
+        .sign_with_keys(keys)
+        .map_err(|e| anyhow::anyhow!("failed to sign setup nudge: {e}"))
+}
+
 /// Build and publish a setup nudge reply to the triggering event.
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
@@ -643,49 +683,26 @@ async fn publish_setup_nudge(
     triggering_event: &nostr::Event,
     payload: &SetupPayload,
 ) -> Result<()> {
-    let edit_target = crate::queue::edit_target_id(triggering_event);
-    let target_event_id = match edit_target.as_deref() {
-        Some(target) => match fetch_edit_original(target, rest_client).await {
-            Some(original) => {
-                let thread_tags = crate::queue::parse_thread_tags(&original);
-                thread_tags
-                    .root_event_id
-                    .unwrap_or_else(|| target.to_string())
-            }
-            None => {
-                tracing::warn!(edit_event_id = %triggering_event.id, target_event_id = target,
-                    "setup-mode: original edit target unavailable; using target as nudge anchor");
-                target.to_string()
-            }
-        },
-        None => crate::queue::parse_thread_tags(triggering_event)
-            .root_event_id
-            .unwrap_or_else(|| triggering_event.id.to_hex()),
+    let original = match crate::queue::edit_target_id(triggering_event) {
+        Some(target) => fetch_edit_original(&target, rest_client).await,
+        None => None,
     };
-    let thread_ref = Some(setup_nudge_thread_ref(&target_event_id)?);
-
-    let body = payload.nudge_body();
-    let author_hex = triggering_event.pubkey.to_hex();
-
-    let event_builder = buzz_sdk::build_message(
+    let anchor_event_id = setup_nudge_anchor(triggering_event, original.as_ref());
+    if crate::queue::edit_target_id(triggering_event).is_some() && original.is_none() {
+        tracing::warn!(edit_event_id = %triggering_event.id, anchor_event_id,
+            "setup-mode: original edit target unavailable; using target as nudge anchor");
+    }
+    let signed = build_setup_nudge_event(
+        keys,
         channel_id,
-        &body,
-        thread_ref.as_ref(),
-        &[&author_hex], // p-tag the asker
-        false,
-        &[],
-    )
-    .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
-
-    let signed = event_builder
-        .sign_with_keys(keys)
-        .map_err(|e| anyhow::anyhow!("failed to sign setup nudge: {e}"))?;
-
+        triggering_event,
+        payload,
+        &anchor_event_id,
+    )?;
     publisher
         .publish_event(signed)
         .await
         .map_err(|e| anyhow::anyhow!("failed to publish setup nudge: {e}"))?;
-
     Ok(())
 }
 
@@ -1037,12 +1054,85 @@ mod tests {
     // nudge. They use the extracted `should_nudge_for_event` helper, which is
     // the exact code the live loop calls.
 
+    fn setup_test_payload() -> SetupPayload {
+        SetupPayload {
+            agent_name: "Fizz".into(),
+            agent_pubkey: "agent".into(),
+            requirements: vec![],
+        }
+    }
+
+    fn setup_edit(target: &str) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16),
+            "edited",
+        )
+        .tags([nostr::Tag::parse(["e", target]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap()
+    }
+
+    fn setup_original_threaded(root: &str) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16), "original")
+            .tags([nostr::Tag::parse(["e", root, "", "reply"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn nudge_e_tags(event: &nostr::Event) -> Vec<Vec<String>> {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .filter(|tag| tag[0] == "e")
+            .collect()
+    }
+
     #[test]
-    fn setup_nudge_edit_fallback_anchors_edit_target_not_edit_event() {
-        let target = "66".repeat(32);
-        let thread_ref = setup_nudge_thread_ref(&target).unwrap();
-        assert_eq!(thread_ref.root_event_id.to_hex(), target);
-        assert_eq!(thread_ref.parent_event_id.to_hex(), target);
+    fn setup_nudge_edit_threaded_original_builds_at_original_root() {
+        let original_id = "66".repeat(32);
+        let root_id = "77".repeat(32);
+        let edit = setup_edit(&original_id);
+        let original = setup_original_threaded(&root_id);
+        let anchor = setup_nudge_anchor(&edit, Some(&original));
+        let nudge = build_setup_nudge_event(
+            &nostr::Keys::generate(),
+            Uuid::new_v4(),
+            &edit,
+            &setup_test_payload(),
+            &anchor,
+        )
+        .unwrap();
+        assert_eq!(anchor, root_id);
+        assert_eq!(
+            nudge_e_tags(&nudge),
+            vec![vec!["e".into(), root_id, "".into(), "reply".into()]]
+        );
+    }
+
+    #[test]
+    fn setup_nudge_edit_fetch_failure_builds_at_target_never_edit_event() {
+        let target_id = "88".repeat(32);
+        let edit = setup_edit(&target_id);
+        let edit_id = edit.id.to_hex();
+        let anchor = setup_nudge_anchor(&edit, None);
+        let nudge = build_setup_nudge_event(
+            &nostr::Keys::generate(),
+            Uuid::new_v4(),
+            &edit,
+            &setup_test_payload(),
+            &anchor,
+        )
+        .unwrap();
+        assert_eq!(anchor, target_id);
+        let e_tags = nudge_e_tags(&nudge);
+        assert_eq!(
+            e_tags,
+            vec![vec!["e".into(), target_id, "".into(), "reply".into()]]
+        );
+        assert_ne!(e_tags[0][1], edit_id);
     }
 
     fn fake_event_id(byte: u8) -> EventId {
