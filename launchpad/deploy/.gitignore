@@ -1,0 +1,33 @@
+# Secrets — the whole point of the folder is that these never land in git.
+.env
+*.env
+!.env.example
+*.pem
+*.key
+id_*
+!id_*.pub.example
+vault-password*
+secrets.yml
+
+# Generated cloud-init. build-vps-clone.sh writes these from an inline heredoc;
+# any copy in the tree is a stale build output containing a real SSH public key.
+seed/
+seed.sample/
+*.iso
+
+# VM images and provider artifacts
+*.ova
+*.vdi
+*.vmdk
+
+# Ansible
+*.retry
+.ansible/
+ansible/inventory/*.local.yml
+
+# Measurement scratch. Evidence belongs on the GitHub issue, not in the repo
+# (#18 and #20: "no repository files change — this issue produces evidence").
+measurements/
+*.log
+
+.DS_Store
