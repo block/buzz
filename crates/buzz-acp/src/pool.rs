@@ -37,7 +37,7 @@ use crate::acp::{
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    BatchEvent, CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
@@ -339,6 +339,9 @@ pub struct SteerRequest {
     /// `queue::native_steer_framing()` + `queue::format_event_block` so
     /// the wording cannot drift from the cancel+merge fallback path.
     pub prompt_blocks: Vec<String>,
+    /// Event incorporated by this steer. The ACP client retains it as the
+    /// response anchor only after the agent positively acknowledges delivery.
+    pub response_anchor: Option<BatchEvent>,
     /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
@@ -564,6 +567,99 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Publish successful channel ACP text through the authenticated HTTP bridge.
+    pub publish_response: bool,
+}
+
+fn should_publish_automatic_response(
+    enabled: bool,
+    source: &PromptSource,
+    outcome: &PromptOutcome,
+    response_text: &str,
+) -> bool {
+    enabled
+        && matches!(source, PromptSource::Channel(_))
+        && matches!(outcome, PromptOutcome::Ok(StopReason::EndTurn))
+        && !response_text.trim().is_empty()
+}
+
+fn build_automatic_response_event(
+    keys: &nostr::Keys,
+    batch: &FlushBatch,
+    response_anchor: Option<&BatchEvent>,
+    response_text: &str,
+) -> Result<nostr::Event, buzz_sdk::SdkError> {
+    // A positively acknowledged non-cancelling steer becomes the response
+    // target. Otherwise match `queue::format_prompt`: the last current event
+    // defines scope. Cancelled events are prior-turn context, and their relay
+    // timestamps must never redirect this response to an older thread.
+    let latest = response_anchor
+        .or_else(|| batch.events.last())
+        .ok_or_else(|| buzz_sdk::SdkError::InvalidInput("response batch has no events".into()))?;
+    let thread_tags = crate::queue::parse_thread_tags(&latest.event);
+    let root_event_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|id| nostr::EventId::from_hex(id).ok())
+        .unwrap_or(latest.event.id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id,
+        parent_event_id: latest.event.id,
+    };
+    let author = latest.event.pubkey.to_hex();
+    buzz_sdk::build_message(
+        batch.channel_id,
+        response_text,
+        Some(&thread_ref),
+        &[author.as_str()],
+        false,
+        &[],
+    )?
+    .sign_with_keys(keys)
+    .map_err(|error| buzz_sdk::SdkError::InvalidInput(format!("response sign failed: {error}")))
+}
+
+async fn maybe_publish_automatic_response(
+    ctx: &PromptContext,
+    source: &PromptSource,
+    outcome: &PromptOutcome,
+    batch: Option<&FlushBatch>,
+    response_anchor: Option<&BatchEvent>,
+    response_text: &str,
+) {
+    if !should_publish_automatic_response(ctx.publish_response, source, outcome, response_text) {
+        return;
+    }
+    let Some(batch) = batch else {
+        return;
+    };
+    let event = match build_automatic_response_event(
+        &ctx.agent_keys,
+        batch,
+        response_anchor,
+        response_text,
+    ) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %batch.channel_id, "automatic ACP response build failed: {error}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), ctx.rest_client.submit_event(&event)).await {
+        Ok(Ok(_)) => tracing::info!(
+            channel = %batch.channel_id,
+            event_id = %event.id,
+            "published automatic ACP response"
+        ),
+        Ok(Err(error)) => tracing::warn!(
+            channel = %batch.channel_id,
+            "automatic ACP response publish failed: {error}"
+        ),
+        Err(_) => tracing::warn!(
+            channel = %batch.channel_id,
+            "automatic ACP response publish timed out"
+        ),
+    }
 }
 
 impl AgentPool {
@@ -2110,6 +2206,18 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        let response_text = agent.acp.take_response_text();
+                        let response_anchor = agent.acp.take_response_anchor();
+                        let outcome = PromptOutcome::Ok(StopReason::EndTurn);
+                        maybe_publish_automatic_response(
+                            &ctx,
+                            &source,
+                            &outcome,
+                            batch.as_ref(),
+                            response_anchor.as_ref(),
+                            &response_text,
+                        )
+                        .await;
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2125,7 +2233,7 @@ pub async fn run_prompt_task(
                             &turn_id,
                             agent,
                             source,
-                            PromptOutcome::Ok(StopReason::EndTurn),
+                            outcome,
                             None, // turn succeeded — batch was processed, no requeue
                         );
                         return;
@@ -2138,6 +2246,19 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            let response_text = agent.acp.take_response_text();
+            let response_anchor = agent.acp.take_response_anchor();
+            let outcome = PromptOutcome::Ok(stop_reason.clone());
+            maybe_publish_automatic_response(
+                &ctx,
+                &source,
+                &outcome,
+                batch.as_ref(),
+                response_anchor.as_ref(),
+                &response_text,
+            )
+            .await;
 
             let should_rotate = matches!(
                 stop_reason,
@@ -2183,14 +2304,7 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            send_prompt_result(
-                &result_tx,
-                &turn_id,
-                agent,
-                source,
-                PromptOutcome::Ok(stop_reason),
-                None,
-            );
+            send_prompt_result(&result_tx, &turn_id, agent, source, outcome, None);
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
@@ -6542,7 +6656,240 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_response: false,
         }
+    }
+
+    #[test]
+    fn automatic_response_event_replies_to_latest_trigger_and_mentions_author() {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let channel_id = Uuid::new_v4();
+        let author = nostr::Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .sign_with_keys(&author)
+            .expect("root event");
+        let latest = EventBuilder::new(Kind::Custom(9), "latest")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["e", &root.id.to_hex(), "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&author)
+            .expect("latest event");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: latest.clone(),
+                prompt_tag: "mentions".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let agent = nostr::Keys::generate();
+
+        let response = build_automatic_response_event(&agent, &batch, None, "done")
+            .expect("response event should build");
+        assert_eq!(response.pubkey, agent.public_key());
+        assert_eq!(response.content, "done");
+        let tags: Vec<Vec<String>> = response
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags.contains(&vec!["h".into(), channel_id.to_string()]));
+        assert!(tags.contains(&vec![
+            "e".into(),
+            root.id.to_hex(),
+            "".into(),
+            "root".into()
+        ]));
+        assert!(tags.contains(&vec![
+            "e".into(),
+            latest.id.to_hex(),
+            "".into(),
+            "reply".into()
+        ]));
+        assert!(tags.contains(&vec!["p".into(), author.public_key().to_hex()]));
+    }
+
+    #[test]
+    fn automatic_response_ignores_newer_cancelled_event_when_selecting_reply_target() {
+        use nostr::{EventBuilder, Kind, Tag, Timestamp};
+
+        let channel_id = Uuid::new_v4();
+        let current_author = nostr::Keys::generate();
+        let cancelled_author = nostr::Keys::generate();
+        let current_root = EventBuilder::new(Kind::Custom(9), "current root")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .custom_created_at(Timestamp::from(50))
+            .sign_with_keys(&current_author)
+            .expect("current root");
+        let current = EventBuilder::new(Kind::Custom(9), "current trigger")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["e", &current_root.id.to_hex(), "", "reply"]).expect("reply tag"),
+            ])
+            .custom_created_at(Timestamp::from(100))
+            .sign_with_keys(&current_author)
+            .expect("current trigger");
+        let cancelled = EventBuilder::new(Kind::Custom(9), "prior cancelled trigger")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .custom_created_at(Timestamp::from(200))
+            .sign_with_keys(&cancelled_author)
+            .expect("cancelled trigger");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: current.clone(),
+                prompt_tag: "mentions".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![crate::queue::BatchEvent {
+                event: cancelled.clone(),
+                prompt_tag: "cancelled".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancel_reason: Some(crate::queue::CancelReason::Steer),
+        };
+
+        let response =
+            build_automatic_response_event(&nostr::Keys::generate(), &batch, None, "done")
+                .expect("response event should build");
+        let tags: Vec<Vec<String>> = response
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+
+        assert!(tags.contains(&vec![
+            "e".into(),
+            current_root.id.to_hex(),
+            "".into(),
+            "root".into()
+        ]));
+        assert!(tags.contains(&vec![
+            "e".into(),
+            current.id.to_hex(),
+            "".into(),
+            "reply".into()
+        ]));
+        assert!(tags.contains(&vec!["p".into(), current_author.public_key().to_hex()]));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.get(1) == Some(&cancelled.id.to_hex())));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.get(1) == Some(&cancelled_author.public_key().to_hex())));
+    }
+
+    #[test]
+    fn automatic_response_prefers_successful_native_steer_anchor() {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let channel_id = Uuid::new_v4();
+        let original_author = nostr::Keys::generate();
+        let steered_author = nostr::Keys::generate();
+        let original = EventBuilder::new(Kind::Custom(9), "original")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .sign_with_keys(&original_author)
+            .expect("original event");
+        let steered_root = EventBuilder::new(Kind::Custom(9), "steered root")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .sign_with_keys(&steered_author)
+            .expect("steered root");
+        let steered = EventBuilder::new(Kind::Custom(9), "steered trigger")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["e", &steered_root.id.to_hex(), "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&steered_author)
+            .expect("steered trigger");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: original.clone(),
+                prompt_tag: "mentions".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let anchor = BatchEvent {
+            event: steered.clone(),
+            prompt_tag: "mentions".into(),
+            received_at: std::time::Instant::now(),
+        };
+
+        let response =
+            build_automatic_response_event(&nostr::Keys::generate(), &batch, Some(&anchor), "done")
+                .expect("response event should build");
+        let tags: Vec<Vec<String>> = response
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+
+        assert!(tags.contains(&vec![
+            "e".into(),
+            steered_root.id.to_hex(),
+            "".into(),
+            "root".into()
+        ]));
+        assert!(tags.contains(&vec![
+            "e".into(),
+            steered.id.to_hex(),
+            "".into(),
+            "reply".into()
+        ]));
+        assert!(tags.contains(&vec!["p".into(), steered_author.public_key().to_hex()]));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.get(1) == Some(&original.id.to_hex())));
+        assert!(!tags
+            .iter()
+            .any(|tag| tag.get(1) == Some(&original_author.public_key().to_hex())));
+    }
+
+    #[test]
+    fn automatic_response_is_gated_to_enabled_successful_nonempty_channel_turns() {
+        assert!(should_publish_automatic_response(
+            true,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &PromptOutcome::Ok(StopReason::EndTurn),
+            "answer",
+        ));
+        assert!(!should_publish_automatic_response(
+            false,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &PromptOutcome::Ok(StopReason::EndTurn),
+            "answer",
+        ));
+        assert!(!should_publish_automatic_response(
+            true,
+            &PromptSource::Heartbeat,
+            &PromptOutcome::Ok(StopReason::EndTurn),
+            "answer",
+        ));
+        assert!(!should_publish_automatic_response(
+            true,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &PromptOutcome::Cancelled,
+            "answer",
+        ));
+        assert!(!should_publish_automatic_response(
+            true,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &PromptOutcome::Ok(StopReason::MaxTokens),
+            "answer",
+        ));
+        assert!(!should_publish_automatic_response(
+            true,
+            &PromptSource::Channel(Uuid::new_v4()),
+            &PromptOutcome::Ok(StopReason::EndTurn),
+            "  \n",
+        ));
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

@@ -66,6 +66,18 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+const AUTOMATIC_RESPONSE_INSTRUCTION: &str = "[ACP Response Delivery]\n\
+For the ordinary reply to the triggering Buzz channel message: Return the ordinary reply as your final ACP text response. Do not run `buzz messages send` for that ordinary reply; the buzz-acp harness will publish the successful final ACP text with the correct agent identity and thread tags. Continue to retain the Buzz CLI for other operations such as reads, reactions, channel management, explicit additional messages, and requested cross-channel coordination.";
+
+fn effective_base_prompt(base_prompt: Option<&str>, publish_response: bool) -> Option<String> {
+    match (base_prompt, publish_response) {
+        (Some(base), true) => Some(format!("{base}\n\n{AUTOMATIC_RESPONSE_INSTRUCTION}")),
+        (None, true) => Some(AUTOMATIC_RESPONSE_INSTRUCTION.to_string()),
+        (Some(base), false) => Some(base.to_string()),
+        (None, false) => None,
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1809,6 +1821,15 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let configured_base_prompt = if config.no_base_prompt {
+        None
+    } else {
+        base_prompt_content
+            .as_deref()
+            .or(Some(include_str!("base_prompt.md")))
+    };
+    let base_prompt = effective_base_prompt(configured_base_prompt, config.publish_response)
+        .map(|content| Box::leak(content.into_boxed_str()) as &'static str);
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1819,13 +1840,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
-        base_prompt: if config.no_base_prompt {
-            None
-        } else if let Some(content) = base_prompt_content {
-            Some(Box::leak(content.into_boxed_str()))
-        } else {
-            Some(include_str!("base_prompt.md"))
-        },
+        base_prompt,
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd: std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
@@ -1843,6 +1858,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        publish_response: config.publish_response,
     });
 
     if !config.memory_enabled {
@@ -3185,6 +3201,7 @@ fn try_native_steer(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
         prompt_blocks: vec![body],
+        response_anchor: Some(be),
         ack_tx,
     };
 
@@ -3972,6 +3989,16 @@ mod agent_draft_prompt_tests {
         assert!(prompt
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
+    }
+
+    #[test]
+    fn automatic_publication_instruction_replaces_only_ordinary_reply_delivery() {
+        let prompt = crate::effective_base_prompt(Some(include_str!("base_prompt.md")), true)
+            .expect("enabled mode should always provide an instruction");
+        assert!(prompt.contains("Return the ordinary reply as your final ACP text response"));
+        assert!(prompt.contains("Do not run `buzz messages send` for that ordinary reply"));
+        assert!(prompt.contains("retain the Buzz CLI for other operations"));
+        assert!(prompt.contains("`buzz reactions`"));
     }
 }
 
@@ -6208,6 +6235,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            publish_response: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6430,6 +6458,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            publish_response: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

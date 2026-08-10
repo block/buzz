@@ -482,6 +482,11 @@ pub struct CliArgs {
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Publish successful ACP text responses as threaded Buzz channel replies.
+    /// Disabled by default to avoid duplicate posts from agents that already send replies.
+    #[arg(long, env = "BUZZ_ACP_PUBLISH_RESPONSE", default_value_t = false)]
+    pub publish_response: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -559,6 +564,8 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Whether successful channel-turn ACP text is published by the harness.
+    pub publish_response: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1107,6 +1114,7 @@ impl Config {
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
+            publish_response: args.publish_response,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1478,6 +1486,7 @@ mod tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            publish_response: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2204,6 +2213,19 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn publish_response_defaults_off_and_requires_explicit_opt_in() {
+        let key = "1".repeat(64);
+        let default_args = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default_args.publish_response);
+
+        let enabled_args =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--publish-response"]);
+        assert!(enabled_args.publish_response);
+        let config = Config::from_args(enabled_args).expect("opt-in config should be valid");
+        assert!(config.publish_response);
     }
 
     #[test]
