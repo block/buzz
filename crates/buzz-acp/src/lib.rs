@@ -185,6 +185,11 @@ impl OwnerCache {
     }
 }
 
+/// Check if `author` is the exact registered owner.
+fn is_owner(author: &str, owner_cache: &OwnerCache) -> bool {
+    owner_cache.get().is_some_and(|owner| author == owner)
+}
+
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
 ///
 /// For unknown authors, queries their kind:0 profile to extract the NIP-OA
@@ -200,7 +205,7 @@ async fn is_owner_or_sibling(
     };
 
     // Direct owner check.
-    if author == my_owner {
+    if is_owner(author, owner_cache) {
         return true;
     }
 
@@ -217,9 +222,9 @@ async fn is_owner_or_sibling(
 
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
+/// Coarse security policy applied before subscription rules. `OwnerOnly`
+/// accepts only the exact registered owner. `Allowlist` preserves the existing
+/// owner, same-owner sibling, and explicit external pubkey behavior.
 ///
 /// # DM hardening (`is_dm`)
 ///
@@ -227,11 +232,12 @@ async fn is_owner_or_sibling(
 /// message looks like a mention and would fire a turn. Combined with
 /// agent-initiated DMs (the agent can be asked to DM a third party), that
 /// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// lands in a DM with the agent can prompt it. To close that hole, `OwnerOnly`
+/// remains exact-owner-only in DMs. Other responding modes admit only the
+/// owner and cryptographically verified same-owner siblings — the explicit
+/// allowlist and `anyone` mode do NOT apply inside DMs. `Nobody` still drops
+/// everything. Callers must resolve `is_dm` fail-closed: unknown channel type
+/// ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -243,13 +249,16 @@ async fn author_allowed(
     if is_dm {
         return match respond_to {
             RespondTo::Nobody => false,
-            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
+            RespondTo::OwnerOnly => is_owner(author, owner_cache),
+            RespondTo::Allowlist | RespondTo::Anyone => {
+                is_owner_or_sibling(author, owner_cache, rest_client).await
+            }
         };
     }
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
-        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        RespondTo::OwnerOnly => is_owner(author, owner_cache),
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
@@ -2829,12 +2838,9 @@ async fn tokio_main() -> Result<()> {
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
+                            // OwnerOnly accepts only the exact registered owner.
+                            // Allowlist preserves same-owner siblings and adds
+                            // the explicit pubkey list for external people.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
@@ -2909,10 +2915,9 @@ async fn tokio_main() -> Result<()> {
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
-                                // Author eligibility (owner ∪ allowlist ∪ siblings)
-                                // is already enforced by the inbound author gate
-                                // above, so the mid-turn signal fires for every
-                                // event that reaches here.
+                                // Author eligibility is already enforced by the
+                                // inbound author gate above, so the mid-turn
+                                // signal fires for every event that reaches here.
                                 let signal = mode_gate_signal(
                                     config.multiple_event_handling,
                                     &author_hex,
@@ -5328,6 +5333,45 @@ mod author_gate_tests {
         cache
     }
 
+    fn signed_event(keys: &nostr::Keys, kind: u32) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), "trigger")
+            .sign_with_keys(keys)
+            .expect("test event must sign")
+    }
+
+    fn cache_for_keys(
+        owner: &nostr::Keys,
+        sibling: &nostr::Keys,
+        agent: &nostr::Keys,
+    ) -> OwnerCache {
+        let cache = OwnerCache::new(Some(owner.public_key().to_hex()));
+        cache.cache_sibling(sibling.public_key().to_hex(), true);
+        cache.cache_sibling(agent.public_key().to_hex(), false);
+        cache
+    }
+
+    async fn wildcard_matches(event: &nostr::Event, agent: &nostr::Keys) -> bool {
+        let rule = SubscriptionRule {
+            name: "wildcard".into(),
+            ..SubscriptionRule::default()
+        };
+        filter::match_event(event, Uuid::new_v4(), &[rule], &agent.public_key().to_hex())
+            .await
+            .is_some()
+    }
+
+    async fn owner_only_allows(event: &nostr::Event, is_dm: bool, cache: &OwnerCache) -> bool {
+        author_allowed(
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            &event.pubkey.to_hex(),
+            is_dm,
+            cache,
+            &dummy_rest_client(),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn test_allowlist_accepts_sibling_not_in_allowlist() {
         let cache = cache_with_sibling();
@@ -5422,30 +5466,84 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_owner_only_admits_owner_and_sibling_to_steer() {
-        let cache = cache_with_sibling();
-        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+    async fn strict_owner_accepts_owner_kind9_as_work() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+        let event = signed_event(&owner, 9);
+
+        assert!(wildcard_matches(&event, &agent).await);
+        assert!(owner_only_allows(&event, false, &cache).await);
+    }
+
+    #[tokio::test]
+    async fn strict_owner_rejects_sibling_kind9_as_work() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+        let event = signed_event(&sibling, 9);
+
+        assert!(wildcard_matches(&event, &agent).await);
+        assert!(!owner_only_allows(&event, false, &cache).await);
+    }
+
+    #[tokio::test]
+    async fn strict_owner_rejects_self_authored_kind9() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+        let event = signed_event(&agent, 9);
+
+        assert!(!owner_only_allows(&event, false, &cache).await);
+    }
+
+    #[tokio::test]
+    async fn strict_owner_rejects_sibling_lifecycle_kinds_even_when_filter_wildcard_matches() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+
+        for kind in [5, 7, 20002] {
+            let event = signed_event(&sibling, kind);
+            assert!(wildcard_matches(&event, &agent).await, "kind {kind}");
             assert!(
-                author_allowed(
-                    &RespondTo::OwnerOnly,
-                    &HashSet::new(),
-                    who,
-                    false,
-                    &cache,
-                    &dummy_rest_client()
-                )
-                .await,
-                "under default OwnerOnly, the {label} must be admitted so steering can fire"
+                !owner_only_allows(&event, false, &cache).await,
+                "sibling kind {kind} must not reach work"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn strict_owner_owner_message_cannot_seed_sibling_reply_chain() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+        let mut events = vec![signed_event(&owner, 9)];
+        events.extend((0..32).map(|_| signed_event(&sibling, 9)));
+
+        let mut eligible_count = 0;
+        for event in &events {
+            if wildcard_matches(event, &agent).await
+                && owner_only_allows(event, false, &cache).await
+            {
+                eligible_count += 1;
+            }
+        }
+
+        assert_eq!(eligible_count, 1);
     }
 
     // ── DM hardening ──────────────────────────────────────────────────────
     //
     // In a DM, clients auto-p-tag every participant, and an agent can be
     // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // the allowlist and `anyone` mode inside DMs. OwnerOnly remains exact
+    // owner; other responding modes admit only owner + verified siblings.
 
     #[tokio::test]
     async fn test_dm_rejects_allowlisted_external_pubkey() {
@@ -5483,13 +5581,20 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_dm_admits_owner_and_sibling_in_every_responding_mode() {
+    async fn strict_owner_dm_accepts_owner_but_rejects_sibling() {
+        let owner = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let cache = cache_for_keys(&owner, &sibling, &agent);
+
+        assert!(owner_only_allows(&signed_event(&owner, 9), true, &cache).await);
+        assert!(!owner_only_allows(&signed_event(&sibling, 9), true, &cache).await);
+    }
+
+    #[tokio::test]
+    async fn test_dm_admits_owner_and_sibling_in_non_strict_modes() {
         let cache = cache_with_sibling();
-        for mode in [
-            RespondTo::OwnerOnly,
-            RespondTo::Allowlist,
-            RespondTo::Anyone,
-        ] {
+        for mode in [RespondTo::Allowlist, RespondTo::Anyone] {
             for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
                 assert!(
                     author_allowed(
