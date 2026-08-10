@@ -1031,6 +1031,30 @@ async fn validate_forum_vote_target(
     Ok(())
 }
 
+/// Reject a chat/forum message whose body is blank.
+///
+/// Relay-side backstop for the kinds that render as a readable row in the
+/// timeline: 9, 40002, 45001, 45003, and the 40003 edits that rewrite them.
+/// Clients guard this too, but the relay is the only chokepoint every client
+/// shares, and a blank message is indistinguishable from a delivery failure
+/// once it renders: an empty row with an author and a timestamp. Accepting one
+/// turns a caller's silent mistake into permanent, replicated noise.
+///
+/// A caption-less attachment is not blank — its payload lives in `imeta` tags,
+/// so a message carrying at least one is allowed through with empty content.
+/// This exemption is load-bearing for edits specifically: a client that drops
+/// the caption from an image but keeps the image sends exactly that shape.
+fn validate_message_not_blank(event: &Event) -> Result<(), String> {
+    if !event.content.trim().is_empty() {
+        return Ok(());
+    }
+    let has_media = event.tags.iter().any(|t| t.kind().to_string() == "imeta");
+    if has_media {
+        return Ok(());
+    }
+    Err("message content must not be empty".to_string())
+}
+
 /// Validate kind:40008 diff event metadata tags.
 fn validate_diff_event(event: &Event) -> Result<(), String> {
     // Content max 60KB
@@ -2475,6 +2499,18 @@ async fn ingest_event_inner(
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if matches!(
+        kind_u32,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_FORUM_POST
+            | KIND_FORUM_COMMENT
+    ) {
+        validate_message_not_blank(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3701,6 +3737,73 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    // Regression: blank chat messages used to be accepted and stored, so a
+    // caller that published "" got a success response and readers got an empty
+    // row indistinguishable from a delivery failure.
+    #[test]
+    fn blank_message_validation_rejects_empty_content() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "", &[]);
+        assert!(validate_message_not_blank(&event).is_err());
+    }
+
+    #[test]
+    fn blank_message_validation_rejects_whitespace_only_content() {
+        for blank in ["   ", "\n", "\t\n  \r\n"] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, blank, &[]);
+            assert!(
+                validate_message_not_blank(&event).is_err(),
+                "whitespace-only body {blank:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_message_validation_accepts_normal_content() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "hello", &[]);
+        assert!(validate_message_not_blank(&event).is_ok());
+    }
+
+    // A caption-less attachment carries its payload in the imeta tag.
+    #[test]
+    fn blank_message_validation_accepts_empty_content_with_imeta() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "",
+            &[&["imeta", "url https://example.com/a.png"]],
+        );
+        assert!(validate_message_not_blank(&event).is_ok());
+    }
+
+    // kind:40002 renders in the timeline exactly like kind:9, so a blank one is
+    // equally unreadable and must be rejected on the same terms.
+    #[test]
+    fn blank_message_validation_covers_stream_message_v2() {
+        let blank = make_event_with_tags(KIND_STREAM_MESSAGE_V2, "  ", &[]);
+        assert!(validate_message_not_blank(&blank).is_err());
+        let ok = make_event_with_tags(KIND_STREAM_MESSAGE_V2, "hello", &[]);
+        assert!(validate_message_not_blank(&ok).is_ok());
+    }
+
+    // An edit rewrites its target's body, so a blank edit blanks a message that
+    // already said something.
+    #[test]
+    fn blank_message_validation_covers_edits() {
+        let blank = make_event_with_tags(KIND_STREAM_MESSAGE_EDIT, "", &[]);
+        assert!(validate_message_not_blank(&blank).is_err());
+    }
+
+    // …but dropping the caption from an image while keeping the image is a
+    // legitimate edit, and it arrives as empty content plus an imeta overlay.
+    #[test]
+    fn blank_message_validation_allows_edit_that_keeps_only_media() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE_EDIT,
+            "",
+            &[&["imeta", "url https://example.com/a.png"]],
+        );
+        assert!(validate_message_not_blank(&event).is_ok());
     }
 
     #[test]

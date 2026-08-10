@@ -40,6 +40,28 @@ fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Reject a human-readable message body that carries no content.
+///
+/// A blank message renders as an empty row that nobody can read, and the write
+/// path has no other floor: `check_content` only enforces a ceiling, so an
+/// empty string signs, publishes, and is accepted like any other message. The
+/// caller then sees a success response for a message that says nothing —
+/// silent failure, and the reason agents in particular fail this way is that
+/// `--content -` reading from a closed stdin yields `""` rather than an error.
+///
+/// `has_media` keeps caption-less attachments legal: a message whose whole
+/// payload is an imeta-tagged image is not blank, it just has no text.
+fn check_content_not_blank(content: &str, has_media: bool) -> Result<(), SdkError> {
+    if !has_media && content.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "message content must not be empty — refusing to publish a blank message \
+             (if you passed `--content -`, nothing was piped into stdin)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate hex string has at least `min_len` hex characters.
 fn check_hex_len(s: &str, min_len: usize, field: &str) -> Result<(), SdkError> {
     if s.len() < min_len || !s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -230,6 +252,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_content_not_blank(content, !media_tags.is_empty())?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
@@ -289,6 +312,7 @@ pub fn build_forum_post(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_content_not_blank(content, !media_tags.is_empty())?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
@@ -306,6 +330,7 @@ pub fn build_forum_comment(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    check_content_not_blank(content, !media_tags.is_empty())?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
@@ -386,12 +411,21 @@ pub fn build_diff_message(
 }
 
 /// Build an edit event targeting an existing message (kind 40003).
+///
+/// Blank content is rejected for the same reason it is on a new message: the
+/// edit replaces the target's body wholesale, so an empty one silently blanks a
+/// message that already said something. This builder emits no imeta tags, so an
+/// edit it produces can never be a caption-less attachment — the media-carrying
+/// edits that legitimately have empty content come from clients that overlay
+/// their own imeta tags, and those are unaffected by this path. Removing a
+/// message is `build_delete_message`, not an edit to "".
 pub fn build_edit(
     channel_id: Uuid,
     target_event_id: nostr::EventId,
     new_content: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
+    check_content_not_blank(new_content, false)?;
     let tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
@@ -2447,6 +2481,63 @@ mod tests {
         assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
     }
 
+    // Regression: a blank body used to sign and publish like any other message,
+    // rendering as an empty row while the caller got a success response. The
+    // path that produced it in practice was `--content -` reading from a closed
+    // stdin, which yields "" rather than an error.
+    #[test]
+    fn message_empty_content_rejected() {
+        let cid = uuid();
+        let result = build_message(cid, "", None, &[], false, &[]);
+        assert!(matches!(result, Err(SdkError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn message_whitespace_only_content_rejected() {
+        let cid = uuid();
+        for blank in ["   ", "\n", "\t\n  \r\n"] {
+            let result = build_message(cid, blank, None, &[], false, &[]);
+            assert!(
+                matches!(result, Err(SdkError::InvalidInput(_))),
+                "whitespace-only body {blank:?} must be rejected"
+            );
+        }
+    }
+
+    // A caption-less attachment is not blank — its payload is in the imeta tag.
+    #[test]
+    fn message_empty_content_allowed_with_media() {
+        let cid = uuid();
+        let media = vec![vec![
+            "imeta".to_string(),
+            "url https://example.com/a.png".to_string(),
+        ]];
+        assert!(build_message(cid, "", None, &[], false, &media).is_ok());
+    }
+
+    #[test]
+    fn forum_post_empty_content_rejected() {
+        let cid = uuid();
+        assert!(matches!(
+            build_forum_post(cid, "  ", &[], &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn forum_comment_empty_content_rejected() {
+        let cid = uuid();
+        let eid = event_id();
+        let tr = ThreadRef {
+            root_event_id: eid,
+            parent_event_id: eid,
+        };
+        assert!(matches!(
+            build_forum_comment(cid, "", &tr, &[], &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
     #[test]
     fn forum_post_happy_path() {
         let cid = uuid();
@@ -2609,6 +2700,20 @@ mod tests {
             build_edit(cid, eid, &big),
             Err(SdkError::ContentTooLarge { .. })
         ));
+    }
+
+    // An edit replaces the target's body wholesale, so an empty one blanks a
+    // message that already said something. Removing a message is a delete.
+    #[test]
+    fn edit_empty_content_rejected() {
+        let cid = uuid();
+        let eid = event_id();
+        for blank in ["", "   ", "\n"] {
+            assert!(
+                matches!(build_edit(cid, eid, blank), Err(SdkError::InvalidInput(_))),
+                "blank edit body {blank:?} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -273,6 +273,9 @@ mod tests {
 
     #[test]
     fn validate_content_size_empty() {
+        // Size-only helper: it enforces a ceiling, never a floor. Emptiness is
+        // a separate concern, rejected per-command (`cmd_send_message`) and in
+        // the SDK builders, because some content fields legitimately allow "".
         assert!(validate_content_size("").is_ok());
     }
 
