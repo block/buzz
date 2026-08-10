@@ -670,10 +670,6 @@ pub async fn dispatch_action(
 
         Delay { duration } => {
             let secs = parse_duration_secs(duration)?;
-            // Cap delay at 270 seconds (4.5 minutes) — must be less than default_timeout_secs (300s)
-            // to avoid non-deterministic StepTimeout. Long delays (hours/days)
-            // should use the scheduled resume pattern (future work: WF-09).
-            const MAX_DELAY_SECS: u64 = 270;
             if secs > MAX_DELAY_SECS {
                 return Err(WorkflowError::InvalidDefinition(format!(
                     "delay exceeds maximum of {MAX_DELAY_SECS} seconds (got {secs}s); \
@@ -698,6 +694,16 @@ pub async fn dispatch_action(
 fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
     Uuid::new_v4().to_string()
 }
+
+/// Maximum delay a `delay` step may request, in seconds.
+///
+/// Must stay below `default_timeout_secs` (300s) so a delay cannot trip a
+/// non-deterministic `StepTimeout`. Long delays (hours/days) should use the
+/// scheduled resume pattern (future work: WF-09).
+///
+/// Exposed as `pub(crate)` so `schema.rs` can reject over-long delays at
+/// definition time instead of leaving them to fail on every run.
+pub(crate) const MAX_DELAY_SECS: u64 = 270;
 
 /// Parse a duration string like "5m", "1h", "30s" into seconds.
 ///
