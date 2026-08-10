@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-function createStorage() {
+function createStorage(onSetItem = () => {}) {
   const values = new Map();
   return {
     getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
+    setItem: (key, value) => {
+      onSetItem(key, value);
+      values.set(key, String(value));
+    },
   };
 }
 
@@ -239,6 +242,11 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
       url: "http://localhost",
     },
   );
+  const writes = [];
+  Object.defineProperty(dom.window, "localStorage", {
+    configurable: true,
+    value: createStorage((key, value) => writes.push([key, String(value)])),
+  });
   Object.assign(globalThis, {
     document: dom.window.document,
     HTMLElement: dom.window.HTMLElement,
@@ -267,11 +275,27 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   await React.act(async () => root.render(React.createElement(Probe)));
   const revision = store.getPersistentAgentAudienceRevision(touchedScope);
   const renderCountBeforeTouch = renderCount;
+  writes.length = 0;
 
   await React.act(async () => {
     store.setPersistentAgentAudience(touchedScope, [agentA]);
   });
 
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0], storageKey);
+  assert.deepEqual(JSON.parse(writes[0][1])[touchedScope], [agentA]);
+  assert.equal(Object.keys(JSON.parse(writes[0][1])).at(-1), touchedScope);
+  assert.equal(
+    store.getPersistentAgentAudienceRevision(touchedScope),
+    revision,
+  );
+  assert.equal(renderCount, renderCountBeforeTouch);
+
+  writes.length = 0;
+  await React.act(async () => {
+    store.setPersistentAgentAudience(touchedScope, [agentA]);
+  });
+  assert.equal(writes.length, 0);
   assert.equal(
     store.getPersistentAgentAudienceRevision(touchedScope),
     revision,

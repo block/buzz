@@ -158,6 +158,7 @@ export function setPersistentAgentAudience(
     current.length === normalized.length &&
     current.every((pubkey, index) => pubkey === normalized[index])
   ) {
+    if (Object.keys(audiences).at(-1) === scope) return;
     const nextAudiences = { ...audiences };
     delete nextAudiences[scope];
     audiences = boundAudiences({ ...nextAudiences, [scope]: current });
