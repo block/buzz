@@ -3491,13 +3491,15 @@ test("members sidebar can invite and remove managed agents", async ({
     0,
   );
 
-  await expect(page.getByText(/Members · \d+/)).toBeVisible();
-  await page.getByTestId("channel-management-search-users").fill("a");
-  await expect(page.getByText("Members", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Members · \d+/)).toHaveCount(0);
-  await expect(
-    page.getByText("Not in this channel", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByTestId("members-sidebar-people-tab")).toContainText(
+    "People",
+  );
+  await expect(page.getByText("People", { exact: true })).toBeVisible();
+  await page.getByTestId("members-sidebar-agents-tab").click();
+  await expect(page.getByTestId("members-sidebar-agents-tab")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
 
   await page.getByTestId("channel-management-search-users").fill("char");
   await expect(
@@ -3696,6 +3698,8 @@ test("members modal does not show direct pubkey entry", async ({ page }) => {
 
 test("members modal separates people and agents", async ({ page }) => {
   const agentPubkey = "abab".repeat(16);
+  const outOfChannelAgentPubkey = "efef".repeat(16);
+  const personPubkey = "cdcd".repeat(16);
   await installMockBridge(page, {
     managedAgents: [
       {
@@ -3703,6 +3707,20 @@ test("members modal separates people and agents", async ({ page }) => {
         name: "Scout",
         channelNames: ["general"],
         status: "running",
+      },
+      {
+        pubkey: outOfChannelAgentPubkey,
+        name: "Scout Agent",
+        status: "stopped",
+      },
+    ],
+    searchProfiles: [
+      { pubkey: personPubkey, displayName: "Scout Person" },
+      {
+        pubkey: outOfChannelAgentPubkey,
+        displayName: "Scout Agent",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
       },
     ],
   });
@@ -3713,14 +3731,47 @@ test("members modal separates people and agents", async ({ page }) => {
     "data-state",
     "active",
   );
+  await expect(page.getByRole("tabpanel", { name: /People/ })).toBeVisible();
   await expect(page.getByText("Scout", { exact: true })).toHaveCount(0);
+
+  await page.getByTestId("channel-management-search-users").fill("scout");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${personPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-user-search-result-${agentPubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
+  ).toHaveCount(0);
 
   await page.getByTestId("members-sidebar-agents-tab").click();
   await expect(page.getByTestId("members-sidebar-agents-tab")).toHaveAttribute(
     "data-state",
     "active",
   );
+  await expect(page.getByRole("tabpanel", { name: /Agents/ })).toBeVisible();
+  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
+    "scout",
+  );
   await expect(page.getByText("Scout", { exact: true })).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-user-search-result-${personPubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
+  ).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await page.getByTestId("channel-members-trigger").click();
+  await expect(page.getByTestId("members-sidebar-people-tab")).toHaveAttribute(
+    "data-state",
+    "active",
+  );
+  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
+    "",
+  );
 });
 
 test("channel header omits the add agent action", async ({ page }) => {

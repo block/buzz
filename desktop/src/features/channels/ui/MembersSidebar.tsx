@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Bot, UserRoundPlus, X } from "lucide-react";
+import { UserRoundPlus, X } from "lucide-react";
 import {
   invalidateChannelState,
   useAddChannelMembersMutation,
@@ -40,7 +40,6 @@ import type {
   ManagedAgent,
   UserSearchResult,
 } from "@/shared/api/types";
-import { Button } from "@/shared/ui/button";
 import {
   Dialog,
   DialogClose,
@@ -50,10 +49,8 @@ import {
 } from "@/shared/ui/dialog";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
-import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
   MODAL_SEARCH_INPUT_CLASS,
   MODAL_SEARCH_SHELL_CLASS,
@@ -64,14 +61,12 @@ import {
   findManagedAgentRuntime,
   managedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
+import { AddMemberSearchResultRow } from "./AddMemberSearchResultRow";
 import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
-const MEMBER_ROW_INSET_DIVIDER_CLASS =
-  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
-
 function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
@@ -159,6 +154,12 @@ export function MembersSidebar({
   const [memberView, setMemberView] = React.useState<"people" | "agents">(
     "people",
   );
+  React.useEffect(() => {
+    if (open && channelId !== null) {
+      setMemberView("people");
+      setSearchQuery("");
+    }
+  }, [channelId, open]);
   const [inviteSubmissionErrors, setInviteSubmissionErrors] = React.useState<
     AddChannelMembersResult["errors"]
   >([]);
@@ -386,6 +387,13 @@ export function MembersSidebar({
     relayAgentsQuery.data,
     userSearchResults,
   ]);
+  const visibleAddSearchResults = React.useMemo(
+    () =>
+      addSearchResults.filter((candidate) =>
+        memberView === "agents" ? candidate.isAgent : !candidate.isAgent,
+      ),
+    [addSearchResults, memberView],
+  );
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
@@ -398,7 +406,7 @@ export function MembersSidebar({
   const addSearchOwnerPubkeys = React.useMemo(
     () => [
       ...new Set(
-        addSearchResults
+        visibleAddSearchResults
           .map((user) => user.ownerPubkey)
           .filter((pubkey): pubkey is string =>
             Boolean(
@@ -409,7 +417,7 @@ export function MembersSidebar({
           ),
       ),
     ],
-    [addSearchResults, identityQuery.data?.pubkey],
+    [identityQuery.data?.pubkey, visibleAddSearchResults],
   );
   const addSearchOwnerProfilesQuery = useUsersBatchQuery(
     addSearchOwnerPubkeys,
@@ -722,12 +730,15 @@ export function MembersSidebar({
                   setSearchQuery(event.target.value);
                 }}
                 onKeyDown={(event) => {
-                  if (event.key !== "Enter" || addSearchResults.length === 0) {
+                  if (
+                    event.key !== "Enter" ||
+                    visibleAddSearchResults.length === 0
+                  ) {
                     return;
                   }
 
                   event.preventDefault();
-                  void handleAddSearchResult(addSearchResults[0]);
+                  void handleAddSearchResult(visibleAddSearchResults[0]);
                 }}
                 placeholder={
                   canAddMembers
@@ -771,149 +782,153 @@ export function MembersSidebar({
                 Agents <span className="ml-1 opacity-60">{bots.length}</span>
               </TabsTrigger>
             </TabsList>
-          </Tabs>
-
-          <div className="max-h-[calc(100vh-12rem)] overflow-y-auto pb-6">
-            <section>
-              <div
-                className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
-                data-testid="members-sidebar-people"
-                onScroll={handlePeopleSearchScroll}
-              >
-                <SearchResultSectionTitle>
-                  {memberView === "people" ? "People" : "Agents"}
-                </SearchResultSectionTitle>
-                {normalizedSearchQuery ? (
-                  <div>
-                    {filteredActiveMembers.map((member) =>
-                      renderMemberCard(member, isBot(member)),
-                    )}
-                    {canAddMembers ? (
-                      <>
-                        {addSearchResults.length > 0 || isAddSearchLoading ? (
-                          <SearchResultSectionTitle>
-                            Not in this channel
-                          </SearchResultSectionTitle>
+            <TabsContent className="mt-0" value={memberView}>
+              <div className="max-h-[calc(100vh-12rem)] overflow-y-auto pb-6">
+                <section>
+                  <div
+                    className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
+                    data-testid="members-sidebar-people"
+                    onScroll={handlePeopleSearchScroll}
+                  >
+                    <SearchResultSectionTitle>
+                      {memberView === "people" ? "People" : "Agents"}
+                    </SearchResultSectionTitle>
+                    {normalizedSearchQuery ? (
+                      <div>
+                        {filteredActiveMembers.map((member) =>
+                          renderMemberCard(member, isBot(member)),
+                        )}
+                        {canAddMembers ? (
+                          <>
+                            {visibleAddSearchResults.length > 0 ||
+                            isAddSearchLoading ? (
+                              <SearchResultSectionTitle>
+                                Not in this channel
+                              </SearchResultSectionTitle>
+                            ) : null}
+                            {visibleAddSearchResults.map((user) => (
+                              <AddMemberSearchResultRow
+                                disabled={
+                                  addingMemberPubkeys.has(user.pubkey) ||
+                                  isArchived
+                                }
+                                key={user.pubkey}
+                                label={formatAddCandidateName(user)}
+                                onSelect={(selectedUser) => {
+                                  void handleAddSearchResult(selectedUser);
+                                }}
+                                ownerLabel={formatOwnerLabel(
+                                  user.ownerPubkey,
+                                  identityQuery.data?.pubkey,
+                                  addSearchOwnerProfilesQuery.data?.profiles,
+                                )}
+                                user={user}
+                              />
+                            ))}
+                            {isAddSearchLoading ? (
+                              <p className="px-4 py-3 text-sm text-muted-foreground">
+                                Searching...
+                              </p>
+                            ) : null}
+                          </>
                         ) : null}
-                        {addSearchResults.map((user) => (
-                          <AddMemberSearchResultRow
-                            disabled={
-                              addingMemberPubkeys.has(user.pubkey) || isArchived
-                            }
-                            key={user.pubkey}
-                            onSelect={(selectedUser) => {
-                              void handleAddSearchResult(selectedUser);
-                            }}
-                            ownerLabel={formatOwnerLabel(
-                              user.ownerPubkey,
-                              identityQuery.data?.pubkey,
-                              addSearchOwnerProfilesQuery.data?.profiles,
-                            )}
-                            user={user}
-                          />
-                        ))}
-                        {isAddSearchLoading ? (
+                        {filteredActiveMembers.length === 0 &&
+                        visibleAddSearchResults.length === 0 &&
+                        !isAddSearchLoading ? (
                           <p className="px-4 py-3 text-sm text-muted-foreground">
-                            Searching...
+                            {memberView === "people"
+                              ? "No matching people."
+                              : "No matching agents."}
                           </p>
                         ) : null}
-                      </>
-                    ) : null}
-                    {filteredActiveMembers.length === 0 &&
-                    addSearchResults.length === 0 &&
-                    !isAddSearchLoading ? (
+                      </div>
+                    ) : filteredActiveMembers.length > 0 ? (
+                      <VirtualizedList
+                        className="h-[calc(100%_-_2.25rem)]"
+                        getItemKey={(member) => member.pubkey}
+                        items={filteredActiveMembers}
+                        renderItem={(member) =>
+                          renderMemberCard(member, isBot(member))
+                        }
+                      />
+                    ) : (
                       <p className="px-4 py-3 text-sm text-muted-foreground">
-                        {memberView === "people"
-                          ? "No matching people."
-                          : "No matching agents."}
+                        {membersQuery.isLoading
+                          ? "Loading members..."
+                          : normalizedSearchQuery
+                            ? "No members match your search."
+                            : memberView === "people"
+                              ? "No people found."
+                              : "No agents found."}
                       </p>
-                    ) : null}
-                  </div>
-                ) : filteredActiveMembers.length > 0 ? (
-                  <VirtualizedList
-                    className="h-[calc(100%_-_2.25rem)]"
-                    getItemKey={(member) => member.pubkey}
-                    items={filteredActiveMembers}
-                    renderItem={(member) =>
-                      renderMemberCard(member, isBot(member))
-                    }
-                  />
-                ) : (
-                  <p className="px-4 py-3 text-sm text-muted-foreground">
-                    {membersQuery.isLoading
-                      ? "Loading members..."
-                      : normalizedSearchQuery
-                        ? "No members match your search."
-                        : memberView === "people"
-                          ? "No people found."
-                          : "No agents found."}
-                  </p>
-                )}
-              </div>
-            </section>
-
-            {archived.length > 0 ? (
-              <section className="mt-4">
-                <details
-                  className="group/archived"
-                  data-testid="members-sidebar-archived"
-                >
-                  <summary className="flex cursor-pointer items-center gap-2 list-none [&::-webkit-details-marker]:hidden">
-                    <h2 className="text-sm font-semibold tracking-tight text-muted-foreground">
-                      Archived
-                    </h2>
-                    <span
-                      className="text-muted-foreground"
-                      data-testid="members-sidebar-archived-count"
-                    >
-                      ({archived.length})
-                    </span>
-                    <span className="ml-auto text-xs text-muted-foreground transition-transform group-open/archived:rotate-90">
-                      ▸
-                    </span>
-                  </summary>
-                  <div
-                    className="mt-2 space-y-2"
-                    data-testid="members-sidebar-archived-list"
-                  >
-                    {filteredArchivedMembers.map((member) =>
-                      renderMemberCard(member, isBot(member)),
                     )}
-                    {filteredArchivedMembers.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">
-                        No archived members match your search.
-                      </p>
-                    ) : null}
                   </div>
-                </details>
-              </section>
-            ) : null}
+                </section>
 
-            {changeRoleError ? (
-              <p
-                className="mt-4 text-sm text-destructive"
-                data-testid="members-sidebar-action-error"
-              >
-                {changeRoleError}
-              </p>
-            ) : null}
+                {archived.length > 0 ? (
+                  <section className="mt-4">
+                    <details
+                      className="group/archived"
+                      data-testid="members-sidebar-archived"
+                    >
+                      <summary className="flex cursor-pointer items-center gap-2 list-none [&::-webkit-details-marker]:hidden">
+                        <h2 className="text-sm font-semibold tracking-tight text-muted-foreground">
+                          Archived
+                        </h2>
+                        <span
+                          className="text-muted-foreground"
+                          data-testid="members-sidebar-archived-count"
+                        >
+                          ({archived.length})
+                        </span>
+                        <span className="ml-auto text-xs text-muted-foreground transition-transform group-open/archived:rotate-90">
+                          ▸
+                        </span>
+                      </summary>
+                      <div
+                        className="mt-2 space-y-2"
+                        data-testid="members-sidebar-archived-list"
+                      >
+                        {filteredArchivedMembers.map((member) =>
+                          renderMemberCard(member, isBot(member)),
+                        )}
+                        {filteredArchivedMembers.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">
+                            No archived members match your search.
+                          </p>
+                        ) : null}
+                      </div>
+                    </details>
+                  </section>
+                ) : null}
 
-            {addMembersMutation.error instanceof Error ? (
-              <p className="mt-4 text-sm text-destructive">
-                {addMembersMutation.error.message}
-              </p>
-            ) : null}
-
-            {inviteSubmissionErrors.length > 0 ? (
-              <div className="mt-4 space-y-1 text-sm text-destructive">
-                {inviteSubmissionErrors.map((error) => (
-                  <p key={`${error.pubkey}-${error.error}`}>
-                    {truncatePubkey(error.pubkey)}: {error.error}
+                {changeRoleError ? (
+                  <p
+                    className="mt-4 text-sm text-destructive"
+                    data-testid="members-sidebar-action-error"
+                  >
+                    {changeRoleError}
                   </p>
-                ))}
+                ) : null}
+
+                {addMembersMutation.error instanceof Error ? (
+                  <p className="mt-4 text-sm text-destructive">
+                    {addMembersMutation.error.message}
+                  </p>
+                ) : null}
+
+                {inviteSubmissionErrors.length > 0 ? (
+                  <div className="mt-4 space-y-1 text-sm text-destructive">
+                    {inviteSubmissionErrors.map((error) => (
+                      <p key={`${error.pubkey}-${error.error}`}>
+                        {truncatePubkey(error.pubkey)}: {error.error}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
               </div>
-            ) : null}
-          </div>
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
       <EditRespondToDialog
@@ -939,81 +954,6 @@ function SearchResultSectionTitle({
     <div className="sticky top-0 z-10 mr-3 flex min-h-9 items-center gap-2 bg-background/95 px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground/75 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <span>{children}</span>
       {action ? <span>{action}</span> : null}
-    </div>
-  );
-}
-
-function AddMemberSearchResultRow({
-  disabled,
-  onSelect,
-  ownerLabel,
-  user,
-}: {
-  disabled: boolean;
-  onSelect: (user: UserSearchResult) => void;
-  ownerLabel?: string | null;
-  user: UserSearchResult;
-}) {
-  return (
-    <div
-      className={cn(
-        "group/add-result relative isolate flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
-        MEMBER_ROW_INSET_DIVIDER_CLASS,
-      )}
-      data-testid={`channel-user-search-result-${user.pubkey}`}
-    >
-      <button
-        aria-label={`Select ${formatAddCandidateName(user)}`}
-        className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-        disabled={disabled}
-        onClick={() => onSelect(user)}
-        type="button"
-      />
-      <UserAvatar
-        avatarUrl={user.avatarUrl}
-        className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
-        displayName={formatAddCandidateName(user)}
-        size="sm"
-      />
-      <div className="pointer-events-none relative z-10 min-w-0 flex-1">
-        {user.isAgent ? (
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-sm font-medium tracking-tight">
-                {formatAddCandidateName(user)}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <Bot aria-hidden="true" className="h-4 w-4" />
-                agent
-              </span>
-            </div>
-            <span className="block truncate font-mono text-2xs text-muted-foreground">
-              {truncatePubkey(user.pubkey)}
-            </span>
-            {ownerLabel ? (
-              <span className="block truncate text-xs text-muted-foreground">
-                managed by {ownerLabel}
-              </span>
-            ) : null}
-          </div>
-        ) : (
-          <span className="block truncate text-sm font-medium tracking-tight">
-            {formatAddCandidateName(user)}
-          </span>
-        )}
-      </div>
-      <Button
-        className="relative z-20 shrink-0"
-        disabled={disabled}
-        onClick={(event) => {
-          event.stopPropagation();
-          onSelect(user);
-        }}
-        size="sm"
-        type="button"
-      >
-        Add
-      </Button>
     </div>
   );
 }
