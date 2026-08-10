@@ -141,102 +141,111 @@ test.beforeEach(async ({ page }, testInfo) => {
               imageDomain: "pbs.twimg.com",
             },
           }
-        : testInfo.title.includes("mixed link preview image outcomes")
+        : testInfo.title.includes("fragment link previews")
           ? {
+              // Metadata is keyed by the canonical, fragment-less URL — the
+              // shape a real OpenGraph/HTML fetch resolves against. A resolver
+              // that fetches with the raw `#fragment` attached would miss these
+              // keys and drop the card, which is exactly the bug under test.
               linkPreviewMetadataByHref: {
-                "https://github.com/block/buzz/pull/4001": {
-                  title: "Loaded preview image",
+                "https://github.com/block/buzz/pull/3767": {
+                  title: "Buzz pull request 3767",
                   siteName: "GitHub",
-                  description: "The image request completed.",
-                  imageDataUrl:
-                    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-                  imageDomain: "opengraph.githubassets.com",
-                  imageFetchState: "image",
-                  imageRetryAfterMs: null,
-                },
-                "https://github.com/block/buzz/pull/4002": {
-                  title: "Rate-limited preview image",
-                  siteName: "GitHub",
-                  description: "Metadata remains available during cooldown.",
+                  description: "Fragment-bearing PR link.",
                   imageDataUrl: null,
                   imageDomain: null,
-                  imageFetchState: "transient_failure",
-                  imageRetryAfterMs: 900_000,
+                },
+                "https://github.com/block/buzz/pull/3867": {
+                  title: "Buzz pull request 3867",
+                  siteName: "GitHub",
+                  description: "Plain PR link.",
+                  imageDataUrl: null,
+                  imageDomain: null,
                 },
               },
             }
-          : testInfo.title.includes("link preview browser image error")
+          : testInfo.title.includes("mixed link preview image outcomes")
             ? {
-                linkPreviewMetadata: {
-                  title: "Invalid decoded preview image",
-                  siteName: "GitHub",
-                  description: "The browser should replace this image.",
-                  imageDataUrl: null,
-                  imageDomain: null,
-                  imageFetchState: "rejected",
-                  imageRetryAfterMs: null,
-                },
-              }
-            : testInfo.title.includes("link preview image geometry")
-              ? {
-                  linkPreviewMetadata: {
-                    title:
-                      "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+                linkPreviewMetadataByHref: {
+                  "https://github.com/block/buzz/pull/4001": {
+                    title: "Loaded preview image",
                     siteName: "GitHub",
-                    description: "A polished, stable preview for shared links.",
+                    description: "The image request completed.",
                     imageDataUrl:
                       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                     imageDomain: "opengraph.githubassets.com",
-                    faviconDataUrl:
-                      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                    imageFetchState: "image",
+                    imageRetryAfterMs: null,
                   },
-                  linkPreviewMetadataDelayMs: 800,
+                  "https://github.com/block/buzz/pull/4002": {
+                    title: "Rate-limited preview image",
+                    siteName: "GitHub",
+                    description: "Metadata remains available during cooldown.",
+                    imageDataUrl: null,
+                    imageDomain: null,
+                    imageFetchState: "transient_failure",
+                    imageRetryAfterMs: 900_000,
+                  },
+                },
+              }
+            : testInfo.title.includes("link preview browser image error")
+              ? {
+                  linkPreviewMetadata: {
+                    title: "Invalid decoded preview image",
+                    siteName: "GitHub",
+                    description: "The browser should replace this image.",
+                    imageDataUrl: null,
+                    imageDomain: null,
+                    imageFetchState: "rejected",
+                    imageRetryAfterMs: null,
+                  },
                 }
-              : testInfo.title.includes("link preview no-image layout") ||
-                  testInfo.title.includes("composer no-image link embeds")
+              : testInfo.title.includes("link preview image geometry")
                 ? {
                     linkPreviewMetadata: {
-                      title: "Buzz",
+                      title:
+                        "Ship a wider horizontal preview with a two-line title that wraps cleanly",
                       siteName: "GitHub",
                       description:
-                        "Open-source collaboration for the Buzz app.",
-                      imageDataUrl: null,
-                      imageDomain: null,
+                        "A polished, stable preview for shared links.",
+                      imageDataUrl:
+                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                     },
-                    linkPreviewMetadataDelayMs: 2_000,
+                    linkPreviewMetadataDelayMs: 800,
                   }
-                : testInfo.title.includes(
-                      "rich link preview preserves description newlines",
-                    )
+                : testInfo.title.includes("link preview no-image layout") ||
+                    testInfo.title.includes("composer no-image link embeds")
                   ? {
                       linkPreviewMetadata: {
-                        title: "Buzz pull request",
+                        title: "Buzz",
                         siteName: "GitHub",
                         description:
-                          "First paragraph line one.\nFirst paragraph line two.\n\nSecond paragraph.",
+                          "Open-source collaboration for the Buzz app.",
                         imageDataUrl: null,
                         imageDomain: null,
+                        faviconDataUrl:
+                          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                       },
+                      linkPreviewMetadataDelayMs: 2_000,
                     }
                   : testInfo.title.includes(
-                        "Enter during an in-flight snapshot upload",
+                        "rich link preview preserves description newlines",
                       )
                     ? {
                         linkPreviewMetadata: {
                           title: "Buzz pull request",
                           siteName: "GitHub",
-                          description: "A sender-authored preview snapshot.",
-                          imageDataUrl:
-                            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-                          imageDomain: "opengraph.githubassets.com",
+                          description:
+                            "First paragraph line one.\nFirst paragraph line two.\n\nSecond paragraph.",
+                          imageDataUrl: null,
+                          imageDomain: null,
                         },
-                        linkPreviewMetadataDelayMs: 300,
-                        linkPreviewUploadDelayMs: 1_200,
                       }
                     : testInfo.title.includes(
-                          "snapshot thumbnail upload failure",
+                          "Enter during an in-flight snapshot upload",
                         )
                       ? {
                           linkPreviewMetadata: {
@@ -246,44 +255,67 @@ test.beforeEach(async ({ page }, testInfo) => {
                             imageDataUrl:
                               "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                             imageDomain: "opengraph.githubassets.com",
-                            faviconDataUrl:
-                              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                           },
-                          // Fail only the thumbnail upload; the favicon survives,
-                          // so the snapshot degrades to a favicon-only preview.
-                          linkPreviewUploadErrorFilenames: [
-                            "link-preview-image",
-                          ],
+                          linkPreviewMetadataDelayMs: 300,
+                          linkPreviewUploadDelayMs: 1_200,
                         }
-                      : testInfo.title.includes("link preview") ||
-                          testInfo.title.includes("supported Compact")
+                      : testInfo.title.includes(
+                            "snapshot thumbnail upload failure",
+                          )
                         ? {
                             linkPreviewMetadata: {
                               title: "Buzz pull request",
                               siteName: "GitHub",
                               description:
                                 "A sender-authored preview snapshot.",
-                              imageDataUrl: null,
-                              imageDomain: null,
+                              imageDataUrl:
+                                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                              imageDomain: "opengraph.githubassets.com",
+                              faviconDataUrl:
+                                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                             },
-                            linkPreviewMetadataDelayMs: testInfo.title.includes(
-                              "loading card before cold resolver work",
-                            )
-                              ? 10_000
-                              : testInfo.title.includes("send does not wait")
-                                ? 3_000
-                                : testInfo.title.includes("style defaults") ||
-                                    testInfo.title.includes("attachment-sized")
-                                  ? 1_500
-                                  : undefined,
-                            linkPreviewMetadataStartBlockMs:
-                              testInfo.title.includes(
-                                "loading card before cold resolver work",
-                              )
-                                ? 150
-                                : undefined,
+                            // Fail only the thumbnail upload; the favicon survives,
+                            // so the snapshot degrades to a favicon-only preview.
+                            linkPreviewUploadErrorFilenames: [
+                              "link-preview-image",
+                            ],
                           }
-                        : undefined;
+                        : testInfo.title.includes("link preview") ||
+                            testInfo.title.includes("supported Compact")
+                          ? {
+                              linkPreviewMetadata: {
+                                title: "Buzz pull request",
+                                siteName: "GitHub",
+                                description:
+                                  "A sender-authored preview snapshot.",
+                                imageDataUrl: null,
+                                imageDomain: null,
+                              },
+                              linkPreviewMetadataDelayMs:
+                                testInfo.title.includes(
+                                  "loading card before cold resolver work",
+                                )
+                                  ? 10_000
+                                  : testInfo.title.includes(
+                                        "send does not wait",
+                                      )
+                                    ? 3_000
+                                    : testInfo.title.includes(
+                                          "style defaults",
+                                        ) ||
+                                        testInfo.title.includes(
+                                          "attachment-sized",
+                                        )
+                                      ? 1_500
+                                      : undefined,
+                              linkPreviewMetadataStartBlockMs:
+                                testInfo.title.includes(
+                                  "loading card before cold resolver work",
+                                )
+                                  ? 150
+                                  : undefined,
+                            }
+                          : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
     : baseMock;
@@ -650,13 +682,21 @@ test("rich link preview preserves description newlines after sending", async ({
   );
 });
 
-test("completed link previews send when one URL has an unsnapshotable fragment", async ({
+test("completed link previews normalize a trailing-fragment URL and still send", async ({
   page,
 }) => {
+  // The third URL carries a trailing `#` (empty fragment). It is normalized to
+  // its fragmentless canonical form for the preview and snapshot tag, so it now
+  // gets a card like the others; the message body keeps the original URL.
   const previewUrls = [
     "https://twitter.com/tellaho",
     "https://github.com/block/buzz/pull/3246",
     "https://x.com/tellaho/status/1884289176381841506#",
+  ];
+  const canonicalUrls = [
+    "https://twitter.com/tellaho",
+    "https://github.com/block/buzz/pull/3246",
+    "https://x.com/tellaho/status/1884289176381841506",
   ];
   const pastedText = previewUrls.join("\n");
   await page.goto("/");
@@ -677,11 +717,8 @@ test("completed link previews send when one URL has an unsnapshotable fragment",
   const composerPreviewCards = page.locator(
     "[data-link-preview-composer-card]",
   );
-  await expect(composerPreviewCards).toHaveCount(2);
-  await expect(
-    composerPreviewCards.locator(`a[href="${previewUrls[2]}"]`),
-  ).toHaveCount(0);
-  await waitForReadyComposerSnapshots(page, 2);
+  await expect(composerPreviewCards).toHaveCount(3);
+  await waitForReadyComposerSnapshots(page, 3);
 
   const send = page.getByTestId("send-message");
   await expect(send).toBeEnabled();
@@ -701,7 +738,7 @@ test("completed link previews send when one URL has an unsnapshotable fragment",
     (
       calls[0]?.payload as { linkPreviewTags?: string[][] | null } | undefined
     )?.linkPreviewTags?.map((tag) => tag[3]),
-  ).toEqual(previewUrls.slice(0, 2));
+  ).toEqual(canonicalUrls);
 });
 
 test("unresolvable preview disappears after the terminal miss", async ({
@@ -1149,6 +1186,44 @@ test("mixed link preview image outcomes keep Compact and Rich fallbacks stable",
   await expect(
     richCards.nth(1).locator("[data-link-preview-image-fallback]"),
   ).toHaveCount(0);
+});
+
+test("fragment link previews render a card per canonical URL", async ({
+  page,
+}) => {
+  // Two links into the SAME page differing only by `#fragment`, plus a link
+  // to a second page. The fragment variants collapse to one card (the preview
+  // is of the page, not the anchor); the second page adds a second card — two
+  // cards total. A resolver that keys previews on the raw fragment-bearing URL
+  // drops the fragment cards entirely (the reported bug).
+  const fragmentUrlA =
+    "https://github.com/block/buzz/pull/3767#pullrequestreview-4857569498";
+  const fragmentUrlB = "https://github.com/block/buzz/pull/3767#issuecomment-1";
+  const plainUrl = "https://github.com/block/buzz/pull/3867";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`${fragmentUrlA}\n${fragmentUrlB}\n${plainUrl}`);
+
+  const composerCards = page
+    .locator("[data-composer-link-previews]")
+    .locator('[data-link-preview="github-pull-request"]');
+  await expect(composerCards).toHaveCount(2);
+
+  await waitForReadyComposerSnapshots(page, 2);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  // Two preview cards: the fragment variants collapsed to the 3767 page, plus
+  // the 3867 page.
+  await expect(
+    row.locator('[data-link-preview="github-pull-request"]'),
+  ).toHaveCount(2);
+  // Both original fragment-bearing prose links survive intact and clickable —
+  // the fragment is a navigation anchor, only the preview is normalized.
+  await expect(row.locator(`a[href="${fragmentUrlA}"]`)).toBeVisible();
+  await expect(row.locator(`a[href="${fragmentUrlB}"]`)).toBeVisible();
 });
 
 test("link preview browser image errors render a fallback", async ({
