@@ -1,10 +1,7 @@
 use std::path::Path;
 
 use crate::managed_agents::{
-    discovery::{
-        classify_runtime, codex_adapter_availability, find_command, resolve_command,
-        KnownAcpRuntime,
-    },
+    discovery::{classify_runtime, codex_adapter_availability, find_command, KnownAcpRuntime},
     AcpAvailabilityStatus,
 };
 
@@ -39,14 +36,16 @@ pub(super) fn requirements(
 
     match availability {
         AcpAvailabilityStatus::Available => {
-            let Some(binary_path) = resolve_command(probe_args[0]) else {
+            let augmented_path = cli_probe::augmented_path();
+            let Some(binary_path) =
+                cli_probe::resolve_probe_command(probe_args[0], augmented_path.as_deref())
+            else {
                 return vec![missing_requirement(
                     probe_args,
                     setup_copy,
                     AcpAvailabilityStatus::Available,
                 )];
             };
-            let augmented_path = cli_probe::augmented_path();
             match cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref()) {
                 cli_probe::ProbeOutcome::LoggedIn => vec![],
                 cli_probe::ProbeOutcome::LoggedOut => vec![missing_requirement(
