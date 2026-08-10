@@ -610,6 +610,8 @@ pub async fn confirm_agent_snapshot_import(
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: vec![],
+            command_wrapper: None,
+            working_directory: None,
             mcp_command: String::new(),
             turn_timeout_seconds: 0,
             idle_timeout_seconds: snapshot.definition.idle_timeout_seconds,

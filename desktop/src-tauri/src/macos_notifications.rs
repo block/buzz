@@ -8,6 +8,8 @@
 
 use std::{
     collections::VecDeque,
+    ffi::OsStr,
+    path::Path,
     ptr::NonNull,
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
@@ -293,7 +295,32 @@ pub(crate) fn take_pending_activations() -> Result<Vec<serde_json::Value>, Strin
 }
 
 fn is_bundled_application() -> bool {
-    NSBundle::mainBundle().bundleIdentifier().is_some()
+    // `tauri dev` can give NSBundle.mainBundle a configured bundle identifier
+    // even though the executable is launched directly from `target/debug`.
+    // UserNotifications still rejects that process with an Objective-C
+    // exception, which cannot unwind through Rust and aborts the whole app.
+    // Require the executable to have the canonical macOS app-bundle layout in
+    // addition to an identifier before calling UNUserNotificationCenter.
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|executable| is_app_bundle_executable(&executable))
+        && NSBundle::mainBundle().bundleIdentifier().is_some()
+}
+
+fn is_app_bundle_executable(executable: &Path) -> bool {
+    let Some(macos_dir) = executable.parent() else {
+        return false;
+    };
+    let Some(contents_dir) = macos_dir.parent() else {
+        return false;
+    };
+    let Some(app_dir) = contents_dir.parent() else {
+        return false;
+    };
+
+    macos_dir.file_name() == Some(OsStr::new("MacOS"))
+        && contents_dir.file_name() == Some(OsStr::new("Contents"))
+        && app_dir.extension() == Some(OsStr::new("app"))
 }
 
 fn target_from_response(response: &UNNotificationResponse) -> Option<serde_json::Value> {
@@ -311,8 +338,9 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_bundled_application, parse_target, permission_state, queue_activation,
-        take_pending_activations, NotificationPermissionState, MAX_PENDING_ACTIVATIONS,
+        is_app_bundle_executable, is_bundled_application, parse_target, permission_state,
+        queue_activation, take_pending_activations, NotificationPermissionState,
+        MAX_PENDING_ACTIVATIONS,
     };
     use objc2_user_notifications::UNAuthorizationStatus;
 
@@ -334,6 +362,19 @@ mod tests {
     #[test]
     fn cargo_test_process_is_not_treated_as_bundled() {
         assert!(!is_bundled_application());
+    }
+
+    #[test]
+    fn only_canonical_app_bundle_executables_enable_notifications() {
+        assert!(is_app_bundle_executable(std::path::Path::new(
+            "/Applications/Buzz.app/Contents/MacOS/buzz-desktop"
+        )));
+        assert!(!is_app_bundle_executable(std::path::Path::new(
+            "/workspace/target/debug/buzz-desktop"
+        )));
+        assert!(!is_app_bundle_executable(std::path::Path::new(
+            "/workspace/Buzz.app/buzz-desktop"
+        )));
     }
 
     #[test]

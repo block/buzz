@@ -175,6 +175,8 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         agent_command: "buzz-agent".to_string(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,

@@ -828,6 +828,8 @@ pub async fn create_managed_agent(
             input.parallelism,
             linked_persona.as_ref(),
         )?;
+        let (command_wrapper, working_directory) =
+            crate::managed_agents::normalized_agent_launch_config(&input)?;
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -848,6 +850,8 @@ pub async fn create_managed_agent(
             agent_command,
             agent_command_override,
             agent_args,
+            command_wrapper,
+            working_directory,
             mcp_command,
             // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
             // store the schema default only. Use idle_timeout_seconds or
@@ -1353,9 +1357,6 @@ pub async fn delete_managed_agent(
 // Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
-// 3. Desktop's existing presence polling sees "offline" — UI updates automatically
-// No backend Tauri command needed. Presence IS the status.
-
 #[path = "agents_deploy.rs"]
 mod deploy;
 use deploy::build_deploy_payload;
@@ -1363,7 +1364,6 @@ use deploy::build_deploy_payload;
 use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
-
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]

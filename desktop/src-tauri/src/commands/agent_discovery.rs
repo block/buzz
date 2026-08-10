@@ -11,7 +11,9 @@ use crate::{
     relay::query_relay,
 };
 
+mod nxtlinq;
 mod post_install_verification;
+pub use nxtlinq::*;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
@@ -27,7 +29,6 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
 /// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
 /// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
-/// Pure planning function: never spawns a process. Tests use it to assert commands without real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
@@ -35,7 +36,6 @@ pub(crate) fn plan_adapter_install<'c>(
     adapter_probe_path: Option<&str>,
 ) -> Option<Vec<&'c str>> {
     match adapter_path {
-        // Adapter present and current — no install needed.
         Some(_) if runtime_id != "codex" => None,
         Some(path)
             if !crate::managed_agents::codex_adapter_is_outdated_with_path(

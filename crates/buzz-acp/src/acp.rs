@@ -158,6 +158,10 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the rejection
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Trust permission requests only after an enforcing Nxtlinq Gateway has
+    /// forwarded them. Disabled by default; enabling this without that wrapper
+    /// would turn unattended requests into implicit approvals.
+    trust_nxtlinq_gateway: bool,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -541,6 +545,8 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            trust_nxtlinq_gateway: std::env::var("BUZZ_ACP_TRUST_NXTLINQ_GATEWAY")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -1902,7 +1908,11 @@ impl AcpClient {
             options.len()
         );
 
-        let response = permission_denial_response(&id, options)?;
+        let response = if self.trust_nxtlinq_gateway {
+            permission_allow_once_response(&id, options)?
+        } else {
+            permission_denial_response(&id, options)?
+        };
 
         // Write the response first, then mark as responded.
         //
@@ -2046,6 +2056,33 @@ fn permission_denial_response(
     tracing::info!(
         target: "acp::permission",
         "rejecting permission id={id} with reject_once optionId={option_id:?}"
+    );
+    Ok(permission_response_selected(id, option_id))
+}
+
+/// Select `allow_once` only when the operator explicitly declares that an
+/// enforcing Nxtlinq Gateway is between this client and the Agent. A policy
+/// denial is answered by the Gateway itself and never reaches this function.
+fn permission_allow_once_response(
+    id: &serde_json::Value,
+    options: &[serde_json::Value],
+) -> Result<serde_json::Value, AcpError> {
+    let allow_once = options
+        .iter()
+        .find(|opt| opt.get("kind").and_then(|kind| kind.as_str()) == Some("allow_once"));
+    let Some(option) = allow_once else {
+        tracing::warn!(
+            target: "acp::permission",
+            "trusted gateway request id={id} has no allow_once option; cancelling"
+        );
+        return Ok(permission_response_cancelled(id));
+    };
+    let option_id = option["optionId"]
+        .as_str()
+        .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+    tracing::info!(
+        target: "acp::permission",
+        "approving gateway-authorized permission id={id} with allow_once optionId={option_id:?}"
     );
     Ok(permission_response_selected(id, option_id))
 }
@@ -2335,6 +2372,29 @@ mod tests {
             Some("opt-reject-42"),
             "must select reject_once even when allow options are offered"
         );
+    }
+
+    #[test]
+    fn trusted_gateway_permission_selects_allow_once_by_kind() {
+        let options = options(
+            r#"[
+            {"optionId": "reject-random", "name": "Reject", "kind": "reject_once"},
+            {"optionId": "allow-random", "name": "Allow", "kind": "allow_once"}
+        ]"#,
+        );
+        let response = permission_allow_once_response(&serde_json::json!(8), &options)
+            .expect("allow response");
+        assert_eq!(outcome(&response), Some("selected"));
+        assert_eq!(response["result"]["outcome"]["optionId"], "allow-random");
+    }
+
+    #[test]
+    fn trusted_gateway_request_without_allow_once_is_cancelled() {
+        let options =
+            options(r#"[{"optionId": "reject-random", "name": "Reject", "kind": "reject_once"}]"#);
+        let response = permission_allow_once_response(&serde_json::json!(8), &options)
+            .expect("cancel response");
+        assert_eq!(outcome(&response), Some("cancelled"));
     }
 
     /// Fail-closed backstop: an adapter that offers no `reject_once` must still

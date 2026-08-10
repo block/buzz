@@ -2423,6 +2423,7 @@ mod tests {
             hints_enabled: true,
             thinking_effort: None,
             prompt_caching: true,
+            nxtlinq_permission_bridge: false,
         }
     }
 

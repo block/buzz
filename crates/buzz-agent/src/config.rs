@@ -778,6 +778,8 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// Require Nxtlinq Gateway authorization evidence before filesystem MCP calls.
+    pub nxtlinq_permission_bridge: bool,
 }
 
 impl Config {
@@ -886,6 +888,7 @@ impl Config {
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            nxtlinq_permission_bridge: parse_env("BUZZ_AGENT_NXTLINQ_PERMISSION_BRIDGE", 0u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -928,6 +931,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            nxtlinq_permission_bridge: false,
             prompt_caching: false,
         }
     }

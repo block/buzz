@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod buzz_message_send;
 mod paths;
 mod read_file;
 mod rg;
@@ -47,6 +48,17 @@ impl DevMcp {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         shell::run(&self.state, p, context.ct).await
+    }
+
+    #[tool(
+        name = "buzz_message_send",
+        description = "Send a literal message to a Buzz channel through the configured relay and identity. Use this for every conversational reply instead of invoking `buzz messages send` through shell. Structured fields are passed directly to Buzz without shell parsing; relay and credentials cannot be overridden."
+    )]
+    async fn buzz_message_send(
+        &self,
+        Parameters(p): Parameters<buzz_message_send::BuzzMessageSendParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        buzz_message_send::run(&self.state, p).await
     }
 
     #[tool(

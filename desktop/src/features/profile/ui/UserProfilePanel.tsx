@@ -170,7 +170,6 @@ export function UserProfilePanel({
       setEditAgentFocus(pending === true ? undefined : pending);
       setEditAgentOpen(true);
     }
-    // Subscribe for events that arrive while the panel is mounted.
     return subscribeOpenEditAgent(pubkey, (focus) => {
       setEditAgentFocus(focus);
       setEditAgentOpen(true);
@@ -402,12 +401,13 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
+    if (managedAgent) return setEditAgentOpen(true);
     if (resolvedPersona) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
     setEditAgentOpen(true);
-  }, [resolvedPersona]);
+  }, [managedAgent, resolvedPersona]);
 
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({

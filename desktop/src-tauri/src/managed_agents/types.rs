@@ -1,16 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BackendKind {
-    #[default]
-    Local,
-    Provider {
-        id: String,
-        config: serde_json::Value,
-    },
-}
+use super::AgentCommandWrapper;
+#[path = "types/backend.rs"]
+mod backend;
+pub use backend::BackendKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -91,7 +85,6 @@ pub struct AgentDefinition {
     pub created_at: String,
     pub updated_at: String,
 }
-
 impl AgentDefinition {
     /// Project this persona onto a key-less unified [`ManagedAgentRecord`]
     /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
@@ -110,6 +103,8 @@ impl AgentDefinition {
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: Vec::new(),
+            command_wrapper: None,
+            working_directory: None,
             mcp_command: String::new(),
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             idle_timeout_seconds: None,
@@ -156,7 +151,6 @@ impl AgentDefinition {
         }
     }
 }
-
 impl ManagedAgentRecord {
     /// Present a key-less definition record back in the legacy
     /// [`AgentDefinition`] shape — the compatibility view the persona command
@@ -255,6 +249,12 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Operator-controlled wrapper around the effective ACP runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_wrapper: Option<AgentCommandWrapper>,
+    /// Absolute workspace sent as ACP `session/new.cwd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<PathBuf>,
     /// Create-time snapshot of the catalog MCP command. Never read at spawn —
     /// the effective MCP command is always re-derived from the runtime catalog
     /// (`known_acp_runtime`) — and no longer written by updates. Kept for
@@ -509,6 +509,8 @@ pub struct ManagedAgentSummary {
     /// concrete pin (`agent_command` above is the resolved/effective command).
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    pub command_wrapper: Option<AgentCommandWrapper>,
+    pub working_directory: Option<PathBuf>,
     /// Catalog-derived from the effective harness (not the record's stored
     /// field), so the UI always shows what a spawn would actually use.
     pub mcp_command: String,

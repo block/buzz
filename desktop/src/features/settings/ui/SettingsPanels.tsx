@@ -81,6 +81,7 @@ import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeS
 import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
+import { NxtlinqGatewaySettingsCard } from "./NxtlinqGatewaySettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
@@ -876,6 +877,7 @@ export function renderSettingsSection(
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
+          <NxtlinqGatewaySettingsCard />
           <HarnessesSettingsPanel />
           <AgentDefaultsSettingsCard />
         </div>

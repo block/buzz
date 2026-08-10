@@ -444,6 +444,11 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** Shared operator-owned Nxtlinq paths used by the Settings and Agent UI. */
+    nxtlinqAuthorizationConfig?: {
+      trustStore: string | null;
+      receiptRoot: string;
+    };
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
@@ -7600,6 +7605,10 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+let mockNxtlinqAuthorizationConfig: {
+  trustStore: string | null;
+  receiptRoot: string;
+} | null = null;
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -9948,6 +9957,9 @@ export function maybeInstallE2eTauriMocks() {
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
+  mockNxtlinqAuthorizationConfig = config.mock?.nxtlinqAuthorizationConfig
+    ? { ...config.mock.nxtlinqAuthorizationConfig }
+    : null;
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -11698,6 +11710,43 @@ export function maybeInstallE2eTauriMocks() {
           payload as { runtimeId?: string },
           activeConfig,
         );
+      case "discover_nxtlinq_authorization_gateway":
+        return {
+          command: "nxtlinq-authorization-gateway",
+          resolved_path: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+          available: true,
+        };
+      case "install_nxtlinq_authorization_gateway":
+        return handleInstallAcpRuntime(
+          { runtimeId: "nxtlinq-authorization-gateway" },
+          activeConfig,
+        );
+      case "get_nxtlinq_authorization_config":
+        return (
+          mockNxtlinqAuthorizationConfig ?? {
+            trustStore: null,
+            receiptRoot: "/tmp/buzz/nxtlinq/receipts",
+          }
+        );
+      case "set_nxtlinq_authorization_config": {
+        const saved = (
+          payload as {
+            config: { trustStore: string | null; receiptRoot: string };
+          }
+        ).config;
+        mockNxtlinqAuthorizationConfig = { ...saved };
+        return saved;
+      }
+      case "pick_nxtlinq_trust_store":
+      case "pick_nxtlinq_directory":
+        return null;
+      case "check_nxtlinq_authorization_setup":
+        return {
+          ready: true,
+          checks: [],
+          signerKeyId: "mock-signer",
+          error: null,
+        };
       case "discover_backend_providers":
         return activeConfig?.mock?.backendProviders ?? [];
       case "probe_backend_provider": {

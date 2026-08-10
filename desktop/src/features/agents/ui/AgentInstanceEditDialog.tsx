@@ -94,6 +94,7 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useAgentLaunchFields } from "./useAgentLaunchFields";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -117,7 +118,6 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -130,6 +130,8 @@ export function AgentInstanceEditDialog({
     agent.personaId != null && agent.agentCommandOverride == null,
   );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
+  const launchFields = useAgentLaunchFields(agent, open);
+  const [nxtlinqSaveBlocked, setNxtlinqSaveBlocked] = React.useState(false);
   const [parallelism, setParallelism] = React.useState(
     String(agent.parallelism),
   );
@@ -170,9 +172,7 @@ export function AgentInstanceEditDialog({
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
-  // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
   // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
@@ -197,6 +197,7 @@ export function AgentInstanceEditDialog({
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
+      setNxtlinqSaveBlocked(false);
       setIsAvatarUploadPending(false);
       setIsAddHarnessOpen(false);
       runtimeTouched.current = false;
@@ -609,9 +610,9 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    !nxtlinqSaveBlocked &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
-
   async function handleSubmit() {
     try {
       const parsedParallelism = Number.parseInt(parallelism, 10);
@@ -672,6 +673,7 @@ export function AgentInstanceEditDialog({
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
             : undefined,
+        ...launchFields.buildUpdate(),
         parallelism:
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
@@ -1177,6 +1179,8 @@ export function AgentInstanceEditDialog({
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
+                      agentPubkey={agent.pubkey}
+                      launchFields={launchFields}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
@@ -1205,6 +1209,7 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
+                      onNxtlinqSaveBlockedChange={setNxtlinqSaveBlocked}
                       onParallelismChange={setParallelism}
                       onSystemPromptChange={setSystemPrompt}
                     />
@@ -1212,7 +1217,6 @@ export function AgentInstanceEditDialog({
                 ) : null}
               </AnimatePresence>
             </div>
-
             {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">

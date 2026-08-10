@@ -460,6 +460,8 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         agent_command: String::new(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 0,
         idle_timeout_seconds: None,

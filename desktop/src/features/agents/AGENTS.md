@@ -165,6 +165,28 @@ with a TypeScript lookup table or an id comparison in a component.
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
+12. **Executable wrappers never replace harness identity.** An authorization
+   gateway or operator wrapper is stored in `ManagedAgentRecord.command_wrapper`
+   and composed only at spawn time around the effective runtime command and
+   args. Runtime discovery, readiness, model/provider metadata, and UI labels
+   continue to describe the downstream harness. The operator-selected absolute
+   `working_directory` is the ACP `session/new.cwd`; do not infer it from the
+   wrapper args or let the downstream Agent replace it. Wrapper launch remains
+   shell-free, and wrapper/workspace changes must participate in restart drift.
+13. **Authorization presets configure wrappers; they do not own project signing.**
+   Nxtlinq discovery and installation remain separate from the ACP runtime
+   catalog, because the Gateway wraps a harness rather than becoming one. The
+   preset may derive wrapper argv and pass through the Agent's configured env
+   names, but it must not generate policy private keys, enroll trusted signers,
+   or place operator trust/receipt state inside the Agent-writable workspace.
+   Raw wrapper fields are internal launch state and are not exposed to end
+   users; the preset owns their deterministic construction. Before enabling a
+   preset, the Host may check file presence and operator-path
+   placement, but cryptographic readiness must be delegated to the Gateway's
+   own check API/CLI rather than reimplemented in TypeScript or Tauri. When an
+   enabled preset's workspace or shared operator paths change, Agent save is
+   blocked until Gateway rechecks the exact draft; a successful recheck must
+   rebuild the stored wrapper argv from that same checked configuration.
 
 ## The tests that enforce this
 

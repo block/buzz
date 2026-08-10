@@ -50,7 +50,33 @@ fn managed_agent_record_without_auth_tag_deserializes() {
 
     assert_eq!(record.auth_tag, None);
     assert_eq!(record.avatar_url, None);
+    assert_eq!(record.command_wrapper, None);
+    assert_eq!(record.working_directory, None);
     assert_eq!(record.pubkey, "abcd1234");
+}
+
+#[test]
+fn command_wrapper_and_working_directory_validate_fail_closed() {
+    let blank = super::AgentCommandWrapper {
+        command: "   ".into(),
+        args: vec![],
+    };
+    assert!(blank.normalized().is_err());
+    assert!(
+        crate::managed_agents::launch_wrapper::validate_agent_working_directory(Some(
+            PathBuf::from("relative")
+        ))
+        .is_err()
+    );
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    assert_eq!(
+        crate::managed_agents::launch_wrapper::validate_agent_working_directory(Some(
+            temp.path().to_path_buf(),
+        ))
+        .expect("absolute existing directory"),
+        Some(temp.path().to_path_buf())
+    );
 }
 
 /// Agent records WITH an auth_tag round-trip correctly through serde.
@@ -711,6 +737,8 @@ fn summary_fixture(
         agent_command: "goose".into(),
         agent_command_override: None,
         agent_args: Vec::new(),
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,

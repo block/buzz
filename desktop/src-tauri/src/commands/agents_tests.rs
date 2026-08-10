@@ -20,6 +20,8 @@ fn bare_agent_record(
         agent_command: "goose".to_string(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: "".to_string(),
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,

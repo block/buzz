@@ -114,9 +114,7 @@ fn goose_has_no_mcp_hooks() {
 fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }
-
 // ── build_respond_to_env tests ───────────────────────────────────────
-
 use super::build_respond_to_env;
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
@@ -139,6 +137,8 @@ fn fixture(
         agent_command: "goose".into(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,
