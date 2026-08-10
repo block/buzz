@@ -12,7 +12,7 @@ import {
 import { allPulseTimelinesQueryKey } from "@/features/profile/hooks";
 import { withoutProjectComments } from "@/features/pulse/lib/projectComments";
 import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
 // ── Query keys ──────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ export const pulseQueryKeys = {
 // ── Own notes ───────────────────────────────────────────────────────────────
 
 export function useLikedNotesQuery(pubkey?: string, enabled = true) {
-  const refetchInterval = useVisibleRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(30_000);
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
@@ -48,7 +48,7 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
 }
 
 export function useMyNotesQuery(pubkey?: string) {
-  const refetchInterval = useVisibleRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(30_000);
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.myNotes(pubkey ?? ""),
@@ -66,7 +66,7 @@ export function useMyNotesQuery(pubkey?: string) {
 // ── Timeline (notes from contacts) ─────────────────────────────────────────
 
 export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
-  const refetchInterval = useVisibleRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(30_000);
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.timeline(contactPubkeys),
@@ -89,7 +89,7 @@ export function usePulseReactionsQuery(
   noteIds: string[],
   currentPubkey?: string,
 ) {
-  const refetchInterval = useVisibleRefetchInterval(60_000);
+  const refetchInterval = useFocusedRefetchInterval(60_000);
 
   return useQuery<Map<string, PulseReactionState>>({
     queryKey: pulseQueryKeys.reactions(noteIds),
@@ -128,7 +128,7 @@ export function useNoteByIdQuery(noteId: string | null) {
 }
 
 export function useGlobalNotesQuery(enabled: boolean) {
-  const refetchInterval = useVisibleRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(30_000);
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.globalNotes,

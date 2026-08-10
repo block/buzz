@@ -7,7 +7,7 @@ import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { getOsIdleSeconds } from "@/shared/api/osIdle";
 import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
   mergePresenceUpdate,
   parseLivePresenceEvent,
@@ -84,7 +84,7 @@ export function usePresenceQuery(
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
-  const refetchInterval = useVisibleRefetchInterval(connected ? 60_000 : false);
+  const refetchInterval = useFocusedRefetchInterval(connected ? 60_000 : false);
 
   return useQuery<PresenceLookup>({
     enabled,

@@ -2,12 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getHomeFeed } from "@/shared/api/tauri";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
 export function useHomeFeedQuery() {
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
-  const refetchInterval = useVisibleRefetchInterval(connected ? 30_000 : false);
+  const refetchInterval = useFocusedRefetchInterval(connected ? 30_000 : false);
 
   return useQuery({
     queryKey: ["home-feed"],

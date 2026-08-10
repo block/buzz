@@ -33,7 +33,7 @@ import type {
   UpdateChannelInput,
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
@@ -194,7 +194,7 @@ function setChannelArchivedState(
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
-  const refetchInterval = useVisibleRefetchInterval(60_000);
+  const refetchInterval = useFocusedRefetchInterval(60_000);
 
   return useQuery({
     enabled: options?.enabled ?? true,

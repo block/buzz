@@ -10,7 +10,7 @@ import {
   setCustomEmoji,
 } from "@/shared/api/customEmoji";
 import { relayClient } from "@/shared/api/relayClient";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 /**
@@ -29,7 +29,7 @@ export const customEmojiQueryKey = ["custom-emoji"] as const;
 export const ownCustomEmojiQueryKey = ["custom-emoji-own"] as const;
 
 export function useCustomEmojiQuery() {
-  const refetchInterval = useVisibleRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(120_000);
 
   return useQuery<CustomEmoji[]>({
     queryKey: customEmojiQueryKey,

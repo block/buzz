@@ -7,12 +7,12 @@ import {
 } from "@/features/reminders/hooks";
 import { dueSince } from "@/features/reminders/lib/reminderFilters";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
-import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import {
   requestDockBounce,
   sendDesktopNotification,
 } from "@/features/notifications/lib/desktop";
 import type { NotificationSettings } from "@/features/notifications/hooks";
+import { startReminderNotificationPoll } from "@/features/reminders/lib/reminderNotificationPoll";
 import {
   formatNotificationTitle,
   resolveNotificationChannelLabel,
@@ -24,7 +24,6 @@ import {
 } from "@/features/notifications/lib/sound";
 
 const WATERMARK_STORAGE_PREFIX = "buzz:lastReminderCheck:";
-const POLL_INTERVAL_MS = 30_000;
 
 function watermarkStorageKey(pubkey: string): string {
   return `${WATERMARK_STORAGE_PREFIX}${pubkey.trim().toLowerCase()}`;
@@ -63,7 +62,6 @@ export function useReminderNotifications(
 ): void {
   const reminders = useRemindersQuery(pubkey).data;
   const queryClient = useQueryClient();
-  const documentVisible = useDocumentVisible();
   const remindersRef = React.useRef<Reminder[]>([]);
   remindersRef.current = reminders ?? [];
   const settingsRef = React.useRef(settings);
@@ -118,7 +116,7 @@ export function useReminderNotifications(
   });
 
   React.useEffect(() => {
-    if (!pubkey || !documentVisible) return;
+    if (!pubkey) return;
 
     const check = () => {
       // Defer until the query has resolved at least once — an empty array from
@@ -146,8 +144,6 @@ export function useReminderNotifications(
       });
     };
 
-    check();
-    const interval = window.setInterval(check, POLL_INTERVAL_MS);
-    return () => window.clearInterval(interval);
-  }, [documentVisible, pubkey, queryClient]);
+    return startReminderNotificationPoll(check);
+  }, [pubkey, queryClient]);
 }

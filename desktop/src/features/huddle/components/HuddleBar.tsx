@@ -318,9 +318,13 @@ export function HuddleBar({
     return () => {
       cancelled = true;
       window.clearInterval(id);
-      setModelStatus(null); // Clear stale status on huddle end/phase change.
     };
   }, [documentVisible, huddlePhase]);
+
+  React.useEffect(() => {
+    if (huddlePhase === "active" || huddlePhase === "connected") return;
+    setModelStatus(null);
+  }, [huddlePhase]);
 
   const isHuddleVisible = isVisibleHuddleState(state);
   const companionHadActiveHuddleRef = React.useRef(false);

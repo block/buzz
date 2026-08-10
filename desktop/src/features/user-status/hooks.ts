@@ -8,7 +8,7 @@ import type {
   UserStatusLookup,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { useVisibleRefetchInterval } from "@/shared/lib/useDocumentVisible";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { KIND_USER_STATUS } from "@/shared/constants/kinds";
 
 function normalizePubkeys(pubkeys: string[]) {
@@ -39,7 +39,7 @@ export function parseUserStatusEvent(event: RelayEvent): {
 }
 
 export function useUserStatusQuery(pubkeys: string[]) {
-  const refetchInterval = useVisibleRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(120_000);
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = normalizedPubkeys.length > 0;
 

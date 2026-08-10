@@ -2,8 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { WorkflowRun, WorkflowRunStatus } from "@/shared/api/types";
 import {
-  useDocumentVisible,
-  useVisibleRefetchInterval,
+  useAppFocused,
+  useFocusedRefetchInterval,
 } from "@/shared/lib/useDocumentVisible";
 import {
   createWorkflow,
@@ -69,7 +69,7 @@ export function useWorkflowQuery(workflowId: string | null) {
 }
 
 export function useWorkflowRunsQuery(workflowId: string | null) {
-  const documentVisible = useDocumentVisible();
+  const appFocused = useAppFocused();
   return useQuery({
     queryKey: workflowRunsQueryKey(workflowId ?? ""),
     queryFn: ({ queryKey: [, resolvedWorkflowId] }) =>
@@ -77,7 +77,7 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
     enabled: workflowId !== null,
     staleTime: 10_000,
     refetchInterval: (query) => {
-      if (!documentVisible) return false;
+      if (!appFocused) return false;
       const runs = query.state.data as WorkflowRun[] | undefined;
       return runs?.some((run) => isActiveWorkflowRunStatus(run.status))
         ? 1_000
@@ -91,7 +91,7 @@ export function useRunApprovalsQuery(
   workflowId: string | null,
   runId: string | null,
 ) {
-  const refetchInterval = useVisibleRefetchInterval(10_000);
+  const refetchInterval = useFocusedRefetchInterval(10_000);
 
   return useQuery({
     queryKey: runApprovalsQueryKey(workflowId ?? "", runId ?? ""),

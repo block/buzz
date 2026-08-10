@@ -2,9 +2,15 @@ import * as React from "react";
 
 export function isDocumentVisible(): boolean {
   if (typeof document === "undefined") return true;
+  return document.visibilityState === "visible";
+}
+
+export function isAppFocused(): boolean {
+  if (!isDocumentVisible()) return false;
   return (
-    document.visibilityState === "visible" &&
-    (typeof document.hasFocus !== "function" || document.hasFocus())
+    typeof document === "undefined" ||
+    typeof document.hasFocus !== "function" ||
+    document.hasFocus()
   );
 }
 
@@ -17,12 +23,26 @@ export function subscribeDocumentVisibility(
 
   const handleVisibilityChange = () => listener(isDocumentVisible());
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("focus", handleVisibilityChange);
-  window.addEventListener("blur", handleVisibilityChange);
   return () => {
     document.removeEventListener("visibilitychange", handleVisibilityChange);
-    window.removeEventListener("focus", handleVisibilityChange);
-    window.removeEventListener("blur", handleVisibilityChange);
+  };
+}
+
+export function subscribeAppFocus(
+  listener: (focused: boolean) => void,
+): () => void {
+  if (typeof document === "undefined") {
+    return () => {};
+  }
+
+  const handleFocusChange = () => listener(isAppFocused());
+  document.addEventListener("visibilitychange", handleFocusChange);
+  window.addEventListener("focus", handleFocusChange);
+  window.addEventListener("blur", handleFocusChange);
+  return () => {
+    document.removeEventListener("visibilitychange", handleFocusChange);
+    window.removeEventListener("focus", handleFocusChange);
+    window.removeEventListener("blur", handleFocusChange);
   };
 }
 
@@ -34,8 +54,16 @@ export function useDocumentVisible(): boolean {
   return visible;
 }
 
-export function useVisibleRefetchInterval(
+export function useAppFocused(): boolean {
+  const [focused, setFocused] = React.useState(isAppFocused);
+
+  React.useEffect(() => subscribeAppFocus(setFocused), []);
+
+  return focused;
+}
+
+export function useFocusedRefetchInterval(
   intervalMs: number | false,
 ): number | false {
-  return useDocumentVisible() ? intervalMs : false;
+  return useAppFocused() ? intervalMs : false;
 }
