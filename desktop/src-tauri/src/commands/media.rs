@@ -115,12 +115,10 @@ fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
 
 /// MIME types blocked from upload — mirrors the server's generic-file deny-list.
 ///
-/// Active-content XSS carriers and native executables. Everything else (images,
-/// video, documents, archives, audio, text, data) is accepted; un-sniffable
-/// files fall back to `application/octet-stream` and are served as downloads.
+/// SVG/JS XSS carriers and native executables. HTML documents are allowed and
+/// served as downloads (same as the relay). Un-sniffable files fall back to
+/// `application/octet-stream`.
 const BLOCKED_MIME: &[&str] = &[
-    "text/html",
-    "application/xhtml+xml",
     "image/svg+xml",
     "application/javascript",
     "text/javascript",
@@ -895,9 +893,9 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_and_validate_mime_rejects_html() {
-        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        assert!(detect_and_validate_mime(html).is_err());
+    fn test_detect_and_validate_mime_accepts_html_as_download() {
+        let html = b"<!DOCTYPE html><html><body><h1>report</h1></body></html>";
+        assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
     }
 
     #[test]
