@@ -1,0 +1,85 @@
+name: ADR
+description: A decision that needs to be made and recorded (MADR format)
+title: "adr: "
+labels: ["type:adr", "needs-decision"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. Use this ONLY when the output is a decision plus its rationale, and NOTHING
+           in the repo changes when this issue closes. If code or config changes, it is
+           a Task or PRD, not an ADR.
+        2. An ADR is NEVER a work item and NEVER has child issues. Work that a decision
+           creates is filed separately afterwards and linked back to this issue.
+        3. Fill EVERY required field. Do not add headings that are not in this form.
+        4. If a field does not apply, write exactly: N/A - <one-line reason>
+        5. Considered options MUST include at least one option you expect to REJECT,
+           with the reason. A single-option ADR is not a decision, it is an announcement.
+        6. You may draft this entire form. You MUST NOT fill Decision outcome with a
+           final choice on your own authority - leave it blank and escalate to a human.
+        7. Security implications is required. If you believe there are none, state why
+           in one sentence rather than writing "none".
+        -->
+
+        A decision to make and record. On acceptance this becomes a document under
+        `launchpad/decisions/` and this issue closes.
+
+        **Agents may draft this in full but must leave Decision outcome blank.**
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and problem statement
+      description: What are we seeing that forces a decision now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: drivers
+    attributes:
+      label: Decision drivers
+      description: Forces and constraints. One per line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Considered options
+      description: One per line. Include at least one option you expect to reject, and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Decision outcome
+      description: Chosen option and why. Leave blank while deliberating. Agents must leave this blank.
+
+  - type: textarea
+    id: consequences
+    attributes:
+      label: Consequences
+      description: Good and bad. State the bad honestly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security implications
+      description: What this changes about trust, exposure, or blast radius.
+    validations:
+      required: true
+
+  - type: input
+    id: supersedes
+    attributes:
+      label: Supersedes
+      description: 'Issue or document this replaces, if any. Write "none" otherwise.'
+      placeholder: "none"
+    validations:
+      required: true

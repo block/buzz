@@ -1,0 +1,71 @@
+name: Enhancement
+description: Something that exists and works, but should work better
+title: "enh: "
+labels: ["type:enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. STOP and check the gate below before using this template.
+           Enhancement requires that the thing ALREADY EXISTS and ALREADY WORKS CORRECTLY.
+           - If it does not exist yet          -> use 01-prd.yml or 02-task.yml
+           - If it exists but behaves wrongly  -> use 04-bug.yml
+           - If it exists but is unfinished because its PRD is not done
+             -> this is a SCOPE CHANGE to that PRD. Do not file an Enhancement.
+                Comment on the parent PRD instead.
+        2. Fill EVERY required field. Do not add headings that are not in this form.
+        3. If a field does not apply, write exactly: N/A - <one-line reason>
+        4. Current behaviour must describe what happens TODAY, observed - not assumed.
+           Include the command you ran and its output where possible.
+        5. Do not describe the desired behaviour as a solution design. Describe the
+           behaviour. Implementation choices belong in the Task that follows.
+        -->
+
+        For improving something that already exists and already works. If it behaves
+        **incorrectly**, file a Bug. If its PRD is not finished yet, that is a scope
+        change to the PRD, not an Enhancement.
+
+  - type: checkboxes
+    id: gate
+    attributes:
+      label: Gate
+      options:
+        - label: The thing I want to improve already exists and currently behaves correctly
+          required: true
+        - label: Its parent PRD is complete, so this is not unfinished scope
+          required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behaviour
+      description: What happens today. Observed, not assumed. Include commands and output where possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired behaviour
+      description: What should happen instead. Describe behaviour, not implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: What triggered this. Who is affected and how often.
+    validations:
+      required: true
+
+  - type: textarea
+    id: components
+    attributes:
+      label: Impacted components
+      description: Real paths or services this touches. One per line.
+    validations:
+      required: true

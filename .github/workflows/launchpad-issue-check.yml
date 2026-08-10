@@ -1,0 +1,89 @@
+name: launchpad — issue body check
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate issue body
+        env:
+          BODY: ${{ github.event.issue.body }}
+          LABELS: ${{ toJSON(github.event.issue.labels.*.name) }}
+          NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY' > /tmp/problems.txt
+          import json, os, re
+
+          body = os.environ.get("BODY") or ""
+          labels = json.loads(os.environ.get("LABELS") or "[]")
+          types = [l for l in labels if l.startswith("type:")]
+
+          # Required '### Heading' sections per type. Mirrors .github/ISSUE_TEMPLATE/*.yml.
+          REQUIRED = {
+              "type:prd": ["Problem", "Evidence", "Success criteria", "Non-goals",
+                           "Impacted components", "Security implications"],
+              "type:task": ["Parent PRD", "Objective", "Definition of done",
+                            "Impacted components", "Out of scope"],
+              "type:enhancement": ["Current behaviour", "Desired behaviour", "Why now",
+                                   "Impacted components"],
+              "type:bug": ["Observed behaviour", "Expected behaviour", "Reproduction",
+                           "Environment", "Impacted components"],
+              "type:adr": ["Context and problem statement", "Decision drivers",
+                           "Considered options", "Consequences",
+                           "Security implications", "Supersedes"],
+          }
+
+          problems = []
+
+          if len(types) == 0:
+              problems.append("No `type:` label. Every issue needs exactly one.")
+          elif len(types) > 1:
+              problems.append(
+                  f"{len(types)} type labels ({', '.join(types)}). "
+                  "Exactly one is allowed — a type never modifies another type.")
+          else:
+              t = types[0]
+              visible = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+              for heading in REQUIRED.get(t, []):
+                  m = re.search(rf"^#+\s*{re.escape(heading)}\s*$(.*?)(?=^#+\s|\Z)",
+                                visible, flags=re.M | re.S)
+                  if not m:
+                      problems.append(f"Missing section: **{heading}**")
+                  elif not m.group(1).strip():
+                      problems.append(f"Empty section: **{heading}**")
+
+              if t == "type:bug" and "```" not in body:
+                  problems.append(
+                      "Bug reports must paste raw output in a fenced code block, not a paraphrase.")
+
+          for p in problems:
+              print(p)
+          PY
+
+          if [ -s /tmp/problems.txt ]; then
+            {
+              echo "**Issue body check failed** — this issue is missing required content."
+              echo
+              sed 's/^/- /' /tmp/problems.txt
+              echo
+              echo "Templates: \`.github/ISSUE_TEMPLATE/\` · Triage rules: \`launchpad/AGENTS.md\`"
+              echo
+              echo "_Edit the issue to fix — this check re-runs automatically._"
+            } > /tmp/comment.md
+            gh issue edit "$NUMBER" --repo "$REPO" --add-label needs-triage
+            gh issue comment "$NUMBER" --repo "$REPO" --body-file /tmp/comment.md
+            cat /tmp/problems.txt
+            exit 1
+          fi
+
+          gh issue edit "$NUMBER" --repo "$REPO" --remove-label needs-triage 2>/dev/null || true
+          echo "Issue body check passed."

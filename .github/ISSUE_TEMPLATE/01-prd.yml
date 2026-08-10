@@ -1,0 +1,78 @@
+name: PRD
+description: A body of work with an outcome, acceptance criteria, and child tasks
+title: "prd: "
+labels: ["type:prd"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. Only use this template when the work needs child issues to finish.
+           If one agent can finish it in one branch and one PR, use 02-task.yml instead.
+        2. Fill EVERY required field. Do not add headings that are not in this form.
+        3. If a field does not apply, write exactly: N/A - <one-line reason>
+        4. Success criteria MUST be markdown checkboxes: - [ ] one testable claim each.
+           Each line must be checkable by a person who did not write it.
+           Bad:  - [ ] Deployment works
+           Good: - [ ] `curl https://<domain>/health` returns HTTP 200 from outside the host
+        5. Impacted components: name real paths or services in this repo
+           (e.g. crates/buzz-relay, launchpad/deploy, .github/workflows).
+           Do not write "various" or "the system".
+        6. Do not speculate. If you do not know something, say so in that field.
+        -->
+
+        Use this for work that needs child tasks. If one branch and one PR can finish
+        it, file a **Task** instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing today, and who it affects.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Facts that establish the problem is real. Link issues, files, or commands and their output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: Markdown checkboxes. One testable claim per line.
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: nongoals
+    attributes:
+      label: Non-goals
+      description: What this explicitly does NOT cover. Prevents scope creep and duplicate work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: components
+    attributes:
+      label: Impacted components
+      description: Real paths or services this touches. One per line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security implications
+      description: What this exposes, protects, or changes about trust. Write "None - <reason>" if genuinely none.
+    validations:
+      required: true

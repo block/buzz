@@ -1,0 +1,82 @@
+name: Bug
+description: Something that exists behaves incorrectly
+title: "bug: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. Bug requires OBSERVED incorrect behaviour. If you have not run it and seen
+           it fail, do not file a Bug. File a Task to investigate instead.
+        2. Fill EVERY required field. Do not add headings that are not in this form.
+        3. If a field does not apply, write exactly: N/A - <one-line reason>
+        4. Reproduction MUST be numbered steps a stranger can follow verbatim, ending
+           in the observable failure. No "then it breaks".
+        5. Observed behaviour MUST include RAW output inside a fenced code block -
+           actual stdout/stderr, log lines, or HTTP response. Do not paraphrase it.
+           Do not write "it errors". Paste the error.
+        6. Do NOT file a security vulnerability here. Close this form and use the
+           private advisory link on the issue chooser page.
+        -->
+
+        Something that exists behaves incorrectly. **Never file a security
+        vulnerability here** — use the private advisory link on the chooser page.
+
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This is not a security vulnerability. I understand vulnerabilities go to a private advisory, not a public issue.
+          required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: What actually happens. Paste RAW stdout/stderr/log output in a code block. Do not paraphrase.
+      value: |
+        ```
+        # paste raw output here
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened, and what tells you so (docs, spec, prior behaviour).
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Numbered steps a stranger can follow verbatim, ending in the failure.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Where this was observed. Host, branch, commit SHA, relevant versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: components
+    attributes:
+      label: Impacted components
+      description: Real paths or services this touches. One per line.
+    validations:
+      required: true

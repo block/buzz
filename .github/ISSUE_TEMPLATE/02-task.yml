@@ -1,0 +1,70 @@
+name: Task
+description: Bounded work one agent or person finishes in one branch and one PR
+title: "task: "
+labels: ["type:task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. This is the DEFAULT type. If you are unsure which template to use, use this
+           one and add the label needs-triage, then say so in Objective.
+        2. A Task has NO children. If this needs sub-issues, it is a PRD - use 01-prd.yml.
+        3. Fill EVERY required field. Do not add headings that are not in this form.
+        4. If a field does not apply, write exactly: N/A - <one-line reason>
+        5. Objective must be ONE sentence naming an artifact that will exist when done.
+           Bad:  Improve the deployment
+           Good: Add an Ansible role that installs and configures Redis on the relay host
+        6. Definition of done MUST be markdown checkboxes, each verifiable by someone else.
+        7. Impacted components: real paths in this repo, one per line. Never "various".
+        8. Link the parent PRD by number. If there is no parent, write: none - standalone
+        -->
+
+        Bounded, concrete work. One branch, one PR. If it needs child issues, file a
+        **PRD** instead.
+
+  - type: input
+    id: parent
+    attributes:
+      label: Parent PRD
+      description: 'Issue number of the PRD this belongs to, e.g. #4. Write "none - standalone" if it has no parent.'
+      placeholder: "#4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: One sentence. Name the artifact that will exist when this is done.
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of done
+      description: Markdown checkboxes. Each line verifiable by someone who did not do the work.
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: components
+    attributes:
+      label: Impacted components
+      description: Real paths or services this touches. One per line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outofscope
+    attributes:
+      label: Out of scope
+      description: What a reviewer should NOT expect to see in the resulting PR.
+    validations:
+      required: true

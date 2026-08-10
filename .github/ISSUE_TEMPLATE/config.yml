@@ -1,1 +1,11 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/launchpad-26/buzz/security/advisories/new
+    about: Report privately. Never open a public issue for a vulnerability.
+  - name: How we work in this repo
+    url: https://github.com/launchpad-26/buzz/blob/launchpad/launchpad/AGENTS.md
+    about: Read before filing — how to pick a type, and what this fork is for.
+  - name: Bugs in Buzz itself
+    url: https://github.com/block/buzz/issues
+    about: This fork operates Buzz, it does not develop it. Upstream product bugs go to block/buzz.

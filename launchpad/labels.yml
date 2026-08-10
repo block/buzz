@@ -1,0 +1,52 @@
+# Source of truth for launchpad-26/buzz labels.
+# Apply with: ./launchpad/sync-labels.sh
+# That script exists and works. If you add a label here, run it — do not hand-create
+# labels in the GitHub UI, or this file stops being true.
+
+# --- Type: exactly one per issue. A type never modifies another type. ----------
+- name: "type:prd"
+  color: "5319e7"
+  description: "Work with acceptance criteria that needs child tasks"
+- name: "type:task"
+  color: "1d76db"
+  description: "Bounded work — one branch, one PR. The default type."
+- name: "type:enhancement"
+  color: "84b6eb"
+  description: "Exists and works, should work better"
+- name: "type:bug"
+  color: "d73a4a"
+  description: "Exists and behaves incorrectly"
+- name: "type:adr"
+  color: "0e8a16"
+  description: "A decision to make and record. Not a work item."
+
+# --- Area: what this touches. Zero or more per issue. --------------------------
+- name: "area:deploy"
+  color: "c2e0c6"
+  description: "VPS, Ansible, host configuration, hardening"
+- name: "area:docs"
+  color: "0075ca"
+  description: "The MkDocs knowledge layer and its content"
+- name: "area:upstream-intel"
+  color: "fbca04"
+  description: "Tracking and reporting on block/buzz upstream"
+- name: "area:ci"
+  color: "bfd4f2"
+  description: "GitHub Actions, checks, automation"
+- name: "area:relay-ops"
+  color: "d4c5f9"
+  description: "Running the Buzz relay — config, community, membership"
+- name: "area:process"
+  color: "e4e669"
+  description: "How the cohort works: templates, labels, conventions"
+
+# --- Workflow state -----------------------------------------------------------
+- name: "needs-triage"
+  color: "b60205"
+  description: "Type unclear or required content missing — a human must look"
+- name: "needs-decision"
+  color: "f9d0c4"
+  description: "Blocked on a decision. Applied automatically to ADRs."
+- name: "by:agent"
+  color: "5319e7"
+  description: "Filed or authored by an AI agent, not a human"

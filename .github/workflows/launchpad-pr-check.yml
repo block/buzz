@@ -1,0 +1,80 @@
+name: launchpad — PR body check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, labeled, unlabeled, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR body
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          body = os.environ.get("BODY") or ""
+          labels = json.loads(os.environ.get("LABELS") or "[]")
+          is_agent = "by:agent" in labels
+          errors = []
+
+          # Strip HTML comments so unfilled placeholders never count as content.
+          visible = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+
+          def section(name):
+              """Text under a '### name' heading, up to the next heading."""
+              m = re.search(rf"^#+\s*{re.escape(name)}\s*$(.*?)(?=^#+\s|\Z)",
+                            visible, flags=re.M | re.S)
+              return m.group(1).strip() if m else None
+
+          if not visible.strip():
+              errors.append("PR body is empty. Use the PR template.")
+
+          if not re.search(r"\b(Closes|Fixes|Resolves)\s+#\d+", visible, re.I):
+              errors.append(
+                  "No closing keyword found. Add 'Closes #<n>' so the board updates on merge.")
+
+          itype = section("Issue type")
+          valid = {"PRD", "Task", "Enhancement", "Bug", "ADR"}
+          if not itype:
+              errors.append("Missing '### Issue type' section.")
+          elif not any(v.lower() in itype.lower() for v in valid):
+              errors.append(
+                  f"Issue type must be one of {sorted(valid)}. Found: {itype!r}")
+
+          if is_agent:
+              for field in ("Harness / provider", "Model", "Initiating human"):
+                  # Table rows: | Field | Value |
+                  m = re.search(rf"\|\s*{re.escape(field)}\s*\|(.*?)\|", visible)
+                  if not m or not m.group(1).strip():
+                      errors.append(
+                          f"by:agent PR missing provenance value for '{field}'.")
+
+              nv = section("Not verified")
+              if not nv:
+                  errors.append("by:agent PR missing '### Not verified' section.")
+              elif nv.lower().strip(" .") in {"nothing", "none", "n/a", ""}:
+                  errors.append(
+                      "'Not verified' must name something specific. "
+                      "There is always something that was not checked.")
+
+              if "```" not in visible:
+                  errors.append(
+                      "by:agent PR must paste raw command output in a fenced code block.")
+
+          if errors:
+              print("PR body check failed:\n")
+              for e in errors:
+                  print(f"  - {e}")
+              print("\nHuman PRs: .github/PULL_REQUEST_TEMPLATE.md")
+              print("Agent PRs: launchpad/AGENT_PR_TEMPLATE.md")
+              sys.exit(1)
+
+          print("PR body check passed." + (" (agent)" if is_agent else " (human)"))
+          PY
