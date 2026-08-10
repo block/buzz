@@ -36,10 +36,9 @@ import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout"
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
-import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
-import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
+import { ComposerDockFrame } from "@/features/channels/ui/ComposerDockFrame";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerGuidanceLayer,
@@ -342,18 +341,9 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
     !isSinglePanelView;
-  const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
-  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
-    activeChannel?.id ?? null,
-  );
-  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
-  const hasCardMintActivity = useCardMintJobs().length > 0;
-  const hasComposerBottomActivity =
-    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
+  // Working-agent + card-mint store subscriptions live in ComposerDockFrame /
+  // ChannelComposerActivityAccessory — not here — so ChannelPane (timeline +
+  // MessageComposer) does not re-render on every typing/working tick.
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) return [];
     return botTypingEntries
@@ -676,11 +666,9 @@ export const ChannelPane = React.memo(function ChannelPane({
               ref={composerWrapperRef}
             >
               <ComposerUploadProgressOverlay />
-              <div
-                className={cn(
-                  "composer-dock composer-overlay-corner-masks relative pointer-events-auto",
-                  hasComposerBottomActivity && "composer-dock--with-activity",
-                )}
+              <ComposerDockFrame
+                channelId={activeChannel?.id ?? null}
+                typingPubkeys={typingPubkeys}
               >
                 {isActiveWelcomeChannel && !timeoutState.active ? (
                   <WelcomeComposerGuidanceLayer
@@ -742,7 +730,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                 {/* The activity accessory is anchored in the dock's reserved
                     bottom rail, so fading it cannot change the observed
                     overlay height or move the conversation. Its natural
-                    content height remains responsive. */}
+                    content height remains responsive. Working/card-mint
+                    subscriptions live inside the accessory + dock frame. */}
                 <ChannelComposerActivityAccessory
                   agents={activityAgents}
                   channel={activeChannel}
@@ -751,10 +740,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                   openAgentSessionPubkey={openAgentSessionPubkey}
                   profiles={profiles}
                   typingPubkeys={typingPubkeys}
-                  visible={hasComposerBottomActivity}
-                  workingBotPubkeys={composerWorkingBotPubkeys}
                 />
-              </div>
+              </ComposerDockFrame>
             </div>
           )}
           {canDropInMainColumn && mainComposerMedia.isDragOver ? (
