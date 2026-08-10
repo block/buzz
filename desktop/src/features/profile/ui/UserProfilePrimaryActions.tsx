@@ -108,7 +108,7 @@ export function ProfilePrimaryActions({
         <ProfileQuickAction
           disabled={agentActionDisabled}
           icon={RefreshCw}
-          label="Restart"
+          label="Restart Agent"
           onClick={onAgentRestart}
           testId="user-profile-agent-restart"
         />
@@ -143,7 +143,7 @@ export function ProfilePersonaPrimaryActions({
       <ProfileQuickAction
         disabled={disabled}
         icon={Play}
-        label="Start agent"
+        label="Start Agent"
         onClick={onStartAgent}
         testId="user-profile-start-agent"
       />

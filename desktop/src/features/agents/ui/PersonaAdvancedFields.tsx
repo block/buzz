@@ -38,6 +38,7 @@ export function PersonaAdvancedFields({
   behaviorDraft,
   disabled,
   envVars,
+  afterRespondTo,
   inheritedEnvVars = {},
   model,
   modelTuningRuntimeId = "",
@@ -55,6 +56,8 @@ export function PersonaAdvancedFields({
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
   envVars: EnvVarsValue;
+  /** Optional create-only field rendered after instruction permissions. */
+  afterRespondTo?: React.ReactNode;
   /** Env vars to display as inherited defaults in tuning-field placeholders.
    *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
   inheritedEnvVars?: EnvVarsValue;
@@ -152,6 +155,8 @@ export function PersonaAdvancedFields({
         }
         variant="persona"
       />
+
+      {afterRespondTo}
 
       <div className="grid gap-5 sm:grid-cols-2">
         <div className="space-y-1.5">

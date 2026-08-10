@@ -295,6 +295,32 @@ type MockBridgeOptions = {
   profileHasEvent?: boolean;
   profileUpdateError?: string;
   profileUpdateErrors?: string[];
+  linkPreviewMetadata?: {
+    title: string;
+    siteName: string | null;
+    description: string | null;
+    imageDataUrl: string | null;
+    imageDomain: string | null;
+    imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+    imageRetryAfterMs?: number | null;
+    faviconDataUrl?: string | null;
+  } | null;
+  linkPreviewMetadataByHref?: Record<
+    string,
+    {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null
+  >;
+  linkPreviewMetadataDelayMs?: number;
+  /** Simulates native cold-cache startup work before the async response. */
+  linkPreviewMetadataStartBlockMs?: number;
   searchProfiles?: MockSearchProfileSeed[];
   updateAvailable?: boolean;
   updateChannelDelayMs?: number;

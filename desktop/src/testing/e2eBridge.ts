@@ -62,6 +62,10 @@ import type {
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  isValidLinkPreviewSnapshotCanonicalUrl,
+  parseLinkPreviewSnapshots,
+} from "@/shared/lib/linkPreviewSnapshot";
 
 type TestIdentity = {
   privateKey: string;
@@ -335,6 +339,32 @@ type E2eConfig = {
     profileHasEvent?: boolean;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
+    linkPreviewMetadata?: {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null;
+    linkPreviewMetadataByHref?: Record<
+      string,
+      {
+        title: string;
+        siteName: string | null;
+        description: string | null;
+        imageDataUrl: string | null;
+        imageDomain: string | null;
+        imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+        imageRetryAfterMs?: number | null;
+        faviconDataUrl?: string | null;
+      } | null
+    >;
+    linkPreviewMetadataDelayMs?: number;
+    /** Simulates native cold-cache startup work before the async response. */
+    linkPreviewMetadataStartBlockMs?: number;
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -1211,6 +1241,8 @@ declare global {
     ) => void;
     /** Inject CLOSED into every active mock live subscription. */
     __BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__?: (reason: string) => number;
+    /** Queue CLOSED responses for channel history REQs. */
+    __BUZZ_E2E_QUEUE_CHANNEL_HISTORY_CLOSES__?: (reasons: string[]) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
@@ -2967,6 +2999,7 @@ const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
+const mockChannelHistoryCloses: string[] = [];
 let mockWebsocketUnavailable = false;
 const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockWebsocketSendMutexWedged = false;
@@ -8909,12 +8942,30 @@ async function resolveMockUploadDescriptorForBytes(
     value.toString(16).padStart(2, "0"),
   ).join("");
   const filename = args.filename ?? "upload.bin";
-  const isAgentJson = filename.toLowerCase().endsWith(".agent.json");
+  const normalizedFilename = filename.toLowerCase();
+  const isAgentJson = normalizedFilename.endsWith(".agent.json");
+  const extension = isAgentJson
+    ? "json"
+    : normalizedFilename.endsWith(".png")
+      ? "png"
+      : normalizedFilename.endsWith(".jpg") ||
+          normalizedFilename.endsWith(".jpeg")
+        ? "jpg"
+        : normalizedFilename.endsWith(".gif")
+          ? "gif"
+          : normalizedFilename.endsWith(".webp")
+            ? "webp"
+            : "bin";
+  const type = isAgentJson
+    ? "application/json"
+    : extension === "bin"
+      ? "application/octet-stream"
+      : `image/${extension === "jpg" ? "jpeg" : extension}`;
   return {
-    url: `https://mock.relay/media/${sha256}${isAgentJson ? ".json" : ".bin"}`,
+    url: `${getRelayHttpUrl(config)}/media/${sha256}.${extension}`,
     sha256,
     size: bytes.length,
-    type: isAgentJson ? "application/json" : "application/octet-stream",
+    type,
     uploaded: Math.floor(Date.now() / 1000),
     filename,
   };
@@ -8930,6 +8981,8 @@ async function handleSendChannelMessage(
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
     mentionTags?: string[][] | null;
+    linkPreviewTags?: string[][] | null;
+    suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8952,7 +9005,44 @@ async function handleSendChannelMessage(
   // Reference-only mentions are already part of the outbound event. Preserve
   // them in the mock event too so local echoes match the complete sent tag set.
   const mentionTags = args.mentionTags ?? [];
-  const extraTags = [...mediaTags, ...emojiTags, ...mentionTags];
+  // Sender-authored link preview snapshots are independently validated by the
+  // real command and echoed on the stored event. Preserve them in the mock so
+  // E2E recipient rendering exercises the same authored-snapshot path.
+  const linkPreviewTags = args.linkPreviewTags ?? [];
+  if (linkPreviewTags.length > 0) {
+    const suppression = linkPreviewTags.some(
+      (tag) =>
+        tag.length === 2 && tag[0] === "link-preview" && tag[1] === "none",
+    );
+    const snapshots = linkPreviewTags.filter(
+      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
+    );
+    const validSnapshots = parseLinkPreviewSnapshots(
+      snapshots,
+      args.content,
+      new URL(getRelayHttpUrl(config)).origin,
+    );
+    if (
+      (suppression && linkPreviewTags.length !== 1) ||
+      (!suppression &&
+        (snapshots.length !== linkPreviewTags.length ||
+          validSnapshots.length !== snapshots.length ||
+          snapshots.some(
+            (tag) => !isValidLinkPreviewSnapshotCanonicalUrl(tag[3] ?? ""),
+          )))
+    ) {
+      throw new Error("invalid link-preview snapshot tag");
+    }
+  }
+  // All independently validated kinds end up on the stored event's tag set,
+  // just like the real relay.
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionTags,
+    ...linkPreviewTags,
+    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
+  ];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -9691,6 +9781,13 @@ function sendToMockSocket(args: {
     }
 
     const channelId = filter["#h"]?.[0];
+    if (channelId && subId.startsWith("history-")) {
+      const closeReason = mockChannelHistoryCloses.shift();
+      if (closeReason) {
+        sendWsText(socket.handler, ["CLOSED", subId, closeReason]);
+        return;
+      }
+    }
     if (!channelId) {
       // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
       // channel tag — serve them across all channel stores like the relay.
@@ -9945,6 +10042,7 @@ export function maybeInstallE2eTauriMocks() {
   mockClosedChannelLiveSubscription = false;
   mockWebsocketUnavailable = false;
   mockAuthResponses.length = 0;
+  mockChannelHistoryCloses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
   deferredSendMessageLiveEchoes.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
@@ -10187,6 +10285,9 @@ export function maybeInstallE2eTauriMocks() {
     relayClient.getConnectionState();
   window.__BUZZ_E2E_QUEUE_AUTH_RESPONSES__ = (responses) => {
     mockAuthResponses.push(...responses);
+  };
+  window.__BUZZ_E2E_QUEUE_CHANNEL_HISTORY_CLOSES__ = (reasons) => {
+    mockChannelHistoryCloses.push(...reasons);
   };
   window.__BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__ = (reason) => {
     let closed = 0;
@@ -11108,6 +11209,26 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
+      case "fetch_link_preview_metadata": {
+        const startBlockMs =
+          activeConfig?.mock?.linkPreviewMetadataStartBlockMs ?? 0;
+        if (startBlockMs > 0) {
+          const stopAt = performance.now() + startBlockMs;
+          while (performance.now() < stopAt) {
+            // Deliberately block to model uncached native command startup.
+          }
+        }
+        const delayMs = activeConfig?.mock?.linkPreviewMetadataDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        const href = (payload as { href?: string }).href;
+        const metadataByHref = activeConfig?.mock?.linkPreviewMetadataByHref;
+        if (href && metadataByHref && Object.hasOwn(metadataByHref, href)) {
+          return metadataByHref[href];
+        }
+        return activeConfig?.mock?.linkPreviewMetadata ?? null;
+      }
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -12488,7 +12609,7 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "edit_message":
         return handleEditMessage(
-          payload as Parameters<typeof handleEditMessage>[0],
+          (payload as { input: Parameters<typeof handleEditMessage>[0] }).input,
           activeConfig,
         );
       case "add_reaction":
@@ -12749,8 +12870,19 @@ export function maybeInstallE2eTauriMocks() {
         }
         return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
       }
+      case "start_identity_recovery_pairing": {
+        const delayMs = activeConfig?.mock?.pairingStartDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        return `nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1&mode=recover`;
+      }
       case "cancel_pairing":
       case "confirm_pairing_sas":
+        return null;
+      case "complete_identity_recovery_pairing":
+        mockIdentityLostCleared = true;
+        await emit("pairing-complete", {});
         return null;
       // ── NIP-IA identity archival ────────────────────────────────────────
       // These mocks drive the archive-button gate matrix in
