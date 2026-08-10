@@ -178,6 +178,46 @@ fn role_switch_checkpoint_starts_exactly_once_after_restart() {
     assert_eq!(consumed.relay_url, config.relay_url);
 }
 
+/// The regression this guards: MeshLLM only advertises the virtual `mesh` model
+/// once two non-virtual models are reachable, so a single-worker mesh never
+/// lists it by name. Keying visibility on the literal name would report a lone
+/// host that is still loading weights as a network path problem.
+#[test]
+fn virtual_mesh_counts_any_advertised_model_as_a_synced_catalog() {
+    let one_worker = vec!["unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string()];
+    assert!(mesh_catalog_shows_model(
+        &one_worker,
+        crate::managed_agents::RELAY_MESH_VIRTUAL_MODEL_ID
+    ));
+}
+
+#[test]
+fn an_empty_catalog_is_never_synced_even_for_the_virtual_model() {
+    assert!(!mesh_catalog_shows_model(
+        &[],
+        crate::managed_agents::RELAY_MESH_VIRTUAL_MODEL_ID
+    ));
+}
+
+#[test]
+fn a_named_model_must_actually_be_advertised() {
+    let advertised = vec!["unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string()];
+    assert!(mesh_catalog_shows_model(
+        &advertised,
+        "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+    ));
+    assert!(!mesh_catalog_shows_model(&advertised, "some/other-model"));
+}
+
+#[test]
+fn a_named_model_ignores_the_main_revision_suffix() {
+    let advertised = vec!["unsloth/gemma-4-E4B-it-GGUF:Q4_K_M@main".to_string()];
+    assert!(mesh_catalog_shows_model(
+        &advertised,
+        "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+    ));
+}
+
 #[test]
 fn readiness_failure_is_catalog_sync_when_model_never_visible() {
     assert_eq!(

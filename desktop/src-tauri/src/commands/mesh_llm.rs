@@ -558,6 +558,28 @@ enum MeshReadinessFailure {
 /// Pure classifier: given whether the served model was ever observed in the
 /// local `/v1/models` catalog during the wait, decide which stage failed.
 /// Split out so the diagnosis is unit-testable without a live mesh.
+/// Whether the catalog has synced enough to count, for the model actually being
+/// requested (a wire name — see `relay_mesh_wire_model`).
+///
+/// The virtual `mesh` model delegates the choice to the router, so any
+/// advertised model proves the catalog synced. It has to work that way: MeshLLM
+/// only advertises `mesh` itself once two non-virtual models are reachable
+/// (`should_advertise_virtual_mesh`), so requiring it by name would leave a
+/// single-worker mesh looking permanently unsynced and misreport a slow model
+/// load as a network path problem.
+fn mesh_catalog_shows_model(advertised: &[String], wire_model: &str) -> bool {
+    if advertised.is_empty() {
+        return false;
+    }
+    if wire_model == crate::managed_agents::RELAY_MESH_VIRTUAL_MODEL_ID {
+        return true;
+    }
+    let wanted = wire_model.trim().replace("@main", "");
+    advertised
+        .iter()
+        .any(|id| id.replace("@main", "") == wanted)
+}
+
 fn classify_mesh_readiness_failure(model_ever_visible: bool) -> MeshReadinessFailure {
     if model_ever_visible {
         MeshReadinessFailure::RoutingNeverCompleted
@@ -600,6 +622,7 @@ async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
     // advertises: probing it would validate a route no agent uses, and could
     // fail readiness while the real route works. Named models pass through
     // unchanged, so this is safe for the serve-side callers too.
+    let requested_model = model_id;
     let model_id = crate::managed_agents::relay_mesh_wire_model(model_id);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -617,8 +640,12 @@ async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
     let mut model_ever_visible = false;
 
     while tokio::time::Instant::now() < deadline {
-        // Refresh catalog visibility. "auto" delegates model choice to the
-        // router, so any advertised model counts as the catalog having synced.
+        // Refresh catalog visibility. The virtual `mesh` model delegates the
+        // choice to the router, so any advertised model counts as the catalog
+        // having synced — and it must, because MeshLLM only advertises `mesh`
+        // itself once two non-virtual models are reachable
+        // (`should_advertise_virtual_mesh`). Requiring it by name would leave a
+        // single-worker mesh looking permanently unsynced.
         if let Ok(response) = client
             .get(&models_url)
             .bearer_auth(crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER)
@@ -627,16 +654,12 @@ async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
         {
             if let Ok(body) = response.json::<serde_json::Value>().await {
                 if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
-                    let wanted = model_id.trim().replace("@main", "");
-                    let visible = !data.is_empty()
-                        && (model_id == crate::mesh_llm::AUTO_MODEL_ID
-                            || data.iter().any(|m| {
-                                m.get("id")
-                                    .and_then(|id| id.as_str())
-                                    .map(|id| id.replace("@main", "") == wanted)
-                                    .unwrap_or(false)
-                            }));
-                    model_ever_visible |= visible;
+                    let advertised: Vec<String> = data
+                        .iter()
+                        .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+                        .map(str::to_owned)
+                        .collect();
+                    model_ever_visible |= mesh_catalog_shows_model(&advertised, model_id);
                 }
             }
         }
@@ -667,7 +690,7 @@ async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
     let failure = classify_mesh_readiness_failure(model_ever_visible);
     Err(mesh_readiness_failure_message(
         failure,
-        model_id,
+        requested_model,
         &last_error,
     ))
 }
