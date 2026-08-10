@@ -46,6 +46,17 @@ type PersonaCatalogDialogProps = {
   personas: AgentPersona[];
 };
 
+/** File types offered by the agent snapshot picker. Keep aligned with isAgentSnapshotCandidateName. */
+export const AGENT_SNAPSHOT_IMPORT_ACCEPT = ".json,.png";
+
+/** Returns whether a dropped file can contain a snapshot understood by the import decoder. */
+export function isAgentSnapshotCandidateName(fileName: string) {
+  const lowerName = fileName.toLowerCase();
+  return lowerName.endsWith(".json") || lowerName.endsWith(".png");
+}
+
+const MAX_AGENT_SNAPSHOT_IMPORT_BYTES = 10 * 1024 * 1024;
+
 type PendingNavigation =
   | { type: "close" }
   | { type: "selection"; selection: string };
@@ -79,6 +90,9 @@ export function PersonaCatalogDialog({
   const dragDepthRef = React.useRef(0);
   const createDirtyRef = React.useRef(false);
   const [isDragOver, setIsDragOver] = React.useState(false);
+  const [importErrorMessage, setImportErrorMessage] = React.useState<
+    string | null
+  >(null);
   const [pendingNavigation, setPendingNavigation] =
     React.useState<PendingNavigation | null>(null);
   const [selection, setSelection] = React.useState("create");
@@ -100,6 +114,7 @@ export function PersonaCatalogDialog({
       setPendingNavigation(null);
       dragDepthRef.current = 0;
       setIsDragOver(false);
+      setImportErrorMessage(null);
     }
   }, [open]);
 
@@ -170,6 +185,7 @@ export function PersonaCatalogDialog({
     if (!isImportSelected) {
       dragDepthRef.current = 0;
       setIsDragOver(false);
+      setImportErrorMessage(null);
     }
   }, [isImportSelected]);
 
@@ -177,18 +193,28 @@ export function PersonaCatalogDialog({
     return event.dataTransfer.types.includes("Files");
   }
 
-  function isAgentSnapshot(file: File) {
-    const lowerName = file.name.toLowerCase();
-    return (
-      lowerName.endsWith(".agent.json") || lowerName.endsWith(".agent.png")
-    );
-  }
-
   async function importFile(file: File) {
-    if (!isAgentSnapshot(file)) return;
-    const buffer = await file.arrayBuffer();
-    onOpenChange(false);
-    onImportFile(Array.from(new Uint8Array(buffer)), file.name);
+    setImportErrorMessage(null);
+    if (!isAgentSnapshotCandidateName(file.name)) {
+      setImportErrorMessage("Choose a JSON or PNG agent snapshot.");
+      return;
+    }
+    if (file.size > MAX_AGENT_SNAPSHOT_IMPORT_BYTES) {
+      setImportErrorMessage(
+        "This snapshot is larger than 10 MB. Choose a smaller file.",
+      );
+      return;
+    }
+
+    try {
+      const buffer = await file.arrayBuffer();
+      onOpenChange(false);
+      onImportFile(Array.from(new Uint8Array(buffer)), file.name);
+    } catch {
+      setImportErrorMessage(
+        "Buzz couldn't read this snapshot. Choose the file again.",
+      );
+    }
   }
 
   return (
@@ -252,6 +278,7 @@ export function PersonaCatalogDialog({
               onRequestClose: requestClose,
             })}
             error={error}
+            importErrorMessage={importErrorMessage}
             isDragOver={isDragOver}
             isLoading={isLoading}
             isPending={isPending}
@@ -265,7 +292,7 @@ export function PersonaCatalogDialog({
             selectedPersonaId={selectedPersona?.id ?? null}
           />
           <input
-            accept=".agent.json,.agent.png"
+            accept={AGENT_SNAPSHOT_IMPORT_ACCEPT}
             className="hidden"
             data-testid="agent-catalog-import-input"
             onChange={(event) => {
@@ -309,6 +336,7 @@ export function PersonaCatalogDialog({
 type PersonaCatalogChooserProps = {
   createContent: React.ReactNode;
   error: Error | null;
+  importErrorMessage: string | null;
   isDragOver: boolean;
   isLoading: boolean;
   isPending: boolean;
@@ -325,6 +353,7 @@ type PersonaCatalogChooserProps = {
 function PersonaCatalogChooser({
   createContent,
   error,
+  importErrorMessage,
   isDragOver,
   isLoading,
   isPending,
@@ -345,7 +374,7 @@ function PersonaCatalogChooser({
           data-testid="agent-catalog-drop-overlay"
         >
           <p className="rounded-full bg-background/90 px-4 py-2 text-sm font-medium text-primary shadow-sm">
-            Drop .agent.json or .agent.png to import
+            Drop a JSON or PNG agent snapshot to import
           </p>
         </div>
       ) : null}
@@ -420,7 +449,10 @@ function PersonaCatalogChooser({
       <div className="relative z-10 mb-3 ml-px mr-3 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-background shadow-[-1px_0_0_0_hsl(var(--sidebar-border)/0.45)]">
         {selection === "create" ? createContent : null}
         {selection === "import" ? (
-          <ImportAgentPane onImport={onImport} />
+          <ImportAgentPane
+            errorMessage={importErrorMessage}
+            onImport={onImport}
+          />
         ) : null}
         {selectedPersona ? (
           <>
@@ -497,7 +529,13 @@ function CatalogNavigationButton({
   );
 }
 
-function ImportAgentPane({ onImport }: { onImport: () => void }) {
+function ImportAgentPane({
+  errorMessage,
+  onImport,
+}: {
+  errorMessage: string | null;
+  onImport: () => void;
+}) {
   return (
     <button
       className="m-5 flex min-h-0 flex-1 flex-col items-center justify-center rounded-xl border-2 border-dashed border-border bg-muted/20 px-8 py-12 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -510,9 +548,18 @@ function ImportAgentPane({ onImport }: { onImport: () => void }) {
       </span>
       <span className="mt-4 text-base font-semibold">Import an agent</span>
       <span className="mt-2 max-w-sm text-sm text-muted-foreground">
-        Drop an .agent.json or .agent.png file anywhere in this window, or
-        choose a file.
+        Drop a JSON or PNG agent snapshot anywhere in this window, or choose a
+        file.
       </span>
+      {errorMessage ? (
+        <span
+          className="mt-3 max-w-sm text-sm text-destructive"
+          data-testid="agent-catalog-import-error"
+          role="alert"
+        >
+          {errorMessage}
+        </span>
+      ) : null}
       <span className="mt-5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">
         Choose file
       </span>

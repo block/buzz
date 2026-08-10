@@ -452,15 +452,63 @@ test("the new agent card opens unified create, catalog, and import flows", async
 
   await page.getByTestId("agent-catalog-import").click();
   await expect(page.getByTestId("agent-catalog-import-dropzone")).toBeVisible();
+  await expect(page.getByTestId("agent-catalog-import-input")).toHaveAttribute(
+    "accept",
+    ".json,.png",
+  );
   const fileChooserPromise = page.waitForEvent("filechooser");
   await page.getByTestId("agent-catalog-import-dropzone").click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles({
     buffer: Buffer.from("{}"),
     mimeType: "application/json",
-    name: "imported.agent.json",
+    name: "agent.json",
   });
   await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
+});
+
+test("ordinary agent snapshot filenames import by drag and drop", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByTestId("agent-catalog-import").click();
+
+  const dataTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["{}"], "agent.json", { type: "application/json" }),
+    );
+    return transfer;
+  });
+  const catalogDialog = page.getByTestId("persona-catalog-dialog");
+  await catalogDialog.dispatchEvent("dragenter", { dataTransfer });
+  await expect(page.getByTestId("agent-catalog-drop-overlay")).toBeVisible();
+  await catalogDialog.dispatchEvent("drop", { dataTransfer });
+
+  await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
+});
+
+test("oversized agent snapshots are rejected before import", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByTestId("agent-catalog-import").click();
+
+  await page.getByTestId("agent-catalog-import-input").setInputFiles({
+    buffer: Buffer.alloc(10 * 1024 * 1024 + 1),
+    mimeType: "application/json",
+    name: "agent.json",
+  });
+
+  await expect(page.getByTestId("agent-catalog-import-error")).toHaveText(
+    "This snapshot is larger than 10 MB. Choose a smaller file.",
+  );
+  await expect(page.getByTestId("persona-catalog-dialog")).toBeVisible();
+  await expect(page.getByTestId("agent-snapshot-import-dialog")).toHaveCount(0);
 });
 
 test("embedded create keeps its draft when discard is cancelled", async ({
