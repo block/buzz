@@ -2415,11 +2415,18 @@ test("built-in removal failures show up from My Agents", async ({ page }) => {
   await page.getByLabel("Open actions for Honey").click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
 
-  await expect(
-    page
-      .locator("[data-sonner-toast]")
-      .filter({ hasText: "Honey is still referenced by a team." }),
-  ).toBeVisible();
+  const failureToast = page
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: "Honey is still referenced by a team." });
+  await expect(failureToast).toBeVisible();
+
+  // The reported failure: Sonner's four-second default cleared this before a
+  // multi-line error could be read, let alone copied into a report.
+  await page.waitForTimeout(5_000);
+  await expect(failureToast).toBeVisible();
+
+  await failureToast.getByRole("button", { name: "Close toast" }).click();
+  await expect(failureToast).toHaveCount(0);
 });
 
 test("personas referenced by teams cannot be deleted", async ({ page }) => {
