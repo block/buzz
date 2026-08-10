@@ -2289,10 +2289,11 @@ async fn test_private_channel_any_member_can_invite() {
 
         for target_role in ["member", "guest", "bot"] {
             let target_keys = Keys::generate();
+            let target_pubkey_hex = target_keys.public_key().to_hex();
             let (accepted, msg) = add_member_with_role_ws(
                 &mut actor_client,
                 &channel_id,
-                &target_keys.public_key().to_hex(),
+                &target_pubkey_hex,
                 target_role,
                 actor_keys,
             )
@@ -2300,6 +2301,11 @@ async fn test_private_channel_any_member_can_invite() {
             assert!(
                 accepted,
                 "private-channel {actor_role} should add {target_role}, got: {msg}"
+            );
+            assert_eq!(
+                member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
+                Some(target_role.to_string()),
+                "private-channel {actor_role} add must persist the {target_role} role"
             );
         }
 
