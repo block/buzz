@@ -6,13 +6,13 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, persist_agent_start_failure,
+        persist_record_start_failure, provider_deploy, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -292,7 +292,13 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             &personas_for_preflight,
             &global_for_preflight,
         );
-    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await?;
+    if let Err(error) = ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await {
+        // The preflight runs before any mutable store load (and without the
+        // store lock, across the await) — persist the refusal under a fresh
+        // lock so a refused start leaves a durable forensic trace.
+        persist_agent_start_failure(app, pubkey, &error);
+        return Err(error);
+    }
 
     {
         let _store_guard = state
@@ -393,7 +399,15 @@ pub(super) async fn start_local_agent_with_preflight(
             &personas,
             &global,
         );
-    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
+    if let Err(error) =
+        ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await
+    {
+        // The preflight runs before the mutable store load below (and without
+        // the store lock, across the await) — persist the refusal under a
+        // fresh lock so a refused start leaves a durable forensic trace.
+        persist_agent_start_failure(app, pubkey, &error);
+        return Err(error);
+    }
 
     let _store_guard = state
         .managed_agents_store_lock
@@ -423,13 +437,23 @@ pub(super) async fn start_local_agent_with_preflight(
                 record.updated_at = crate::util::now_iso();
             }
             None => {
-                return Err(
-                    crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string(),
-                );
+                let error =
+                    crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string();
+                // The store lock and records are already in hand here —
+                // persist the refusal before returning so an orphaned instance
+                // explains itself on the durable record.
+                persist_record_start_failure(app, &mut records, pubkey, &error);
+                return Err(error);
             }
         }
     }
-    start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;
+    if let Err(error) = start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex)) {
+        // Spawn refusal (missing identity key, harness-descriptor resolution
+        // failure, …): persist before returning so the failure is visible
+        // after the fact, not just in the returned error string.
+        persist_record_start_failure(app, &mut records, pubkey, &error);
+        return Err(error);
+    }
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
         retain_managed_agent_pending(app, state, saved_record);
