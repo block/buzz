@@ -46,6 +46,10 @@ use crate::relay::{ChannelInfo, RestClient};
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 
+/// Stable marker used by the main loop to dead-letter an unverified reply
+/// without retrying and risking a duplicate publication.
+pub const PUBLICATION_VERIFICATION_ERROR_PREFIX: &str = "publication verification failed:";
+
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
@@ -2110,6 +2114,42 @@ pub async fn run_prompt_task(
                                 "control signal arrived but turn already completed — treating as success"
                             );
                         }
+                        // The ACP response was consumed by the race, but it is
+                        // still a completed channel turn. Preserve the same
+                        // publication contract as the normal success arm.
+                        // Explicit Cancel is the sole exception: its contract
+                        // deliberately drops the caller's batch.
+                        if !matches!(control_signal, ControlSignal::Cancel) {
+                            if let Some(batch) = batch.as_ref() {
+                                if let Err(error) = verify_reply_publication(&ctx, batch).await {
+                                    tracing::error!(
+                                        target: "pool::publication",
+                                        channel_id = %batch.channel_id,
+                                        events = batch.events.len(),
+                                        "race-completed ACP turn has no observed signed reply: {error}"
+                                    );
+                                    let usage = agent.acp.take_turn_usage();
+                                    publish_agent_turn_metric(
+                                        &ctx,
+                                        usage,
+                                        observer_channel_id,
+                                        &session_id,
+                                        &turn_id,
+                                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                    )
+                                    .await;
+                                    send_prompt_result(
+                                        &result_tx,
+                                        &turn_id,
+                                        agent,
+                                        source,
+                                        PromptOutcome::Error(AcpError::Protocol(error)),
+                                        requeue_batch_if_queue(&ctx, Some(batch.clone())),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
@@ -2143,6 +2183,42 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            // ACP only acknowledges that the agent finished its turn; its
+            // response carries no user-visible text. A channel turn is not
+            // complete until the relay contains the agent's signed reply to
+            // this batch. Without this gate an agent can return `ok` after
+            // silently skipping `buzz messages send`, and the queue will
+            // permanently drop the caller's request.
+            if let Some(batch) = batch.as_ref() {
+                if let Err(error) = verify_reply_publication(&ctx, batch).await {
+                    tracing::error!(
+                        target: "pool::publication",
+                        channel_id = %batch.channel_id,
+                        events = batch.events.len(),
+                        "ACP turn ended without an observed signed reply: {error}"
+                    );
+                    let usage = agent.acp.take_turn_usage();
+                    publish_agent_turn_metric(
+                        &ctx,
+                        usage,
+                        observer_channel_id,
+                        &session_id,
+                        &turn_id,
+                        Some(buzz_core::agent_turn_metric::StopReason::Error),
+                    )
+                    .await;
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(AcpError::Protocol(error)),
+                        requeue_batch_if_queue(&ctx, Some(batch.clone())),
+                    );
+                    return;
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -2362,6 +2438,137 @@ pub async fn run_prompt_task(
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
+}
+
+/// Confirm that a successful channel turn actually produced a signed reply.
+/// ACP only returns a stop reason, so this relay check prevents a silent `ok`
+/// from acknowledging a caller whose request was never published.
+async fn verify_reply_publication(ctx: &PromptContext, batch: &FlushBatch) -> Result<(), String> {
+    use nostr::{Alphabet, Kind, SingleLetterTag};
+
+    let channel_info = ctx.channel_info.resolve(batch.channel_id).await;
+    if !batch_requires_reply(
+        batch,
+        &ctx.agent_keys.public_key().to_hex(),
+        channel_info.as_ref().map(|info| info.channel_type.as_str()),
+    ) {
+        tracing::debug!(
+            target: "pool::publication",
+            channel_id = %batch.channel_id,
+            "skipping reply verification for an unaddressed stream turn"
+        );
+        return Ok(());
+    }
+
+    let anchors = publication_anchors(batch);
+    if anchors.is_empty() {
+        return Err(format!(
+            "{PUBLICATION_VERIFICATION_ERROR_PREFIX} batch has no valid reply anchor"
+        ));
+    }
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel = batch.channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16))
+        .author(ctx.agent_keys.public_key())
+        .custom_tags(h_tag, [channel.as_str()])
+        .limit(32);
+    let response = timeout(Duration::from_secs(10), ctx.rest_client.query(&[filter]))
+        .await
+        .map_err(|_| {
+            format!("{PUBLICATION_VERIFICATION_ERROR_PREFIX} reply publication query timed out")
+        })?
+        .map_err(|e| {
+            format!("{PUBLICATION_VERIFICATION_ERROR_PREFIX} reply publication query failed: {e}")
+        })?;
+
+    if publication_proof_from_query(&response, batch.channel_id, &ctx.agent_keys, &anchors) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{PUBLICATION_VERIFICATION_ERROR_PREFIX} no signed kind:9 reply for this batch was found on the relay"
+        ))
+    }
+}
+
+/// A missing publication is actionable only when the turn was directed at this
+/// agent. Stream fan-out deliberately allows silence; DMs always require a
+/// response. Unknown channel metadata fails closed as DM so a transient lookup
+/// failure cannot silently discard a private request.
+fn batch_requires_reply(
+    batch: &FlushBatch,
+    agent_pubkey_hex: &str,
+    channel_type: Option<&str>,
+) -> bool {
+    if channel_type != Some("stream") {
+        return true;
+    }
+
+    batch
+        .events
+        .iter()
+        .chain(batch.cancelled_events.iter())
+        .any(|event| {
+            event.event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.len() >= 2
+                    && values[0] == "p"
+                    && values[1].eq_ignore_ascii_case(agent_pubkey_hex)
+            })
+        })
+}
+
+/// Return every event ID a correctly threaded reply to this batch may cite.
+fn publication_anchors(batch: &FlushBatch) -> HashSet<String> {
+    batch
+        .events
+        .iter()
+        .chain(batch.cancelled_events.iter())
+        .flat_map(|event| {
+            let tags = crate::queue::parse_thread_tags(&event.event);
+            [
+                Some(event.event.id.to_hex()),
+                tags.root_event_id,
+                tags.parent_event_id,
+            ]
+        })
+        .flatten()
+        .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
+        .collect()
+}
+
+/// Validate queried events instead of trusting relay-side filters alone.
+fn publication_proof_from_query(
+    response: &serde_json::Value,
+    channel_id: Uuid,
+    agent_keys: &nostr::Keys,
+    anchors: &HashSet<String>,
+) -> bool {
+    let Some(events) = response.as_array() else {
+        return false;
+    };
+    let agent_pubkey = agent_keys.public_key();
+    let channel = channel_id.to_string();
+    events.iter().any(|raw| {
+        let Ok(event) = serde_json::from_value::<nostr::Event>(raw.clone()) else {
+            return false;
+        };
+        if event.verify().is_err()
+            || event.kind != nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16)
+            || event.pubkey != agent_pubkey
+        {
+            return false;
+        }
+        let has_channel = event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() >= 2 && values[0] == "h" && values[1] == channel
+        });
+        let cites_anchor = event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() >= 2 && values[0] == "e" && anchors.contains(&values[1])
+        });
+        has_channel && cites_anchor
+    })
 }
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
@@ -4032,8 +4239,10 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queue::BatchEvent;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+    use std::time::Instant;
 
     fn test_mcp_server() -> McpServer {
         McpServer {
@@ -5478,6 +5687,130 @@ mod tests {
             cancelled_events: vec![],
             cancel_reason: None,
         }
+    }
+
+    #[test]
+    fn publication_proof_requires_signed_threaded_reply_from_this_agent() {
+        let channel_id = Uuid::new_v4();
+        let agent = Keys::generate();
+        let batch = one_event_batch(channel_id);
+        let anchor = batch.events[0].event.id.to_hex();
+        let reply = EventBuilder::new(Kind::Custom(9), "published")
+            .tags([
+                Tag::parse(["h", channel_id.to_string().as_str()]).unwrap(),
+                Tag::parse(["e", anchor.as_str(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&agent)
+            .unwrap();
+        let response = json!([reply]);
+
+        assert!(publication_proof_from_query(
+            &response,
+            channel_id,
+            &agent,
+            &publication_anchors(&batch),
+        ));
+    }
+
+    #[test]
+    fn publication_proof_rejects_unsigned_or_unanchored_events() {
+        let channel_id = Uuid::new_v4();
+        let agent = Keys::generate();
+        let batch = one_event_batch(channel_id);
+        let anchor = batch.events[0].event.id.to_hex();
+        let reply = EventBuilder::new(Kind::Custom(9), "published")
+            .tags([
+                Tag::parse(["h", channel_id.to_string().as_str()]).unwrap(),
+                Tag::parse(["e", anchor.as_str(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&agent)
+            .unwrap();
+        let mut tampered = serde_json::to_value(reply).unwrap();
+        tampered["content"] = json!("tampered after signing");
+
+        assert!(!publication_proof_from_query(
+            &json!([tampered]),
+            channel_id,
+            &agent,
+            &publication_anchors(&batch),
+        ));
+    }
+
+    #[test]
+    fn publication_requirement_distinguishes_directed_turns_from_stream_fanout() {
+        let channel_id = Uuid::new_v4();
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let foreign = Keys::generate().public_key().to_hex();
+
+        let unaddressed = one_event_batch(channel_id);
+        assert!(!batch_requires_reply(
+            &unaddressed,
+            &agent_hex,
+            Some("stream")
+        ));
+
+        let foreign_event = EventBuilder::new(Kind::Custom(9), "for another agent")
+            .tags([Tag::parse(["p", foreign.as_str()]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let foreign_batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: foreign_event,
+                prompt_tag: "owner-direct".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        assert!(!batch_requires_reply(
+            &foreign_batch,
+            &agent_hex,
+            Some("stream")
+        ));
+
+        let directed_event = EventBuilder::new(Kind::Custom(9), "for this agent")
+            .tags([Tag::parse(["p", agent_hex.as_str()]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let directed_batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: directed_event,
+                prompt_tag: "mentioned".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        assert!(batch_requires_reply(
+            &directed_batch,
+            &agent_hex,
+            Some("stream")
+        ));
+
+        assert!(batch_requires_reply(&unaddressed, &agent_hex, Some("dm")));
+        assert!(batch_requires_reply(&unaddressed, &agent_hex, None));
+    }
+
+    #[test]
+    fn publication_requirement_includes_addressed_cancelled_events() {
+        let channel_id = Uuid::new_v4();
+        let agent = Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let directed_event = EventBuilder::new(Kind::Custom(9), "steered request")
+            .tags([Tag::parse(["p", agent_hex.as_str()]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut batch = one_event_batch(channel_id);
+        batch.cancelled_events.push(BatchEvent {
+            event: directed_event,
+            prompt_tag: "mentioned".into(),
+            received_at: Instant::now(),
+        });
+
+        assert!(batch_requires_reply(&batch, &agent_hex, Some("stream")));
     }
 
     #[test]
