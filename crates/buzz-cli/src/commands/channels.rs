@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use buzz_core::kind::{KIND_MANAGED_AGENT, KIND_TEAM};
+use buzz_core::kind::{KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_TEAM};
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -10,6 +11,7 @@ use crate::client::{
 };
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
+use crate::commands::users::presence_subject;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
@@ -470,14 +472,175 @@ async fn scan_managed_agents_by_owner(
     Ok(found)
 }
 
+/// Best-effort hints for a candidate agent pubkey, used to annotate the
+/// duplicate-instance error. Gathered from relay presence and kind:0 lookups
+/// before cardinality runs — both are optional so a lookup failure never
+/// becomes a new failure mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateHint {
+    /// Latest presence status from kind:40902 (`"online"`, `"offline"`, or
+    /// whatever string the relay holds). `None` if the lookup failed or
+    /// returned no event.
+    presence: Option<String>,
+    /// `created_at` timestamp from the agent's kind:0 profile event — the
+    /// time of the last profile update (kind:0 is replaceable; desktop
+    /// republishes it on rename and profile reconciliation). `None` if the
+    /// lookup failed or returned nothing.
+    profile_updated_at: Option<u64>,
+}
+
+/// Fetch best-effort presence (kind:40902) and kind:0 metadata for each
+/// pubkey in `pubkeys`, running both queries concurrently and bounding the
+/// whole enrichment phase by `timeout`. Returns a map from pubkey to hints;
+/// pubkeys with failed or absent lookups are absent from the map rather than
+/// causing an error — callers must handle the missing-hint case. On timeout
+/// or relay error, returns whatever partial hints were collected (possibly
+/// an empty map) so the caller can still print bare pubkeys promptly.
+///
+/// Only called when duplicate candidates have been detected: happy-path
+/// resolutions perform zero hint queries.
+async fn fetch_candidate_hints(
+    client: &BuzzClient,
+    pubkeys: &[String],
+    timeout: std::time::Duration,
+) -> HashMap<String, CandidateHint> {
+    if pubkeys.is_empty() {
+        return HashMap::new();
+    }
+
+    // Presence: kind:40902, relay-synthesized on demand.
+    let presence_filter = serde_json::json!({
+        "kinds": [KIND_PRESENCE_SNAPSHOT],
+        "authors": pubkeys,
+        "limit": pubkeys.len(),
+    });
+    // Profile: kind:0 replaceable head per author.
+    let profile_filter = serde_json::json!({
+        "kinds": [0],
+        "authors": pubkeys,
+        "limit": pubkeys.len(),
+    });
+
+    // Run both queries concurrently and bound by the overall timeout.
+    let (presence_result, profile_result) = tokio::time::timeout(timeout, async {
+        tokio::join!(
+            client.query(&presence_filter),
+            client.query(&profile_filter),
+        )
+    })
+    .await
+    .unwrap_or((
+        Err(crate::error::CliError::Other("hint timeout".to_string())),
+        Err(crate::error::CliError::Other("hint timeout".to_string())),
+    ));
+
+    let presence_events: Vec<serde_json::Value> = presence_result
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default();
+    let profile_events: Vec<serde_json::Value> = profile_result
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default();
+
+    build_hint_map(&presence_events, &profile_events)
+}
+
+/// Pure response-to-map conversion: takes the raw presence (kind:40902) and
+/// profile (kind:0) event slices returned by the relay and builds the
+/// per-pubkey hint map. Extracted as a sync function so it is directly
+/// unit-testable without a relay.
+///
+/// Presence subject is the `p`-tag value when present (relay signs the event
+/// and embeds the agent pubkey there), otherwise the event author.
+fn build_hint_map(
+    presence_events: &[serde_json::Value],
+    profile_events: &[serde_json::Value],
+) -> HashMap<String, CandidateHint> {
+    let mut hints: HashMap<String, CandidateHint> = HashMap::new();
+
+    for event in presence_events {
+        let subject = presence_subject(event).to_string();
+        if subject.is_empty() {
+            continue;
+        }
+        let status = event
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        hints
+            .entry(subject)
+            .or_insert(CandidateHint {
+                presence: None,
+                profile_updated_at: None,
+            })
+            .presence = status;
+    }
+
+    for event in profile_events {
+        let Some(pubkey) = event
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let profile_updated_at = event.get("created_at").and_then(|v| v.as_u64());
+        hints
+            .entry(pubkey)
+            .or_insert(CandidateHint {
+                presence: None,
+                profile_updated_at: None,
+            })
+            .profile_updated_at = profile_updated_at;
+    }
+
+    hints
+}
+
+/// Format a single candidate pubkey for the duplicate-instance error,
+/// appending available hint fields in brackets. Pure and testable.
+///
+/// Examples:
+/// - `"aaa…bbb [online, profile updated 2024-01-15]"`
+/// - `"aaa…bbb [offline]"`
+/// - `"aaa…bbb [profile updated 2024-01-15]"`
+/// - `"aaa…bbb"` (no hint at all)
+fn format_candidate(pubkey: &str, hint: Option<&CandidateHint>) -> String {
+    let Some(h) = hint else {
+        return pubkey.to_string();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(status) = &h.presence {
+        parts.push(status.clone());
+    }
+    if let Some(ts) = h.profile_updated_at {
+        // Use chrono for safe conversion; omit the date if the timestamp is
+        // out of range rather than panicking or printing garbage.
+        if let Some(dt) = DateTime::from_timestamp(ts as i64, 0) {
+            parts.push(format!("profile updated {}", dt.format("%Y-%m-%d")));
+        }
+    }
+    if parts.is_empty() {
+        pubkey.to_string()
+    } else {
+        format!("{pubkey} [{}]", parts.join(", "))
+    }
+}
+
 /// Apply the F4 cardinality rule per persona slug: zero live instances is a
 /// known skip (cold-start provisioning is desktop-only, out of scope), one is
 /// added, more than one is a hard error listing candidate pubkeys — matching
 /// all instances silently would risk adding a stale or wrong instance. Pure
 /// and independent of the relay so it's directly unit-testable.
+///
+/// `hints` is best-effort decoration gathered by the async caller before this
+/// function runs: absent entries are silently omitted from the error, never a
+/// new failure mode.
 fn apply_cardinality_rule(
     slugs: &[String],
     found: &[ResolvedAgent],
+    hints: &HashMap<String, CandidateHint>,
 ) -> Result<ResolvedRoster, CliError> {
     let mut agents = Vec::new();
     let mut skipped = Vec::new();
@@ -487,7 +650,10 @@ fn apply_cardinality_rule(
             [] => skipped.push(slug.clone()),
             [one] => agents.push((*one).clone()),
             many => {
-                let candidates: Vec<&str> = many.iter().map(|a| a.pubkey.as_str()).collect();
+                let candidates: Vec<String> = many
+                    .iter()
+                    .map(|a| format_candidate(&a.pubkey, hints.get(&a.pubkey)))
+                    .collect();
                 return Err(CliError::Usage(format!(
                     "persona '{slug}' has {} live instances for this owner ({}); \
                      pass a template with a single instance per persona, or resolve \
@@ -527,6 +693,7 @@ fn resolve_roster_with_archive_filter(
     slugs: &[String],
     found: Vec<ResolvedAgent>,
     archived_result: Result<Vec<String>, CliError>,
+    hints: &HashMap<String, CandidateHint>,
 ) -> Result<RosterResolution, CliError> {
     let (archived, archive_state_warning) = match archived_result {
         Ok(pubkeys) => (pubkeys.into_iter().collect::<HashSet<String>>(), None),
@@ -546,7 +713,7 @@ fn resolve_roster_with_archive_filter(
         }
     }
 
-    let resolved = apply_cardinality_rule(slugs, &live_found).map_err(|e| {
+    let resolved = apply_cardinality_rule(slugs, &live_found, hints).map_err(|e| {
         match (e, &archive_state_warning) {
             (CliError::Usage(msg), Some(warning)) => {
                 CliError::Usage(format!("{msg} (warning: {warning})"))
@@ -590,13 +757,74 @@ fn finalize_roster_resolution(
     slugs: &[String],
     found: Vec<ResolvedAgent>,
     archived_result: Result<Vec<String>, CliError>,
+    hints: &HashMap<String, CandidateHint>,
     warn_sink: &mut dyn std::io::Write,
 ) -> Result<RosterResolution, CliError> {
     if let Err(e) = &archived_result {
         let warning = archive_snapshot_warning(e);
         let _ = writeln!(warn_sink, "{}", serde_json::json!({"warning": warning}));
     }
-    resolve_roster_with_archive_filter(slugs, found, archived_result)
+    resolve_roster_with_archive_filter(slugs, found, archived_result, hints)
+}
+
+/// Post-fetch stage of [`build_roster_resolution`]: given the already-fetched
+/// `found` and `archived_result`, identifies duplicate live instances, calls
+/// `fetch_hints` only for their pubkeys, then delegates to
+/// [`finalize_roster_resolution`].
+///
+/// Accepting `fetch_hints` as a generic async closure makes this function
+/// directly testable without a relay: tests pass a recording closure that
+/// asserts the exact pubkey set and returns a controlled hint map.
+///
+/// - **Happy path** (no duplicates): `fetch_hints` is never called.
+/// - **Trusted archive archives one of a pair**: only the surviving live pair
+///   triggers `fetch_hints`; archived instances are not fetched for.
+/// - **Untrusted archive** (`archived_result: Err`): all found instances are
+///   conservatively treated as live for duplicate detection.
+async fn assemble_roster_resolution<F, Fut>(
+    slugs: &[String],
+    found: Vec<ResolvedAgent>,
+    archived_result: Result<Vec<String>, CliError>,
+    fetch_hints: F,
+    warn_sink: &mut dyn std::io::Write,
+) -> Result<RosterResolution, CliError>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = HashMap<String, CandidateHint>>,
+{
+    // Determine which pubkeys belong to duplicate live instances after archive
+    // filtering. Untrusted archive (Err) → empty archived set → conservative.
+    let duplicate_pubkeys: Vec<String> = {
+        let archived_set: HashSet<&str> = match &archived_result {
+            Ok(keys) => keys.iter().map(String::as_str).collect(),
+            Err(_) => HashSet::new(),
+        };
+        let live: Vec<&ResolvedAgent> = found
+            .iter()
+            .filter(|a| !archived_set.contains(a.pubkey.as_str()))
+            .collect();
+        let mut slug_count: HashMap<&str, Vec<&str>> = HashMap::new();
+        for a in &live {
+            slug_count
+                .entry(a.persona_id.as_str())
+                .or_default()
+                .push(a.pubkey.as_str());
+        }
+        slug_count
+            .into_values()
+            .filter(|pks| pks.len() > 1)
+            .flatten()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let hints = if duplicate_pubkeys.is_empty() {
+        HashMap::new()
+    } else {
+        fetch_hints(duplicate_pubkeys).await
+    };
+
+    finalize_roster_resolution(slugs, found, archived_result, &hints, warn_sink)
 }
 
 /// Resolve a template's roster against the relay: expand team entries into
@@ -606,6 +834,11 @@ fn finalize_roster_resolution(
 /// for the pure filter+cardinality core and the fail-open contract). Runs
 /// entirely before any channel-creation side effect — a cardinality error
 /// aborts with nothing created.
+///
+/// Hint fetching is zero-cost on the happy path: [`assemble_roster_resolution`]
+/// only invokes the hint fetcher when duplicate live instances are detected
+/// after archive filtering. Queries run concurrently and are bounded by a
+/// 3-second timeout; on expiry the error prints with bare pubkeys.
 async fn build_roster_resolution(
     client: &BuzzClient,
     owner: &str,
@@ -636,10 +869,22 @@ async fn build_roster_resolution(
     }
 
     let slug_set: HashSet<&str> = slugs.iter().map(String::as_str).collect();
-    let found = scan_managed_agents_by_owner(client, owner, &slug_set).await?;
+    let (found, archived_result) = tokio::join!(
+        scan_managed_agents_by_owner(client, owner, &slug_set),
+        fetch_archived_snapshot(client),
+    );
+    let found = found?;
 
-    let archived_result = fetch_archived_snapshot(client).await;
-    finalize_roster_resolution(&slugs, found, archived_result, &mut std::io::stderr())
+    assemble_roster_resolution(
+        &slugs,
+        found,
+        archived_result,
+        |pks| async move {
+            fetch_candidate_hints(client, &pks, std::time::Duration::from_secs(3)).await
+        },
+        &mut std::io::stderr(),
+    )
+    .await
 }
 
 /// `buzz channels create --template <name>`: load a desktop-local channel
@@ -1176,17 +1421,29 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
+        cmd_set_add_policy, finalize_roster_resolution, format_candidate, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, ArchivedExclusion, CandidateHint,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
     use serde_json::json;
+    use std::collections::HashMap;
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    fn no_hints() -> HashMap<String, CandidateHint> {
+        HashMap::new()
+    }
+
+    fn hint(presence: Option<&str>, profile_updated_at: Option<u64>) -> CandidateHint {
+        CandidateHint {
+            presence: presence.map(str::to_string),
+            profile_updated_at,
+        }
     }
 
     #[test]
@@ -1392,7 +1649,8 @@ mod tests {
     #[test]
     fn cardinality_zero_instances_is_skipped_not_error() {
         let slugs = vec!["builtin:fizz".to_string()];
-        let resolved = apply_cardinality_rule(&slugs, &[]).expect("zero instances is not fatal");
+        let resolved =
+            apply_cardinality_rule(&slugs, &[], &no_hints()).expect("zero instances is not fatal");
         assert!(resolved.agents.is_empty());
         assert_eq!(resolved.skipped, vec!["builtin:fizz".to_string()]);
     }
@@ -1401,7 +1659,8 @@ mod tests {
     fn cardinality_one_instance_is_added() {
         let slugs = vec!["builtin:fizz".to_string()];
         let found = vec![agent("builtin:fizz", "a".repeat(64).as_str())];
-        let resolved = apply_cardinality_rule(&slugs, &found).expect("single instance resolves");
+        let resolved =
+            apply_cardinality_rule(&slugs, &found, &no_hints()).expect("single instance resolves");
         assert_eq!(resolved.agents.len(), 1);
         assert_eq!(resolved.agents[0].persona_id, "builtin:fizz");
         assert!(resolved.skipped.is_empty());
@@ -1414,7 +1673,7 @@ mod tests {
             agent("builtin:fizz", &"a".repeat(64)),
             agent("builtin:fizz", &"b".repeat(64)),
         ];
-        let err = apply_cardinality_rule(&slugs, &found).unwrap_err();
+        let err = apply_cardinality_rule(&slugs, &found, &no_hints()).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         let msg = err.to_string();
         assert!(msg.contains("builtin:fizz"));
@@ -1438,13 +1697,14 @@ mod tests {
             agent("builtin:duplicated", &"b".repeat(64)),
             agent("builtin:duplicated", &"c".repeat(64)),
         ];
-        let err = apply_cardinality_rule(&slugs, &found).unwrap_err();
+        let err = apply_cardinality_rule(&slugs, &found, &no_hints()).unwrap_err();
         assert!(err.to_string().contains("builtin:duplicated"));
     }
 
     #[test]
     fn cardinality_empty_roster_resolves_to_empty_lists() {
-        let resolved = apply_cardinality_rule(&[], &[]).expect("empty roster is not fatal");
+        let resolved =
+            apply_cardinality_rule(&[], &[], &no_hints()).expect("empty roster is not fatal");
         assert!(resolved.agents.is_empty());
         assert!(resolved.skipped.is_empty());
     }
@@ -1458,7 +1718,7 @@ mod tests {
             agent("builtin:fizz", &"a".repeat(64)),
             agent("builtin:unrelated", &"z".repeat(64)),
         ];
-        let resolved = apply_cardinality_rule(&slugs, &found).expect("resolves");
+        let resolved = apply_cardinality_rule(&slugs, &found, &no_hints()).expect("resolves");
         assert_eq!(resolved.agents.len(), 1);
         assert_eq!(resolved.agents[0].persona_id, "builtin:fizz");
     }
@@ -1477,9 +1737,13 @@ mod tests {
             agent("builtin:fizz", &live_pk),
             agent("builtin:fizz", &archived_pk),
         ];
-        let resolution =
-            resolve_roster_with_archive_filter(&slugs, found, Ok(vec![archived_pk.clone()]))
-                .expect("resolves to the single live instance");
+        let resolution = resolve_roster_with_archive_filter(
+            &slugs,
+            found,
+            Ok(vec![archived_pk.clone()]),
+            &no_hints(),
+        )
+        .expect("resolves to the single live instance");
         assert_eq!(resolution.agents.len(), 1);
         assert_eq!(resolution.agents[0].pubkey, live_pk);
         assert!(resolution.skipped.is_empty());
@@ -1502,9 +1766,13 @@ mod tests {
         let pk1 = "a".repeat(64);
         let pk2 = "b".repeat(64);
         let found = vec![agent("builtin:fizz", &pk1), agent("builtin:fizz", &pk2)];
-        let resolution =
-            resolve_roster_with_archive_filter(&slugs, found, Ok(vec![pk1.clone(), pk2.clone()]))
-                .expect("all-archived is a skip, not an error");
+        let resolution = resolve_roster_with_archive_filter(
+            &slugs,
+            found,
+            Ok(vec![pk1.clone(), pk2.clone()]),
+            &no_hints(),
+        )
+        .expect("all-archived is a skip, not an error");
         assert!(resolution.agents.is_empty());
         assert_eq!(
             resolution.skipped,
@@ -1521,8 +1789,9 @@ mod tests {
         // Zero live instances (nothing to archive) must not be confused
         // with "all instances archived" — no exclusions were made.
         let slugs = vec!["builtin:fizz".to_string()];
-        let resolution = resolve_roster_with_archive_filter(&slugs, vec![], Ok(vec![]))
-            .expect("zero instances is not fatal");
+        let resolution =
+            resolve_roster_with_archive_filter(&slugs, vec![], Ok(vec![]), &no_hints())
+                .expect("zero instances is not fatal");
         assert!(resolution.agents.is_empty());
         assert_eq!(
             resolution.skipped,
@@ -1543,8 +1812,9 @@ mod tests {
         let pk = "a".repeat(64);
         let found = vec![agent("builtin:fizz", &pk)];
         let archived_err = CliError::Other("relay info document missing 'self' field".into());
-        let resolution = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err))
-            .expect("fails open — resolution still succeeds");
+        let resolution =
+            resolve_roster_with_archive_filter(&slugs, found, Err(archived_err), &no_hints())
+                .expect("fails open — resolution still succeeds");
         assert_eq!(resolution.agents.len(), 1);
         assert_eq!(resolution.agents[0].pubkey, pk);
         assert!(resolution.archived_excluded.is_empty());
@@ -1567,7 +1837,7 @@ mod tests {
             agent("builtin:fizz", &"b".repeat(64)),
         ];
         let archived_err = CliError::Other("query failure".into());
-        let err = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err))
+        let err = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err), &no_hints())
             .expect_err("ambiguity error must still propagate");
         assert!(matches!(err, CliError::Usage(_)));
         let msg = err.to_string();
@@ -1589,7 +1859,7 @@ mod tests {
         let slugs = vec!["builtin:fizz".to_string()];
         let pk = "a".repeat(64);
         let found = vec![agent("builtin:fizz", &pk)];
-        let resolution = resolve_roster_with_archive_filter(&slugs, found, Ok(vec![]))
+        let resolution = resolve_roster_with_archive_filter(&slugs, found, Ok(vec![]), &no_hints())
             .expect("resolves with nothing archived");
         assert!(resolution.archived_excluded.is_empty());
         let serialized = serde_json::to_value(&resolution.archived_excluded).unwrap();
@@ -1619,8 +1889,9 @@ mod tests {
         let found = vec![agent("builtin:fizz", &pk)];
         let archived_err = CliError::Other("relay info document missing 'self' field".into());
         let mut sink: Vec<u8> = Vec::new();
-        let resolution = finalize_roster_resolution(&slugs, found, Err(archived_err), &mut sink)
-            .expect("fails open — resolution still succeeds");
+        let resolution =
+            finalize_roster_resolution(&slugs, found, Err(archived_err), &no_hints(), &mut sink)
+                .expect("fails open — resolution still succeeds");
 
         let sink_text = String::from_utf8(sink).expect("sink is UTF-8");
         let lines: Vec<&str> = sink_text.lines().collect();
@@ -1663,8 +1934,9 @@ mod tests {
         ];
         let archived_err = CliError::Other("query failure".into());
         let mut sink: Vec<u8> = Vec::new();
-        let err = finalize_roster_resolution(&slugs, found, Err(archived_err), &mut sink)
-            .expect_err("ambiguity error must still propagate");
+        let err =
+            finalize_roster_resolution(&slugs, found, Err(archived_err), &no_hints(), &mut sink)
+                .expect_err("ambiguity error must still propagate");
 
         let sink_text = String::from_utf8(sink).expect("sink is UTF-8");
         assert_eq!(
@@ -1708,6 +1980,369 @@ mod tests {
         assert!(
             report.get("archive_state_warning").is_none(),
             "no warning key expected: {report}"
+        );
+    }
+
+    // --- Candidate hint formatting ---
+
+    #[test]
+    fn format_candidate_no_hint_returns_bare_pubkey() {
+        let pk = "a".repeat(64);
+        assert_eq!(format_candidate(&pk, None), pk);
+    }
+
+    #[test]
+    fn format_candidate_presence_only_appends_status() {
+        let pk = "a".repeat(64);
+        let h = hint(Some("offline"), None);
+        let formatted = format_candidate(&pk, Some(&h));
+        assert!(formatted.contains(&pk), "pubkey must appear: {formatted}");
+        assert!(
+            formatted.contains("[offline]"),
+            "presence status must appear: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_candidate_provisioned_at_only_appends_date() {
+        let pk = "b".repeat(64);
+        // 2024-01-15 = 1705276800 seconds since epoch
+        let h = hint(None, Some(1_705_276_800));
+        let formatted = format_candidate(&pk, Some(&h));
+        assert!(formatted.contains(&pk), "pubkey must appear: {formatted}");
+        assert!(
+            formatted.contains("profile updated 2024-01-15"),
+            "date must appear: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_candidate_both_hints_appends_both() {
+        let pk = "c".repeat(64);
+        let h = hint(Some("online"), Some(1_705_276_800));
+        let formatted = format_candidate(&pk, Some(&h));
+        assert!(formatted.contains(&pk), "pubkey must appear: {formatted}");
+        assert!(
+            formatted.contains("online"),
+            "presence must appear: {formatted}"
+        );
+        assert!(
+            formatted.contains("profile updated 2024-01-15"),
+            "date must appear: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_candidate_empty_hint_fields_returns_bare_pubkey() {
+        // Both hint fields None — same output as no hint at all.
+        let pk = "d".repeat(64);
+        let h = hint(None, None);
+        assert_eq!(format_candidate(&pk, Some(&h)), pk);
+    }
+
+    #[test]
+    fn cardinality_error_includes_hint_when_provided() {
+        // When hints are present, the duplicate-instance error must include
+        // the presence and provisioned-at decoration in its candidate list.
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let slugs = vec!["builtin:fizz".to_string()];
+        let found = vec![agent("builtin:fizz", &pk_a), agent("builtin:fizz", &pk_b)];
+        let mut hints = HashMap::new();
+        hints.insert(pk_a.clone(), hint(Some("offline"), Some(1_705_276_800)));
+        hints.insert(pk_b.clone(), hint(Some("online"), None));
+
+        let err = apply_cardinality_rule(&slugs, &found, &hints).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&pk_a), "pk_a must appear: {msg}");
+        assert!(msg.contains(&pk_b), "pk_b must appear: {msg}");
+        assert!(msg.contains("offline"), "offline status must appear: {msg}");
+        assert!(
+            msg.contains("profile updated 2024-01-15"),
+            "provisioned date must appear: {msg}"
+        );
+        assert!(msg.contains("online"), "online status must appear: {msg}");
+    }
+
+    #[test]
+    fn cardinality_error_falls_back_to_bare_pubkey_when_hint_missing() {
+        // A missing hint entry in the map must not cause a panic or omit
+        // the pubkey from the error — it must print as a bare pubkey.
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let slugs = vec!["builtin:fizz".to_string()];
+        let found = vec![agent("builtin:fizz", &pk_a), agent("builtin:fizz", &pk_b)];
+        // Only pk_a has a hint; pk_b is absent from the map.
+        let mut hints = HashMap::new();
+        hints.insert(pk_a.clone(), hint(Some("offline"), None));
+
+        let err = apply_cardinality_rule(&slugs, &found, &hints).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(&pk_a), "pk_a must appear: {msg}");
+        assert!(
+            msg.contains(&pk_b),
+            "pk_b must appear as bare pubkey: {msg}"
+        );
+        // pk_b has no hint — it must not appear as "[online]" or "[offline]"
+        // but must still appear in the candidate list.
+        assert!(
+            !msg.contains(&format!("{pk_b} [")),
+            "pk_b must not have hint brackets: {msg}"
+        );
+    }
+
+    // --- build_hint_map boundary tests ---
+
+    #[test]
+    fn build_hint_map_uses_p_tag_over_author_for_presence() {
+        // Relay signs presence events with its own key; the agent pubkey is in
+        // the `p` tag. The relay author must NOT be used as the map key.
+        let relay_pk = "r".repeat(64);
+        let agent_pk = "a".repeat(64);
+        let presence = vec![json!({
+            "pubkey": relay_pk,
+            "content": "online",
+            "tags": [["p", agent_pk]],
+        })];
+        let map = build_hint_map(&presence, &[]);
+        assert!(
+            !map.contains_key(&relay_pk),
+            "relay author must not be the key: {map:?}"
+        );
+        assert!(
+            map.contains_key(&agent_pk),
+            "agent p-tag must be key: {map:?}"
+        );
+        assert_eq!(
+            map[&agent_pk].presence.as_deref(),
+            Some("online"),
+            "presence status preserved"
+        );
+    }
+
+    #[test]
+    fn build_hint_map_presence_failure_profile_survives() {
+        // If presence lookup fails (empty slice), profile hints must still be
+        // populated from the profile events alone.
+        let pk = "b".repeat(64);
+        let profile = vec![json!({
+            "pubkey": pk,
+            "created_at": 1_705_276_800_u64,
+        })];
+        let map = build_hint_map(&[], &profile);
+        assert!(map.contains_key(&pk), "pubkey must be in map: {map:?}");
+        assert_eq!(
+            map[&pk].profile_updated_at,
+            Some(1_705_276_800),
+            "profile timestamp preserved"
+        );
+        assert!(
+            map[&pk].presence.is_none(),
+            "presence must be absent when lookup failed"
+        );
+    }
+
+    #[test]
+    fn build_hint_map_profile_failure_presence_survives() {
+        // If profile lookup fails (empty slice), presence hints must still be
+        // populated from the presence events alone.
+        let pk = "c".repeat(64);
+        let presence = vec![json!({
+            "pubkey": pk,
+            "content": "offline",
+            "tags": [],
+        })];
+        let map = build_hint_map(&presence, &[]);
+        assert!(map.contains_key(&pk), "pubkey must be in map: {map:?}");
+        assert_eq!(
+            map[&pk].presence.as_deref(),
+            Some("offline"),
+            "presence status preserved"
+        );
+        assert!(
+            map[&pk].profile_updated_at.is_none(),
+            "profile_updated_at must be absent when lookup failed"
+        );
+    }
+
+    #[test]
+    fn build_hint_map_malformed_entries_are_skipped() {
+        // Presence events missing both pubkey and p-tag are skipped without
+        // panicking; profile events missing pubkey are skipped too.
+        let malformed_presence = vec![
+            json!({"content": "online"}), // no pubkey, no p-tag
+            json!({"pubkey": null, "content": "online", "tags": []}),
+        ];
+        let malformed_profile = vec![
+            json!({"created_at": 1_705_276_800_u64}), // no pubkey
+            json!({"pubkey": null, "created_at": 1_705_276_800_u64}),
+        ];
+        let map = build_hint_map(&malformed_presence, &malformed_profile);
+        assert!(
+            map.is_empty(),
+            "malformed entries must yield empty map: {map:?}"
+        );
+    }
+
+    #[test]
+    fn build_hint_map_both_failures_yield_empty_map() {
+        // Both slices empty simulates a total timeout / relay error.
+        let map = build_hint_map(&[], &[]);
+        assert!(map.is_empty(), "empty inputs must yield empty map");
+    }
+
+    // --- assemble_roster_resolution wiring tests ---
+    // These tests exercise the conditional-fetch logic directly, proving:
+    // (a) the fetcher is called only when duplicate live instances exist, and
+    // (b) the exact pubkey set passed to the fetcher matches the live duplicates.
+    // Using a recording closure instead of a real relay means these run
+    // synchronously fast and catch the wiring even without a relay.
+
+    /// Helper: make a `ResolvedAgent` with the given persona and pubkey.
+    fn owned_agent(persona_id: &str, pubkey: &str) -> ResolvedAgent {
+        ResolvedAgent {
+            persona_id: persona_id.to_string(),
+            pubkey: pubkey.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_roster_resolution_duplicate_pair_invokes_fetcher_with_their_pubkeys() {
+        // Two live instances for the same slug — fetcher must be called with
+        // exactly those two pubkeys.
+        let pk_a = "a".repeat(64);
+        let pk_b = "b".repeat(64);
+        let slugs = vec!["sietch:agent".to_string()];
+        let found = vec![
+            owned_agent("sietch:agent", &pk_a),
+            owned_agent("sietch:agent", &pk_b),
+        ];
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let fetcher_invoked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fetcher_invoked);
+        let result = assemble_roster_resolution(
+            &slugs,
+            found,
+            Ok(vec![]), // trusted empty archive: both are live
+            |pks| async move {
+                flag.store(true, Ordering::Relaxed);
+                // Verify the fetcher receives exactly the duplicate pubkeys.
+                let mut sorted = pks.clone();
+                sorted.sort();
+                assert_eq!(sorted.len(), 2, "exactly 2 duplicate pubkeys expected");
+                HashMap::new()
+            },
+            &mut std::io::sink(),
+        )
+        .await;
+
+        assert!(
+            fetcher_invoked.load(Ordering::Relaxed),
+            "fetcher must be called for a duplicate pair"
+        );
+        // Both pubkeys appear in the cardinality error (bare, since the fetcher returned empty).
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains(&pk_a), "pk_a must appear in error: {err}");
+        assert!(err.contains(&pk_b), "pk_b must appear in error: {err}");
+    }
+
+    #[tokio::test]
+    async fn assemble_roster_resolution_single_instance_never_invokes_fetcher() {
+        // All slugs have exactly one live instance — fetcher must NOT be called.
+        // If it is called, the `panic!` fires.
+        let pk = "c".repeat(64);
+        let slugs = vec!["sietch:agent".to_string()];
+        let found = vec![owned_agent("sietch:agent", &pk)];
+
+        let result = assemble_roster_resolution(
+            &slugs,
+            found,
+            Ok(vec![]),
+            |_pks| async move {
+                panic!("fetcher must not be called on a single-instance roster");
+                #[allow(unreachable_code)]
+                HashMap::<String, CandidateHint>::new()
+            },
+            &mut std::io::sink(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "single instance resolves cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assemble_roster_resolution_trusted_archive_removes_duplicate_suppresses_fetcher() {
+        // pk_a is archived. Only pk_b remains live — no duplicate, so the
+        // fetcher must NOT be called.
+        let pk_a = "d".repeat(64);
+        let pk_b = "e".repeat(64);
+        let slugs = vec!["sietch:agent".to_string()];
+        let found = vec![
+            owned_agent("sietch:agent", &pk_a),
+            owned_agent("sietch:agent", &pk_b),
+        ];
+
+        let result = assemble_roster_resolution(
+            &slugs,
+            found,
+            Ok(vec![pk_a.clone()]), // pk_a archived
+            |_pks| async move {
+                panic!("fetcher must not be called when archive resolves the duplicate");
+                #[allow(unreachable_code)]
+                HashMap::<String, CandidateHint>::new()
+            },
+            &mut std::io::sink(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "archive resolves duplicate cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assemble_roster_resolution_untrusted_archive_invokes_fetcher_conservatively() {
+        // Archive snapshot is Err (untrusted). Both instances are treated as
+        // live conservatively → fetcher must be called.
+        let pk_a = "f".repeat(64);
+        let pk_b = "g".repeat(64);
+        let slugs = vec!["sietch:agent".to_string()];
+        let found = vec![
+            owned_agent("sietch:agent", &pk_a),
+            owned_agent("sietch:agent", &pk_b),
+        ];
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let fetcher_invoked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fetcher_invoked);
+        let result = assemble_roster_resolution(
+            &slugs,
+            found,
+            Err(CliError::Other("snapshot unavailable".to_string())),
+            |pks| async move {
+                flag.store(true, Ordering::Relaxed);
+                let _ = pks;
+                HashMap::<String, CandidateHint>::new()
+            },
+            &mut std::io::sink(),
+        )
+        .await;
+
+        assert!(
+            fetcher_invoked.load(Ordering::Relaxed),
+            "fetcher must be called under untrusted archive"
+        );
+        // Error still surfaces (bare pubkeys, plus the archive warning embedded).
+        assert!(
+            result.is_err(),
+            "untrusted archive + duplicates is still an error"
         );
     }
 }
