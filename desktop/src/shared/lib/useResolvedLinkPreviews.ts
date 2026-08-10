@@ -86,6 +86,13 @@ function metadataCacheKey(href: string): string {
   }
 }
 
+function isNegativeMetadata(metadata: LinkPreviewMetadata | null): boolean {
+  // A cached NEGATIVE is a result that should be retried when the URL freshly
+  // re-enters the composer: a hard miss (null) or a transient image failure.
+  // A healthy hit (`image`/`rejected`/no state) is a settled positive.
+  return metadata === null || metadata.imageFetchState === "transient_failure";
+}
+
 function metadataExpiry(
   metadata: LinkPreviewMetadata | null,
   now: number,
@@ -185,6 +192,23 @@ function createMetadataLoader({
   return {
     deleteKey(key: string) {
       cache.delete(key);
+    },
+    /**
+     * Drop a cached NEGATIVE result (a resolved null or a transient failure) so
+     * the next load refetches. Used when a URL freshly enters the composer: a
+     * user pasting a link that previously blanked should get a new attempt now,
+     * not the stale miss. A healthy cached hit and an in-flight fetch are left
+     * untouched, so passive scroll re-renders still ride the cache as before.
+     * Returns whether a negative entry was actually dropped, so callers can
+     * invalidate their own derived state (e.g. retained React metadata) in step.
+     */
+    invalidateNegative(href: string): boolean {
+      const key = metadataCacheKey(href);
+      const cached = cache.get(key);
+      if (!cached || cached instanceof Promise) return false;
+      if (!isNegativeMetadata(cached.metadata)) return false;
+      cache.delete(key);
+      return true;
     },
     load,
     peek,
@@ -417,15 +441,101 @@ export function withEntityFallbacks(
 
 export function useResolvedLinkPreviews(
   previews: SupportedLinkPreview[],
+  {
+    refetchNewNegatives = false,
+    liveHrefs,
+  }: {
+    /**
+     * When a preview href is newly present since the last run, drop any cached
+     * NEGATIVE (null/transient-fail) metadata for it so it refetches instead of
+     * resolving to a stale miss. Used by the composer: a freshly pasted link
+     * should get a new attempt. Off by default so passive renders (the message
+     * list) keep riding the cache. Healthy cached hits are never invalidated.
+     */
+    refetchNewNegatives?: boolean;
+    /**
+     * The hrefs present in the caller's LIVE (undebounced) content. When given,
+     * newness is judged against this set instead of the resolved `previews`, so
+     * a URL that leaves and re-enters the live content is treated as re-entered
+     * even when a debounce swallowed the intermediate empty state (the composer
+     * debounces resolution, so `previews` may never observe the URL leaving).
+     * Resolution timing still follows `previews`; only the invalidation decision
+     * uses this. Omit to track newness against `previews` (the default).
+     */
+    liveHrefs?: readonly string[];
+  } = {},
 ): ResolvedLinkPreview[] {
   const [resolvedMetadata, setResolvedMetadata] =
     React.useState<ResolvedMetadataByHref>({});
   const [retryGeneration, setRetryGeneration] = React.useState(0);
+  const seenHrefsRef = React.useRef<Set<string>>(new Set());
+  // Newness is tracked against the live href set when the caller supplies one,
+  // so a debounce-swallowed leave/re-entry of the same URL still counts as new.
+  // Read through a ref inside the effect and drive re-runs off the stable string
+  // key, so an unstable per-render array does not have to be an effect dep.
+  const currentHrefs = liveHrefs ?? previews.map((preview) => preview.href);
+  const newnessKey = currentHrefs.join("\n");
+  const currentHrefsRef = React.useRef<readonly string[]>(currentHrefs);
+  currentHrefsRef.current = currentHrefs;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: newnessKey is the stable string key for the live href set read via currentHrefsRef; it drives the re-run so the per-render array need not be a dep.
   React.useEffect(() => {
     let cancelled = false;
     let retryAt = Number.POSITIVE_INFINITY;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    if (refetchNewNegatives) {
+      // Invalidate first, before the peek/load loop below reads the cache, so a
+      // newly-present href loads fresh instead of resolving to its stale miss.
+      // buzz:// entity links resolve off the relay, not this cache — skip them.
+      // Newness is judged against the live href set when supplied (so a
+      // debounce-swallowed leave/re-entry still counts), else against previews.
+      const seen = seenHrefsRef.current;
+      const liveNow = currentHrefsRef.current;
+      const next = new Set<string>(liveNow);
+      const reenteredKeys: string[] = [];
+      for (const preview of previews) {
+        if (
+          seen.has(preview.href) ||
+          !liveNow.includes(preview.href) ||
+          preview.href.startsWith("buzz://")
+        ) {
+          continue;
+        }
+        // Drop any settled NEGATIVE from the SHARED loader cache so the load
+        // below refetches instead of resolving to the stale miss. (A no-op when
+        // the shared entry is healthy, in-flight, or absent.)
+        metadataLoader.invalidateNegative(preview.href);
+        reenteredKeys.push(metadataCacheKey(preview.href));
+      }
+      seenHrefsRef.current = next;
+      // Dropping the loader entry alone is not enough: this hook retains its own
+      // resolved metadata, and the render that scheduled this effect already
+      // read the stale negative from it. Clear this hook's OWN negative key for
+      // every re-entered href — gating on whether the shared loader dropped a
+      // settled entry misses the case where another hook left an in-flight
+      // Promise in the shared cache (invalidateNegative leaves Promises alone
+      // and the loop below merely coalesces onto it), which would otherwise
+      // keep this hook's retained `transient_failure` as a `snapshotReady`
+      // fallback the composer could turn into a sendable snapshot tag from stale
+      // metadata until that fetch resolves. Clearing the local negative renders
+      // the re-entered link as pending until the fresh load wins. Healthy local
+      // hits are kept, so passive re-renders still show their card instantly.
+      if (reenteredKeys.length > 0) {
+        setResolvedMetadata((current) => {
+          let changed = false;
+          const nextMetadata = { ...current };
+          for (const key of reenteredKeys) {
+            const value = nextMetadata[key];
+            if (value !== undefined && isNegativeMetadata(value)) {
+              delete nextMetadata[key];
+              changed = true;
+            }
+          }
+          return changed ? nextMetadata : current;
+        });
+      }
+    }
 
     const scheduleRetry = (
       { expiresAt, key }: Pick<MetadataLoadResult, "expiresAt" | "key">,
@@ -485,7 +595,7 @@ export function useResolvedLinkPreviews(
       for (const cancel of cancelScheduledLoads) cancel();
       if (retryTimer !== null) clearTimeout(retryTimer);
     };
-  }, [previews, retryGeneration]);
+  }, [previews, refetchNewNegatives, retryGeneration, newnessKey]);
 
   return React.useMemo(
     () =>
