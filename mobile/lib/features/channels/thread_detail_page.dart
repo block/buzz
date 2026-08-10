@@ -25,6 +25,7 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
+import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
 import '../../shared/read_state/read_state_format.dart';
@@ -777,6 +778,21 @@ class _ThreadMessage extends ConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
+    void openMessageActions(Rect anchorRect) {
+      showMessageActions(
+        context: context,
+        ref: ref,
+        message: message,
+        channelId: channelId,
+        canManageMessage: canManageMessage,
+        allMessages: allMessages,
+        currentPubkey: currentPubkey,
+        isMember: isMember,
+        isArchived: isArchived,
+        anchorRect: anchorRect,
+      );
+    }
+
     return Padding(
       padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
       child: DecoratedBox(
@@ -794,21 +810,11 @@ class _ThreadMessage extends ConsumerWidget {
           // trailing gutter. InkWell still clips its ink to [borderRadius],
           // while leaving overflowing message content visible.
           clipBehavior: Clip.none,
-          child: InkWell(
+          child: MessageLongPressInkWell(
             key: ValueKey('thread-message-row-${message.id}'),
+            onLongPress: openMessageActions,
             borderRadius: BorderRadius.circular(Radii.md),
             highlightColor: context.colors.primary.withValues(alpha: 0.1),
-            onLongPress: () => showMessageActions(
-              context: context,
-              ref: ref,
-              message: message,
-              channelId: channelId,
-              canManageMessage: canManageMessage,
-              allMessages: allMessages,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-            ),
             child: Padding(
               padding: EdgeInsets.only(
                 top: showAuthor ? 0 : Grid.xxs,

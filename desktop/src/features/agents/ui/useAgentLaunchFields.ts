@@ -14,6 +14,7 @@ export function useAgentLaunchFields(agent: ManagedAgent, open: boolean) {
   const [workingDirectory, setWorkingDirectory] = React.useState(
     agent.workingDirectory ?? "",
   );
+  const [saveBlocked, setSaveBlocked] = React.useState(false);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: polling must not wipe edits
   React.useEffect(() => {
@@ -21,6 +22,7 @@ export function useAgentLaunchFields(agent: ManagedAgent, open: boolean) {
     setCommandWrapperCommand(agent.commandWrapper?.command ?? "");
     setCommandWrapperArgs(agent.commandWrapper?.args.join(",") ?? "");
     setWorkingDirectory(agent.workingDirectory ?? "");
+    setSaveBlocked(false);
   }, [open, agent.pubkey]);
 
   function buildUpdate(): Pick<
@@ -53,9 +55,11 @@ export function useAgentLaunchFields(agent: ManagedAgent, open: boolean) {
   return {
     commandWrapperArgs,
     commandWrapperCommand,
+    saveBlocked,
     workingDirectory,
     setCommandWrapperArgs,
     setCommandWrapperCommand,
+    setSaveBlocked,
     setWorkingDirectory,
     buildUpdate,
   };

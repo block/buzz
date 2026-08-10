@@ -853,9 +853,7 @@ pub async fn create_managed_agent(
             command_wrapper,
             working_directory,
             mcp_command,
-            // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
-            // store the schema default only. Use idle_timeout_seconds or
-            // max_turn_duration_seconds for actual turn-length control.
+            // BUZZ_ACP_TURN_TIMEOUT is deprecated; persist the schema default.
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
@@ -1354,11 +1352,13 @@ pub async fn delete_managed_agent(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-// Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
+// 3. Desktop's existing presence polling sees "offline" — UI updates automatically
+// No backend Tauri command needed. Presence IS the status.
 #[path = "agents_deploy.rs"]
 mod deploy;
+pub(super) mod provider_access;
 use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};

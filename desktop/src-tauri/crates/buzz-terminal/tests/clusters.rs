@@ -306,6 +306,10 @@ fn wrapping_does_not_split_a_uniform_run() {
         .iter()
         .find(|row| row.line == 0)
         .expect("wrapped row must be present");
+    assert!(
+        first.wrapped,
+        "soft-wrap geometry must survive row encoding"
+    );
     let texts: Vec<&str> = first.spans.iter().map(|s| s.text.as_str()).collect();
     assert_eq!(
         texts,

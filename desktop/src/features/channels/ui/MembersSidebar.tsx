@@ -30,6 +30,7 @@ import {
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
+import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { changeChannelMemberRole } from "@/shared/api/tauri";
 import type {
@@ -199,7 +200,6 @@ export function MembersSidebar({
       ),
     [bots, currentPubkey, people],
   );
-
   const allMemberPubkeys = React.useMemo(
     () => rawMembers.map((member) => member.pubkey),
     [rawMembers],
@@ -217,9 +217,7 @@ export function MembersSidebar({
     if (!normalizedSearchQuery) {
       return activeMembers;
     }
-
     const profiles = memberProfilesQuery.data?.profiles ?? {};
-
     return activeMembers.filter((member) => {
       const normalizedPubkey = normalizePubkey(member.pubkey);
       const profile = profiles[normalizedPubkey] ?? null;
@@ -282,12 +280,6 @@ export function MembersSidebar({
         agent,
       ]),
     );
-    const memberAgentLabels = new Set(
-      rawMembers
-        .filter((member) => member.isAgent === true || member.role === "bot")
-        .map((member) => member.displayName?.trim().toLowerCase())
-        .filter((label): label is string => Boolean(label)),
-    );
     const sharedChannelIds = getSharedChannelIds(channelsQuery.data);
     const allowedAgentPubkeys = getMentionableAgentPubkeys({
       currentPubkey,
@@ -300,10 +292,6 @@ export function MembersSidebar({
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (
-        (candidate.isAgent &&
-          memberAgentLabels.has(
-            formatAddCandidateName(candidate).toLowerCase(),
-          )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
         !isAgentIdentityInAllowedList(candidate, allowedAgentPubkeys)
@@ -393,7 +381,6 @@ export function MembersSidebar({
     normalizedDeferredSearchQuery,
     relayAgentsQuery.data,
     userSearchResults,
-    rawMembers,
   ]);
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
@@ -816,11 +803,14 @@ export function MembersSidebar({
                     ) : null}
                   </div>
                 ) : filteredActiveMembers.length > 0 ? (
-                  <div>
-                    {filteredActiveMembers.map((member) =>
-                      renderMemberCard(member, isBot(member)),
-                    )}
-                  </div>
+                  <VirtualizedList
+                    className="h-[calc(100%_-_2.25rem)]"
+                    getItemKey={(member) => member.pubkey}
+                    items={filteredActiveMembers}
+                    renderItem={(member) =>
+                      renderMemberCard(member, isBot(member))
+                    }
+                  />
                 ) : (
                   <p className="px-4 py-3 text-sm text-muted-foreground">
                     {membersQuery.isLoading
@@ -968,6 +958,9 @@ function AddMemberSearchResultRow({
                 agent
               </span>
             </div>
+            <span className="block truncate font-mono text-2xs text-muted-foreground">
+              {truncatePubkey(user.pubkey)}
+            </span>
             {ownerLabel ? (
               <span className="block truncate text-xs text-muted-foreground">
                 managed by {ownerLabel}

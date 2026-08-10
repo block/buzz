@@ -233,6 +233,26 @@ fn openai_text_with_usage(content: &str, prompt_tokens: u64) -> Value {
     v
 }
 
+fn openai_max_tokens(content: &str, tool_calls: Value) -> Value {
+    json!({
+        "id": "cc-max", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls,
+            },
+            "finish_reason": "length",
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 100,
+            "total_tokens": 110,
+        },
+    })
+}
+
 fn openai_tool_call(id: &str, name: &str, args: Value) -> Value {
     json!({
         "id": "cc-2", "object": "chat.completion", "model": "fake-model",
@@ -2434,6 +2454,110 @@ async fn context_window_400_recovers_instead_of_sticking() {
         stderr.contains("provider reported context overflow; forcing handoff"),
         "expected the forced-handoff log line, got: {stderr}"
     );
+    h.shutdown().await;
+}
+
+/// A provider output-token stop is an interrupted round, not completion. The
+/// agent must preserve any text, discard a possibly partial tool call, provide
+/// actionable feedback, and let the same prompt finish normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovers_in_turn_without_running_partial_tool_call() {
+    const PARTIAL: &str = "partial-before-limit";
+    let partial_call = json!([{
+        "id": "partial-call", "type": "function",
+        "function": { "name": "dev__shell", "arguments": "{\"command\":\"echo" },
+    }]);
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens(PARTIAL, partial_call),
+        openai_text("done after truncation"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"do the task"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 2, "truncation should trigger one retry");
+    let retry = &requests[1]["messages"];
+    let serialized = retry.to_string();
+    assert!(
+        serialized.contains(PARTIAL),
+        "partial text was lost: {retry}"
+    );
+    assert!(
+        serialized.contains("output token limit")
+            && serialized.contains("smaller steps")
+            && serialized.contains("tool call"),
+        "retry lacks actionable truncation feedback: {retry}"
+    );
+    assert!(
+        !serialized.contains("partial-call") && !serialized.contains("tool_call_id"),
+        "partial tool call must not be replayed or executed: {retry}"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// `max_rounds` counts max-token responses because they are successful, billed
+/// provider requests. Recovery must not grant them the refund reserved for a
+/// rejected context-overflow request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovery_respects_finite_round_cap() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens("cut off", json!([])),
+        openai_text("must not be requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_ROUNDS", "1")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(
+        reply["result"]["stopReason"], "max_turn_requests",
+        "{reply}"
+    );
+    assert_eq!(llm.captured.lock().await.len(), 1);
+    h.shutdown().await;
+}
+
+/// With the production-unbounded round setting, a model that always fills its
+/// output allowance still has to return. Two recovery prompts are allowed; the
+/// third truncation surfaces the original stop reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_max_tokens_is_bounded() {
+    let responses = (0..4)
+        .map(|_| openai_max_tokens("still truncated", json!([])))
+        .collect();
+    let llm = spawn_capturing_llm(responses).await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_ROUNDS", "0")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.recv_until(|v| v["id"] == json!(prompt_id)),
+    )
+    .await
+    .expect("max-token recovery must be bounded");
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    assert_eq!(llm.captured.lock().await.len(), 3);
     h.shutdown().await;
 }
 

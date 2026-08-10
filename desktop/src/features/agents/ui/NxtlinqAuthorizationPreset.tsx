@@ -310,7 +310,7 @@ export function NxtlinqAuthorizationPreset({
                         <p className="text-muted-foreground">{check.detail}</p>
                       ) : null}
                       {check.path ? (
-                        <p className="truncate font-mono text-[11px] text-muted-foreground">
+                        <p className="truncate font-mono text-2xs text-muted-foreground">
                           {check.path}
                         </p>
                       ) : null}

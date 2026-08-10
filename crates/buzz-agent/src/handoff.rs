@@ -3,6 +3,7 @@ use crate::config::{
     HANDOFF_MAX_OUTPUT_TOKENS, HANDOFF_MAX_TOOL_NAMES, HANDOFF_MIN_PROMPT_BUDGET_BYTES,
     HANDOFF_ORIGINAL_TASK_MAX_BYTES, MAX_CONTEXT_RECOVERIES_PER_RUN,
 };
+use crate::llm::summary_completion_cap;
 use crate::types::HistoryItem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +36,21 @@ pub(crate) enum ContextRecovery {
     Exhausted,
 }
 
-const HANDOFF_SYSTEM_PROMPT: &str = "You are generating a context handoff summary for the next \
-turn of an autonomous agent. Be concise but thorough. Cover: what the original task was, what \
-you accomplished, key decisions made, what remains, and one concrete next step. Output plain \
-text only — no tool calls, no JSON. Stay under 8192 tokens.";
+/// System prompt for the handoff summarizer. `LazyLock` + `format!` so the
+/// token figure is derived from [`HANDOFF_MAX_OUTPUT_TOKENS`] instead of a
+/// duplicated literal, and "visible plain-text summary" makes explicit that
+/// the limit is on summary text, not on any hidden reasoning the model does
+/// first (which is budgeted separately on the wire — see
+/// `openrouter_summary_body`).
+static HANDOFF_SYSTEM_PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "You are generating a context handoff summary for the next turn of an autonomous agent. \
+         Be concise but thorough. Cover: what the original task was, what you accomplished, key \
+         decisions made, what remains, and one concrete next step. Output plain text only — no \
+         tool calls, no JSON. Keep the visible plain-text summary under \
+         {HANDOFF_MAX_OUTPUT_TOKENS} tokens."
+    )
+});
 
 impl RunCtx<'_> {
     pub(crate) async fn maybe_handoff(&mut self, handoff_attempts: &mut usize) -> HandoffOutcome {
@@ -170,7 +182,7 @@ impl RunCtx<'_> {
             _ = self.cancel.changed() => return HandoffOutcome::Cancelled,
             r = self.llm.summarize(
                 self.cfg,
-                HANDOFF_SYSTEM_PROMPT,
+                &HANDOFF_SYSTEM_PROMPT,
                 &prompt,
                 HANDOFF_MAX_OUTPUT_TOKENS,
                 self.effective_model,
@@ -331,7 +343,7 @@ impl RunCtx<'_> {
             Some(explicit) => explicit.saturating_sub(fixed_bytes),
             None => handoff_prompt_budget_bytes(
                 self.cfg.max_context_tokens,
-                HANDOFF_MAX_OUTPUT_TOKENS,
+                summary_completion_cap(self.cfg.provider, HANDOFF_MAX_OUTPUT_TOKENS),
                 fixed_bytes,
             ),
         };
@@ -513,8 +525,9 @@ fn byte_fallback_threshold(
 mod tests {
     use super::{
         byte_fallback_threshold, estimate_tokens_from_bytes, handoff_prompt_budget_bytes,
-        token_threshold,
+        summary_completion_cap, token_threshold, HANDOFF_SYSTEM_PROMPT,
     };
+    use crate::config::{Provider, HANDOFF_MAX_OUTPUT_TOKENS};
 
     #[test]
     fn handoff_prompt_budget_reserves_summary_output_and_fixed_prompt() {
@@ -524,6 +537,71 @@ mod tests {
     #[test]
     fn handoff_prompt_budget_saturates_when_fixed_prompt_exceeds_window() {
         assert_eq!(handoff_prompt_budget_bytes(1_000, 2_000, 10_000), 0);
+    }
+
+    /// OpenRouter's summary request grants reasoning an equal budget on top of
+    /// the visible-text budget, so its completion cap is 2× the handoff text
+    /// budget; the input budget must reserve that doubled cap. At the
+    /// 1-byte/token upper bound, prompt bytes bound prompt tokens, so the join
+    /// to pin is: (budget + fixed prompt) + actual completion cap ≤ window.
+    /// Reserving only `HANDOFF_MAX_OUTPUT_TOKENS` would break this by exactly
+    /// one extra reasoning budget at the maximum constructed prompt.
+    #[test]
+    fn openrouter_prompt_budget_reserves_doubled_completion_cap() {
+        let cap = summary_completion_cap(Provider::OpenRouter, HANDOFF_MAX_OUTPUT_TOKENS);
+        assert_eq!(
+            cap,
+            2 * HANDOFF_MAX_OUTPUT_TOKENS,
+            "OpenRouter doubles: text + reasoning"
+        );
+        let window = 200_000u64;
+        let fixed = 1_000usize;
+        let budget = handoff_prompt_budget_bytes(window, cap, fixed);
+        assert_eq!(budget, 182_616); // 200_000 - 16_384 - 1_000
+        let max_prompt_tokens = estimate_tokens_from_bytes(budget + fixed);
+        assert!(
+            max_prompt_tokens + u64::from(cap) <= window,
+            "input + completion allowance must fit the configured window"
+        );
+        // The old single reservation violates the same join — the regression
+        // this guards against.
+        let stale_budget = handoff_prompt_budget_bytes(window, HANDOFF_MAX_OUTPUT_TOKENS, fixed);
+        assert!(
+            estimate_tokens_from_bytes(stale_budget + fixed) + u64::from(cap) > window,
+            "reserving only the text budget must be observable as an overflow here"
+        );
+    }
+
+    /// Anthropic/OpenAI/Databricks summary bodies request exactly the caller's
+    /// budget, so their input reservation is unchanged.
+    #[test]
+    fn non_openrouter_completion_cap_is_the_callers_budget() {
+        for provider in [
+            Provider::Anthropic,
+            Provider::OpenAi,
+            Provider::Databricks,
+            Provider::DatabricksV2,
+        ] {
+            assert_eq!(
+                summary_completion_cap(provider, HANDOFF_MAX_OUTPUT_TOKENS),
+                HANDOFF_MAX_OUTPUT_TOKENS
+            );
+        }
+    }
+
+    /// The prompt's token figure is derived from `HANDOFF_MAX_OUTPUT_TOKENS`
+    /// and names the *visible plain-text summary* as its target, so hidden
+    /// reasoning (budgeted separately on the wire) is not the referent.
+    #[test]
+    fn handoff_system_prompt_derives_limit_and_targets_visible_text() {
+        let expected = format!(
+            "Keep the visible plain-text summary under {HANDOFF_MAX_OUTPUT_TOKENS} tokens."
+        );
+        assert!(
+            HANDOFF_SYSTEM_PROMPT.contains(&expected),
+            "prompt must derive its token figure from HANDOFF_MAX_OUTPUT_TOKENS: {}",
+            *HANDOFF_SYSTEM_PROMPT
+        );
     }
 
     #[test]

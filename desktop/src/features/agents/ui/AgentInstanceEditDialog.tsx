@@ -11,6 +11,7 @@ import {
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   ManagedAgent,
@@ -63,9 +64,9 @@ import {
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { CreateAgentRespondToField } from "./RespondToField";
 import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
@@ -131,7 +132,6 @@ export function AgentInstanceEditDialog({
   );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
   const launchFields = useAgentLaunchFields(agent, open);
-  const [nxtlinqSaveBlocked, setNxtlinqSaveBlocked] = React.useState(false);
   const [parallelism, setParallelism] = React.useState(
     String(agent.parallelism),
   );
@@ -168,12 +168,10 @@ export function AgentInstanceEditDialog({
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  // Runtime selector: defaults to "custom" until the dialog opens and the
-  // catalog loads. The open-effect re-derives the correct id from the catalog.
+  // Defaults to custom until the open effect can match the loaded runtime catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
   const runtimeTouched = React.useRef(false);
-  // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
     if (open) {
@@ -197,7 +195,6 @@ export function AgentInstanceEditDialog({
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
-      setNxtlinqSaveBlocked(false);
       setIsAvatarUploadPending(false);
       setIsAddHarnessOpen(false);
       runtimeTouched.current = false;
@@ -393,6 +390,9 @@ export function AgentInstanceEditDialog({
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
@@ -610,7 +610,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    !nxtlinqSaveBlocked &&
+    !launchFields.saveBlocked &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
   async function handleSubmit() {
@@ -907,7 +907,6 @@ export function AgentInstanceEditDialog({
             )}
           </div>
           <div className="space-y-5">
-            {/* Agent name */}
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -935,17 +934,14 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
-
-            {/* Who can send instructions */}
-            <CreateAgentRespondToField
+            <OwnerOnlyAccessField
+              accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
-              variant="persona"
             />
-
             <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}
@@ -1209,7 +1205,7 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
-                      onNxtlinqSaveBlockedChange={setNxtlinqSaveBlocked}
+                      onNxtlinqSaveBlockedChange={launchFields.setSaveBlocked}
                       onParallelismChange={setParallelism}
                       onSystemPromptChange={setSystemPrompt}
                     />

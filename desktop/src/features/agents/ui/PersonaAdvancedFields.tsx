@@ -1,8 +1,12 @@
 import * as React from "react";
+import { useAgentAccessOwnerOnlyQuery } from "../useAgentAccessOwnerOnly";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
-import { CreateAgentRespondToField } from "./RespondToField";
+import {
+  CreateAgentRespondToField,
+  OWNER_ONLY_ACCESS_DISABLED_REASON,
+} from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import {
   isBuzzAgentRuntime,
@@ -34,6 +38,7 @@ export function PersonaAdvancedFields({
   behaviorDraft,
   disabled,
   envVars,
+  afterRespondTo,
   inheritedEnvVars = {},
   model,
   modelTuningRuntimeId = "",
@@ -51,6 +56,8 @@ export function PersonaAdvancedFields({
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
   envVars: EnvVarsValue;
+  /** Optional create-only field rendered after instruction permissions. */
+  afterRespondTo?: React.ReactNode;
   /** Env vars to display as inherited defaults in tuning-field placeholders.
    *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
   inheritedEnvVars?: EnvVarsValue;
@@ -83,6 +90,11 @@ export function PersonaAdvancedFields({
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
 }) {
+  const { data: agentAccessOwnerOnly = false } = useAgentAccessOwnerOnlyQuery();
+  const respondToMode = agentAccessOwnerOnly
+    ? "owner-only"
+    : (behaviorDraft.respondTo ?? "owner-only");
+
   // Numeric tuning descriptors — gate on catalog status so that loading/error
   // never collapses to "no controls": keys stay visible as generic rows.
   const numericDescriptors = React.useMemo(
@@ -126,9 +138,12 @@ export function PersonaAdvancedFields({
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField
-        allowlist={behaviorDraft.respondToAllowlist}
-        disabled={disabled}
-        mode={behaviorDraft.respondTo ?? "owner-only"}
+        allowlist={agentAccessOwnerOnly ? [] : behaviorDraft.respondToAllowlist}
+        disabled={disabled || agentAccessOwnerOnly}
+        disabledReason={
+          agentAccessOwnerOnly ? OWNER_ONLY_ACCESS_DISABLED_REASON : undefined
+        }
+        mode={respondToMode}
         onAllowlistChange={(allowlist) =>
           onBehaviorDraftChange({
             ...behaviorDraft,
@@ -140,6 +155,8 @@ export function PersonaAdvancedFields({
         }
         variant="persona"
       />
+
+      {afterRespondTo}
 
       <div className="grid gap-5 sm:grid-cols-2">
         <div className="space-y-1.5">

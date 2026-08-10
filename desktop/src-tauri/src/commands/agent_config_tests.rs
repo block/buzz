@@ -626,6 +626,19 @@ fn baked_env_thinking_effort_is_unmasked() {
 }
 
 #[test]
+fn baked_env_thinking_summary_is_unmasked() {
+    // BUZZ_AGENT_THINKING_SUMMARY is a non-secret enum — must not be masked.
+    let entries = baked_env_from_map(&[("BUZZ_AGENT_THINKING_SUMMARY", "detailed")]);
+    assert_eq!(entries.len(), 1);
+    let summary = entries
+        .iter()
+        .find(|e| e.key == "BUZZ_AGENT_THINKING_SUMMARY")
+        .unwrap();
+    assert_eq!(summary.value, "detailed");
+    assert!(!summary.masked);
+}
+
+#[test]
 fn baked_env_allowlist_is_case_insensitive() {
     // Known-safe keys — case-insensitive match must allow them.
     assert!(super::is_safe_to_reveal("buzz_agent_provider"));
@@ -634,6 +647,8 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(super::is_safe_to_reveal("BUZZ_AGENT_MODEL"));
     assert!(super::is_safe_to_reveal("buzz_agent_thinking_effort"));
     assert!(super::is_safe_to_reveal("BUZZ_AGENT_THINKING_EFFORT"));
+    assert!(super::is_safe_to_reveal("buzz_agent_thinking_summary"));
+    assert!(super::is_safe_to_reveal("BUZZ_AGENT_THINKING_SUMMARY"));
     assert!(super::is_safe_to_reveal("databricks_host"));
     assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
     assert!(super::is_safe_to_reveal("databricks_model"));

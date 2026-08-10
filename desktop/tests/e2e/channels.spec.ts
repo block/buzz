@@ -3394,6 +3394,40 @@ test("home inbox manage affordance opens management without leaving home", async
   await expect(page).not.toHaveURL(/#\/channels\//);
 });
 
+test("members sidebar virtualizes large channel rosters", async ({ page }) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  const pubkeys = Array.from({ length: 500 }, (_, index) =>
+    (index + 1).toString(16).padStart(64, "0"),
+  );
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys,
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  const memberList = page.getByTestId("members-sidebar-people");
+  const memberRows = memberList.locator('[data-testid^="sidebar-member-"]');
+  await expect(memberRows.first()).toBeVisible();
+  expect(await memberRows.count()).toBeLessThan(50);
+
+  const virtualizedList = memberList.locator(".overflow-y-auto");
+  await virtualizedList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(
+    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+  ).toBeVisible();
+});
+
 test("members sidebar can invite relay-authorized agents", async ({ page }) => {
   await installMockBridge(page, {
     relayAgents: [
@@ -3740,7 +3774,7 @@ test("channel header actions show tooltips", async ({ page }) => {
   }
 });
 
-test("members sidebar collapses same-persona managed agents", async ({
+test("members sidebar retains distinct same-persona managed agents", async ({
   page,
 }) => {
   const inChannelAgentPubkey =
@@ -3790,8 +3824,8 @@ test("members sidebar collapses same-persona managed agents", async ({
   ).toHaveCount(0);
   await expect(
     page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
-  ).toHaveCount(0);
-  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
+  ).toBeVisible();
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
 test("private-channel members cannot add people without owner/admin", async ({

@@ -1,3 +1,4 @@
+mod agent_access;
 mod agent_auth;
 mod agent_config;
 mod agent_discovery;
@@ -64,6 +65,7 @@ mod window_vibrancy;
 mod workflows;
 mod workspace;
 
+pub use agent_access::*;
 pub use agent_auth::*;
 pub use agent_config::*;
 pub use agent_discovery::*;
