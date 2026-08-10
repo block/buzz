@@ -1,7 +1,7 @@
 use super::*;
 use crate::managed_agents::AgentDefinition;
 
-fn bare_agent_record(
+pub(super) fn bare_agent_record(
     persona_id: Option<&str>,
     model: Option<&str>,
     provider: Option<&str>,
@@ -653,12 +653,13 @@ fn redeploy_guard_requires_provider_backend_and_existing_deployment() {
     assert!(error.contains("has not been deployed yet"));
 
     record.backend_agent_id = Some("existing-provider-agent".to_string());
-    let (provider_id, config, cached_binary_path) =
-        provider_access::redeploy_provider_target("agent", &record)
-            .expect("deployed provider target");
-    assert_eq!(provider_id, "provider");
-    assert_eq!(config["region"], "test");
-    assert_eq!(cached_binary_path, None);
+    record.updated_at = "generation-1".to_string();
+    let captured = provider_access::redeploy_provider_target("agent", &record)
+        .expect("deployed provider target");
+    assert_eq!(captured.provider_id, "provider");
+    assert_eq!(captured.config["region"], "test");
+    assert_eq!(captured.cached_binary_path, None);
+    assert_eq!(captured.updated_at, "generation-1");
 }
 
 #[test]
