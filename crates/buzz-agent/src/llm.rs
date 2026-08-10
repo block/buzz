@@ -227,6 +227,17 @@ impl Llm {
                 .await
             }
         };
+        // Stamp the actually-requested model into the response so the usage
+        // accumulation path can derive pricingIdentity. For OpenAi/Databricks
+        // this is done per-response inside openai_request_for_model (where the
+        // resolved request_model is known after mesh/auto resolution). For the
+        // remaining providers the effective_model IS the request model.
+        let result = result.map(|mut r| {
+            if r.request_model.is_none() {
+                r.request_model = Some(effective_model.to_string());
+            }
+            r
+        });
         // Stamp the effective model into Llm errors so log lines carry
         // `llm: (model-name) 404 Not Found: …` instead of the bare status.
         // The `llm: ` prefix comes from `Display for AgentError::Llm`; the
@@ -618,6 +629,10 @@ impl Llm {
                 self.post_openai(cfg, "/responses", &body, request_model)
                     .await?,
             )
+            .map(|mut r| {
+                r.request_model = Some(request_model.to_string());
+                r
+            })
             .map_err(PostError::from);
         }
         let (body, parse) = build(false, request_model);
@@ -625,7 +640,12 @@ impl Llm {
             .post_openai(cfg, "/chat/completions", &body, request_model)
             .await
         {
-            Ok(value) => parse(value).map_err(PostError::from),
+            Ok(value) => parse(value)
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
+                .map_err(PostError::from),
             Err(PostError::Agent(error))
                 if cfg.openai_api == OpenAiApi::Auto && self.try_upgrade(&error) =>
             {
@@ -634,6 +654,10 @@ impl Llm {
                     self.post_openai(cfg, "/responses", &body, request_model)
                         .await?,
                 )
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
                 .map_err(PostError::from)
             }
             Err(error) => Err(error),
@@ -1330,27 +1354,33 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
-    let input_tokens = sum_usage(&v, &["input_tokens"]);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    let input_tokens = sum_usage(&v, &["input_tokens"]).and_then(SumUsageResult::into_exact);
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // The Responses API nests the cache split under `input_tokens_details`.
     let cached_input_tokens = usage_first(
         &v,
         &["cache_read_input_tokens"],
         &[("input_tokens_details", "cached_tokens")],
     );
+    // Responses API does not expose cache-write tokens today; stays None.
+    let cache_write_tokens: Option<u64> = None;
     // Responses API reports a genuine provider total. Read it directly —
     // never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // input_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -1364,28 +1394,70 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
     }
 }
 
+/// Result of a multi-field token sum — distinguishes a successful total from an
+/// arithmetic overflow so callers can propagate the overflow signal rather than
+/// silently clamping to `u64::MAX`.
+#[derive(Debug, PartialEq)]
+enum SumUsageResult {
+    /// At least one field was present and the total did not overflow.
+    Exact(u64),
+    /// At least one field was present but the cumulative sum overflowed `u64`.
+    Overflow,
+}
+
+impl SumUsageResult {
+    /// Returns `Some(n)` when exact, `None` when overflow or when the caller
+    /// needs to signal an explicit absence.  Single-field callers whose sums
+    /// cannot overflow use this to convert back to `Option<u64>`.
+    fn into_exact(self) -> Option<u64> {
+        match self {
+            SumUsageResult::Exact(n) => Some(n),
+            SumUsageResult::Overflow => None,
+        }
+    }
+}
+
 /// Sum a set of `usage` token fields, returning `None` only when the `usage`
 /// object is absent or carries none of the requested fields. A field that is
 /// present is added; a field that is missing contributes 0. This keeps the
 /// result an inclusive total (so cached tokens are never silently dropped)
 /// while still distinguishing "no usage reported" from "usage was zero".
-fn sum_usage(v: &Value, fields: &[&str]) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] if the cumulative total exceeds `u64::MAX`.
+/// Single-field callers whose sums cannot overflow may call `.into_exact()` to
+/// convert back to `Option<u64>` without loss.
+fn sum_usage(v: &Value, fields: &[&str]) -> Option<SumUsageResult> {
     let usage = v.get("usage")?;
     let mut total: u64 = 0;
     let mut saw_any = false;
+    let mut overflowed = false;
     for f in fields {
         if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
-            total = total.saturating_add(n);
+            match total.checked_add(n) {
+                Some(t) => total = t,
+                None => overflowed = true,
+            }
             saw_any = true;
         }
     }
-    saw_any.then_some(total)
+    if !saw_any {
+        return None;
+    }
+    if overflowed {
+        Some(SumUsageResult::Overflow)
+    } else {
+        Some(SumUsageResult::Exact(total))
+    }
 }
 
 /// Input-token total for Anthropic / Databricks (Anthropic-style) responses.
 /// `input_tokens` alone EXCLUDES cached tokens, so we sum it with the two
 /// cache fields to get the inclusive total the context budget must gate on.
-fn anthropic_input_tokens(v: &Value) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] when the sum of the three fields
+/// exceeds `u64::MAX` — the caller must propagate the overflow signal rather
+/// than clamping.
+fn anthropic_input_tokens(v: &Value) -> Option<SumUsageResult> {
     sum_usage(
         v,
         &[
@@ -1415,7 +1487,7 @@ fn anthropic_input_tokens(v: &Value) -> Option<u64> {
 /// The two never collide here: the router sends `claude*` models to the
 /// Anthropic route, so `parse_openai` only ever sees inclusive `prompt_tokens`.
 fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
-    sum_usage(v, &["prompt_tokens"])
+    sum_usage(v, &["prompt_tokens"]).and_then(SumUsageResult::into_exact)
 }
 
 /// First present value among `usage.<field>` and `usage.<nested>.<leaf>` pairs.
@@ -1576,23 +1648,38 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
             }
         }
     }
-    let input_tokens = anthropic_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // anthropic_input_tokens() returns Option<SumUsageResult> because it sums
+    // three fields that can collectively overflow u64. Propagate the overflow
+    // signal via `input_tokens_overflowed` so the run loop can poison the
+    // turn accumulator rather than treating u64::MAX as an exact reading.
+    let (input_tokens, input_tokens_overflowed) = match anthropic_input_tokens(&v) {
+        Some(SumUsageResult::Exact(n)) => (Some(n), false),
+        Some(SumUsageResult::Overflow) => (None, true),
+        None => (None, false),
+    };
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // Anthropic reports the cache split flat on `usage`. Note this is already
     // part of `input_tokens` above, which sums it in deliberately.
     let cached_input_tokens = usage_first(&v, &["cache_read_input_tokens"], &[]);
+    // Anthropic reports cache-creation tokens as `cache_creation_input_tokens`;
+    // also a subset of `input_tokens` (already folded in above).
+    let cache_write_tokens = usage_first(&v, &["cache_creation_input_tokens"], &[]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed,
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         // Anthropic reports only category counts; NIP-AM forbids deriving a
         // total from them. Always None for this provider.
         total_tokens: None,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (complete) after parse.
+        request_model: None,
     })
 }
 
@@ -1690,21 +1777,29 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     }
     dedupe_provider_ids(&mut tool_calls);
     let input_tokens = openai_chat_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["completion_tokens"]);
+    let output_tokens = sum_usage(&v, &["completion_tokens"]).and_then(SumUsageResult::into_exact);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
+    // OpenAI Chat Completions reports cache-write tokens under
+    // `prompt_tokens_details.cache_write_tokens`. A subset of `prompt_tokens`.
+    let cache_write_tokens =
+        usage_first(&v, &[], &[("prompt_tokens_details", "cache_write_tokens")]);
     // OpenAI Chat Completions reports a genuine provider total. Read it
     // directly — never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // prompt_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -6122,6 +6217,98 @@ mod tests {
         // is "no usable reading" -> None, not Some(0).
         let v = serde_json::json!({"usage": {"output_tokens": 5}});
         assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
+    }
+
+    #[test]
+    fn sum_usage_exact_single_field() {
+        let v = serde_json::json!({"usage": {"input_tokens": 42}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens"]),
+            Some(SumUsageResult::Exact(42))
+        );
+    }
+
+    #[test]
+    fn sum_usage_exact_two_fields() {
+        let v = serde_json::json!({"usage": {"input_tokens": 100, "cache_read_input_tokens": 50}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens", "cache_read_input_tokens"]),
+            Some(SumUsageResult::Exact(150))
+        );
+    }
+
+    #[test]
+    fn sum_usage_overflow_two_fields_signals_overflow() {
+        // Reproducer from Thufir's finding: input_tokens = u64::MAX, cache_read = 1.
+        // Must return Overflow, not Exact(u64::MAX).
+        let v = serde_json::json!({
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64
+            }
+        });
+        assert_eq!(
+            sum_usage(
+                &v,
+                &[
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens"
+                ]
+            ),
+            Some(SumUsageResult::Overflow)
+        );
+    }
+
+    #[test]
+    fn parse_anthropic_input_overflow_sets_flag_and_clears_value() {
+        // The inclusive sum overflows; input_tokens must be None and the flag set.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None, "overflowed value must be discarded");
+        assert!(r.input_tokens_overflowed, "overflow flag must be set");
+        // output_tokens unaffected by input overflow
+        assert_eq!(r.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn parse_anthropic_normal_sum_does_not_set_flag() {
+        // Normal (non-overflow) path: flag stays false.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100_u64,
+                "cache_read_input_tokens": 900_u64,
+                "cache_creation_input_tokens": 50_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+        assert!(!r.input_tokens_overflowed);
+    }
+
+    #[test]
+    fn parse_anthropic_absent_usage_does_not_set_flag() {
+        // Absent usage: flag stays false, input_tokens stays None.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None);
+        assert!(!r.input_tokens_overflowed);
     }
 
     /// A token source whose `bearer()` always hands back the same stale
