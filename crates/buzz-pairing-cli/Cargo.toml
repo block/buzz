@@ -23,3 +23,7 @@ hex = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+
+# Explicit provider selection is required when workspace feature unification
+# compiles both rustls providers into the standalone pairing binary.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

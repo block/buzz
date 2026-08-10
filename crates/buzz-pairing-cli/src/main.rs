@@ -96,6 +96,10 @@ enum CliError {
 
 #[tokio::main]
 async fn main() {
+    // Workspace feature unification can compile both rustls providers. Choose
+    // one before the first WSS connection so rustls does not panic at runtime.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
     if let Err(e) = run(cli.command).await {
         eprintln!("error: {e}");
