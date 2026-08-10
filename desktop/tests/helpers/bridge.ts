@@ -433,6 +433,8 @@ type MockBridgeOptions = {
    * invoked. Drives the keyring-locked screen in tests.
    */
   identityLocked?: boolean;
+  /** Delay (ms) applied to identity import so specs can observe pending navigation. */
+  identityImportDelayMs?: number;
   /**
    * Pending community deep links seeded into the mocked Rust-side queue.
    * The frontend drains these on boot into onboarding or an editable Add

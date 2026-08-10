@@ -463,6 +463,8 @@ type E2eConfig = {
     // When true, `get_identity` returns `locked: true` until `import_identity` is
     // called. Drives the keyring-locked screen in tests.
     identityLocked?: boolean;
+    /** Delay (ms) applied to identity import so specs can observe pending navigation. */
+    identityImportDelayMs?: number;
     /**
      * Global agent config returned by `get_global_agent_config`. Defaults to
      * an empty config (no provider, model, or env vars) if not specified.
@@ -11183,6 +11185,12 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "import_identity": {
+        const importDelayMs = activeConfig?.mock?.identityImportDelayMs ?? 0;
+        if (importDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, importDelayMs),
+          );
+        }
         const request = payload as { nsec?: string; password?: string } | null;
         const input = request?.nsec ?? "";
         if (input.trim().startsWith("ncryptsec1")) {
