@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Sparkles } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { Switch } from "@/shared/ui/switch";
@@ -40,6 +40,8 @@ import { deriveMeshShareToggle } from "../shareToggleState";
 import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
+const ACCEPTED_RECOMMENDATION_STORAGE_KEY =
+  "buzz.mesh-compute.share.accepted-recommendation.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
 
 // Keep the Share compute controls visually and behaviorally aligned with the
@@ -90,14 +92,22 @@ export function MeshComputeSettingsCard() {
     MeshModelOption[]
   >([]);
   const [catalog, setCatalog] = React.useState<MeshModelCatalog | null>(null);
-  const [modelInput, setModelInput] = React.useState(() =>
-    readDraft(MODEL_DRAFT_STORAGE_KEY),
+  const acceptedRecommendation = React.useMemo(
+    () => readDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY),
+    [],
+  );
+  const [modelInput, setModelInput] = React.useState(
+    () => acceptedRecommendation || readDraft(MODEL_DRAFT_STORAGE_KEY),
   );
   const [maxVramGb, setMaxVramGb] = React.useState<string>(() =>
     readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
   );
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [recommenderState, setRecommenderState] = React.useState<
+    "idle" | "scanning" | "result" | "selected"
+  >(acceptedRecommendation ? "selected" : "idle");
+  const [scanStep, setScanStep] = React.useState(0);
   const [actionInFlight, setActionInFlight] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
     "start" | "stop" | null
@@ -127,11 +137,9 @@ export function MeshComputeSettingsCard() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: status?.state is the intentional trigger — re-fetch installed models when the node transitions (a fresh start may have downloaded a new model)
   React.useEffect(() => refreshInstalled(), [refreshInstalled, status?.state]);
 
-  // One-shot hardware-aware catalog fetch. Purely additive: when it fails
-  // (stub build, survey error) the card falls back to the free-text field.
-  // When there is no saved choice, make the curated recommendation the actual
-  // default so a new member can turn Share Compute on directly. An explicit
-  // saved draft always wins.
+  // One-shot hardware-aware catalog fetch. Failures are non-fatal: manual
+  // selection still works. Keep an empty draft empty until the member accepts
+  // the recommendation so hardware detection remains an intentional action.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -139,11 +147,6 @@ export function MeshComputeSettingsCard() {
         const value = await meshModelCatalog();
         if (cancelled) return;
         setCatalog(value);
-        setModelInput((current) => {
-          if (current.trim() !== "" || !value.recommended) return current;
-          writeDraft(MODEL_DRAFT_STORAGE_KEY, value.recommended);
-          return value.recommended;
-        });
       } catch {
         // Non-fatal — picker just doesn't render.
       }
@@ -152,6 +155,20 @@ export function MeshComputeSettingsCard() {
       cancelled = true;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (recommenderState !== "scanning") return;
+    if (scanStep >= 4) {
+      setRecommenderState("result");
+      return;
+    }
+    const timer = window.setTimeout(() => setScanStep((step) => step + 1), 450);
+    return () => window.clearTimeout(timer);
+  }, [recommenderState, scanStep]);
+
+  const recommendation = catalog?.entries.find(
+    (entry) => entry.recommended && entry.fit !== "too_large" && entry.fitsDisk,
+  );
 
   // Mirror only a SERVE runtime's model into the field. A client reports the
   // remote model it is consuming; copying that value here both loses the
@@ -279,6 +296,25 @@ export function MeshComputeSettingsCard() {
             onCheckedChange={handleToggle}
           />
         </div>
+
+        <SmartHardwareRecommendation
+          catalog={catalog}
+          recommendation={recommendation}
+          scanStep={scanStep}
+          state={recommenderState}
+          onAccept={(entry) => {
+            setModelInput(entry.name);
+            setIsCustomModelEditing(false);
+            writeDraft(MODEL_DRAFT_STORAGE_KEY, entry.name);
+            writeDraft(ACCEPTED_RECOMMENDATION_STORAGE_KEY, entry.name);
+            setRecommenderState("selected");
+          }}
+          onScan={() => {
+            setScanStep(0);
+            setRecommenderState("scanning");
+          }}
+          onView={() => setRecommenderState("result")}
+        />
 
         <MeshModelPicker
           catalog={catalog}
@@ -411,6 +447,127 @@ export function MeshComputeSettingsCard() {
  * option group while the backend streams mesh-download-progress events —
  * the answer to "it just greys out while downloading".
  */
+function SmartHardwareRecommendation({
+  catalog,
+  recommendation,
+  scanStep,
+  state,
+  onAccept,
+  onScan,
+  onView,
+}: {
+  catalog: MeshModelCatalog | null;
+  recommendation: MeshCatalogEntry | undefined;
+  scanStep: number;
+  state: "idle" | "scanning" | "result" | "selected";
+  onAccept: (entry: MeshCatalogEntry) => void;
+  onScan: () => void;
+  onView: () => void;
+}) {
+  if (state === "selected") {
+    return (
+      <button
+        className="flex w-full items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-left hover:bg-primary/10"
+        data-testid="mesh-smart-recommendation-selected"
+        onClick={onView}
+        type="button"
+      >
+        <span>
+          <span className="block text-sm font-medium">
+            Smart recommendation
+          </span>
+          <span className="block text-sm text-muted-foreground">
+            {recommendation?.name ?? catalog?.recommended}
+          </span>
+        </span>
+        <span className="text-sm text-primary">View</span>
+      </button>
+    );
+  }
+  if (state === "idle") {
+    return (
+      <button
+        className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 disabled:opacity-50"
+        data-testid="mesh-smart-recommend"
+        disabled={!catalog}
+        onClick={onScan}
+        type="button"
+      >
+        <Sparkles className="h-4 w-4" />
+        Find the best model for this machine
+      </button>
+    );
+  }
+  if (state === "scanning") {
+    const items = [
+      ["Chip", catalog?.gpuName ?? "Detecting…"],
+      ["AI memory", catalog?.vramDisplay ?? "Detecting…"],
+      ["Free disk", catalog?.diskFreeDisplay ?? "Detecting…"],
+      ["Best model", recommendation?.name ?? "Comparing…"],
+    ];
+    return (
+      <div
+        className="rounded-xl border border-primary/30 bg-primary/5 px-4 py-5"
+        data-testid="mesh-hardware-scan"
+      >
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Sparkles className="h-4 w-4 animate-pulse text-primary" />
+          Checking your machine…
+        </div>
+        <div className="mt-3 grid gap-2">
+          {items.map(([label, value], index) => (
+            <div
+              className="grid grid-cols-[1rem_6rem_minmax(0,1fr)] gap-2 text-sm"
+              key={label}
+            >
+              {index < scanStep ? (
+                <Check className="h-4 w-4 text-emerald-500" />
+              ) : (
+                <span>›</span>
+              )}
+              <span className="text-muted-foreground">{label}</span>
+              <span className="truncate font-medium">
+                {index < scanStep ? value : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (!recommendation) {
+    return (
+      <p className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+        No recommendation fits both this machine's AI memory and free disk.
+        Choose a smaller model manually.
+      </p>
+    );
+  }
+  return (
+    <div
+      className="rounded-xl border border-primary/30 bg-primary/5 p-4"
+      data-testid="mesh-recommendation-result"
+    >
+      <div className="flex items-center gap-2 text-sm font-semibold text-primary">
+        <Sparkles className="h-4 w-4" /> Best match
+      </div>
+      <p className="mt-2 text-base font-semibold">{recommendation.name}</p>
+      <p className="mt-1 text-sm text-muted-foreground">
+        {recommendation.description} · {recommendation.size} ·{" "}
+        {FIT_LABEL[recommendation.fit]}
+      </p>
+      <button
+        className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        data-testid="mesh-use-recommendation"
+        onClick={() => onAccept(recommendation)}
+        type="button"
+      >
+        Use this model
+      </button>
+    </div>
+  );
+}
+
 function DownloadProgressBar({
   progress,
 }: {
@@ -492,7 +649,7 @@ function MeshModelPicker({
     const catalogOptions = (catalog?.entries ?? []).map((entry) => {
       seen.add(entry.name);
       return {
-        disabled: entry.fit === "too_large",
+        disabled: entry.fit === "too_large" || !entry.fitsDisk,
         label: <MeshModelOptionLabel entry={entry} />,
         value: entry.name,
       };
@@ -573,7 +730,7 @@ function MeshModelPicker({
       ) : null}
       <p className="text-sm font-normal text-muted-foreground">
         {catalog
-          ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
+          ? `Hardware profile: ${catalog.gpuName ?? "detected accelerator"}, ${catalog.vramDisplay} AI memory, ${catalog.diskFreeDisplay} free disk.`
           : "Choose a model or enter a model reference or local file."}{" "}
         Buzz downloads remote models when sharing starts.
       </p>
@@ -597,6 +754,11 @@ function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
       {entry.installed ? (
         <span className="shrink-0 text-2xs text-muted-foreground">
           Installed
+        </span>
+      ) : null}
+      {!entry.fitsDisk ? (
+        <span className="shrink-0 text-2xs text-destructive">
+          Needs disk space
         </span>
       ) : null}
       {!entry.curated ? (

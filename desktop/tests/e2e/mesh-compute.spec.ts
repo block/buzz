@@ -15,6 +15,45 @@ type E2eWindow = Window & {
   }) => void;
 };
 
+test("smart hardware detection recommends and persists a fitting model", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await openSettings(page, "compute");
+
+  const card = page.getByTestId("settings-mesh-share-compute");
+  await page.getByTestId("mesh-smart-recommend").click();
+  await expect(page.getByTestId("mesh-hardware-scan")).toContainText(
+    "Checking your machine",
+  );
+  await expect(page.getByTestId("mesh-recommendation-result")).toContainText(
+    "Gemma-4-E4B-it-Q4_K_M",
+    { timeout: 5_000 },
+  );
+  await expect(page.getByTestId("mesh-recommendation-result")).toContainText(
+    "Fits well",
+  );
+  await page.getByTestId("mesh-use-recommendation").click();
+  await expect(
+    page.getByTestId("mesh-smart-recommendation-selected"),
+  ).toBeVisible();
+  await expect(page.getByTestId("mesh-share-compute-model")).toContainText(
+    "Gemma-4-E4B-it-Q4_K_M",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem(
+          "buzz.mesh-compute.share.accepted-recommendation.v1",
+        ),
+      ),
+    )
+    .toBe("Gemma-4-E4B-it-Q4_K_M");
+  await expect(card).toContainText("32 GB AI memory");
+  await expect(card).toContainText("128 GB free disk");
+});
+
 test("Share compute chooses a model before sharing", async ({ page }) => {
   const modelRef = "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M";
   await installMockBridge(page);
@@ -33,7 +72,7 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
     page.getByTestId("mesh-share-compute-sharing-status"),
   ).toHaveCount(0);
   await expect(model).toBeVisible();
-  await expect(toggle).toBeEnabled();
+  await expect(toggle).toBeDisabled();
   await model.click();
   await page.getByRole("option", { name: "Custom model…" }).click();
   await page.getByLabel("Custom model reference").fill(modelRef);
