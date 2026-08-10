@@ -300,3 +300,103 @@ fn slimming_republish_wave_is_one_time() {
         "second boot must be a no-op (idempotence)"
     );
 }
+
+// ── retain_agent_record (interactive-edit engine) ────────────────────────────
+//
+// #2423: renaming an agent must re-retain its kind:30177 identity record
+// IMMEDIATELY, not at the next boot-time reconcile. These tests pin the shared
+// engine both the boot reconcile and the interactive edit paths
+// (`retain_managed_agent_pending`, persona-rename propagation) run on.
+
+/// A rename re-retains the identity record under the SAME coordinate (the
+/// agent pubkey) with the new name, queued for publish, with a created_at
+/// strictly past the retained head so the relay's replaceable-event rule
+/// accepts it. Without this, the relay keeps the old name→pubkey binding
+/// until the next restart — the identity desync in #2423.
+#[test]
+fn rename_re_retains_identity_record_with_new_name() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let owner = keys.public_key().to_hex();
+    let pubkey = "9".repeat(64);
+    let mut record = sample_record(&pubkey, "Fizz");
+
+    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    let first = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
+        .unwrap()
+        .unwrap();
+    // Simulate the flush loop confirming the initial publish.
+    mark_synced(
+        &conn,
+        first.kind,
+        &first.pubkey,
+        &first.d_tag,
+        first.created_at,
+        &first.content,
+    )
+    .unwrap();
+
+    record.name = "Spark".to_string();
+    assert!(
+        retain_agent_record(&conn, &keys, &record).unwrap(),
+        "a renamed record must re-retain its identity record"
+    );
+
+    let row = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.d_tag, pubkey, "coordinate stays keyed by agent pubkey");
+    assert!(
+        row.content.contains("Spark"),
+        "retained identity record must carry the new name"
+    );
+    assert!(
+        !row.content.contains("Fizz"),
+        "the stale name must not survive the rename"
+    );
+    assert!(row.pending_sync, "a rename must queue a republish");
+    assert!(
+        row.created_at > first.created_at,
+        "created_at must bump past the retained head (replaceable-event rule)"
+    );
+}
+
+/// An unchanged record is a true no-op: no rewrite, no `pending_sync` churn.
+/// This is what lets every edit path call the engine unconditionally.
+#[test]
+fn retain_agent_record_is_noop_when_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let pubkey = "8".repeat(64);
+    let record = sample_record(&pubkey, "steady-agent");
+
+    assert!(retain_agent_record(&conn, &keys, &record).unwrap());
+    let row = get_retained_event(
+        &conn,
+        KIND_MANAGED_AGENT,
+        &keys.public_key().to_hex(),
+        &pubkey,
+    )
+    .unwrap()
+    .unwrap();
+    mark_synced(
+        &conn,
+        row.kind,
+        &row.pubkey,
+        &row.d_tag,
+        row.created_at,
+        &row.content,
+    )
+    .unwrap();
+
+    assert!(
+        !retain_agent_record(&conn, &keys, &record).unwrap(),
+        "an unchanged projection must not re-retain"
+    );
+    assert!(
+        get_pending_sync(&conn).unwrap().is_empty(),
+        "no pending_sync churn for an unchanged record"
+    );
+}

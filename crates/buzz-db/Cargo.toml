@@ -20,6 +20,9 @@ sha2        = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }
 nostr       = { workspace = true }
+rand        = { workspace = true }
+metrics     = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+metrics-util = { workspace = true }

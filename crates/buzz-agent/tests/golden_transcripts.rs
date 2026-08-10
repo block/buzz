@@ -808,3 +808,137 @@ async fn test_cancel_notification_no_reply() {
 
     h.shutdown().await;
 }
+
+/// ACP v2 ContentChunk compliance: both `agent_thought_chunk` and
+/// `agent_message_chunk` must carry `messageId` and `content` when the
+/// client negotiates protocol version 2.
+///
+/// ACP v2 requires `ContentChunk.messageId` (required in v2 schema at
+/// agentclientprotocol/agent-client-protocol schema/v2/schema.json @d13d1baa).
+/// ACP v1 allows the field, so adding it is backwards-safe.
+///
+/// Additional invariants verified here:
+/// - The thought and assistant message IDs are **distinct** (two logical messages).
+/// - IDs do **not** recur across two consecutive `session/prompt` calls in the same
+///   ACP session (`run_id` is fresh per prompt, so no cross-turn collision).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_acp_v2_chunks_carry_message_id() {
+    // OpenAI Responses API: reasoning item + text item. Both emitted chunks
+    // must have messageId + content on a v2 connection.
+    // Two responses so we can send two session/prompt calls and verify no ID reuse.
+    let url = spawn_fake_llm(vec![
+        responses_reasoning_response("Thinking about it.", "Here is my response."),
+        responses_reasoning_response("Thinking again.", "Second response."),
+    ])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("OPENAI_COMPAT_API_KEY", "test"),
+        ("OPENAI_COMPAT_MODEL", "fake-model"),
+        ("OPENAI_COMPAT_API", "responses"),
+        ("OPENAI_COMPAT_BASE_URL", &url),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await; // negotiates protocolVersion: 2
+
+    // ── First prompt ──────────────────────────────────────────────────────────
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think and respond" }],
+            }),
+        )
+        .await;
+    let updates1 = collect_updates_until_done(&mut h, p1).await;
+
+    let thought1 = updates1
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .expect("agent_thought_chunk must be emitted on prompt 1");
+    let message1 = updates1
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .expect("agent_message_chunk must be emitted on prompt 1");
+
+    // ACP v2 ContentChunk compliance: messageId must be present and non-empty.
+    let thought_id1 = thought1["messageId"]
+        .as_str()
+        .expect("agent_thought_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !thought_id1.is_empty(),
+        "agent_thought_chunk messageId must not be empty"
+    );
+
+    let message_id1 = message1["messageId"]
+        .as_str()
+        .expect("agent_message_chunk must carry messageId (ACP v2 required field)");
+    assert!(
+        !message_id1.is_empty(),
+        "agent_message_chunk messageId must not be empty"
+    );
+
+    // Thought and assistant message are two distinct logical messages — their IDs must differ.
+    assert_ne!(
+        thought_id1, message_id1,
+        "agent_thought_chunk and agent_message_chunk are distinct logical messages; their messageIds must differ"
+    );
+
+    // content must be present and correct.
+    assert_eq!(
+        thought1["content"]["text"], "Thinking about it.",
+        "thought content mismatch"
+    );
+    assert_eq!(
+        message1["content"]["text"], "Here is my response.",
+        "message content mismatch"
+    );
+
+    // ── Second prompt (same ACP session) ─────────────────────────────────────
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think again" }],
+            }),
+        )
+        .await;
+    let updates2 = collect_updates_until_done(&mut h, p2).await;
+
+    let thought2 = updates2
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .expect("agent_thought_chunk must be emitted on prompt 2");
+    let message2 = updates2
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .expect("agent_message_chunk must be emitted on prompt 2");
+
+    let thought_id2 = thought2["messageId"]
+        .as_str()
+        .expect("agent_thought_chunk must carry messageId on prompt 2");
+    let message_id2 = message2["messageId"]
+        .as_str()
+        .expect("agent_message_chunk must carry messageId on prompt 2");
+
+    // IDs from prompt 2 must be distinct from each other.
+    assert_ne!(
+        thought_id2, message_id2,
+        "prompt 2: thought and message IDs must differ"
+    );
+
+    // IDs must NOT recur across prompts — ACP requires session-unique messageIds.
+    assert_ne!(
+        thought_id1, thought_id2,
+        "thought messageId must not recur across session/prompt calls (run_id must differ)"
+    );
+    assert_ne!(
+        message_id1, message_id2,
+        "message messageId must not recur across session/prompt calls (run_id must differ)"
+    );
+
+    h.shutdown().await;
+}

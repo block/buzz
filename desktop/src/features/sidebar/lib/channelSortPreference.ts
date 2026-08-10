@@ -1,4 +1,4 @@
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 import type { Channel } from "@/shared/api/types";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sort.v1";
@@ -128,8 +128,17 @@ function channelRecencyMs(channel: Channel): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 export function compareChannelsByName(left: Channel, right: Channel): number {
-  return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+  return (
+    compareCodeUnits(left.name.toLowerCase(), right.name.toLowerCase()) ||
+    compareCodeUnits(left.id, right.id)
+  );
 }
 
 /**

@@ -2,9 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge, openCreateChannelDialog } from "../helpers/bridge";
 
-const DEFAULT_AGENT_ACTIVITY_PUBKEY =
-  "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
-
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -72,7 +69,7 @@ async function expectHomeView(page: import("@playwright/test").Page) {
 
 async function selectHomeInboxFilter(
   page: import("@playwright/test").Page,
-  label: "Activity" | "Agents",
+  label: "Agents",
 ) {
   await page
     .getByTestId("home-inbox")
@@ -141,7 +138,6 @@ test("Buzz shared compute explains automatic model selection", async ({
   });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
   await chooseSharedComputeProvider(page);
 
   await expect
@@ -156,7 +152,7 @@ test("Buzz shared compute explains automatic model selection", async ({
   await expect(page.locator("#persona-model")).toContainText("Automatic");
   await expect(
     page.getByText(
-      "Buzz will choose an available shared model when the agent starts.",
+      "Auto uses Mesh collective intelligence when two or more models stay available, otherwise it chooses one available model.",
     ),
   ).toBeVisible();
   await expect(page.locator("#persona-custom-model")).toHaveCount(0);
@@ -170,7 +166,6 @@ test("create agent persists Buzz shared compute with auto model", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
   await page.locator("#persona-display-name").fill(agentName);
 
   await chooseSharedComputeProvider(page);
@@ -178,9 +173,12 @@ test("create agent persists Buzz shared compute with auto model", async ({
   const model = page.locator("#persona-model");
   await expect(model).toContainText("Automatic");
   await page.getByTestId("persona-dialog-submit").click();
-  await expect(
-    page.getByRole("heading", { name: "Agent created" }),
-  ).toBeVisible({ timeout: 10_000 });
+  const createdToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Agent created" });
+  await expect(createdToast).toBeVisible({ timeout: 10_000 });
+  await expect(createdToast).toHaveCount(1);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   const createPayload = await page.evaluate((name) => {
     const log = (
@@ -214,7 +212,6 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await page.locator("#persona-display-name").fill(agentName);
   await page
@@ -255,10 +252,12 @@ test("create agent supports parallelism and system prompt overrides", async ({
   // the definition (agents always start after creation).
   await page.getByTestId("persona-dialog-submit").click();
 
-  await expect(
-    page.getByRole("heading", { name: "Agent created" }),
-  ).toBeVisible({ timeout: 10_000 });
-  await page.getByRole("button", { name: "Done" }).click();
+  const createdToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Agent created" });
+  await expect(createdToast).toBeVisible({ timeout: 10_000 });
+  await expect(createdToast).toHaveCount(1);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,
@@ -298,77 +297,23 @@ test("opens a mocked channel from the inbox feed", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("inbox feed shows channel and agent activity sections", async ({
+test("Inbox excludes generic channel and unowned agent traffic", async ({
   page,
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
   await page.goto("/");
+  await expectHomeView(page);
 
-  await selectHomeInboxFilter(page, "Activity");
-  await expect(inboxList).toContainText(
+  await expect(inboxList).not.toContainText(
     "Engineering shipped the desktop build.",
+  );
+  await expect(inboxList).not.toContainText(
+    "Agent progress: channel index complete.",
   );
 
   await selectHomeInboxFilter(page, "Agents");
-  await expect(inboxList).toContainText(
-    "Agent progress: channel index complete.",
-  );
-  await inboxList.getByText("Agent progress: channel index complete.").click();
-  await expect(page.getByTestId("home-inbox-detail")).toContainText(
-    "Agent progress: channel index complete.",
-  );
-});
-
-test("inbox agent hover hides actions without agent access", async ({
-  page,
-}) => {
-  await page.goto("/");
-
-  await selectHomeInboxFilter(page, "Agents");
-  const agentRow = page.getByTestId("home-inbox-item-mock-feed-agent");
-  await expect(agentRow).toContainText(
-    "Agent progress: channel index complete.",
-  );
-
-  await agentRow.getByTestId("home-inbox-avatar-mock-feed-agent").hover();
-  const profilePopover = page.locator(
-    '[data-testid="user-profile-popover"][data-state="open"]',
-  );
-  await expect(profilePopover).toBeVisible();
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-});
-
-test("opens a mocked forum activity item from the inbox feed", async ({
-  page,
-}) => {
-  await page.goto("/");
-
-  await selectHomeInboxFilter(page, "Activity");
-  await expect(page.getByTestId("home-inbox-list")).toContainText(
-    "Engineering shipped the desktop build.",
-  );
-  await page
-    .getByTestId("home-inbox-list")
-    .getByText("Engineering shipped the desktop build.")
-    .click();
-  await expect(page.getByTestId("home-inbox-detail")).toContainText(
-    "Engineering shipped the desktop build.",
-  );
+  await expect(inboxList).toContainText("No agent updates found");
 });
 
 test("inbox feed renders resolved author labels", async ({ page }) => {
@@ -634,6 +579,9 @@ test("does not shift the timeline when the composer grows", async ({
   await page.waitForTimeout(400);
   await page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
+    // The raw position assignment sets up detached history, while wheel is the
+    // same ownership signal a real reader produces before composer reflow.
+    timeline.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
     timeline.scrollTop = 0;
     timeline.dispatchEvent(new Event("scroll"));
   });

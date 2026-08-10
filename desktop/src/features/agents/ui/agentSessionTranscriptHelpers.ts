@@ -61,15 +61,12 @@ export function parsePromptText(text: string): {
  * deterministically.
  *
  * The harness composes the value in order:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
- * with any section omitted when absent. For team-pack agents the persona body
- * already contains the pack-level instructions appended by `compose_prompt()`
- * in `buzz-persona/src/resolve.rs`:
- *   `{persona_body}\n\n---\n# Team Instructions\n{pack_instructions}`
- * Extraction runs in reverse producer order so that each `lastIndexOf` search
- * operates on the full input and each extraction boundary is unambiguous.
+ *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
+ * with any section omitted when absent. Extraction runs in reverse producer
+ * order so that each `lastIndexOf` search operates on the full input and each
+ * extraction boundary is unambiguous.
  *
- * Four extraction passes before Base/System parsing:
+ * Five extraction passes:
  *
  * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
  *    - Start-of-string: canvas-only input.
@@ -80,18 +77,23 @@ export function parsePromptText(text: string): {
  * 2. **Core** (`[Agent Memory — core]`): appended before canvas by `with_core()`.
  *    Same two cases, same last-occurrence guard.
  *
- * 3. **Base/System**: remainder after canvas and core extraction.
+ * 3. **Team Instructions** (`[Team Instructions]`): appended before core by
+ *    `with_team()` in `buzz-acp/src/pool.rs`. Same two cases (start-of-string
+ *    or `\n\n[Team Instructions]\n` inline), same last-occurrence guard. Output
+ *    position: after System, before Core Memory.
+ *
+ * 4. **Base/System**: remainder after the three top-level section extractions.
  *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
  *    inside a body can start a new section.
  *
- * 4. **Team Instructions**: if the `System` body contains the exact canonical
- *    delimiter `\n\n---\n# Team Instructions\n` (produced by `compose_prompt()`),
- *    the body is split at the **last** occurrence of that boundary (same
- *    last-occurrence guard as canvas and core). The text before becomes the
- *    `System` body; the text after becomes a `Team Instructions` section
- *    inserted immediately after `System`. Non-canonical lookalikes (bare `---`
- *    without the heading, a `# Team Instructions` on a different line, or only
- *    a single preceding newline) are kept literal inside `System`.
+ * 5. **Legacy Team Instructions** (backward compat): if the `System` body
+ *    contains the exact canonical delimiter `\n\n---\n# Team Instructions\n`
+ *    (produced by the now-removed `compose_prompt()` in buzz-persona), the body
+ *    is split at the **last** occurrence of that boundary. The text before
+ *    becomes the `System` body; the text after becomes a `Team Instructions`
+ *    section inserted immediately after `System`. Non-canonical lookalikes
+ *    (bare `---` without the heading, a `# Team Instructions` on a different
+ *    line, or only a single preceding newline) are kept literal inside `System`.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
@@ -133,7 +135,29 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 3. Parse Base/System from the remaining prefix ────────────────────────
+  // ── 3. Extract [Team Instructions] (modern runtime framing) ─────────────
+  // with_team() in buzz-acp/src/pool.rs appends "\n\n[Team Instructions]\n{instructions}"
+  // after [System] and before core/canvas. Same two cases as canvas/core:
+  // start-of-string (team-only input) or the inline double-newline marker
+  // (last occurrence guards against embedded lookalikes preceded by a single \n).
+  const TEAM_HEADER = "[Team Instructions]";
+  const TEAM_MARKER_INLINE = `\n\n${TEAM_HEADER}\n`;
+  let modernTeamBody: string | null = null;
+
+  if (remainder.startsWith(`${TEAM_HEADER}\n`)) {
+    modernTeamBody = remainder.slice(`${TEAM_HEADER}\n`.length).trim();
+    remainder = "";
+  } else {
+    const lastTeam = remainder.lastIndexOf(TEAM_MARKER_INLINE);
+    if (lastTeam !== -1) {
+      modernTeamBody = remainder
+        .slice(lastTeam + TEAM_MARKER_INLINE.length)
+        .trim();
+      remainder = remainder.slice(0, lastTeam);
+    }
+  }
+
+  // ── 4. Parse Base/System from the remaining prefix ────────────────────────
   // The canonical team-instructions delimiter produced by compose_prompt() in
   // buzz-persona/src/resolve.rs:
   //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
@@ -181,7 +205,9 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 4. Append core and canvas sections in producer order ──────────────────
+  // ── 5. Append team (modern), core, and canvas sections in producer order ──
+  if (modernTeamBody)
+    sections.push({ title: "Team Instructions", body: modernTeamBody });
   if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
   if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
 

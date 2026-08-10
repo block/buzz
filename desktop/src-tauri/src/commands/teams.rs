@@ -39,7 +39,6 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 /// happens on an actual user edit. The guard is intentionally omitted.
 pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
-        managed_agents_base_dir,
         persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
         team_events::build_team_event,
@@ -48,19 +47,16 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
-        let (pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
-            let pubkey = keys.public_key().to_hex();
-            // Monotonic created_at: bump past the retained head (NIP-AP step 3).
-            let prior =
-                get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
-            let event = build_team_event(team)?
-                .custom_created_at(monotonic_created_at(prior))
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign team event: {e}"))?;
-            (pubkey, event)
-        };
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let conn = open_retention_db(&scope.db_path)?;
+        let pubkey = scope.owner_keys.public_key().to_hex();
+        // Monotonic created_at: bump past the retained head (NIP-AP step 3).
+        let prior =
+            get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
+        let event = build_team_event(team)?
+            .custom_created_at(monotonic_created_at(prior))
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign team event: {e}"))?;
         retain_event(
             &conn,
             &RetainedEvent {
@@ -90,7 +86,6 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
 /// disk-authoritative delete.
 fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
     use crate::managed_agents::{
-        managed_agents_base_dir,
         retention::{
             delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
             RetainedEvent,
@@ -103,15 +98,12 @@ fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
     const KIND_DELETE: u32 = 5;
 
     let result = (|| -> Result<(), String> {
-        let (pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
-            let pubkey = keys.public_key().to_hex();
-            let event = build_team_delete(d_tag, &pubkey)?
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
-            (pubkey, event)
-        };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        let pubkey = scope.owner_keys.public_key().to_hex();
+        let event = build_team_delete(d_tag, &pubkey)?
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
+        let conn = open_retention_db(&scope.db_path)?;
         delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
         retain_event(
             &conn,

@@ -1,12 +1,67 @@
+.composer-dock {
+  --composer-dock-active-rail: 2.125rem;
+  --composer-dock-activity-bottom: 0.5rem;
+  --composer-dock-quiet-inset: 1.25rem;
+  --composer-dock-release: calc(
+    var(--composer-dock-active-rail) -
+    var(--composer-dock-quiet-inset)
+  );
+
+  padding-bottom: var(--composer-dock-quiet-inset);
+  transition: padding-bottom 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity {
+  padding-bottom: var(--composer-dock-active-rail);
+}
+
+.composer-dock-quiet-spacer {
+  height: var(--composer-dock-release);
+  transition: height 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity .composer-dock-quiet-spacer {
+  height: 0;
+}
+
+.composer-dock-rail-mask {
+  height: var(--composer-dock-quiet-inset);
+  transition: height 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity .composer-dock-rail-mask {
+  height: var(--composer-dock-active-rail);
+}
+
+.composer-dock-activity {
+  bottom: var(--composer-dock-activity-bottom);
+}
+
 .composer-overlay-corner-masks::before,
 .composer-overlay-corner-masks::after {
   position: absolute;
-  bottom: 2.5rem;
+  bottom: var(--composer-dock-quiet-inset);
   z-index: 0;
   width: 1rem;
   height: 1rem;
   background: hsl(var(--background));
   content: "";
+  transition: bottom 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.composer-dock--with-activity.composer-overlay-corner-masks::before,
+.composer-dock--with-activity.composer-overlay-corner-masks::after {
+  bottom: var(--composer-dock-active-rail);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-dock,
+  .composer-dock-quiet-spacer,
+  .composer-dock-rail-mask,
+  .composer-overlay-corner-masks::before,
+  .composer-overlay-corner-masks::after {
+    transition: none;
+  }
 }
 
 .composer-overlay-corner-masks::before {

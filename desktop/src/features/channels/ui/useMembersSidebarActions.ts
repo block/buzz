@@ -11,7 +11,10 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { useManagedAgentRuntimeAction } from "@/features/agents/managedAgentRuntimeHooks";
+import {
+  clearActiveTurnsForAgentOnStop,
+  useManagedAgentRuntimeAction,
+} from "@/features/agents/managedAgentRuntimeHooks";
 import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   channelsQueryKey,
@@ -174,6 +177,9 @@ export function useMembersSidebarActions({
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
         setActionNoticeMessage(
           agent.backend.type === "provider"
             ? `Shutdown command sent to ${agent.name}.`
@@ -203,6 +209,7 @@ export function useMembersSidebarActions({
           agent,
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
         });
         return undefined;
       },
@@ -216,13 +223,18 @@ export function useMembersSidebarActions({
 
   async function handleStopAll() {
     await runBulkAgentAction({
-      action: (agent) =>
-        stopManagedAgentWithRules({
+      action: async (agent) => {
+        const result = await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
-        }),
+        });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
+        return result;
+      },
       actionKey: "bulk-stop",
       agents: stoppableManagedBots,
       failureMessage: "Failed to stop agent.",

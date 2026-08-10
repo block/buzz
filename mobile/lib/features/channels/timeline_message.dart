@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
-import '../custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
 import 'channel_window.dart';
 
 enum SystemEventType {
@@ -94,16 +94,17 @@ class SystemEvent {
           return '$actor joined the channel';
         }
         final target = resolveLabel(targetPubkey);
-        return '$actor added $target to the channel';
+        return '$target was added by $actor';
       }(),
       SystemEventType.memberLeft => '$actor left the channel',
       SystemEventType.memberRemoved => () {
         final target = resolveLabel(targetPubkey);
         return '$actor removed $target from the channel';
       }(),
-      SystemEventType.topicChanged => '$actor changed the topic to "$topic"',
+      SystemEventType.topicChanged =>
+        '$actor ${_describeTextFieldChange('topic', topic)}',
       SystemEventType.purposeChanged =>
-        '$actor changed the purpose to "$purpose"',
+        '$actor ${_describeTextFieldChange('purpose', purpose)}',
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
@@ -111,6 +112,25 @@ class SystemEvent {
       SystemEventType.huddleEnded => '$actor ended the huddle',
     };
   }
+}
+
+/// Caption fragment for a channel topic or purpose change, e.g.
+/// `changed the topic to "Release planning"` or `cleared the topic`.
+///
+/// A blank value means the field was cleared: the relay reports a clear as a
+/// `topic_changed` / `purpose_changed` event carrying an empty string, not as a
+/// separate event type. Without this branch the timeline renders
+/// `changed the topic to ""`, which reads as if the topic were set to two quote
+/// marks. Whitespace-only values are treated as cleared for the same reason.
+///
+/// Mirrors `describeChannelTextFieldChange` in
+/// `desktop/src/features/messages/lib/systemEventCopy.ts`.
+String _describeTextFieldChange(String field, String? value) {
+  final trimmed = value?.trim();
+  if (trimmed == null || trimmed.isEmpty) {
+    return 'cleared the $field';
+  }
+  return 'changed the $field to "$trimmed"';
 }
 
 @immutable
@@ -171,6 +191,11 @@ class TimelineMessage {
     this.parentId,
     this.rootId,
   });
+
+  /// Attachment messages stay visually distinct from surrounding messages,
+  /// even when several are sent by the same author in quick succession.
+  bool get hasAttachments =>
+      tags.any((tag) => tag.isNotEmpty && tag.first == 'imeta');
 }
 
 @immutable
@@ -180,11 +205,13 @@ class ThreadSummary {
 
   /// Up to 3 most recent unique participant pubkeys.
   final List<String> participantPubkeys;
+  final int? lastReplyAt;
 
   const ThreadSummary({
     required this.threadHeadId,
     required this.replyCount,
     required this.participantPubkeys,
+    this.lastReplyAt,
   });
 }
 
@@ -195,6 +222,107 @@ class MainTimelineEntry {
   final ThreadSummary? summary;
 
   const MainTimelineEntry({required this.message, this.summary});
+}
+
+const _membershipGroupWindowSeconds = 5 * 60;
+
+@immutable
+class _MembershipChange {
+  final String? actor;
+  final bool isSelfJoin;
+
+  const _MembershipChange({required this.actor, required this.isSelfJoin});
+}
+
+_MembershipChange? _membershipChange(MainTimelineEntry entry) {
+  final event = entry.message.systemEvent;
+  if (!entry.message.isSystem || event?.type != SystemEventType.memberJoined) {
+    return null;
+  }
+
+  final actor = event?.actorPubkey?.trim().toLowerCase();
+  final target = event?.targetPubkey?.trim().toLowerCase();
+  if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
+    return null;
+  }
+
+  final isSelfJoin = actor == target;
+  return _MembershipChange(
+    actor: isSelfJoin ? null : actor,
+    isSelfJoin: isSelfJoin,
+  );
+}
+
+bool _membershipChangesCanGroup(
+  _MembershipChange first,
+  _MembershipChange second,
+) {
+  return first.isSelfJoin == second.isSelfJoin &&
+      (first.isSelfJoin || first.actor == second.actor);
+}
+
+bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
+  final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
+  final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
+  return first.year == second.year &&
+      first.month == second.month &&
+      first.day == second.day;
+}
+
+/// Groups consecutive membership arrivals using the same display rule as
+/// desktop: matching additions (or self-joins) within a fixed five-minute
+/// window become one render item. Other events and local day boundaries break
+/// the group.
+///
+/// Each inner list is one renderable timeline item. Non-grouped entries are
+/// returned as single-item lists.
+List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
+  List<MainTimelineEntry> entries,
+) {
+  final groupsByStart = <int, int>{};
+
+  for (var end = entries.length - 1; end >= 0;) {
+    final newestEntry = entries[end];
+    final newestChange = _membershipChange(newestEntry);
+    if (newestChange == null) {
+      end -= 1;
+      continue;
+    }
+
+    var start = end;
+    while (start > 0) {
+      final candidate = entries[start - 1];
+      final candidateChange = _membershipChange(candidate);
+      if (candidateChange == null ||
+          !_membershipChangesCanGroup(candidateChange, newestChange) ||
+          !_isSameLocalDay(
+            candidate.message.createdAt,
+            newestEntry.message.createdAt,
+          ) ||
+          newestEntry.message.createdAt < candidate.message.createdAt ||
+          newestEntry.message.createdAt - candidate.message.createdAt >
+              _membershipGroupWindowSeconds) {
+        break;
+      }
+      start -= 1;
+    }
+
+    if (start < end) groupsByStart[start] = end;
+    end = start - 1;
+  }
+
+  final result = <List<MainTimelineEntry>>[];
+  for (var index = 0; index < entries.length;) {
+    final groupEnd = groupsByStart[index];
+    if (groupEnd == null) {
+      result.add([entries[index]]);
+      index += 1;
+      continue;
+    }
+    result.add(entries.sublist(index, groupEnd + 1));
+    index = groupEnd + 1;
+  }
+  return result;
 }
 
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
@@ -381,13 +509,9 @@ List<MainTimelineEntry> buildMainTimelineEntries(
   List<TimelineMessage> messages, {
   Map<String, ChannelWindowThreadSummary>? relaySummaries,
 }) {
-  // Index direct children by parentId.
-  final childrenByParent = <String, List<TimelineMessage>>{};
-  for (final msg in messages) {
-    final pid = msg.parentId;
-    if (pid == null) continue;
-    childrenByParent.putIfAbsent(pid, () => []).add(msg);
-  }
+  // Index descendant stats by ancestor, so a nested reply updates every summary
+  // above it and not only the summary of its direct parent.
+  final descendantStats = _buildDescendantStats(messages);
 
   return [
     for (final msg in messages)
@@ -396,7 +520,7 @@ List<MainTimelineEntry> buildMainTimelineEntries(
           message: msg,
           summary: _buildSummary(
             msg.id,
-            childrenByParent,
+            descendantStats,
             relaySummaries?[msg.id],
           ),
         ),
@@ -409,35 +533,174 @@ bool _isBroadcastReply(TimelineMessage message) {
   );
 }
 
+/// Combine what the relay counted with what this client has actually seen.
+///
+/// The count and last-reply time follow the desktop's `mergeThreadSummaries`
+/// (`desktop/src/features/messages/lib/threadPanel.ts`): the relay recount is
+/// authoritative for replies this client never loaded, and the locally observed
+/// replies are authoritative for anything that landed after (or alongside) the
+/// last recount. Neither source alone is complete, so take the larger count and
+/// the later reply time rather than letting one shadow the other. The facepile
+/// order is mobile's own (see [_mergeParticipants]) because this file already
+/// renders relay participants in the order the relay sent them.
+///
+/// Both halves count descendants, not direct replies: the relay's
+/// `descendant_count` and the locally assembled [_buildDescendantStats]. A badge
+/// on the main timeline stands for the whole thread under that message, so a
+/// reply to a reply has to raise it.
 ThreadSummary? _buildSummary(
   String messageId,
-  Map<String, List<TimelineMessage>> childrenByParent,
+  Map<String, _DescendantStats> descendantStats,
   ChannelWindowThreadSummary? relaySummary,
 ) {
-  if (relaySummary != null && relaySummary.replyCount > 0) {
-    return ThreadSummary(
-      threadHeadId: messageId,
-      replyCount: relaySummary.replyCount,
-      participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
-    );
-  }
-
-  final replies = childrenByParent[messageId];
-  if (replies == null || replies.isEmpty) return null;
-
-  // Up to 3 most recent unique participants (walk backwards).
-  final seen = <String>{};
-  final participants = <String>[];
-  for (var i = replies.length - 1; i >= 0 && participants.length < 3; i--) {
-    final pk = replies[i].pubkey.toLowerCase();
-    if (seen.add(pk)) participants.add(pk);
-  }
+  final local = _buildLocalSummary(messageId, descendantStats);
+  final relay = _buildRelaySummary(messageId, relaySummary);
+  if (relay == null) return local;
+  if (local == null) return relay;
 
   return ThreadSummary(
     threadHeadId: messageId,
-    replyCount: replies.length,
-    participantPubkeys: participants.reversed.toList(),
+    replyCount: local.replyCount > relay.replyCount
+        ? local.replyCount
+        : relay.replyCount,
+    // Relay participants first: they describe the whole thread, including
+    // replies this client never loaded, so a recount's facepile keeps rendering
+    // as it does today. Locally seen repliers (newest first, matching the relay
+    // order this file already renders) only fill the remaining slots.
+    participantPubkeys: _mergeParticipants(
+      relay.participantPubkeys,
+      local.participantPubkeys.reversed,
+    ),
+    lastReplyAt: _laterOf(local.lastReplyAt, relay.lastReplyAt),
   );
+}
+
+/// Summary assembled from the replies present in the loaded timeline.
+///
+/// Counts every loaded descendant, not only direct children, because the root
+/// badge in the main timeline stands for the whole thread. This mirrors the
+/// desktop's `buildSummaryForDirectReplies`, which reads the same descendant
+/// stats and reverses the newest-first participants to oldest-first.
+ThreadSummary? _buildLocalSummary(
+  String messageId,
+  Map<String, _DescendantStats> descendantStats,
+) {
+  final stats = descendantStats[messageId];
+  if (stats == null || stats.descendantCount == 0) return null;
+
+  return ThreadSummary(
+    threadHeadId: messageId,
+    replyCount: stats.descendantCount,
+    participantPubkeys: stats.recentParticipantsNewestFirst.reversed.toList(),
+    lastReplyAt: stats.lastReplyAt,
+  );
+}
+
+/// Descendant count, last reply time, and recent participants for every message
+/// that has at least one loaded descendant.
+///
+/// Mirrors the desktop's `buildDescendantStatsByMessageId`
+/// (`desktop/src/features/messages/lib/threadPanel.ts`): each message is
+/// attributed to every ancestor on its parent chain, so a reply nested under a
+/// reply still counts towards the root it belongs to. Messages are visited
+/// newest first so the capped participant list keeps the most recent repliers.
+Map<String, _DescendantStats> _buildDescendantStats(
+  List<TimelineMessage> messages,
+) {
+  final messageById = <String, TimelineMessage>{
+    for (final msg in messages) msg.id: msg,
+  };
+  final statsByMessageId = <String, _DescendantStats>{
+    for (final msg in messages) msg.id: _DescendantStats(),
+  };
+
+  // Oldest first, keeping the original order for messages sharing a timestamp,
+  // then walked in reverse so participants are collected newest first.
+  final ordered = List<int>.generate(messages.length, (index) => index)
+    ..sort((left, right) {
+      final byCreatedAt = messages[left].createdAt.compareTo(
+        messages[right].createdAt,
+      );
+      return byCreatedAt != 0 ? byCreatedAt : left.compareTo(right);
+    });
+
+  for (var i = ordered.length - 1; i >= 0; i--) {
+    final message = messages[ordered[i]];
+    final participant = message.pubkey.toLowerCase();
+
+    // Cap the walk so a malformed parent chain (a cycle, for instance) cannot
+    // spin forever.
+    var ancestorId = message.parentId;
+    var hops = 0;
+    final maxHops = messages.length + 1;
+
+    while (ancestorId != null && hops < maxHops) {
+      final ancestorStats = statsByMessageId[ancestorId];
+      if (ancestorStats == null) break;
+
+      ancestorStats.descendantCount += 1;
+      ancestorStats.lastReplyAt = _laterOf(
+        ancestorStats.lastReplyAt,
+        message.createdAt,
+      );
+      if (ancestorStats.recentParticipantsNewestFirst.length < 3 &&
+          !ancestorStats.recentParticipantsNewestFirst.contains(participant)) {
+        ancestorStats.recentParticipantsNewestFirst.add(participant);
+      }
+
+      ancestorId = messageById[ancestorId]?.parentId;
+      hops += 1;
+    }
+  }
+
+  return statsByMessageId;
+}
+
+/// Mutable accumulator for [_buildDescendantStats].
+class _DescendantStats {
+  int descendantCount = 0;
+  int? lastReplyAt;
+  final List<String> recentParticipantsNewestFirst = [];
+}
+
+/// Summary from the relay's recount, or null when it reports no replies.
+ThreadSummary? _buildRelaySummary(
+  String messageId,
+  ChannelWindowThreadSummary? relaySummary,
+) {
+  if (relaySummary == null || relaySummary.descendantCount <= 0) return null;
+  return ThreadSummary(
+    threadHeadId: messageId,
+    replyCount: relaySummary.descendantCount,
+    participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
+    lastReplyAt: relaySummary.lastReplyAt,
+  );
+}
+
+int? _laterOf(int? left, int? right) {
+  if (left == null) return right;
+  if (right == null) return left;
+  return left > right ? left : right;
+}
+
+/// Up to 3 unique pubkeys, [primary] first.
+///
+/// [secondary] is expected newest-first so that a capped facepile keeps the
+/// most recent participants rather than the oldest ones. Uniqueness is
+/// case-insensitive because the locally assembled half lowercases pubkeys while
+/// the relay half is passed through as received.
+List<String> _mergeParticipants(
+  Iterable<String> primary,
+  Iterable<String> secondary,
+) {
+  final seen = <String>{};
+  final merged = <String>[];
+  for (final pubkey in [...primary, ...secondary]) {
+    if (!seen.add(pubkey.toLowerCase())) continue;
+    merged.add(pubkey);
+    if (merged.length == 3) break;
+  }
+  return merged;
 }
 
 class _Edit {

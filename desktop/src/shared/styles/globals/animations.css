@@ -2,6 +2,69 @@
   animation: sprout-arc-spinner-spin 500ms linear infinite;
 }
 
+@keyframes buzz-qr-cell-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+
+  27% {
+    opacity: 0.27;
+    transform: scale(0);
+  }
+
+  30% {
+    opacity: 0.3;
+    transform: scale(0.043);
+  }
+
+  35% {
+    opacity: 0.35;
+    transform: scale(0.167);
+  }
+
+  40% {
+    opacity: 0.4;
+    transform: scale(0.358);
+  }
+
+  45% {
+    opacity: 0.45;
+    transform: scale(0.632);
+  }
+
+  49% {
+    opacity: 0.49;
+    transform: scale(0.918);
+  }
+
+  50% {
+    opacity: 0.5;
+    transform: scale(1.1);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.buzz-qr-cell-reveal {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: buzz-qr-cell-reveal 58ms linear var(--buzz-qr-reveal-delay, 0ms)
+    forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-qr-cell-reveal {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+}
+
 @keyframes sprout-arc-spinner-spin {
   to {
     transform: rotate(360deg);
@@ -124,54 +187,58 @@
 }
 
 .buzz-shimmer {
-  --buzz-shimmer-duration: 2000ms;
-  --buzz-shimmer-band: 400%;
+  --buzz-shimmer-duration: 2600ms;
+  --buzz-shimmer-band: 250%;
   --buzz-shimmer-highlight: color-mix(
     in srgb,
-    hsl(var(--foreground)) 82%,
-    hsl(var(--muted-foreground)) 18%
+    hsl(var(--background)) 60%,
+    hsl(var(--muted-foreground)) 40%
   );
+  --buzz-shimmer-spread: 2rem;
 
-  color: hsl(var(--muted-foreground));
-  display: inline-block;
-  position: relative;
-}
-
-.buzz-shimmer::before {
   animation: buzz-shimmer var(--buzz-shimmer-duration) linear infinite;
   background-clip: text;
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    transparent 40%,
-    var(--buzz-shimmer-highlight) 50%,
-    transparent 60%,
-    transparent 100%
-  );
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - var(--buzz-shimmer-spread)),
+      var(--buzz-shimmer-highlight) 50%,
+      transparent calc(50% + var(--buzz-shimmer-spread))
+    ),
+    linear-gradient(hsl(var(--muted-foreground)), hsl(var(--muted-foreground)));
+  background-position:
+    100% 0,
+    0 0;
   background-repeat: no-repeat;
-  background-size: var(--buzz-shimmer-band) 100%;
+  background-size:
+    var(--buzz-shimmer-band) 100%,
+    100% 100%;
   color: transparent;
-  content: attr(data-shimmer-text);
-  inset: 0;
-  pointer-events: none;
-  position: absolute;
+  display: inline-block;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
 @keyframes buzz-shimmer {
   0% {
-    background-position: 100% 0;
+    background-position:
+      100% 0,
+      0 0;
   }
 
   100% {
-    background-position: 0% 0;
+    background-position:
+      0 0,
+      0 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .buzz-shimmer::before {
+  .buzz-shimmer {
     animation: none;
+    background: none;
+    color: hsl(var(--muted-foreground));
+    -webkit-text-fill-color: currentcolor;
   }
 }
 

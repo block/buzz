@@ -68,6 +68,61 @@ async function getMessagePosition(
   }, messageId);
 }
 
+test("channel switch settles at the newest message after virtualized rows measure", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    const base = Math.floor(Date.now() / 1000);
+    for (let index = 0; index < 80; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `switch-bottom ${index} ${"variable-height ".repeat(
+          index % 7,
+        )}`,
+        createdAt: base + index,
+      });
+    }
+  });
+
+  // Open another channel first so this exercises a real channel switch, where
+  // the virtualizer API is temporarily null while the keyed list remounts.
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("switch-bottom 79");
+  // Reflow a rendered row well after the removed 250ms settle deadline. The
+  // geometry-driven bottom intent must still chase the new physical floor.
+  await timeline.evaluate((element) => {
+    window.setTimeout(() => {
+      const row = element.querySelector<HTMLElement>("[data-message-id]");
+      if (row) {
+        row.style.minHeight = `${row.getBoundingClientRect().height + 240}px`;
+      }
+      element.dataset.delayedBottomReflow = "complete";
+    }, 600);
+  });
+  await expect(timeline).toHaveAttribute(
+    "data-delayed-bottom-reflow",
+    "complete",
+  );
+  await expect
+    .poll(async () => {
+      const metrics = await getTimelineMetrics(page);
+      return metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop;
+    })
+    .toBeLessThanOrEqual(1);
+  await expect(page.getByTestId("message-scroll-to-latest")).toHaveCount(0);
+});
+
 test("first channel load paints the first window without waiting for the row-floor top-up", async ({
   page,
 }) => {
@@ -168,6 +223,7 @@ test("preserves user scroll while older channel history loads", async ({
   const scrollToTop = async () =>
     timeline.evaluate((element) => {
       const container = element as HTMLDivElement;
+      container.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
       container.scrollTop = 0;
       container.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
@@ -454,11 +510,20 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
     )
     .toBe("resolved");
 
-  const afterPrepend = await getTimelineMetrics(page);
-  // (a) Geometry: timeline still pinned to bottom.
-  expect(
-    afterPrepend.scrollTop + afterPrepend.clientHeight,
-  ).toBeGreaterThanOrEqual(afterPrepend.scrollHeight - 2);
+  // (a) Geometry: timeline settles back to bottom. The durable bottom owner
+  // batches ResizeObserver-driven geometry correction into requestAnimationFrame,
+  // so scrollHeight growth and the physical-floor write need not share a turn.
+  await expect
+    .poll(
+      async () => {
+        const metrics = await getTimelineMetrics(page);
+        return (
+          metrics.scrollTop + metrics.clientHeight >= metrics.scrollHeight - 2
+        );
+      },
+      { timeout: 2_000 },
+    )
+    .toBe(true);
 
   // (b) DOM: the last rendered [data-message-id] sits within 2px of the
   // timeline's bottom edge. This catches a class of bugs where the geometry
@@ -1641,6 +1706,7 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
   const scrollToTop = async () =>
     timeline.evaluate((element) => {
       const container = element as HTMLDivElement;
+      container.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
       container.scrollTop = 0;
       container.dispatchEvent(new Event("scroll", { bubbles: true }));
     });

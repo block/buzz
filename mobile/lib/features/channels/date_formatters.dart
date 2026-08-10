@@ -5,6 +5,8 @@ import 'package:intl/intl.dart';
 export '../../shared/utils/string_utils.dart' show shortPubkey;
 
 final _fullDateFormat = DateFormat('EEEE, MMMM d, y');
+final _shortMonthFormat = DateFormat('MMM');
+final _messageTimeFormat = DateFormat('h:mm a', 'en_US');
 
 /// Returns "Today", "Yesterday", or a full date like "Monday, March 31, 2026".
 ///
@@ -62,20 +64,48 @@ String relativeTime(int unixSeconds) {
   return '${time.month}/${time.day}/${time.year}';
 }
 
-/// Compact time label: "HH:MM" for today, "M/D HH:MM" for older messages.
-String formatMessageTime(int unixSeconds) {
-  final dt = DateTime.fromMillisecondsSinceEpoch(
+/// Returns desktop-parity thread activity copy such as "just now",
+/// "3 hours ago", or "on May 19th".
+String formatThreadSummaryLastReplyTime(
+  int unixSeconds, {
+  @visibleForTesting int? nowSeconds,
+}) {
+  nowSeconds ??= DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  var diff = nowSeconds - unixSeconds;
+  if (diff < 0) diff = 0;
+
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return _formatAgo(diff ~/ 60, 'minute');
+  if (diff < 86400) return _formatAgo(diff ~/ 3600, 'hour');
+  if (diff < 604800) return _formatAgo(diff ~/ 86400, 'day');
+
+  final date = DateTime.fromMillisecondsSinceEpoch(
     unixSeconds * 1000,
     isUtc: true,
   ).toLocal();
-  final now = DateTime.now();
-  final diff = now.difference(dt);
+  return 'on ${_shortMonthFormat.format(date)} '
+      '${date.day}${_ordinalSuffix(date.day)}';
+}
 
-  final hh = dt.hour.toString().padLeft(2, '0');
-  final mm = dt.minute.toString().padLeft(2, '0');
+String _formatAgo(int value, String unit) =>
+    '$value $unit${value == 1 ? '' : 's'} ago';
 
-  if (diff.inDays > 0) {
-    return '${dt.month}/${dt.day} $hh:$mm';
-  }
-  return '$hh:$mm';
+String _ordinalSuffix(int day) {
+  final lastTwoDigits = day % 100;
+  if (lastTwoDigits >= 11 && lastTwoDigits <= 13) return 'th';
+  return switch (day % 10) {
+    1 => 'st',
+    2 => 'nd',
+    3 => 'rd',
+    _ => 'th',
+  };
+}
+
+/// Desktop-parity message clock time, e.g. "2:34 PM".
+String formatMessageTime(int unixSeconds) {
+  final date = DateTime.fromMillisecondsSinceEpoch(
+    unixSeconds * 1000,
+    isUtc: true,
+  ).toLocal();
+  return _messageTimeFormat.format(date);
 }

@@ -326,7 +326,9 @@ export function resolveDefaultModelLabel({
   return (
     defaultModelLabel ??
     discoveredModelOptions?.find((option) => option.id.trim() === "")?.label ??
-    (isSharedCompute ? "Default (auto)" : getDefaultLlmModelLabel(globalModel))
+    (isSharedCompute
+      ? "Auto (collective when available)"
+      : getDefaultLlmModelLabel(globalModel))
   );
 }
 
