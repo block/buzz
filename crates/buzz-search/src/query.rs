@@ -63,6 +63,16 @@ pub enum SearchMode {
     /// relay still refetches and re-authorizes every hit; this mode changes only
     /// the candidate tsquery, not the access boundary.
     Prefix,
+    /// Case-insensitive substring match over the raw `content` (`kurs` matches
+    /// `mattkursmark`).
+    ///
+    /// Intended for user-picker typeahead over kind:0 profiles, where names are
+    /// single FTS lexemes that neither `FullText` nor `Prefix` can match
+    /// mid-token. Uses `ILIKE`, not tsquery, so hits carry no `ts_rank_cd`
+    /// relevance (rank is 0; ordering falls back to recency) — picker surfaces
+    /// re-rank client-side. Rows excluded from the search allowlist
+    /// (`search_tsv IS NULL`, e.g. gift wraps) stay excluded.
+    Contains,
 }
 
 /// A community-scoped FTS query.
@@ -137,8 +147,49 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
 
-fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
-    match mode {
+/// Escape SQL LIKE metacharacters (`%`, `_`, `\`) so user input is treated
+/// as literal text. Used with `ESCAPE '\'` in the query.
+///
+/// Without this, a search query of `"%"` would match every row and `"_"`
+/// would act as a single-character wildcard.
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Push the SELECT head, community fence, and mode-specific match predicate.
+///
+/// The two tsquery modes share the `search_tsv @@ query` shape with a
+/// `ts_rank_cd` relevance score. `Contains` has no tsquery: it matches the raw
+/// `content` with a LIKE-escaped `ILIKE` pattern and a constant rank, keeping
+/// `search_tsv IS NOT NULL` so kinds excluded from the search allowlist stay
+/// invisible to it.
+fn push_query_head(qb: &mut QueryBuilder<sqlx::Postgres>, query: &SearchQuery, search_text: &str) {
+    if query.mode == SearchMode::Contains {
+        qb.push(
+            "SELECT id, kind, pubkey, channel_id, \
+             EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
+             0::real AS rank \
+             FROM events WHERE community_id = ",
+        );
+        qb.push_bind(*query.community.as_uuid());
+        qb.push(" AND deleted_at IS NULL AND search_tsv IS NOT NULL AND content ILIKE ");
+        qb.push_bind(format!("%{}%", escape_like(search_text)));
+        qb.push(" ESCAPE '\\'");
+        return;
+    }
+
+    qb.push(
+        "SELECT id, kind, pubkey, channel_id, \
+         EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
+         ts_rank_cd(search_tsv, search_query.query) AS rank \
+         FROM events CROSS JOIN LATERAL (SELECT ",
+    );
+    match query.mode {
+        // Returned early above; this arm exists only for match totality.
+        SearchMode::Contains => {}
         SearchMode::FullText => {
             qb.push("websearch_to_tsquery('simple', ");
             qb.push_bind(search_text);
@@ -175,6 +226,9 @@ fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_
             );
         }
     }
+    qb.push(" AS query) AS search_query WHERE community_id = ");
+    qb.push_bind(*query.community.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
 }
 fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
@@ -197,7 +251,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 
 /// Execute a community-scoped FTS query.
 ///
-/// SQL shape (always):
+/// SQL shape (`FullText` and `Prefix`):
 /// ```sql
 /// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
 ///        ts_rank_cd(search_tsv, query) AS rank
@@ -210,6 +264,11 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// ORDER BY rank DESC, created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
 /// ```
+///
+/// `Contains` swaps the match arm for `search_tsv IS NOT NULL AND content
+/// ILIKE '%<escaped>%'` with a constant `0` rank (ordering falls back to
+/// recency); everything else — community fence, scopes, pagination — is the
+/// same builder tail.
 ///
 /// `community_id = $ctx` is the first predicate and is non-negotiable. There
 /// is no code path through this function that omits it.
@@ -230,16 +289,8 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     let page = query.page.clamp(1, PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page_actual as i64);
 
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT id, kind, pubkey, channel_id, \
-         EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
-         ts_rank_cd(search_tsv, search_query.query) AS rank \
-         FROM events CROSS JOIN LATERAL (SELECT ",
-    );
-    push_tsquery(&mut qb, query.mode, &search_text);
-    qb.push(" AS query) AS search_query WHERE community_id = ");
-    qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("");
+    push_query_head(&mut qb, query, &search_text);
 
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the
@@ -348,5 +399,14 @@ mod tests {
         let long = "x".repeat(SEARCH_TEXT_MAX_CHARS + 10);
         let cleaned = normalized_search_text(&long).expect("non-empty");
         assert_eq!(cleaned.chars().count(), SEARCH_TEXT_MAX_CHARS);
+    }
+
+    #[test]
+    fn escape_like_treats_metacharacters_as_literals() {
+        assert_eq!(escape_like("%"), "\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like("a\\b"), "a\\\\b");
+        assert_eq!(escape_like("%_\\"), "\\%\\_\\\\");
+        assert_eq!(escape_like("kurs"), "kurs");
     }
 }

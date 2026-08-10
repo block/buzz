@@ -260,6 +260,135 @@ async fn search_does_not_return_other_community_events() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn contains_mode_matches_mid_token_substring() {
+    // Repro for "Member search should match substrings, not just prefixes":
+    // a member picker query for "kurs" must find the profile whose
+    // display_name is "mattkursmark". The name is a single `simple` lexeme,
+    // so neither FullText nor Prefix can match it mid-token — only Contains.
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "sub.example").await;
+    let evt_id = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        evt_id,
+        rand_bytes32(),
+        0,
+        r#"{"name":"mattkursmark","display_name":"mattkursmark","about":"hello"}"#,
+        None,
+        1700000000,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let query = |q: &str, mode: buzz_search::SearchMode| SearchQuery {
+        community: c,
+        q: q.into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![0]),
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode,
+    };
+    let contains = buzz_search::SearchMode::Contains;
+    let prefix = buzz_search::SearchMode::Prefix;
+
+    let by_prefix = svc.search(&query("kurs", prefix)).await.expect("search ok");
+    assert_eq!(
+        by_prefix.hits.len(),
+        0,
+        "prefix mode cannot match mid-token — the gap contains mode closes"
+    );
+
+    let by_substring = svc
+        .search(&query("kurs", contains))
+        .await
+        .expect("search ok");
+    assert_eq!(by_substring.hits.len(), 1, "mid-token substring matches");
+    assert_eq!(by_substring.hits[0].event_id, evt_id);
+
+    let case_insensitive = svc
+        .search(&query("KURS", contains))
+        .await
+        .expect("search ok");
+    assert_eq!(case_insensitive.hits.len(), 1, "ILIKE is case-insensitive");
+
+    let wildcard = svc.search(&query("%", contains)).await.expect("search ok");
+    assert_eq!(
+        wildcard.hits.len(),
+        0,
+        "LIKE metacharacters are escaped, not wildcards"
+    );
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn contains_mode_stays_community_scoped_and_respects_search_allowlist() {
+    let (pool, schema) = setup().await;
+
+    let c_a = mk_community(&pool, "contains-a.example").await;
+    let c_b = mk_community(&pool, "contains-b.example").await;
+    insert_event(
+        &pool,
+        c_a,
+        rand_bytes32(),
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"mattkursmark"}"#,
+        None,
+        1700000000,
+    )
+    .await;
+    // Kind 1059 (gift wrap) is excluded from the search allowlist:
+    // `search_tsv` is NULL and contains mode must not see its content.
+    insert_event(
+        &pool,
+        c_a,
+        rand_bytes32(),
+        rand_bytes32(),
+        1059,
+        "wrapped-kursmark-payload",
+        None,
+        1700000000,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let query = |community: CommunityId, kinds: Option<Vec<i32>>| SearchQuery {
+        community,
+        q: "kurs".into(),
+        channel_scope: ChannelScope::Any,
+        kinds,
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode: buzz_search::SearchMode::Contains,
+    };
+
+    let in_a = svc.search(&query(c_a, None)).await.expect("search ok");
+    assert_eq!(
+        in_a.hits.len(),
+        1,
+        "profile matches; allowlist-excluded gift wrap does not"
+    );
+    assert_eq!(in_a.hits[0].kind, 0);
+
+    let in_b = svc.search(&query(c_b, None)).await.expect("search ok");
+    assert_eq!(in_b.hits.len(), 0, "other community must see nothing");
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn kind0_search_by_display_name_works_without_flattening() {
     // The case I worried might regress without the kind:0 content-flattening
     // hack. Postgres FTS over raw JSON content tokenizes through the
