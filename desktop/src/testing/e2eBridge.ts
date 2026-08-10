@@ -9318,6 +9318,17 @@ function findMockEventChannel(eventId: string): string | undefined {
   return undefined;
 }
 
+/** Author of a stored mock event, for the NIP-25 `p` tag on reactions. */
+function findMockEventAuthor(eventId: string): string | undefined {
+  for (const events of mockMessages.values()) {
+    const match = events.find((event) => event.id === eventId);
+    if (match) {
+      return match.pubkey;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Mock the `add_reaction` Tauri command. Mirrors the real Rust command: a
  * kind:7 whose content is the emoji, plus — for a custom emoji — the NIP-30
@@ -9327,7 +9338,12 @@ function findMockEventChannel(eventId: string): string | undefined {
  * kind:7). Unicode reactions carry no emoji tag, like the real command.
  */
 async function handleAddReaction(
-  args: { eventId: string; emoji: string; emojiUrl?: string | null },
+  args: {
+    eventId: string;
+    emoji: string;
+    emojiUrl?: string | null;
+    targetPubkey?: string;
+  },
   config: E2eConfig | undefined,
 ): Promise<void> {
   const channelId = findMockEventChannel(args.eventId);
@@ -9335,11 +9351,39 @@ async function handleAddReaction(
     throw new Error(`mock add_reaction: unknown target event ${args.eventId}`);
   }
 
+  // The real command's `p` tag is the *signer* of the target event. The mock
+  // store holds that event, so its recorded author is the ground truth — use
+  // it rather than the caller-supplied `targetPubkey`, which lets the direct
+  // `invoke("add_reaction", …)` specs assert the tag without threading a
+  // pubkey through, and guarantees the tag is never an empty string. When the
+  // caller does supply one (the UI path passes `signerPubkey`), verify it
+  // agrees, so the specs pin that the UI sends the signer and not the display
+  // author.
+  const targetPubkey = findMockEventAuthor(args.eventId);
+  if (!targetPubkey) {
+    throw new Error(
+      `mock add_reaction: no recorded author for target event ${args.eventId}`,
+    );
+  }
+  if (
+    args.targetPubkey &&
+    args.targetPubkey.toLowerCase() !== targetPubkey.toLowerCase()
+  ) {
+    throw new Error(
+      `mock add_reaction: targetPubkey ${args.targetPubkey} does not match ` +
+        `the target event's signer ${targetPubkey} — pass the signer's pubkey`,
+    );
+  }
+
   const emoji = args.emoji.trim();
-  // Real add_reaction events carry only the target `e` tag. Channel live
-  // subscriptions already know which channel matched and restore that context
-  // before merging the event into the timeline cache.
-  const tags: string[][] = [["e", args.eventId]];
+  // Real add_reaction events carry the target `e` tag plus the NIP-25 `p` tag
+  // naming the reacted-to event's signer. Channel live subscriptions already
+  // know which channel matched and restore that context before merging the
+  // event into the timeline cache.
+  const tags: string[][] = [
+    ["e", args.eventId],
+    ["p", targetPubkey],
+  ];
   if (args.emojiUrl) {
     const shortcode = emoji.replace(/^:+/, "").replace(/:+$/, "").toLowerCase();
     tags.push(["emoji", shortcode, args.emojiUrl]);

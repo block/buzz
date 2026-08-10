@@ -41,9 +41,11 @@ Future<void> publishNote(
   ref.invalidate(likedNotesProvider);
 }
 
+/// [notePubkey] is the note author — it becomes the reaction's NIP-25 `p` tag.
 Future<void> toggleNoteUpvote(
   WidgetRef ref, {
   required String noteId,
+  required String notePubkey,
   required bool isUpvoted,
   String? reactionEventId,
 }) async {
@@ -53,7 +55,7 @@ Future<void> toggleNoteUpvote(
       await actions.removeReaction(reactionEventId, '+');
     }
   } else {
-    await actions.addReaction(noteId, '+');
+    await actions.addReaction(noteId, notePubkey, '+');
   }
   ref.invalidate(likedNotesProvider);
 }

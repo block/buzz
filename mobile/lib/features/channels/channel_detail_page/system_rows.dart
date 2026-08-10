@@ -64,7 +64,7 @@ class _SystemMessageRow extends HookConsumerWidget {
         ),
       );
       if (reactedMessages.isEmpty) {
-        actions.addReaction(message.id, emoji);
+        actions.addReaction(message.id, message.pubkey, emoji);
         return;
       }
       for (final source in reactedMessages) {
