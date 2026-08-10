@@ -139,8 +139,11 @@ export function initializePersistentAgentAudience(
   scope: string,
   pubkeys: Iterable<string>,
 ): void {
-  if (!enabled || !scope || Object.hasOwn(audiences, scope)) return;
-  setPersistentAgentAudience(scope, pubkeys);
+  if (!enabled || !scope) return;
+  setPersistentAgentAudience(
+    scope,
+    Object.hasOwn(audiences, scope) ? audiences[scope] : pubkeys,
+  );
 }
 
 export function setPersistentAgentAudience(
@@ -155,6 +158,10 @@ export function setPersistentAgentAudience(
     current.length === normalized.length &&
     current.every((pubkey, index) => pubkey === normalized[index])
   ) {
+    const nextAudiences = { ...audiences };
+    delete nextAudiences[scope];
+    audiences = boundAudiences({ ...nextAudiences, [scope]: current });
+    persistAudiences();
     return;
   }
 

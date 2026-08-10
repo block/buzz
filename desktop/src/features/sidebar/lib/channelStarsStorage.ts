@@ -68,9 +68,10 @@ export function readChannelStarsStore(pubkey: string): ChannelStarStore {
 export function boundStarStore(store: ChannelStarStore): ChannelStarStore {
   const entries = Object.entries(store.channels);
   if (entries.length <= MAX_CHANNEL_STAR_ENTRIES) return store;
-  entries.sort(([, left], [, right]) => {
-    if (left.starred !== right.starred) return left.starred ? 1 : -1;
-    return left.updatedAt - right.updatedAt;
+  entries.sort(([leftId, left], [rightId, right]) => {
+    if (left.updatedAt !== right.updatedAt)
+      return left.updatedAt - right.updatedAt;
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
   });
   return {
     ...store,

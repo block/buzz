@@ -224,28 +224,70 @@ test("mergeStores: both empty returns empty", () => {
   assert.deepEqual(result, { version: 1, channels: {} });
 });
 
-test("boundStarStore: caps entries and evicts false tombstones before active stars", () => {
+test("boundStarStore: retains newest entries regardless of starred value", () => {
   const channels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
       `active-${index}`,
-      { starred: true, updatedAt: index },
+      { starred: true, updatedAt: index + 1 },
     ]),
   );
-  channels["old-false"] = { starred: false, updatedAt: -1 };
+  channels["old-false"] = { starred: false, updatedAt: 0 };
   channels["new-false"] = { starred: false, updatedAt: 9999 };
 
   const result = boundStarStore({ version: 1, channels });
 
   assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_STAR_ENTRIES);
   assert.equal(result.channels["old-false"], undefined);
-  assert.equal(result.channels["new-false"], undefined);
-  assert.deepEqual(result.channels["active-0"], {
+  assert.deepEqual(result.channels["new-false"], {
+    starred: false,
+    updatedAt: 9999,
+  });
+  assert.equal(result.channels["active-0"], undefined);
+  assert.deepEqual(result.channels["active-1"], {
     starred: true,
-    updatedAt: 0,
+    updatedAt: 2,
   });
 });
 
-test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-trimmed", () => {
+test("boundStarStore: uses channel ID as an updatedAt tie-breaker", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES + 1 }, (_, index) => [
+      `channel-${String(MAX_CHANNEL_STAR_ENTRIES - index).padStart(3, "0")}`,
+      { starred: true, updatedAt: 1 },
+    ]),
+  );
+
+  const result = boundStarStore({ version: 1, channels });
+
+  assert.equal(result.channels["channel-000"], undefined);
+  assert.deepEqual(result.channels["channel-500"], {
+    starred: true,
+    updatedAt: 1,
+  });
+});
+
+test("mergeStores: a fresh at-capacity unstar defeats an older remote star", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { starred: true, updatedAt: index + 1 },
+    ]),
+  );
+  channels["unstarred"] = { starred: false, updatedAt: 9999 };
+  const bounded = boundStarStore({ version: 1, channels });
+
+  const result = mergeStores(bounded, {
+    version: 1,
+    channels: { unstarred: { starred: true, updatedAt: 9998 } },
+  });
+
+  assert.deepEqual(result.channels.unstarred, {
+    starred: false,
+    updatedAt: 9999,
+  });
+});
+
+test("mergeStores: evicted remote ID re-enters and the oldest state is re-trimmed", () => {
   const localChannels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
       `active-${index}`,
@@ -268,10 +310,14 @@ test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-t
     starred: true,
     updatedAt: 9999,
   });
-  assert.equal(result.channels["active-0"], undefined);
-  assert.deepEqual(result.channels["active-1"], {
+  assert.deepEqual(result.channels["active-0"], {
+    starred: false,
+    updatedAt: 9998,
+  });
+  assert.equal(result.channels["active-1"], undefined);
+  assert.deepEqual(result.channels["active-2"], {
     starred: true,
-    updatedAt: 11,
+    updatedAt: 12,
   });
 });
 

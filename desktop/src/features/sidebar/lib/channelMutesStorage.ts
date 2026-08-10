@@ -68,9 +68,10 @@ export function readChannelMutesStore(pubkey: string): ChannelMuteStore {
 export function boundMuteStore(store: ChannelMuteStore): ChannelMuteStore {
   const entries = Object.entries(store.channels);
   if (entries.length <= MAX_CHANNEL_MUTE_ENTRIES) return store;
-  entries.sort(([, left], [, right]) => {
-    if (left.muted !== right.muted) return left.muted ? 1 : -1;
-    return left.updatedAt - right.updatedAt;
+  entries.sort(([leftId, left], [rightId, right]) => {
+    if (left.updatedAt !== right.updatedAt)
+      return left.updatedAt - right.updatedAt;
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
   });
   return {
     ...store,

@@ -231,6 +231,69 @@ test("persistent audiences retain only the 200 most recently touched scopes", as
   assert.deepEqual(retouched["scope-new"], [agentC]);
 });
 
+test("an unchanged touch refreshes LRU without revision or emit", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM(
+    "<!doctype html><html><body><div id='root'></div></body></html>",
+    {
+      url: "http://localhost",
+    },
+  );
+  Object.assign(globalThis, {
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    window: dom.window,
+  });
+  loadSequence += 1;
+  const store = await import(
+    `./persistentAgentAudience.ts?test=${Date.now()}-touch-${loadSequence}`
+  );
+  const touchedScope = "scope-0";
+  store.setPersistentAgentAudience(touchedScope, [agentA]);
+  for (let index = 1; index < store.MAX_PERSISTENT_AGENT_AUDIENCES; index++) {
+    store.setPersistentAgentAudience(`scope-${index}`, [agentA]);
+  }
+
+  const React = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const root = createRoot(document.getElementById("root"));
+  let renderCount = 0;
+  function Probe() {
+    store.usePersistentAgentAudience(touchedScope);
+    renderCount += 1;
+    return null;
+  }
+  await React.act(async () => root.render(React.createElement(Probe)));
+  const revision = store.getPersistentAgentAudienceRevision(touchedScope);
+  const renderCountBeforeTouch = renderCount;
+
+  await React.act(async () => {
+    store.setPersistentAgentAudience(touchedScope, [agentA]);
+  });
+
+  assert.equal(
+    store.getPersistentAgentAudienceRevision(touchedScope),
+    revision,
+  );
+  assert.equal(renderCount, renderCountBeforeTouch);
+
+  await React.act(async () => {
+    store.setPersistentAgentAudience("scope-new", [agentB]);
+  });
+  const saved = savedAudiences();
+  assert.deepEqual(saved[touchedScope], [agentA]);
+  assert.equal(saved["scope-1"], undefined);
+  assert.deepEqual(saved["scope-new"], [agentB]);
+  assert.equal(
+    store.getPersistentAgentAudienceRevision(touchedScope),
+    revision,
+  );
+
+  await React.act(async () => root.unmount());
+  dom.window.close();
+});
+
 test("timeline scope is intentionally unsupported", async () => {
   const store = await loadStore(7);
   assert.equal(

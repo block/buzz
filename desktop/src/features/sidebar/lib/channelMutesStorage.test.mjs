@@ -210,25 +210,67 @@ test("mergeStores: both empty returns empty", () => {
   assert.deepEqual(result, { version: 1, channels: {} });
 });
 
-test("boundMuteStore: caps entries and evicts false tombstones before active mutes", () => {
+test("boundMuteStore: retains newest entries regardless of muted value", () => {
   const channels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
       `active-${index}`,
-      { muted: true, updatedAt: index },
+      { muted: true, updatedAt: index + 1 },
     ]),
   );
-  channels["old-false"] = { muted: false, updatedAt: -1 };
+  channels["old-false"] = { muted: false, updatedAt: 0 };
   channels["new-false"] = { muted: false, updatedAt: 9999 };
 
   const result = boundMuteStore({ version: 1, channels });
 
   assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
   assert.equal(result.channels["old-false"], undefined);
-  assert.equal(result.channels["new-false"], undefined);
-  assert.deepEqual(result.channels["active-0"], { muted: true, updatedAt: 0 });
+  assert.deepEqual(result.channels["new-false"], {
+    muted: false,
+    updatedAt: 9999,
+  });
+  assert.equal(result.channels["active-0"], undefined);
+  assert.deepEqual(result.channels["active-1"], { muted: true, updatedAt: 2 });
 });
 
-test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-trimmed", () => {
+test("boundMuteStore: uses channel ID as an updatedAt tie-breaker", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES + 1 }, (_, index) => [
+      `channel-${String(MAX_CHANNEL_MUTE_ENTRIES - index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+
+  const result = boundMuteStore({ version: 1, channels });
+
+  assert.equal(result.channels["channel-000"], undefined);
+  assert.deepEqual(result.channels["channel-500"], {
+    muted: true,
+    updatedAt: 1,
+  });
+});
+
+test("mergeStores: a fresh at-capacity unmute defeats an older remote mute", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index + 1 },
+    ]),
+  );
+  channels["unmuted"] = { muted: false, updatedAt: 9999 };
+  const bounded = boundMuteStore({ version: 1, channels });
+
+  const result = mergeStores(bounded, {
+    version: 1,
+    channels: { unmuted: { muted: true, updatedAt: 9998 } },
+  });
+
+  assert.deepEqual(result.channels.unmuted, {
+    muted: false,
+    updatedAt: 9999,
+  });
+});
+
+test("mergeStores: evicted remote ID re-enters and the oldest state is re-trimmed", () => {
   const localChannels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
       `active-${index}`,
@@ -251,8 +293,12 @@ test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-t
     muted: true,
     updatedAt: 9999,
   });
-  assert.equal(result.channels["active-0"], undefined);
-  assert.deepEqual(result.channels["active-1"], { muted: true, updatedAt: 11 });
+  assert.deepEqual(result.channels["active-0"], {
+    muted: false,
+    updatedAt: 9998,
+  });
+  assert.equal(result.channels["active-1"], undefined);
+  assert.deepEqual(result.channels["active-2"], { muted: true, updatedAt: 12 });
 });
 
 // ── mutedChannelIdsFromStore ──────────────────────────────────────────────────
