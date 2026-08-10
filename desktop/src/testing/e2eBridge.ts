@@ -97,6 +97,8 @@ export type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+  commandWrapper?: RawManagedAgent["command_wrapper"];
+  workingDirectory?: string | null;
   /** Per-agent env vars seeded into the mock store. */
   envVars?: Record<string, string>;
 };
@@ -834,6 +836,11 @@ type RawManagedAgent = {
   acp_command: string;
   agent_command: string;
   agent_args: string[];
+  command_wrapper?: {
+    command: string;
+    args: string[];
+  } | null;
+  working_directory?: string | null;
   mcp_command: string;
   turn_timeout_seconds: number;
   idle_timeout_seconds: number | null;
@@ -1666,6 +1673,13 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
     agent_args: [...agent.agent_args],
+    command_wrapper: agent.command_wrapper
+      ? {
+          command: agent.command_wrapper.command,
+          args: [...agent.command_wrapper.args],
+        }
+      : null,
+    working_directory: agent.working_directory ?? null,
     mcp_command: agent.mcp_command,
     turn_timeout_seconds: agent.turn_timeout_seconds,
     idle_timeout_seconds: agent.idle_timeout_seconds ?? null,
@@ -2221,6 +2235,8 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     acp_command: "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
+    command_wrapper: seed.commandWrapper ?? null,
+    working_directory: seed.workingDirectory ?? null,
     mcp_command: "",
     turn_timeout_seconds: 320,
     idle_timeout_seconds: null,
@@ -11863,13 +11879,48 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_nxtlinq_trust_store":
       case "pick_nxtlinq_directory":
         return null;
-      case "check_nxtlinq_authorization_setup":
+      case "check_nxtlinq_authorization_setup": {
+        const setup = payload as {
+          projectRoot: string;
+          trustStore: string;
+          receiptDirectory: string;
+        };
         return {
           ready: true,
-          checks: [],
+          checks: [
+            {
+              id: "project",
+              label: "Agent workspace",
+              status: "found",
+              path: setup.projectRoot,
+              detail: null,
+            },
+            {
+              id: "manifest",
+              label: "Signed manifest",
+              status: "valid",
+              path: `${setup.projectRoot}/agent.manifest.json`,
+              detail: "Signed by mock-signer",
+            },
+            {
+              id: "trust-store",
+              label: "Trusted signers",
+              status: "valid",
+              path: setup.trustStore,
+              detail: null,
+            },
+            {
+              id: "receipts",
+              label: "Receipt directory",
+              status: "ready",
+              path: setup.receiptDirectory,
+              detail: null,
+            },
+          ],
           signerKeyId: "mock-signer",
           error: null,
         };
+      }
       case "discover_backend_providers":
         return activeConfig?.mock?.backendProviders ?? [];
       case "probe_backend_provider": {

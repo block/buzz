@@ -192,7 +192,10 @@ export function NxtlinqAuthorizationPreset({
         : null;
 
   return (
-    <div className="space-y-4 rounded-xl border border-border/80 bg-muted/20 p-4">
+    <div
+      className="space-y-4 rounded-xl border border-border/80 bg-muted/20 p-4"
+      data-testid="nxtlinq-authorization-preset"
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm font-semibold text-foreground">

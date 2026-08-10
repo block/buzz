@@ -62,7 +62,7 @@ export function NxtlinqGatewaySettingsCard() {
         : null;
 
   return (
-    <section className="min-w-0">
+    <section className="min-w-0" data-testid="settings-nxtlinq-authorization">
       <SettingsSectionHeader
         description="Install the authorization Gateway once and configure operator-owned trust for all local Agents."
         title="Nxtlinq authorization"
