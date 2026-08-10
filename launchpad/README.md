@@ -40,6 +40,11 @@ Blank issues are turned off. You pick a type, and the form asks for what that ty
 **Not sure?** File a **Task**, add `needs-triage`, and say you're unsure. That's the
 correct move, not a failure — a misfiled PRD hides an approval step, which is worse.
 
+**One specialised form.** *Agent workflow proposal* is an **Enhancement** with a
+different set of prompts — it asks for the access an agent needs and its blast radius,
+because a sandbox can only be scoped to a purpose someone wrote down. It carries
+`type:enhancement` + `area:agents-and-automation`. See #40 for the submission guidance.
+
 The full decision procedure — five questions, first yes wins — is in
 [AGENTS.md §4](AGENTS.md#4-choosing-an-issue-type).
 
@@ -65,7 +70,7 @@ You're building the VPS deployment (PRD #2) and notice Redis isn't installed any
 
 ## Labels
 
-14 labels, in [`labels.yml`](labels.yml). Apply changes with
+15 labels, in [`labels.yml`](labels.yml). Apply changes with
 [`./sync-labels.sh`](sync-labels.sh) — that script exists and works, so don't
 hand-create labels in the GitHub UI or the file stops being true.
 
@@ -76,7 +81,7 @@ never modifies another type.
 
 **Area** — what it touches. Zero or more.
 
-`area:deploy` · `area:docs` · `area:upstream-intel` · `area:ci` · `area:relay-ops` · `area:process`
+`area:deploy` · `area:docs` · `area:upstream-intel` · `area:ci` · `area:relay-ops` · `area:process` · `area:agents-and-automation`
 
 **State**
 

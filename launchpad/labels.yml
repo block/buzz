@@ -39,6 +39,9 @@
 - name: "area:process"
   color: "e4e669"
   description: "How the cohort works: templates, labels, conventions"
+- name: "area:agents-and-automation"
+  color: "c5def5"
+  description: "Agentic workflows and automation — proposals and delivery (see #40)"
 
 # --- Workflow state -----------------------------------------------------------
 - name: "needs-triage"

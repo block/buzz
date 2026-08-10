@@ -150,6 +150,11 @@ These are hard constraints, not style preferences.
 
 ### Filing an issue
 
+There is one specialised form beyond the five types: **Agent workflow proposal**
+(`06-agent-workflow.yml`). It is an Enhancement with different prompts — it requires the
+specific access an agent needs and its blast radius. Use it for any proposal that an agent
+should do something a person does today. Guidance is in #40.
+
 Read the template for your chosen type in `.github/ISSUE_TEMPLATE/` and fill it. The
 YAML `description:` of each field tells you what it wants, and each template opens with
 an `AGENT INSTRUCTIONS` comment block — read it.

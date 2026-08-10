@@ -1,0 +1,110 @@
+name: Agent workflow proposal
+description: Propose an agentic workflow — an agent doing something a person does today
+title: "enh: agent workflow — "
+labels: ["type:enhancement", "area:agents-and-automation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        AGENT INSTRUCTIONS — read before filling this form.
+
+        1. This is a PROPOSAL, not a build ticket. Describe the workflow you want to
+           exist. Do not describe how you would implement it.
+        2. Fill EVERY required field. Do not add headings that are not in this form.
+        3. If a field does not apply, write exactly: N/A - <one-line reason>
+        4. Current behaviour: describe the MANUAL process this replaces. If nothing
+           does this today, write exactly: nobody - this is new.
+           Do not invent a process that does not exist.
+        5. Impacted components is where you state ACCESS. Be specific and complete:
+           - filesystem paths the agent reads or writes
+           - network egress (which hosts, which APIs)
+           - credentials or tokens, and their scope
+           - which repositories, and read vs write
+           "Repo access" is not an answer. "Write access to launchpad-26/buzz" is.
+        6. Blast radius: assume the agent is wrong or has been manipulated. State what
+           breaks and whether it is reversible. "Nothing" is not an acceptable answer
+           for any workflow that writes anything.
+        7. Fields 5 and 6 are load-bearing. A sandbox can only be scoped to a purpose
+           that has been stated. Do not compress them.
+        8. You may draft this proposal in full. You may not approve it or begin building
+           the workflow it describes.
+        -->
+
+        Propose an agentic workflow. This captures a **candidate** — building it is
+        separate work, filed per proposal once accepted.
+
+        Read the submission guidance in #40 before filing. **Access required** and
+        **Blast radius** are the fields that matter most: a purpose-scoped sandbox can
+        only be scoped to a purpose someone has written down.
+
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired behaviour
+      description: What the agent does, in one sentence, then any detail. Describe the workflow, not the implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behaviour
+      description: 'The manual process this replaces, and who does it. If nothing does this today, write exactly: nobody - this is new.'
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: What makes this worth doing. How often the manual version happens, and what it costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: trigger
+    attributes:
+      label: Trigger
+      description: What starts this workflow, and whether a human is in the loop before it acts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: components
+    attributes:
+      label: Impacted components
+      description: 'ACCESS REQUIRED. Filesystem paths, network egress, credentials and their scope, repositories with read vs write. Be specific — "repo access" is not an answer.'
+      value: |
+        - Filesystem:
+        - Network egress:
+        - Credentials:
+        - Repositories (read/write):
+    validations:
+      required: true
+
+  - type: textarea
+    id: blast
+    attributes:
+      label: Blast radius
+      description: Assume the agent is wrong or has been manipulated. What breaks, and is the damage reversible?
+    validations:
+      required: true
+
+  - type: textarea
+    id: signal
+    attributes:
+      label: Success signal
+      description: How you would know it worked. Prefer something observable over a feeling.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Before filing
+      options:
+        - label: This proposes a workflow; it does not begin building one
+          required: true
+        - label: I have stated the access required specifically enough for someone else to scope a sandbox from it
+          required: true
