@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundChannelSectionsStore,
   DEFAULT_STORE,
+  MAX_CHANNEL_SECTION_ASSIGNMENTS,
+  MAX_CHANNEL_SECTIONS,
   parseChannelSectionPayload,
   readChannelSectionsStore,
   storageKey,
@@ -150,6 +153,34 @@ test("stripOrphanedAssignments: store with all valid assignments returns same re
 test("stripOrphanedAssignments: empty store returns same reference", () => {
   const store = makeStore({ sections: [], assignments: {} });
   assert.equal(stripOrphanedAssignments(store), store);
+});
+
+test("boundChannelSectionsStore caps sections and assignments", () => {
+  const sections = Array.from(
+    { length: MAX_CHANNEL_SECTIONS + 1 },
+    (_, index) => makeSection({ id: `section-${index}`, order: index }),
+  );
+  const assignments = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_SECTION_ASSIGNMENTS + 1 }, (_, index) => [
+      `channel-${index}`,
+      "section-100",
+    ]),
+  );
+
+  const bounded = boundChannelSectionsStore(
+    makeStore({ sections, assignments }),
+  );
+
+  assert.equal(bounded.sections.length, MAX_CHANNEL_SECTIONS);
+  assert.equal(
+    bounded.sections.some((section) => section.id === "section-0"),
+    false,
+  );
+  assert.equal(
+    Object.keys(bounded.assignments).length,
+    MAX_CHANNEL_SECTION_ASSIGNMENTS,
+  );
+  assert.equal(bounded.assignments["channel-0"], undefined);
 });
 
 test("writeChannelSectionsStore + readChannelSectionsStore: write then read returns same data", () => {

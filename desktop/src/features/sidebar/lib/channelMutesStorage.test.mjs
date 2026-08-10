@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundMuteStore,
+  MAX_CHANNEL_MUTE_ENTRIES,
   parseMutePayload,
   mergeStores,
   mutedChannelIdsFromStore,
@@ -206,6 +208,51 @@ test("mergeStores: both empty returns empty", () => {
     { version: 1, channels: {} },
   );
   assert.deepEqual(result, { version: 1, channels: {} });
+});
+
+test("boundMuteStore: caps entries and evicts false tombstones before active mutes", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index },
+    ]),
+  );
+  channels["old-false"] = { muted: false, updatedAt: -1 };
+  channels["new-false"] = { muted: false, updatedAt: 9999 };
+
+  const result = boundMuteStore({ version: 1, channels });
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.equal(result.channels["old-false"], undefined);
+  assert.equal(result.channels["new-false"], undefined);
+  assert.deepEqual(result.channels["active-0"], { muted: true, updatedAt: 0 });
+});
+
+test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-trimmed", () => {
+  const localChannels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { muted: true, updatedAt: index + 10 },
+    ]),
+  );
+  const result = mergeStores(
+    { version: 1, channels: localChannels },
+    {
+      version: 1,
+      channels: {
+        "evicted-id": { muted: true, updatedAt: 9999 },
+        "active-0": { muted: false, updatedAt: 9998 },
+      },
+    },
+  );
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["evicted-id"], {
+    muted: true,
+    updatedAt: 9999,
+  });
+  assert.equal(result.channels["active-0"], undefined);
+  assert.deepEqual(result.channels["active-1"], { muted: true, updatedAt: 11 });
 });
 
 // ── mutedChannelIdsFromStore ──────────────────────────────────────────────────

@@ -207,6 +207,30 @@ test("new recipients retain explicit mention order", async () => {
   assert.deepEqual(savedAudiences(), { [scope]: [agentB, agentA] });
 });
 
+test("persistent audiences retain only the 200 most recently touched scopes", async () => {
+  const store = await loadStore(11);
+  for (
+    let index = 0;
+    index < store.MAX_PERSISTENT_AGENT_AUDIENCES + 2;
+    index++
+  ) {
+    store.setPersistentAgentAudience(`scope-${index}`, [agentA]);
+  }
+
+  const saved = savedAudiences();
+  assert.equal(Object.keys(saved).length, store.MAX_PERSISTENT_AGENT_AUDIENCES);
+  assert.equal(saved["scope-0"], undefined);
+  assert.equal(saved["scope-1"], undefined);
+  assert.deepEqual(saved["scope-201"], [agentA]);
+
+  store.setPersistentAgentAudience("scope-2", [agentB]);
+  store.setPersistentAgentAudience("scope-new", [agentC]);
+  const retouched = savedAudiences();
+  assert.equal(retouched["scope-3"], undefined);
+  assert.deepEqual(retouched["scope-2"], [agentB]);
+  assert.deepEqual(retouched["scope-new"], [agentC]);
+});
+
 test("timeline scope is intentionally unsupported", async () => {
   const store = await loadStore(7);
   assert.equal(

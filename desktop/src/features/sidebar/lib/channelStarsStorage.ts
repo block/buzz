@@ -1,4 +1,5 @@
 const STORAGE_KEY_PREFIX = "buzz-channel-stars.v1";
+export const MAX_CHANNEL_STAR_ENTRIES = 500;
 
 export type ChannelStarEntry = {
   starred: boolean;
@@ -45,7 +46,7 @@ export function parseStarPayload(json: unknown): ChannelStarStore | null {
           ),
         )
       : {};
-  return { version: 1, channels };
+  return boundStarStore({ version: 1, channels });
 }
 
 export function readChannelStarsStore(pubkey: string): ChannelStarStore {
@@ -64,12 +65,28 @@ export function readChannelStarsStore(pubkey: string): ChannelStarStore {
   }
 }
 
+export function boundStarStore(store: ChannelStarStore): ChannelStarStore {
+  const entries = Object.entries(store.channels);
+  if (entries.length <= MAX_CHANNEL_STAR_ENTRIES) return store;
+  entries.sort(([, left], [, right]) => {
+    if (left.starred !== right.starred) return left.starred ? 1 : -1;
+    return left.updatedAt - right.updatedAt;
+  });
+  return {
+    ...store,
+    channels: Object.fromEntries(entries.slice(-MAX_CHANNEL_STAR_ENTRIES)),
+  };
+}
+
 export function writeChannelStarsStore(
   pubkey: string,
   store: ChannelStarStore,
 ): boolean {
   try {
-    window.localStorage.setItem(storageKey(pubkey), JSON.stringify(store));
+    window.localStorage.setItem(
+      storageKey(pubkey),
+      JSON.stringify(boundStarStore(store)),
+    );
     return true;
   } catch {
     return false;
@@ -94,7 +111,7 @@ export function mergeStores(
       merged[id] = (l ?? r) as ChannelStarEntry;
     }
   }
-  return { version: 1, channels: merged };
+  return boundStarStore({ version: 1, channels: merged });
 }
 
 export function starredChannelIdsFromStore(

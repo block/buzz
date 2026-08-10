@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundStarStore,
   DEFAULT_STORE,
   mergeStores,
   readChannelStarsStore,
@@ -163,10 +164,10 @@ export function useChannelStars(
         updatedAt: Math.floor(Date.now() / 1000),
       };
       setStore((prev) => {
-        const next: ChannelStarStore = {
+        const next = boundStarStore({
           version: 1,
           channels: { ...prev.channels, [channelId]: entry },
-        };
+        });
         if (!writeChannelStarsStore(pubkey, next)) return prev;
         managerRef.current?.publishStars(next);
         return next;

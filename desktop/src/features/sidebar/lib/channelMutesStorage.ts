@@ -1,4 +1,5 @@
 const STORAGE_KEY_PREFIX = "buzz-channel-mutes.v1";
+export const MAX_CHANNEL_MUTE_ENTRIES = 500;
 
 export type ChannelMuteEntry = {
   muted: boolean;
@@ -45,7 +46,7 @@ export function parseMutePayload(json: unknown): ChannelMuteStore | null {
           ),
         )
       : {};
-  return { version: 1, channels };
+  return boundMuteStore({ version: 1, channels });
 }
 
 export function readChannelMutesStore(pubkey: string): ChannelMuteStore {
@@ -64,12 +65,28 @@ export function readChannelMutesStore(pubkey: string): ChannelMuteStore {
   }
 }
 
+export function boundMuteStore(store: ChannelMuteStore): ChannelMuteStore {
+  const entries = Object.entries(store.channels);
+  if (entries.length <= MAX_CHANNEL_MUTE_ENTRIES) return store;
+  entries.sort(([, left], [, right]) => {
+    if (left.muted !== right.muted) return left.muted ? 1 : -1;
+    return left.updatedAt - right.updatedAt;
+  });
+  return {
+    ...store,
+    channels: Object.fromEntries(entries.slice(-MAX_CHANNEL_MUTE_ENTRIES)),
+  };
+}
+
 export function writeChannelMutesStore(
   pubkey: string,
   store: ChannelMuteStore,
 ): boolean {
   try {
-    window.localStorage.setItem(storageKey(pubkey), JSON.stringify(store));
+    window.localStorage.setItem(
+      storageKey(pubkey),
+      JSON.stringify(boundMuteStore(store)),
+    );
     return true;
   } catch {
     return false;
@@ -94,7 +111,7 @@ export function mergeStores(
       merged[id] = (l ?? r) as ChannelMuteEntry;
     }
   }
-  return { version: 1, channels: merged };
+  return boundMuteStore({ version: 1, channels: merged });
 }
 
 export function mutedChannelIdsFromStore(store: ChannelMuteStore): Set<string> {

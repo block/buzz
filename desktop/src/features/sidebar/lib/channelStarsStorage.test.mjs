@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundStarStore,
+  MAX_CHANNEL_STAR_ENTRIES,
   parseStarPayload,
   mergeStores,
   starredChannelIdsFromStore,
@@ -220,6 +222,57 @@ test("mergeStores: both empty returns empty", () => {
     { version: 1, channels: {} },
   );
   assert.deepEqual(result, { version: 1, channels: {} });
+});
+
+test("boundStarStore: caps entries and evicts false tombstones before active stars", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { starred: true, updatedAt: index },
+    ]),
+  );
+  channels["old-false"] = { starred: false, updatedAt: -1 };
+  channels["new-false"] = { starred: false, updatedAt: 9999 };
+
+  const result = boundStarStore({ version: 1, channels });
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_STAR_ENTRIES);
+  assert.equal(result.channels["old-false"], undefined);
+  assert.equal(result.channels["new-false"], undefined);
+  assert.deepEqual(result.channels["active-0"], {
+    starred: true,
+    updatedAt: 0,
+  });
+});
+
+test("mergeStores: evicted remote ID re-enters LWW merge and a tombstone is re-trimmed", () => {
+  const localChannels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
+      `active-${index}`,
+      { starred: true, updatedAt: index + 10 },
+    ]),
+  );
+  const result = mergeStores(
+    { version: 1, channels: localChannels },
+    {
+      version: 1,
+      channels: {
+        "evicted-id": { starred: true, updatedAt: 9999 },
+        "active-0": { starred: false, updatedAt: 9998 },
+      },
+    },
+  );
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_STAR_ENTRIES);
+  assert.deepEqual(result.channels["evicted-id"], {
+    starred: true,
+    updatedAt: 9999,
+  });
+  assert.equal(result.channels["active-0"], undefined);
+  assert.deepEqual(result.channels["active-1"], {
+    starred: true,
+    updatedAt: 11,
+  });
 });
 
 // ── starredChannelIdsFromStore ────────────────────────────────────────────────

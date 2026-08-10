@@ -2,6 +2,7 @@ import * as React from "react";
 
 const ENABLED_STORAGE_KEY = "buzz:keep-addressed-agents-active";
 const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v2";
+export const MAX_PERSISTENT_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
 const revisions = new Map<string, number>();
@@ -39,6 +40,15 @@ function readEnabled(): boolean {
   }
 }
 
+function boundAudiences(
+  value: Record<string, string[]>,
+): Record<string, string[]> {
+  const entries = Object.entries(value);
+  return entries.length <= MAX_PERSISTENT_AGENT_AUDIENCES
+    ? value
+    : Object.fromEntries(entries.slice(-MAX_PERSISTENT_AGENT_AUDIENCES));
+}
+
 function readAudiences(): Record<string, string[]> {
   if (typeof window === "undefined") return {};
   try {
@@ -56,7 +66,7 @@ function readAudiences(): Record<string, string[]> {
         );
       }
     }
-    return result;
+    return boundAudiences(result);
   } catch {
     return {};
   }
@@ -148,7 +158,12 @@ export function setPersistentAgentAudience(
     return;
   }
 
-  audiences = { ...audiences, [scope]: normalized };
+  const nextAudiences = { ...audiences };
+  delete nextAudiences[scope];
+  audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
+  for (const revisedScope of revisions.keys()) {
+    if (!Object.hasOwn(audiences, revisedScope)) revisions.delete(revisedScope);
+  }
   advanceRevision(scope);
   persistAudiences();
   emit();
