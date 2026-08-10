@@ -66,6 +66,25 @@ async function emitRootMessage(
   return event;
 }
 
+/**
+ * Assert the composer's *exact* text, trailing whitespace included.
+ *
+ * `toHaveText` normalizes whitespace, so `"@Morgarita"` and `"@Morgarita "`
+ * both satisfy it — which is how a dropped trailing space shipped past an
+ * assertion written to guard that very space. Mention chips are decorations
+ * over plain text and only match when a boundary follows the name, so the
+ * space is the difference between the next keystroke starting a message and
+ * it corrupting the mention.
+ */
+async function expectExactComposerText(
+  input: ReturnType<Page["getByTestId"]>,
+  expected: string,
+) {
+  await expect
+    .poll(() => input.evaluate((element) => element.textContent))
+    .toBe(expected);
+}
+
 function channelComposer(page: Page) {
   return page.getByTestId("channel-composer-overlay");
 }
@@ -147,7 +166,7 @@ test("persistent agents transition atomically before Enter-send resolves", async
 
   // The network send is still pending, so this is the first observable
   // post-submit editor state rather than the later success hydration pass.
-  await expect(input).toHaveText("@Morgarita ", { timeout: 500 });
+  await expectExactComposerText(input, "@Morgarita ");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1, {
     timeout: 500,
   });
@@ -184,6 +203,52 @@ test("persistent agents transition atomically before Enter-send resolves", async
       }),
     )
     .toEqual({ empty: true, atDocumentEnd: true });
+});
+
+test("typing straight after a send extends the message, not the mention", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Morgarita hello");
+  await input.press("Enter");
+
+  // The post-send refill goes through the markdown parse, which used to eat
+  // the trailing space and leave the caret flush against the mention.
+  await expectExactComposerText(input, "@Morgarita ");
+  await input.pressSequentially("next");
+
+  await expect(input).toHaveText("@Morgarita next");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+});
+
+test("a mention survives the draft round-trip when a thread is reopened", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  await expectExactComposerText(input, "@Morgarita ");
+
+  // Leaving the thread persists the composer to the draft store; returning
+  // reloads it through the same markdown parse. Hydration cannot repair the
+  // result — it only inserts mentions that are *absent*, and this one is
+  // present, just unspaced.
+  await openGeneral(page);
+  await openThread(page);
+
+  await expectExactComposerText(input, "@Morgarita ");
+  await input.pressSequentially("hi");
+
+  await expect(input).toHaveText("@Morgarita hi");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
 test("timeline agent send remains one-shot and returns to the placeholder", async ({
