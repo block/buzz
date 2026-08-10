@@ -27,12 +27,15 @@ extern "C" {
 /// storm the count can grow between the probe and the fill call. Returns an
 /// empty vec on any kernel error.
 #[cfg(target_os = "macos")]
-pub(super) fn collect_all_pids() -> Vec<libc::c_int> {
+pub(super) fn collect_all_pids_checked() -> Result<Vec<libc::c_int>, String> {
     let mut pids: Vec<libc::c_int>;
     loop {
         let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
         if count <= 0 {
-            return Vec::new();
+            return Err(format!(
+                "failed to enumerate processes: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         let buf_len = (count as usize) * 2;
         pids = vec![0; buf_len];
@@ -43,13 +46,21 @@ pub(super) fn collect_all_pids() -> Vec<libc::c_int> {
             )
         };
         if actual <= 0 {
-            return Vec::new();
+            return Err(format!(
+                "failed to enumerate processes: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         pids.truncate(actual as usize);
         if (actual as usize) < buf_len {
-            return pids;
+            return Ok(pids);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn collect_all_pids() -> Vec<libc::c_int> {
+    collect_all_pids_checked().unwrap_or_default()
 }
 
 /// Read the raw `KERN_PROCARGS2` buffer for the given PID.
@@ -321,12 +332,12 @@ fn proc_exe_path_from_procargs2(pid: u32) -> Option<PathBuf> {
 /// two-sysctl call by ~99.9% (there are typically O(hundreds) of user
 /// processes but at most a handful of `buzz-acp` instances).
 #[cfg(target_os = "macos")]
-fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
+fn collect_process_snapshots_checked(harness_name: &str) -> Result<Vec<ProcessSnapshot>, String> {
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
     let mut snapshots = Vec::new();
 
-    let pids = collect_all_pids();
+    let pids = collect_all_pids_checked()?;
 
     for &pid in &pids {
         if pid <= 0 || pid == my_pid {
@@ -375,7 +386,12 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
             });
         }
     }
-    snapshots
+    Ok(snapshots)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
+    collect_process_snapshots_checked(harness_name).unwrap_or_default()
 }
 
 /// Collect process snapshots for all user-owned processes on Linux via /proc.
@@ -385,14 +401,13 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
 /// launch — exactly the stale-install class this sweep targets. The suffix is
 /// stripped so the comparison against `expected_harness_exe_path` succeeds.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
+fn collect_process_snapshots_checked(harness_name: &str) -> Result<Vec<ProcessSnapshot>, String> {
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
     let mut snapshots = Vec::new();
 
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return snapshots;
-    };
+    let entries = std::fs::read_dir("/proc")
+        .map_err(|error| format!("failed to enumerate processes: {error}"))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
@@ -430,7 +445,12 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
             });
         }
     }
-    snapshots
+    Ok(snapshots)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
+    collect_process_snapshots_checked(harness_name).unwrap_or_default()
 }
 
 // ── expected_harness_exe_path ─────────────────────────────────────────────
@@ -471,6 +491,30 @@ pub fn expected_harness_exe_path() -> Option<PathBuf> {
 /// The basename of the harness binary — used for the cheap name pre-filter in
 /// `collect_process_snapshots` before the expensive exe-path lookup.
 const HARNESS_BINARY_NAME: &str = "buzz-acp";
+
+/// Return exact-path outer harnesses that are not tracked by this Desktop.
+/// Enumeration and current-executable failures are surfaced so callers can
+/// use an empty result as positive evidence instead of a best-effort sweep.
+#[cfg(unix)]
+pub(crate) fn collect_untracked_bundle_harnesses_checked(
+    tracked_pids: &[u32],
+) -> Result<Vec<u32>, String> {
+    let harness_exe = expected_harness_exe_path()
+        .ok_or_else(|| "failed to resolve this Buzz bundle's harness path".to_string())?;
+    let snapshots = collect_process_snapshots_checked(HARNESS_BINARY_NAME)?;
+    Ok(select_untracked_bundle_harnesses(
+        &snapshots,
+        &harness_exe,
+        tracked_pids,
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn collect_untracked_bundle_harnesses_checked(
+    _tracked_pids: &[u32],
+) -> Result<Vec<u32>, String> {
+    Ok(Vec::new())
+}
 
 // ── sweep_untracked_bundle_harnesses ─────────────────────────────────────
 

@@ -31,7 +31,9 @@ pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
-pub(crate) use sweep::sweep_untracked_bundle_harnesses;
+pub(crate) use sweep::{
+    collect_untracked_bundle_harnesses_checked, sweep_untracked_bundle_harnesses,
+};
 
 mod process;
 #[cfg(test)]
@@ -48,8 +50,8 @@ mod orphan_sweep;
 #[cfg(target_os = "macos")]
 use orphan_sweep::proc_pidinfo;
 pub(crate) use orphan_sweep::{
-    sweep_orphaned_agent_processes, sweep_system_agent_processes,
-    sweep_system_agent_processes_with_grace,
+    collect_same_instance_orphans_checked, sweep_orphaned_agent_processes,
+    sweep_system_agent_processes, sweep_system_agent_processes_with_grace,
 };
 #[cfg(target_os = "macos")]
 use orphan_sweep::{BSDInfo, PROC_PIDTBSDINFO};

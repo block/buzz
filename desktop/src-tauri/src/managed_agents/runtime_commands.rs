@@ -14,6 +14,9 @@ use super::{
 };
 use crate::app_state::AppState;
 
+mod preflight;
+use preflight::ensure_no_runtime_before_isolation_prepare;
+
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
 fn status_for(
@@ -257,12 +260,31 @@ pub fn prepare_managed_agent_isolation(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if runtimes.iter_mut().any(|(key, runtime)| {
-        key.pubkey.eq_ignore_ascii_case(&record.pubkey)
-            && runtime.child.try_wait().ok().flatten().is_none()
-    }) {
-        return Err("stop every runtime for this agent before preparing isolation".into());
+    let mut tracked_pids = Vec::new();
+    for (key, runtime) in runtimes.iter_mut() {
+        match runtime.child.try_wait() {
+            Ok(None) => {
+                if key.pubkey.eq_ignore_ascii_case(&record.pubkey) {
+                    return Err(
+                        "stop every runtime for this agent before preparing isolation".into(),
+                    );
+                }
+                tracked_pids.push(runtime.child.id());
+            }
+            Ok(Some(_)) => {}
+            Err(error) => {
+                return Err(format!(
+                    "cannot prove managed runtimes are stopped before preparing isolation: {error}"
+                ));
+            }
+        }
     }
+    ensure_no_runtime_before_isolation_prepare(
+        &app,
+        &record.pubkey,
+        &current_instance_id(&app),
+        &tracked_pids,
+    )?;
     drop(runtimes);
     let profile = record
         .filesystem_isolation
