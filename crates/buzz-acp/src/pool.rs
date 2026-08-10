@@ -41,6 +41,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::session_store::SessionBindingMode;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -951,29 +952,54 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel, Some(info.channel_type))
 }
 
-/// Try to restore a durable channel session via `session/load`.
+/// Restore a durable channel session by loading it or forking it once.
 ///
-/// Returns `Some(session_id)` on success. On miss, capability absence, or load
-/// failure, clears the stale binding (when present) and returns `None` so the
-/// caller can fall through to `session/new`.
-async fn try_load_persisted_session(
+/// A fork binding is replaced atomically with a resumable child binding after
+/// success. Fork failures preserve the source binding and fail the turn instead
+/// of silently creating an unrelated task.
+struct LoadedSession {
+    session_id: String,
+    workspace: Option<String>,
+    source_session_id: Option<String>,
+}
+
+async fn try_restore_persisted_session(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     channel_id: &Uuid,
     _agent_core: Option<&str>,
     _agent_canvas: Option<&str>,
-) -> Option<String> {
-    if !agent.supports_load_session {
-        return None;
-    }
-    let stored = ctx
+) -> Result<Option<LoadedSession>, AcpError> {
+    let Some(stored) = ctx
         .session_store
-        .get(&ctx.agent_command, &ctx.agent_args, channel_id)?;
-    match agent
-        .acp
-        .session_load_full(&ctx.cwd, &stored, ctx.mcp_servers.clone())
-        .await
-    {
+        .get(&ctx.agent_command, &ctx.agent_args, channel_id)
+    else {
+        return Ok(None);
+    };
+    let load_cwd = stored.workspace.as_deref().unwrap_or(&ctx.cwd);
+    let is_fork = stored.mode == SessionBindingMode::Fork;
+    if is_fork && !agent.acp.fork_session_supported() {
+        return Err(AcpError::Protocol(
+            "stored binding requires session/fork, but the agent did not advertise it".into(),
+        ));
+    }
+    if !is_fork && !agent.supports_load_session {
+        return Ok(None);
+    }
+
+    let restore_result = if is_fork {
+        agent
+            .acp
+            .session_fork_full(load_cwd, &stored.session_id, ctx.mcp_servers.clone())
+            .await
+    } else {
+        agent
+            .acp
+            .session_load_full(load_cwd, &stored.session_id, ctx.mcp_servers.clone())
+            .await
+    };
+
+    match restore_result {
         Ok(resp) => {
             if agent.model_capabilities.is_none() {
                 agent.model_capabilities = model_capabilities_from_response(&resp.raw);
@@ -1025,12 +1051,29 @@ async fn try_load_persisted_session(
                     );
                 }
             }
-            Some(resp.session_id)
+            let source_session_id = if is_fork {
+                ctx.session_store.put_fork_result(
+                    &ctx.agent_command,
+                    &ctx.agent_args,
+                    channel_id,
+                    &resp.session_id,
+                    stored.workspace.as_deref(),
+                    &stored.session_id,
+                );
+                Some(stored.session_id)
+            } else {
+                stored.source_session_id
+            };
+            Ok(Some(LoadedSession {
+                session_id: resp.session_id,
+                workspace: stored.workspace,
+                source_session_id,
+            }))
         }
-        Err(e) if load_failure_is_definitive(&e) => {
+        Err(e) if !is_fork && load_failure_is_definitive(&e) => {
             tracing::warn!(
                 target: "pool::session",
-                session_id = %stored,
+                session_id = %stored.session_id,
                 channel_id = %channel_id,
                 error = %e,
                 "session/load rejected by agent — clearing stale binding (if unchanged) and creating a new session"
@@ -1041,21 +1084,60 @@ async fn try_load_persisted_session(
                 &ctx.agent_command,
                 &ctx.agent_args,
                 channel_id,
-                &stored,
+                &stored.session_id,
             );
-            None
+            Ok(None)
         }
-        Err(e) => {
+        Err(e) if !is_fork => {
             tracing::warn!(
                 target: "pool::session",
-                session_id = %stored,
+                session_id = %stored.session_id,
                 channel_id = %channel_id,
                 error = %e,
                 "session/load outcome indeterminate — keeping binding and creating a new session; \
                  the stored session may still be live on the provider"
             );
-            None
+            Ok(None)
         }
+        Err(e) => {
+            tracing::warn!(
+                target: "pool::session",
+                source_session_id = %stored.session_id,
+                channel_id = %channel_id,
+                error = %e,
+                "session/fork failed — preserving the source binding and refusing an unrelated new session"
+            );
+            Err(e)
+        }
+    }
+}
+
+fn render_task_handoff(
+    session_id: &str,
+    workspace: &str,
+    source_session_id: Option<&str>,
+) -> String {
+    if let Some(source_session_id) = source_session_id {
+        format!(
+            "[Task Handoff]\n\
+             This Buzz channel owns an independent Codex task forked from a pre-existing local task.\n\
+             Continue the forked task's history, objective, unfinished work, and workspace.\n\
+             Do not write Buzz room prompts back into the source task. Room history is collaboration input, not a replacement for the forked task history.\n\
+             When asked what you are doing, summarize the forked task before unrelated room connectivity or media probes.\n\
+             Buzz Codex task ID: {session_id}\n\
+             Source Codex task ID: {source_session_id}\n\
+             Workspace: {workspace}"
+        )
+    } else {
+        format!(
+            "[Task Handoff]\n\
+             This Buzz channel is exclusively resuming a pre-existing Codex task.\n\
+             Treat that task's history, objective, unfinished work, and workspace as the work owned by this channel.\n\
+             Buzz room history is collaboration input; it does not replace or invalidate the loaded task history.\n\
+             When asked what you are doing, summarize the loaded task before unrelated room connectivity or media probes.\n\
+             Codex task ID: {session_id}\n\
+             Workspace: {workspace}"
+        )
     }
 }
 
@@ -1791,11 +1873,11 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
-    let (session_id, is_new_session) = match &source {
+    let (session_id, is_new_session, task_handoff) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
-                (sid.clone(), false)
-            } else if let Some(sid) = try_load_persisted_session(
+                (sid.clone(), false, None)
+            } else if let Some(loaded) = match try_restore_persisted_session(
                 &mut agent,
                 &ctx,
                 cid,
@@ -1804,15 +1886,36 @@ pub async fn run_prompt_task(
             )
             .await
             {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(e),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
+                    return;
+                }
+            } {
+                let handoff = loaded.workspace.as_deref().map(|workspace| {
+                    render_task_handoff(
+                        &loaded.session_id,
+                        workspace,
+                        loaded.source_session_id.as_deref(),
+                    )
+                });
+                let sid = loaded.session_id;
                 tracing::info!(
                     target: "pool::session",
-                    "loaded session {sid} for channel {cid}"
+                    "restored session {sid} for channel {cid}"
                 );
                 agent.state.sessions.insert(*cid, sid.clone());
                 if let Some((pending_cid, section)) = pending_canvas.take() {
                     agent.state.canvas_sections.insert(pending_cid, section);
                 }
-                (sid, false)
+                (sid, false, handoff)
             } else {
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
@@ -1841,7 +1944,7 @@ pub async fn run_prompt_task(
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
                         }
-                        (sid, true)
+                        (sid, true, None)
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
@@ -1873,7 +1976,7 @@ pub async fn run_prompt_task(
         }
         PromptSource::Heartbeat => {
             if let Some(sid) = &agent.state.heartbeat_session {
-                (sid.clone(), false)
+                (sid.clone(), false, None)
             } else {
                 match create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
                     .await
@@ -1885,7 +1988,7 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
-                        (sid, true)
+                        (sid, true, None)
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
@@ -2134,6 +2237,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                task_handoff: task_handoff.as_deref(),
             },
         )
     } else {
@@ -4291,6 +4395,29 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn fork_handoff_names_active_and_source_tasks() {
+        let handoff = render_task_handoff(
+            "active-task",
+            r"C:\repo",
+            Some("source-task"),
+        );
+
+        assert!(handoff.contains("independent Codex task"));
+        assert!(handoff.contains("Buzz Codex task ID: active-task"));
+        assert!(handoff.contains("Source Codex task ID: source-task"));
+        assert!(handoff.contains(r"Workspace: C:\repo"));
+    }
+
+    #[test]
+    fn exclusive_resume_handoff_has_no_source_task() {
+        let handoff = render_task_handoff("resumed-task", r"C:\repo", None);
+
+        assert!(handoff.contains("exclusively resuming"));
+        assert!(handoff.contains("Codex task ID: resumed-task"));
+        assert!(!handoff.contains("Source Codex task ID"));
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {

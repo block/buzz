@@ -1377,6 +1377,10 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Explicit ownership context for a manually bound pre-existing task.
+    /// This must ride in the user turn for every protocol version because
+    /// `session/load` cannot retrofit a new system prompt.
+    pub task_handoff: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1394,9 +1398,10 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
 /// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
 /// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 3. `[Task Handoff]` — when the channel explicitly takes over an existing task
+/// 4. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 5. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 6. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -1426,7 +1431,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         .map(|ci| ci.channel_type == "dm")
         .unwrap_or(false);
 
-    let mut sections: Vec<String> = Vec::with_capacity(7);
+    let mut sections: Vec<String> = Vec::with_capacity(8);
 
     // For legacy agents (protocol_version < 2), inject base_prompt and
     // system_prompt as user-message sections. Modern agents receive these
@@ -1462,7 +1467,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     }
 
-    // 2. Context hints (with a human-aware reply anchor).
+    // A loaded external task needs an explicit ownership marker in the first
+    // user turn. The loaded session already has its old system prompt, so this
+    // cannot be delivered through session/new even for modern agents.
+    if let Some(handoff) = args.task_handoff {
+        sections.push(handoff.to_string());
+    }
+
+    // Context hints (with a human-aware reply anchor).
     //
     // Human-facing turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
@@ -4529,6 +4541,40 @@ mod tests {
             !prompt.contains("[Channel Canvas]"),
             "no canvas section expected when agent_canvas is None; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_format_prompt_task_handoff_precedes_room_context_for_modern_agent() {
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event: make_event("summarize your current work"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let handoff = "[Task Handoff]\nCodex task ID: session-1\nWorkspace: C:\\repo";
+        let sections = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                has_system_prompt_support: true,
+                task_handoff: Some(handoff),
+                ..Default::default()
+            },
+        );
+
+        let handoff_index = sections
+            .iter()
+            .position(|section| section.starts_with("[Task Handoff]"))
+            .expect("task handoff section");
+        let context_index = sections
+            .iter()
+            .position(|section| section.starts_with("[Context]"))
+            .expect("room context section");
+        assert_eq!(sections[handoff_index], handoff);
+        assert!(handoff_index < context_index);
     }
 
     #[test]

@@ -198,6 +198,8 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the adapter advertised ACP `session/fork` at initialization.
+    fork_session_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -548,6 +550,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            fork_session_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -604,6 +607,7 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.fork_session_supported = Self::agent_supports_fork_session(&result);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -724,6 +728,34 @@ impl AcpClient {
         })
     }
 
+    /// Send `session/fork` to branch a stored session into a new session ID.
+    pub async fn session_fork_full(
+        &mut self,
+        cwd: &str,
+        session_id: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        let params = serde_json::json!({
+            "cwd": cwd,
+            "sessionId": session_id,
+            "mcpServers": mcp_servers,
+        });
+        let result = self.send_request("session/fork", params).await?;
+        let forked_id = result["sessionId"]
+            .as_str()
+            .ok_or_else(|| AcpError::Protocol("session/fork response missing sessionId".into()))?
+            .to_owned();
+        tracing::info!(
+            target: "acp::session",
+            source_session_id = session_id,
+            "session forked: {forked_id}"
+        );
+        Ok(SessionNewResponse {
+            session_id: forked_id,
+            raw: result,
+        })
+    }
+
     /// Returns true when an initialize result advertises `loadSession`.
     pub fn agent_supports_load_session(init_result: &serde_json::Value) -> bool {
         init_result
@@ -731,6 +763,17 @@ impl AcpClient {
             .and_then(|caps| caps.get("loadSession"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
+    }
+
+    /// Returns true when an initialize result advertises `session/fork`.
+    pub fn agent_supports_fork_session(init_result: &serde_json::Value) -> bool {
+        init_result
+            .pointer("/agentCapabilities/sessionCapabilities/fork")
+            .is_some_and(|value| !value.is_null())
+    }
+
+    pub fn fork_session_supported(&self) -> bool {
+        self.fork_session_supported
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -2319,6 +2362,26 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_capability_requires_advertised_session_fork() {
+        let supported = serde_json::json!({
+            "agentCapabilities": {
+                "sessionCapabilities": {
+                    "fork": {}
+                }
+            }
+        });
+        let absent = serde_json::json!({
+            "agentCapabilities": {
+                "loadSession": true,
+                "sessionCapabilities": {}
+            }
+        });
+
+        assert!(AcpClient::agent_supports_fork_session(&supported));
+        assert!(!AcpClient::agent_supports_fork_session(&absent));
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {

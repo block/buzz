@@ -28,12 +28,75 @@ use crate::config::normalize_agent_command_identity;
 /// Environment override for the session store path (tests / operators).
 pub const SESSION_STORE_ENV: &str = "BUZZ_ACP_SESSION_STORE";
 
+/// Durable data needed to resume a channel's ACP session faithfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBinding {
+    pub session_id: String,
+    pub workspace: Option<String>,
+    pub mode: SessionBindingMode,
+    pub source_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBindingMode {
+    #[default]
+    Resume,
+    Fork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum StoredSessionBinding {
+    /// Backward-compatible form written by the original session store.
+    Legacy(String),
+    Detailed {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+        #[serde(default)]
+        mode: SessionBindingMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_session_id: Option<String>,
+    },
+}
+
+impl StoredSessionBinding {
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Legacy(session_id) | Self::Detailed { session_id, .. } => session_id,
+        }
+    }
+
+    fn into_binding(self) -> SessionBinding {
+        match self {
+            Self::Legacy(session_id) => SessionBinding {
+                session_id,
+                workspace: None,
+                mode: SessionBindingMode::Resume,
+                source_session_id: None,
+            },
+            Self::Detailed {
+                session_id,
+                workspace,
+                mode,
+                source_session_id,
+            } => SessionBinding {
+                session_id,
+                workspace,
+                mode,
+                source_session_id,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 struct StoreFile {
     /// version for future migrations
     version: u32,
-    /// map key → ACP session id
-    sessions: HashMap<String, String>,
+    /// map key → ACP session binding
+    sessions: HashMap<String, StoredSessionBinding>,
 }
 
 /// Durable session binding store shared across buzz-acp processes.
@@ -78,17 +141,21 @@ impl SessionStore {
             .join(format!("{identity}.json"))
     }
 
-    /// Look up a stored ACP session id for a channel.
+    /// Look up a stored ACP session binding for a channel.
     pub fn get(
         &self,
         agent_command: &str,
         agent_args: &[String],
         channel_id: &Uuid,
-    ) -> Option<String> {
+    ) -> Option<SessionBinding> {
         let key = binding_key(agent_command, agent_args, channel_id);
         let _lock = self.acquire_lock(false)?;
         match load_store(&self.path) {
-            Ok(data) => data.sessions.get(&key).cloned(),
+            Ok(data) => data
+                .sessions
+                .get(&key)
+                .cloned()
+                .map(StoredSessionBinding::into_binding),
             Err(e) => {
                 self.warn_io("failed to read ACP session bindings", &e);
                 None
@@ -103,6 +170,44 @@ impl SessionStore {
         agent_args: &[String],
         channel_id: &Uuid,
         session_id: &str,
+    ) {
+        self.put_value(
+            agent_command,
+            agent_args,
+            channel_id,
+            StoredSessionBinding::Legacy(session_id.to_owned()),
+        );
+    }
+
+    /// Persist the child produced by a one-time fork while retaining provenance.
+    pub fn put_fork_result(
+        &self,
+        agent_command: &str,
+        agent_args: &[String],
+        channel_id: &Uuid,
+        session_id: &str,
+        workspace: Option<&str>,
+        source_session_id: &str,
+    ) {
+        self.put_value(
+            agent_command,
+            agent_args,
+            channel_id,
+            StoredSessionBinding::Detailed {
+                session_id: session_id.to_owned(),
+                workspace: workspace.map(str::to_owned),
+                mode: SessionBindingMode::Resume,
+                source_session_id: Some(source_session_id.to_owned()),
+            },
+        );
+    }
+
+    fn put_value(
+        &self,
+        agent_command: &str,
+        agent_args: &[String],
+        channel_id: &Uuid,
+        binding: StoredSessionBinding,
     ) {
         let key = binding_key(agent_command, agent_args, channel_id);
         let Some(_lock) = self.acquire_lock(true) else {
@@ -123,8 +228,8 @@ impl SessionStore {
                 return;
             }
         };
-        data.version = 1;
-        data.sessions.insert(key, session_id.to_owned());
+        data.version = 2;
+        data.sessions.insert(key, binding);
         if let Err(e) = save_store(&self.path, &data) {
             self.warn_io("failed to persist ACP session binding", &e);
         }
@@ -183,7 +288,7 @@ impl SessionStore {
                 let matches = data
                     .sessions
                     .get(&key)
-                    .is_some_and(|current| current == expected_session_id);
+                    .is_some_and(|current| current.session_id() == expected_session_id);
                 if !matches {
                     return false;
                 }
@@ -324,17 +429,85 @@ mod tests {
         assert!(store.get("hermes", &["acp".into()], &channel).is_none());
         store.put("hermes", &["acp".into()], &channel, "sess-1");
         assert_eq!(
-            store.get("hermes", &["acp".into()], &channel).as_deref(),
-            Some("sess-1")
+            store
+                .get("hermes", &["acp".into()], &channel)
+                .map(|binding| binding.session_id),
+            Some("sess-1".to_string())
         );
         // Re-open from disk.
         let store2 = SessionStore::open(store.path.clone());
         assert_eq!(
-            store2.get("hermes", &["acp".into()], &channel).as_deref(),
-            Some("sess-1")
+            store2
+                .get("hermes", &["acp".into()], &channel)
+                .map(|binding| binding.session_id),
+            Some("sess-1".to_string())
         );
         assert!(store2.remove_if_equals("hermes", &["acp".into()], &channel, "sess-1"));
         assert!(store2.get("hermes", &["acp".into()], &channel).is_none());
+    }
+
+    #[test]
+    fn round_trip_binding_with_workspace() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let store = SessionStore::open(path.clone());
+        let channel = Uuid::new_v4();
+
+        let key = binding_key("codex-acp", &[], &channel);
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 2,
+                "sessions": {
+                    (key): {
+                        "session_id": "019eca9a-beb9-7902-8ce6-527b2ba56020",
+                        "workspace": r"C:\Users\test\gelatin_doe"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.get("codex-acp", &[], &channel),
+            Some(SessionBinding {
+                session_id: "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+                workspace: Some(r"C:\Users\test\gelatin_doe".to_string()),
+                mode: SessionBindingMode::Resume,
+                source_session_id: None,
+            })
+        );
+
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\"workspace\""));
+    }
+
+    #[test]
+    fn fork_result_becomes_resumable_and_keeps_source() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let store = SessionStore::open(path);
+        let channel = Uuid::new_v4();
+
+        store.put_fork_result(
+            "codex-acp",
+            &[],
+            &channel,
+            "child-session",
+            Some(r"C:\repo"),
+            "source-session",
+        );
+
+        assert_eq!(
+            store.get("codex-acp", &[], &channel),
+            Some(SessionBinding {
+                session_id: "child-session".to_string(),
+                workspace: Some(r"C:\repo".to_string()),
+                mode: SessionBindingMode::Resume,
+                source_session_id: Some("source-session".to_string()),
+            })
+        );
     }
 
     #[test]
@@ -350,8 +523,10 @@ mod tests {
             "b",
         );
         assert_eq!(
-            store.get("hermes", &["acp".into()], &channel).as_deref(),
-            Some("a")
+            store
+                .get("hermes", &["acp".into()], &channel)
+                .map(|binding| binding.session_id),
+            Some("a".to_string())
         );
         assert_eq!(
             store
@@ -360,8 +535,8 @@ mod tests {
                     &["-p".into(), "chad".into(), "acp".into()],
                     &channel
                 )
-                .as_deref(),
-            Some("b")
+                .map(|binding| binding.session_id),
+            Some("b".to_string())
         );
     }
 
@@ -381,12 +556,16 @@ mod tests {
 
         let reopened = SessionStore::open(path.clone());
         assert_eq!(
-            reopened.get("hermes", &args, &channel_a).as_deref(),
-            Some("session-a")
+            reopened
+                .get("hermes", &args, &channel_a)
+                .map(|binding| binding.session_id),
+            Some("session-a".to_string())
         );
         assert_eq!(
-            reopened.get("hermes", &args, &channel_b).as_deref(),
-            Some("session-b")
+            reopened
+                .get("hermes", &args, &channel_b)
+                .map(|binding| binding.session_id),
+            Some("session-b".to_string())
         );
 
         // Open both before either mutation. A stale process-local snapshot would
@@ -399,12 +578,16 @@ mod tests {
         let final_store = SessionStore::open(path);
         assert!(final_store.get("hermes", &args, &channel_a).is_none());
         assert_eq!(
-            final_store.get("hermes", &args, &channel_b).as_deref(),
-            Some("session-b")
+            final_store
+                .get("hermes", &args, &channel_b)
+                .map(|binding| binding.session_id),
+            Some("session-b".to_string())
         );
         assert_eq!(
-            final_store.get("hermes", &args, &channel_c).as_deref(),
-            Some("session-c")
+            final_store
+                .get("hermes", &args, &channel_c)
+                .map(|binding| binding.session_id),
+            Some("session-c".to_string())
         );
     }
 
@@ -417,8 +600,10 @@ mod tests {
         let channel = Uuid::new_v4();
         store.put("hermes", &["acp".into()], &channel, "recovered");
         assert_eq!(
-            store.get("hermes", &["acp".into()], &channel).as_deref(),
-            Some("recovered")
+            store
+                .get("hermes", &["acp".into()], &channel)
+                .map(|binding| binding.session_id),
+            Some("recovered".to_string())
         );
     }
 
@@ -435,24 +620,28 @@ mod tests {
         let read_x = process_a
             .get("hermes", &args, &channel)
             .expect("process A read X");
-        assert_eq!(read_x, "session-x");
+        assert_eq!(read_x.session_id, "session-x");
 
         // Process B writes Y for the same channel.
         let process_b = SessionStore::open(path.clone());
         process_b.put("hermes", &args, &channel, "session-y");
         assert_eq!(
-            process_b.get("hermes", &args, &channel).as_deref(),
-            Some("session-y")
+            process_b
+                .get("hermes", &args, &channel)
+                .map(|binding| binding.session_id),
+            Some("session-y".to_string())
         );
 
         // Process A's failed load of X must not delete Y.
-        let removed = process_a.remove_if_equals("hermes", &args, &channel, &read_x);
+        let removed = process_a.remove_if_equals("hermes", &args, &channel, &read_x.session_id);
         assert!(!removed);
 
         let final_store = SessionStore::open(path);
         assert_eq!(
-            final_store.get("hermes", &args, &channel).as_deref(),
-            Some("session-y")
+            final_store
+                .get("hermes", &args, &channel)
+                .map(|binding| binding.session_id),
+            Some("session-y".to_string())
         );
     }
 
