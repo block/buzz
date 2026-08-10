@@ -1,4 +1,4 @@
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
@@ -12,6 +12,17 @@ const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+
+// `nextResolve` requires specifiers to be URLs or relative paths. Passing an
+// absolute filesystem path happens to work on POSIX (node coerces it), but on
+// Windows an absolute path like `C:\...` parses as a URL with protocol `c:`
+// and every test run dies with ERR_UNSUPPORTED_ESM_URL_SCHEME. Hand absolute
+// paths to node as proper file:// URLs on all platforms.
+function toFileSpecifier(candidatePath) {
+  return path.isAbsolute(candidatePath)
+    ? pathToFileURL(candidatePath).href
+    : candidatePath;
+}
 
 function resolveSourcePath(basePath) {
   // Existence decides, not path.extname — a dotted basename like
@@ -76,7 +87,7 @@ export function resolve(specifier, context, nextResolve) {
   }
   if (specifier === "@features-manifest") {
     const resolved = path.join(repoRoot, "preview-features.json");
-    return nextResolve(resolved, context);
+    return nextResolve(toFileSpecifier(resolved), context);
   }
   if (specifier.startsWith("@/")) {
     const stripped = specifier.slice(2);
@@ -86,7 +97,10 @@ export function resolve(specifier, context, nextResolve) {
     // Otherwise paths like `@/.../foo.mjs` would be coerced into `foo.mjs.ts`
     // and fail to resolve.
     const resolved = resolveSourcePath(`${srcRoot}/${stripped}`);
-    return nextResolve(resolved ?? `${srcRoot}/${stripped}`, context);
+    return nextResolve(
+      toFileSpecifier(resolved ?? `${srcRoot}/${stripped}`),
+      context,
+    );
   }
   // Resolve extensionless relative TS imports (e.g. `./parseImeta`) — the app's
   // bundler adds the extension, but node's ESM resolver does not. Without this,
@@ -103,7 +117,7 @@ export function resolve(specifier, context, nextResolve) {
       path.resolve(path.dirname(parentPath), specifier),
     );
     if (resolved) {
-      return nextResolve(resolved, context);
+      return nextResolve(toFileSpecifier(resolved), context);
     }
     return nextResolve(specifier, context);
   }

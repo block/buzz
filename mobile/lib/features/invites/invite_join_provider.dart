@@ -261,12 +261,17 @@ String _communityNameFromClaim(Map<String, dynamic> claim, String relayUrl) {
 }
 
 bool _requiresFreshInvite(Object error) {
-  return error.toString().contains('join_policy_required');
+  final message = error.toString();
+  return message.contains('join_policy_required') ||
+      message.contains('invite_exhausted');
 }
 
 String _friendlyInviteError(Object error) {
   final message = error.toString();
   if (message.contains('invite_expired')) return 'This invite has expired.';
+  if (message.contains('invite_exhausted')) {
+    return 'This invite has reached its use limit. Ask for a new invite.';
+  }
   if (message.contains('invite_invalid')) return 'This invite is not valid.';
   if (message.contains('join_policy_required')) {
     return 'This invite approval has expired. Re-open the invite link to try again.';

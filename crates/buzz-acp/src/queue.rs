@@ -646,6 +646,11 @@ impl EventQueue {
         self.in_flight_channels.contains(&channel_id)
     }
 
+    /// Whether any channel currently has a turn in flight.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight_channels.is_empty()
+    }
+
     // ── Goose-native steer withhold (side table) ──────────────────────────
     //
     // While a goose-native `_goose/unstable/session/steer` write is in flight
@@ -985,6 +990,9 @@ pub enum ConversationContext {
 /// A single message in a conversation context section.
 #[derive(Debug, Clone)]
 pub struct ContextMessage {
+    /// Nostr event ID. Legacy REST fixtures may omit it, in which case it is
+    /// empty and cannot participate in delivery deduplication.
+    pub event_id: String,
     pub pubkey: String,
     pub timestamp: String,
     pub content: String,
@@ -1236,6 +1244,7 @@ fn format_context_hints(
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
+    conversation_context_had_delivered_events: bool,
     reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
@@ -1253,6 +1262,10 @@ fn format_context_hints(
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
+        } else if conversation_context_had_delivered_events && is_reply {
+            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read the reply chain."
+        } else if conversation_context_had_delivered_events {
+            "Earlier conversation context was already delivered in this session. Use `buzz messages get --channel <UUID>` to re-read it."
         } else if is_reply {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch the reply chain."
         } else {
@@ -1280,6 +1293,8 @@ fn format_context_hints(
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
+        } else if conversation_context_had_delivered_events {
+            "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
         } else {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
         };
@@ -1354,6 +1369,9 @@ pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
+    /// True when delivery-delta filtering removed at least one event that this
+    /// live session had already received. Trigger-only context does not set it.
+    pub conversation_context_had_delivered_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
@@ -1369,9 +1387,62 @@ pub struct FormatPromptArgs<'a> {
     ///
     /// For modern agents (protocol_version >= 2) the section is delivered via
     /// the system role in session/new; omit here to avoid duplication.
-    /// For legacy agents it rides in the user message on every turn of the
-    /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Set once this session's standing context has already been delivered —
+    /// see [`StandingContext`]. Only meaningful for legacy agents; modern
+    /// agents are gated by `has_system_prompt_support` regardless.
+    ///
+    /// Defaults to `false` so a caller that never sets it behaves as if this
+    /// were the session's first message.
+    pub standing_context_sent: bool,
+}
+
+/// The prompt sections that do not change for the life of a session: base
+/// prompt, persona, team instructions, core memory, and channel canvas.
+///
+/// Protocol-v2 agents receive all of this through the system role at
+/// `session/new`, once. Legacy agents (`protocol_version < 2`) have no system
+/// role, so it has to ride in a user message — but only in the session's
+/// *first* one. Re-sending it every turn makes the standing framing the newest
+/// and most-repeated text in the window, outweighing the conversation it exists
+/// to frame, and evicting real channel history that much sooner.
+///
+/// Both legacy dispatch paths (initial message, batch flush) render through
+/// this one type so their section set and ordering cannot drift apart.
+#[derive(Default)]
+pub(crate) struct StandingContext<'a> {
+    pub base_prompt: Option<&'a str>,
+    pub system_prompt: Option<&'a str>,
+    pub team_instructions: Option<&'a str>,
+    pub agent_core: Option<&'a str>,
+    pub agent_canvas: Option<&'a str>,
+}
+
+impl StandingContext<'_> {
+    /// Render the sections in the order legacy agents have always seen them.
+    pub(crate) fn sections(&self) -> Vec<String> {
+        let mut sections = Vec::with_capacity(5);
+        if let Some(bp) = self.base_prompt {
+            sections.push(base_section(bp));
+        }
+        if let Some(sp) = self.system_prompt {
+            sections.push(format!("[System]\n{sp}"));
+        }
+        if let Some(team) = self
+            .team_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("[Team Instructions]\n{team}"));
+        }
+        if let Some(core) = self.agent_core {
+            sections.push(core.to_string());
+        }
+        if let Some(canvas) = self.agent_canvas {
+            sections.push(canvas.to_string());
+        }
+        sections
+    }
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1386,12 +1457,12 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
-/// 2. `[Agent Memory — core]` — if agent core memory is set
-/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 0. [`StandingContext`] — `[Base]`, `[System]`, `[Team Instructions]`,
+///    `[Agent Memory — core]`, `[Channel Canvas]`. Legacy agents only, and only
+///    on the session's first message (see `standing_context_sent`)
+/// 1. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 2. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 3. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
 /// Each section is returned as its own block rather than one joined string so
 /// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
@@ -1423,38 +1494,22 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
-    // For legacy agents (protocol_version < 2), inject base_prompt and
-    // system_prompt as user-message sections. Modern agents receive these
-    // via the system role in session/new.
-    if !args.has_system_prompt_support {
-        if let Some(bp) = args.base_prompt {
-            sections.push(base_section(bp));
-        }
-        if let Some(sp) = args.system_prompt {
-            sections.push(format!("[System]\n{sp}"));
-        }
-        if let Some(team) = args
-            .team_instructions
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            sections.push(format!("[Team Instructions]\n{team}"));
-        }
-    }
-
-    // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // For modern agents (protocol_version >= 2), core is delivered via the
-    // system role in session/new, so it is omitted here to avoid duplication.
-    // Legacy agents have no system role, so core rides in the user message
-    // alongside `[Base]`/`[System]`.
-    if !args.has_system_prompt_support {
-        if let Some(core) = args.agent_core {
-            sections.push(core.to_string());
-        }
-        // Channel canvas metadata — same delivery semantics as core for legacy agents.
-        if let Some(canvas) = args.agent_canvas {
-            sections.push(canvas.to_string());
-        }
+    // Standing context — base prompt, persona, team instructions, core memory
+    // and canvas. Modern agents received all of it via the system role in
+    // session/new. Legacy agents get it here, in the session's first message
+    // only; `standing_context_sent` means an earlier message in this session
+    // already carried it.
+    if !args.has_system_prompt_support && !args.standing_context_sent {
+        sections.extend(
+            StandingContext {
+                base_prompt: args.base_prompt,
+                system_prompt: args.system_prompt,
+                team_instructions: args.team_instructions,
+                agent_core: args.agent_core,
+                agent_canvas: args.agent_canvas,
+            }
+            .sections(),
+        );
     }
 
     // 2. Context hints (with a human-aware reply anchor).
@@ -1484,6 +1539,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         &thread_tags,
         is_dm,
         args.conversation_context.is_some(),
+        args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
     ));
 
@@ -2404,6 +2460,60 @@ mod tests {
     }
 
     #[test]
+    fn test_format_prompt_legacy_agent_omits_standing_after_first_message() {
+        // The defect this pins: standing context was re-sent on every turn of a
+        // legacy session, so the largest and least informative part of the
+        // prompt was also the most recent — crowding out the conversation and
+        // evicting real channel history sooner.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hello"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let canvas = "[Channel Canvas]\ncanvas content";
+        let core = "[Agent Memory — core]\nremember this";
+        let args = |sent| FormatPromptArgs {
+            has_system_prompt_support: false,
+            base_prompt: Some("test base prompt"),
+            system_prompt: Some("test system prompt"),
+            team_instructions: Some("ship small"),
+            agent_core: Some(core),
+            agent_canvas: Some(canvas),
+            standing_context_sent: sent,
+            ..Default::default()
+        };
+
+        let first = format_prompt(&batch, &args(false)).join("\n\n");
+        let later = format_prompt(&batch, &args(true)).join("\n\n");
+
+        for section in [
+            "[Base]",
+            "[System]",
+            "[Team Instructions]",
+            "[Agent Memory — core]",
+            "[Channel Canvas]",
+        ] {
+            assert!(first.contains(section), "first message missing {section}");
+            assert!(!later.contains(section), "turn 2 repeated {section}");
+        }
+        // What the turn is actually about survives, and now leads.
+        assert!(later.starts_with("[Context]"), "got: {later}");
+        assert!(later.contains("hello"));
+        assert!(
+            later.len() < first.len(),
+            "later turns must be smaller: {} vs {}",
+            later.len(),
+            first.len()
+        );
+    }
+
+    #[test]
     fn test_format_prompt_modern_agent_suppresses_base_and_system() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
@@ -2459,6 +2569,7 @@ mod tests {
 
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1test".into(),
                 content: "prior message".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
@@ -3073,11 +3184,13 @@ mod tests {
         let ctx = ConversationContext::Thread {
             messages: vec![
                 ContextMessage {
+                    event_id: String::new(),
                     pubkey: "npub1xyz".into(),
                     timestamp: "2026-03-15T16:30:00Z".into(),
                     content: "Let's refactor auth".into(),
                 },
                 ContextMessage {
+                    event_id: String::new(),
                     pubkey: "npub1def".into(),
                     timestamp: "2026-03-15T16:35:00Z".into(),
                     content: "yes go ahead".into(),
@@ -3120,6 +3233,7 @@ mod tests {
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1abc".into(),
                 timestamp: "2026-03-15T16:00:00Z".into(),
                 content: "Can you deploy?".into(),
@@ -3165,6 +3279,7 @@ mod tests {
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: author_hex.clone(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
@@ -3377,6 +3492,7 @@ mod tests {
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: String::new(),
                 pubkey: "npub1xyz".into(),
                 timestamp: "2026-03-15T16:30:00Z".into(),
                 content: "Should I deploy?".into(),
@@ -3411,6 +3527,95 @@ mod tests {
         );
         // Thread context should be included.
         assert!(prompt.contains("Should I deploy?"));
+    }
+
+    #[test]
+    fn test_format_prompt_empty_thread_delta_distinguishes_trigger_only_from_delivered() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "follow up",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let trigger_only_prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(trigger_only_prompt.contains("fetch thread context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context_had_delivered_events: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Earlier thread context was already delivered in this session"));
+        assert!(prompt.contains("buzz messages thread"));
+        assert!(!prompt.contains("Thread context included below"));
+        assert!(!prompt.contains("[Thread Context"));
+    }
+
+    #[test]
+    fn test_format_prompt_empty_dm_delta_distinguishes_trigger_only_from_delivered() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("follow up"),
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let trigger_only_prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(trigger_only_prompt.contains("for conversation context"));
+        assert!(!trigger_only_prompt.contains("already delivered in this session"));
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                conversation_context_had_delivered_events: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            prompt.contains("Earlier conversation context was already delivered in this session")
+        );
+        assert!(prompt.contains("buzz messages get"));
+        assert!(!prompt.contains("Conversation context included below"));
+        assert!(!prompt.contains("[Conversation Context"));
     }
 
     #[test]

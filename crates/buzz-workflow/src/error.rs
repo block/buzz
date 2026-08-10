@@ -54,6 +54,12 @@ pub enum WorkflowError {
     #[error("database error: {0}")]
     Database(String),
 
+    /// The workflow's owner is not currently authorized to run it (removed
+    /// from the channel, insufficient role for the definition's actions, or
+    /// the authority lookup failed — all deny, fail-closed).
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),

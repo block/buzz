@@ -484,7 +484,7 @@ fn fresh_keyring_generate_writes_marker() {
     let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
 
     // The key was stored in the keyring (not the file), and the marker marks it.
-    assert!(!legacy_path.exists());
+    assert!(!legacy_path.exists() && resolved.storage == IdentityStorage::SystemKeyring);
     assert!(migration_marker_path(dir.path()).exists());
     assert_eq!(
         store
@@ -541,7 +541,10 @@ fn fresh_generate_keyring_failure_falls_back_to_file_without_marker() {
     let from_file = load_key_file(&legacy_path).unwrap();
     assert_key_eq(&resolved.keys, &from_file);
     // No marker: the file is the authoritative store, not the keyring.
-    assert!(!migration_marker_path(dir.path()).exists());
+    assert!(
+        !migration_marker_path(dir.path()).exists()
+            && resolved.storage == IdentityStorage::LocalFile
+    );
 }
 
 // ── New tests for the three defects fixed in this PR ─────────────────────
@@ -786,10 +789,7 @@ fn persist_imported_identity_falls_back_to_file_on_keyring_failure() {
     let result = persist_imported_identity_impl(&store, &imported_keys, &legacy_path, dir.path());
 
     // The policy core handles the keyring failure — Ok, not Err.
-    assert!(
-        result.is_ok(),
-        "must not propagate keyring failure when file fallback succeeds"
-    );
+    assert_eq!(result.unwrap(), IdentityStorage::LocalFile);
 
     // Key is recoverable from the file on next boot.
     let from_file = load_key_file(&legacy_path).unwrap();

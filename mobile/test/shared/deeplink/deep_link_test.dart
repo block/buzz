@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   _inviteTests();
+  _buildMessageLinkTests();
 
   group('parseMessageDeepLink', () {
     test('parses channel and id', () {
@@ -228,6 +229,67 @@ void _inviteTests() {
           reason: 'must reject relay scheme in $hostile',
         );
       }
+    });
+  });
+}
+
+void _buildMessageLinkTests() {
+  group('buildMessageLink', () {
+    test('builds channel + id link', () {
+      expect(
+        buildMessageLink(channelId: 'd14cd131', messageId: 'abc123'),
+        'buzz://message?channel=d14cd131&id=abc123',
+      );
+    });
+
+    test('includes thread root when present', () {
+      expect(
+        buildMessageLink(
+          channelId: 'd14cd131',
+          messageId: 'abc123',
+          threadRootId: 'root99',
+        ),
+        'buzz://message?channel=d14cd131&id=abc123&thread=root99',
+      );
+    });
+
+    test('treats empty thread root as absent', () {
+      expect(
+        buildMessageLink(
+          channelId: 'd14cd131',
+          messageId: 'abc123',
+          threadRootId: '',
+        ),
+        'buzz://message?channel=d14cd131&id=abc123',
+      );
+    });
+
+    test('round-trips through parseMessageDeepLink', () {
+      final url = buildMessageLink(
+        channelId: 'chan-1',
+        messageId: 'msg-1',
+        threadRootId: 'root-1',
+      );
+      final parsed = parseMessageDeepLink(Uri.parse(url));
+      expect(
+        parsed,
+        const MessageDeepLink(
+          channelId: 'chan-1',
+          messageId: 'msg-1',
+          threadRootId: 'root-1',
+        ),
+      );
+    });
+
+    test('throws on empty channel or id', () {
+      expect(
+        () => buildMessageLink(channelId: '', messageId: 'abc'),
+        throwsArgumentError,
+      );
+      expect(
+        () => buildMessageLink(channelId: 'chan', messageId: ''),
+        throwsArgumentError,
+      );
     });
   });
 }

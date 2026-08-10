@@ -15,6 +15,8 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
+  final Set<String> _agentMentionNames = <String>{};
+
   static final _rules = [
     _MarkdownRule(
       r'```(?:\r?\n)?([\s\S]*?)(?:\r?\n)?```',
@@ -30,6 +32,21 @@ class _MarkdownEditingController extends TextEditingController {
     _MarkdownRule(r'~~([^\n]*?)~~', _MarkdownStyle.strikethrough),
     _MarkdownRule(r'_([^_\n]*?)_', _MarkdownStyle.italic),
   ];
+
+  /// Updates the known agent labels which should render as agent mention
+  /// chips. The editor still stores the literal `@Name` text, matching the
+  /// markdown sent to the relay.
+  void setAgentMentionNames(Iterable<String> names) {
+    final next = {
+      for (final name in names)
+        if (name.trim().isNotEmpty) name.trim().toLowerCase(),
+    };
+    if (setEquals(_agentMentionNames, next)) return;
+    _agentMentionNames
+      ..clear()
+      ..addAll(next);
+    notifyListeners();
+  }
 
   @override
   TextSpan buildTextSpan({
@@ -81,6 +98,7 @@ class _MarkdownEditingController extends TextEditingController {
       if (nextRule == null || nextMatch == null) {
         spans.addAll(
           _buildTextSpans(
+            context,
             source.substring(offset),
             inheritedStyle,
             sourceOffset + offset,
@@ -93,6 +111,7 @@ class _MarkdownEditingController extends TextEditingController {
       if (nextMatch.start > 0) {
         spans.addAll(
           _buildTextSpans(
+            context,
             tail.substring(0, nextMatch.start),
             inheritedStyle,
             sourceOffset + offset,
@@ -129,10 +148,12 @@ class _MarkdownEditingController extends TextEditingController {
       } else {
         spans.addAll(
           _buildTextSpans(
+            context,
             content,
             contentStyle,
             matchOffset + contentStart,
             composingRange,
+            renderAgentMentions: false,
           ),
         );
       }
@@ -150,11 +171,18 @@ class _MarkdownEditingController extends TextEditingController {
   }
 
   List<InlineSpan> _buildTextSpans(
+    BuildContext context,
     String source,
     TextStyle style,
     int sourceOffset,
-    TextRange composingRange,
-  ) {
+    TextRange composingRange, {
+    bool renderAgentMentions = true,
+  }) {
+    List<InlineSpan> buildTextSegment(String text, TextStyle segmentStyle) =>
+        renderAgentMentions
+        ? _buildAgentMentionSpans(context, text, segmentStyle)
+        : [TextSpan(text: text, style: segmentStyle)];
+
     if (source.isEmpty) return const [];
     final localStart = (composingRange.start - sourceOffset)
         .clamp(0, source.length)
@@ -165,7 +193,7 @@ class _MarkdownEditingController extends TextEditingController {
     if (!composingRange.isValid ||
         composingRange.isCollapsed ||
         localStart >= localEnd) {
-      return [TextSpan(text: source, style: style)];
+      return buildTextSegment(source, style);
     }
 
     final composingDecorations = [
@@ -178,15 +206,79 @@ class _MarkdownEditingController extends TextEditingController {
     );
     return [
       if (localStart > 0)
-        TextSpan(text: source.substring(0, localStart), style: style),
+        ...buildTextSegment(source.substring(0, localStart), style),
       TextSpan(
         text: source.substring(localStart, localEnd),
         style: composingStyle,
       ),
       if (localEnd < source.length)
-        TextSpan(text: source.substring(localEnd), style: style),
+        ...buildTextSegment(source.substring(localEnd), style),
     ];
   }
+
+  List<InlineSpan> _buildAgentMentionSpans(
+    BuildContext context,
+    String source,
+    TextStyle style,
+  ) {
+    if (_agentMentionNames.isEmpty) {
+      return [TextSpan(text: source, style: style)];
+    }
+
+    final escapedNames = _agentMentionNames.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    final expression = RegExp(
+      r'(^|\s)@(' +
+          escapedNames.map(RegExp.escape).join('|') +
+          r')(?=\s|[,.!?:;)\]}*_]|$)',
+      caseSensitive: false,
+      multiLine: true,
+    );
+    final spans = <InlineSpan>[];
+    var offset = 0;
+    for (final match in expression.allMatches(source)) {
+      final prefix = match.group(1)!;
+      if (match.start > offset) {
+        spans.add(
+          TextSpan(text: source.substring(offset, match.start), style: style),
+        );
+      }
+      if (prefix.isNotEmpty) spans.add(TextSpan(text: prefix, style: style));
+
+      final label = match.group(2)!;
+      spans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.baseline,
+          baseline: TextBaseline.alphabetic,
+          child: _ComposerAgentMentionChip(label: label, textStyle: style),
+        ),
+      );
+      // The visual chip replaces the `@` placeholder. Keep the label as
+      // invisible source text so the text span still has one character per
+      // source character, preserving native cursor and deletion behavior.
+      spans.add(
+        TextSpan(
+          text: label,
+          semanticsLabel: '',
+          style: _hiddenMentionTextStyle(style),
+        ),
+      );
+      offset = match.end;
+    }
+    if (offset < source.length) {
+      spans.add(TextSpan(text: source.substring(offset), style: style));
+    }
+    return spans.isEmpty ? [TextSpan(text: source, style: style)] : spans;
+  }
+
+  TextStyle _hiddenMentionTextStyle(TextStyle inheritedStyle) =>
+      inheritedStyle.copyWith(
+        color: Colors.transparent,
+        fontSize: 0.01,
+        height: 0.01,
+        letterSpacing: 0,
+        decoration: TextDecoration.none,
+      );
 
   (int, int) _contentBounds(String fullMatch, _MarkdownStyle markdownStyle) {
     final delimiterLength = switch (markdownStyle) {
@@ -244,6 +336,63 @@ class _MarkdownEditingController extends TextEditingController {
       height: 0.01,
       letterSpacing: 0,
       decoration: TextDecoration.none,
+    );
+  }
+}
+
+class _ComposerAgentMentionChip extends StatelessWidget {
+  final String label;
+  final TextStyle textStyle;
+
+  const _ComposerAgentMentionChip({
+    required this.label,
+    required this.textStyle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style = textStyle.copyWith(
+      color: context.colors.primary,
+      fontWeight: FontWeight.w500,
+      height: 1,
+    );
+    final fontSize = style.fontSize ?? 16;
+
+    return Semantics(
+      label: 'Agent mention: $label',
+      excludeSemantics: true,
+      child: Container(
+        key: const ValueKey('composer-agent-mention-chip'),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.half,
+          Grid.quarter + 1,
+          Grid.half,
+          Grid.quarter,
+        ),
+        decoration: BoxDecoration(
+          // The composer surface is already tinted, so the body chip's
+          // low-opacity fill disappears here. Keep the same chip geometry
+          // while giving this editable token enough contrast to read as one.
+          color: context.colors.primary.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(Radii.sm),
+          border: Border.all(
+            color: context.colors.primary.withValues(alpha: 0.12),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(
+              LucideIcons.bot,
+              size: fontSize * 0.95,
+              color: context.colors.primary,
+            ),
+            const SizedBox(width: Grid.quarter),
+            Text(label, style: style),
+          ],
+        ),
+      ),
     );
   }
 }

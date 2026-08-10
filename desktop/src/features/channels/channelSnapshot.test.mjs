@@ -87,6 +87,36 @@ test("remove clears the snapshot for that relay", () => {
   assert.equal(readChannelSnapshot(RELAY), null);
 });
 
+test("cache write evicts disposable entries and retries at quota", () => {
+  const original = window.localStorage;
+  const storage = new Map([
+    ["buzz-channel-messages.v1:relay:old", "big"],
+    ["buzz-timeline-skeleton-shape.v1:old", "small"],
+  ]);
+  window.localStorage = {
+    get length() {
+      return storage.size;
+    },
+    key: (index) => [...storage.keys()][index] ?? null,
+    getItem: (key) => storage.get(key) ?? null,
+    setItem(key, value) {
+      if (!storage.has(key) && storage.size >= 2) {
+        throw new Error("quota exceeded");
+      }
+      storage.set(key, value);
+    },
+    removeItem: (key) => storage.delete(key),
+  };
+  try {
+    writeChannelSnapshot(RELAY, [makeChannel()]);
+    assert.deepEqual(readChannelSnapshot(RELAY), [makeChannel()]);
+    assert.equal(storage.has("buzz-channel-messages.v1:relay:old"), false);
+    assert.equal(storage.has("buzz-timeline-skeleton-shape.v1:old"), false);
+  } finally {
+    window.localStorage = original;
+  }
+});
+
 test("write is tolerant of storage failures", () => {
   const original = window.localStorage.setItem;
   window.localStorage.setItem = () => {

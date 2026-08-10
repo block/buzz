@@ -1,5 +1,4 @@
 import * as React from "react";
-
 import { EditorContent } from "@tiptap/react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
@@ -10,26 +9,23 @@ import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
-  buildOutgoingMessage,
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
-  mergeOutgoingTags,
   restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
-
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
+import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import {
-  type MediaUploadController,
-  useMediaUpload,
-} from "@/features/messages/lib/useMediaUpload";
+  cancelBackgroundMediaUploads,
+  saveQueuedAttachmentsForDraft,
+  takeQueuedAttachmentsForDraft,
+  useBackgroundMediaUpload,
+} from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   hasMentionClipboardHtml,
   normalizeMentionClipboardHtml,
@@ -45,7 +41,6 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
-import type { ChannelType } from "@/shared/api/types";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -54,114 +49,30 @@ import {
   MentionAutocomplete,
   type MentionSuggestion,
 } from "./MentionAutocomplete";
-import { MessageComposerToolbar } from "./MessageComposerToolbar";
+import { ComposerDockToolbar } from "./ComposerDockToolbar";
+import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
-
-type MessageComposerAudienceContext = {
-  type: "thread";
-  threadRootId: string;
-  initialAgentPubkeys?: readonly string[];
-};
-type MessageComposerProps = {
-  audienceContext?: MessageComposerAudienceContext | null;
-  channelId?: string | null;
-  channelName: string;
-  channelType?: ChannelType | null;
-  containerClassName?: string;
-  disabled?: boolean;
-  draftKey?: string;
-  /**
-   * When provided, the composer fires `submitMessage` once on mount after
-   * the draft matching this key has been loaded into the editor. This powers
-   * the "Send message" confirm-dialog flow in the Drafts panel. The callback
-   * `onAutoSubmitComplete` must clear the trigger (e.g. remove `?autoSend`
-   * from the URL) — it is called synchronously before `submitMessage` fires
-   * so the param is gone before any navigation the send might cause.
-   *
-   * Fires at most once per mount: a stable key value that persists across
-   * re-renders does NOT re-fire.
-   */
-  autoSubmitDraftKey?: string | null;
-  /** Called when the auto-submit fires so the parent can clear the trigger. */
-  onAutoSubmitComplete?: () => void;
-  editTarget?: {
-    author: string;
-    body: string;
-    id: string;
-    /**
-     * NIP-92 imeta attachments on the original event, in tag order. Loaded
-     * into the composer's pending-imeta state on edit-open so the user sees
-     * them as removable thumbnails (just like the send path) and can add
-     * more. The submit path emits a fresh full imeta tag set on the edit
-     * event; the receiver overlays it.
-     */
-    imetaMedia?: ImetaMedia[];
-  } | null;
-  isSending?: boolean;
-  mediaController?: MediaUploadController;
-  onCancelEdit?: () => void;
-  onCancelReply?: () => void;
-  /**
-   * Invoked when the user presses ↑ in an empty composer that is not already
-   * in edit mode. The owner should locate the most recent message authored by
-   * the current user within this composer's scope (main timeline, DM, or
-   * thread) and enter edit mode for it. Return `true` if a target was found
-   * and edit mode was entered, so the composer can swallow the keystroke;
-   * return `false` to let the arrow key fall through normally.
-   */
-  onEditLastOwnMessage?: () => boolean;
-  onEditSave?: (
-    content: string,
-    mediaTags?: string[][],
-    mentionPubkeys?: string[],
-  ) => Promise<void>;
-  /** Captures send context synchronously before awaits can change navigation. */
-  onCaptureSendContext?: () => {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
-  /** Resolves the channel required to prepare mentions before sending. */
-  onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
-  onPreparingMentionSendChange?: (isPreparing: boolean) => void;
-  onSend: (
-    content: string,
-    mentionPubkeys: string[],
-    mediaTags?: string[][],
-    channelId?: string | null,
-    threadContext?: {
-      parentEventId: string | null;
-      threadHeadId: string | null;
-    } | null,
-  ) => Promise<void>;
-  placeholder?: string;
-  profiles?: UserProfileLookup;
-  replyTarget?: {
-    author: string;
-    body: string;
-    id: string;
-  } | null;
-  showTopBorder?: boolean;
-  toolbarExtraActions?: React.ReactNode;
-  typingParentEventId?: string | null;
-  typingRootEventId?: string | null;
-};
-
+import { submitMessageEdit } from "./submitMessageEdit";
+import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
+import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
   channelId = null,
   channelName,
   channelType = null,
   containerClassName,
+  layoutMode = "standalone",
   disabled = false,
   draftKey,
   autoSubmitDraftKey = null,
   onAutoSubmitComplete,
   editTarget = null,
   isSending = false,
+  onDeferredEditPendingChange,
   onCancelEdit,
   onCancelReply,
   onCaptureSendContext,
@@ -174,6 +85,7 @@ function MessageComposerImpl({
   profiles,
   replyTarget = null,
   mediaController,
+  showBackgroundUploadProgress = true,
   showTopBorder = false,
   toolbarExtraActions,
   typingParentEventId = null,
@@ -187,6 +99,12 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     syncContentRefFromEditorRef,
   } = useComposerContentState();
+  const [previewContent, setPreviewContent] = React.useState("");
+  const deferredPreviewContent = React.useDeferredValue(previewContent);
+  const {
+    previewList: composerLinkPreviews,
+    getReadyTags: getReadyLinkPreviewTags,
+  } = useComposerLinkPreviews(deferredPreviewContent);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
@@ -194,12 +112,10 @@ function MessageComposerImpl({
   >(() => new Set());
   const spoileredAttachmentUrlsRef = React.useRef(spoileredAttachmentUrls);
   spoileredAttachmentUrlsRef.current = spoileredAttachmentUrls;
-
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
     setIsFormattingOpen(pressed);
   }, []);
-
   const drafts = useDrafts();
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
@@ -215,10 +131,10 @@ function MessageComposerImpl({
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
-  // Snapshot composer state before edit mode so cancel can restore it.
   const preEditSnapshotRef = React.useRef<{
     content: string;
     pendingImeta: ImetaMedia[];
+    queuedAttachments: ReturnType<typeof useMediaUpload>["queuedAttachments"];
     spoileredAttachmentUrls: Set<string>;
   } | null>(null);
   const mentions = useMentions(channelId, undefined, profiles, {
@@ -232,16 +148,20 @@ function MessageComposerImpl({
     typingParentEventId,
     typingRootEventId,
   );
-
-  // We pass a custom setter that both updates React state AND inserts
-  // markdown into the Tiptap editor when media upload completes.
-  const internalMedia = useMediaUpload();
+  const internalMedia = useMediaUpload({ deferUploadsUntilSend: true });
   const media = mediaController ?? internalMedia;
+  const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
+  const composerDisabled = disabled || isDeferredEditPending;
+  const isEditSubmissionLocked =
+    isSending || media.isUploading || isDeferredEditPending;
+  const canRestoreEditDraftRef = React.useRef(false);
+  canRestoreEditDraftRef.current =
+    contentRef.current.trim().length === 0 &&
+    media.pendingImetaRef.current.length === 0 &&
+    media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
-
-  // Draft-persist lifecycle: restore/clear content + imeta + spoilered urls on
-  // key change, and persist the outgoing draft in the cleanup. The StrictMode
-  // fix lives inside this hook — see useDraftPersistSnapshot.ts.
+  const backgroundUpload = useBackgroundMediaUpload();
+  // Restore/persist drafts at a key boundary; the hook handles StrictMode.
   useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
@@ -251,6 +171,11 @@ function MessageComposerImpl({
     restoreMentionRefs: mentions.restoreDraftMentionRefs,
     livePendingImeta: media.pendingImeta,
     setPendingImeta: media.setPendingImeta,
+    getQueuedAttachments: () => media.queuedAttachmentsRef.current,
+    saveQueuedAttachmentsForDraft,
+    clearQueuedAttachments: media.clearQueuedAttachments,
+    restoreQueuedAttachments: media.restoreQueuedAttachments,
+    takeQueuedAttachmentsForDraft,
     setContent: (content) => {
       setComposerContent(content);
       richText.setContent(content);
@@ -270,7 +195,6 @@ function MessageComposerImpl({
     channelLinks.clearChannels();
     emojiAutocomplete.clearEmojis();
   }, [effectiveDraftKey]);
-
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
@@ -289,16 +213,13 @@ function MessageComposerImpl({
   editTargetRef.current = editTarget;
   extractMentionPubkeysRef.current = mentions.extractMentionPubkeys;
   ownerPubkeyRef.current = ownerPubkey;
-
   const isAutocompleteOpenRef = React.useRef(false);
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
     emojiAutocomplete.isEmojiAutocompleteOpen;
-
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
-
   // Set after `useLinkEditor` exists below; the editor's link-click handler
   // delegates through this ref to break the hook ordering cycle (the editor
   // needs `onEditLink`, but the link editor needs the editor's `richText`).
@@ -309,7 +230,6 @@ function MessageComposerImpl({
     ((info: LinkSelectionInfo | null) => void) | null
   >(null);
   const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
-
   const scrollComposerToBottom = React.useCallback(() => {
     window.requestAnimationFrame(() => {
       const scrollElement = composerScrollRef.current;
@@ -317,17 +237,15 @@ function MessageComposerImpl({
       scrollElement.scrollTop = scrollElement.scrollHeight;
     });
   }, []);
-
   const computedPlaceholder = editTarget
     ? "Edit your message"
     : (placeholder ??
       (replyTarget
         ? `Reply to ${replyTarget.author} in #${channelName}`
         : `Message #${channelName}`));
-
   const richText = useRichTextEditor({
     placeholder: computedPlaceholder,
-    editable: !disabled,
+    editable: !composerDisabled,
     mentionNames: mentions.knownNames,
     agentMentionNames: mentions.agentKnownNames,
     channelNames: channelLinks.knownChannelNames,
@@ -344,21 +262,18 @@ function MessageComposerImpl({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
-    onUpdate: ({ cursor, text }) => {
+    onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
-
+      setPreviewContent(linkPreviewContent);
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
-
       persistentMentionHydrationRef.current?.reconcile(text);
-
       if (text.trim().length > 0) {
         notifyTyping();
       }
     },
   });
-
   const linkEditor = useLinkEditor(richText);
   syncContentRefFromEditorRef.current = () => {
     const markdown = richText.getMarkdown();
@@ -369,7 +284,6 @@ function MessageComposerImpl({
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
-
   const persistentMentionHydration = usePersistentAgentMentionHydration({
     audienceScope,
     hydrationKey: effectiveDraftKey,
@@ -383,7 +297,6 @@ function MessageComposerImpl({
     persistentMentionHydration,
   );
   persistentMentionHydrationRef.current = persistentMentionHydration;
-
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -399,6 +312,11 @@ function MessageComposerImpl({
     setContent: setComposerContent,
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
+    hasUnsavedMedia: () =>
+      media.pendingImetaRef.current.length > 0 ||
+      media.queuedAttachmentsRef.current.length > 0,
+    clearQueuedAttachments: media.clearQueuedAttachments,
+    restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
     onSuccessfulExplicitAgentAudience:
       persistentAudience.enabled && audienceContext && ownerPubkey
@@ -413,16 +331,18 @@ function MessageComposerImpl({
         : undefined,
     resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
   });
-
+  React.useEffect(() => {
+    onDeferredEditPendingChange?.(isDeferredEditPending);
+    return () => onDeferredEditPendingChange?.(false);
+  }, [isDeferredEditPending, onDeferredEditPendingChange]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
+    if (editTarget && media.isUploading) return onCancelEdit?.();
     if (editTarget) {
-      // Snapshot the current draft (text + attachments) so the user's
-      // in-flight work survives the edit-mode hijack and is restored on
-      // edit-cancel/exit.
       preEditSnapshotRef.current = {
         content: syncComposerContentFromEditor(),
         pendingImeta: [...media.pendingImetaRef.current],
+        queuedAttachments: [...media.queuedAttachmentsRef.current],
         spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
       };
       // Strip the trailing `![image|video](url)` lines that correspond to
@@ -439,6 +359,7 @@ function MessageComposerImpl({
       // attachments so they show up in `ComposerAttachments` and the user
       // can remove existing ones / add new ones before saving.
       media.setPendingImeta(editableImeta);
+      media.clearQueuedAttachments();
       setSpoileredAttachmentUrls(
         findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
@@ -454,6 +375,7 @@ function MessageComposerImpl({
       const {
         content: restoredContent,
         pendingImeta: restoredImeta,
+        queuedAttachments: restoredQueuedAttachments,
         spoileredAttachmentUrls: restoredSpoileredAttachmentUrls,
       } = preEditSnapshotRef.current;
       preEditSnapshotRef.current = null;
@@ -462,21 +384,19 @@ function MessageComposerImpl({
         ? richText.setContent(restoredContent)
         : richText.clearContent();
       media.setPendingImeta(restoredImeta);
+      media.restoreQueuedAttachments(restoredQueuedAttachments);
       setSpoileredAttachmentUrls(restoredSpoileredAttachmentUrls);
     }
   }, [editTarget?.id]);
-
   // ── Focus on reply ──────────────────────────────────────────────────
   // Use focusPreserve so that re-renders (e.g. new messages arriving in
   // a thread) don't yank the cursor to the end while the user is editing.
   React.useEffect(() => {
-    if (!replyTarget || disabled) return;
+    if (!replyTarget || composerDisabled) return;
     richText.focusPreserve();
-  }, [disabled, replyTarget, richText.focusPreserve]);
-
+  }, [composerDisabled, replyTarget, richText.focusPreserve]);
   // ── Autofocus on mount / channel switch ─────────────────────────────
-  useComposerAutofocus(richText.focus, effectiveDraftKey, disabled);
-
+  useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
   // ── Mention / channel / emoji autocomplete insertion ────────────────
   // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
   // applies it as a single ProseMirror transaction (no markdown round-trip).
@@ -491,7 +411,6 @@ function MessageComposerImpl({
     },
     [richText.replacePlainTextRange],
   );
-
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -503,7 +422,6 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -515,7 +433,6 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-
   const applyEmojiInsert = React.useCallback(
     (suggestion: EmojiSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -527,7 +444,6 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-
   // ── Emoji insertion ─────────────────────────────────────────────────
   const insertEmoji = React.useCallback(
     (emoji: string) => {
@@ -564,12 +480,10 @@ function MessageComposerImpl({
     },
     [richText.editor, mentions.clearMentions, customEmoji],
   );
-
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
     const { text, cursor } = richText.getPlainTextAndCursor();
-
     // Check if there's already an @-query in progress
     const beforeCursor = text.slice(0, cursor);
     if (/(?:^|[\s])@[^\s]*$/.test(beforeCursor)) {
@@ -577,14 +491,12 @@ function MessageComposerImpl({
       richText.focus();
       return;
     }
-
     // Insert @ at cursor
     const previousChar = text.slice(0, cursor).slice(-1);
     const prefix =
       cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
     richText.editor.chain().focus().insertContent(prefix).run();
     setIsEmojiPickerOpen(false);
-
     // Trigger mention detection after inserting @
     const { text: updatedText, cursor: updatedCursor } =
       richText.getPlainTextAndCursor();
@@ -595,81 +507,57 @@ function MessageComposerImpl({
     richText.focus,
     mentions.updateMentionQuery,
   ]);
-
-  // ── Submit message ──────────────────────────────────────────────────
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
-
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
-      if (isSendingRef.current || isUploadingRef.current) return;
-      const currentPendingImeta = media.pendingImetaRef.current;
-      const hasMedia = currentPendingImeta.length > 0;
-      // Empty text + zero attachments is a no-op (don't let edit become an
-      // effective deletion).
-      if (!trimmed && !hasMedia) return;
-
-      // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
-      // because edit semantics use `[]` as the explicit "wipe all
-      // attachments" signal — the receiver overlay drops imeta when the
-      // edit carries an empty (but defined) set.
-      const { content: finalContent, mediaTags } = buildOutgoingMessage(
-        trimmed,
-        currentPendingImeta,
+      if (isEditSubmissionLocked) return;
+      // No empty-edit guard here: clearing an edit to empty (no text, no
+      // attachments) flows through to onEditSave as empty content, which
+      // deletes the message instead of publishing it (see handleEditSave).
+      await submitMessageEdit({
+        content: trimmed,
+        editTargetId: editTargetRef.current.id,
+        customEmoji,
+        originalContent: editTargetRef.current.body,
+        ownerPubkey: ownerPubkeyRef.current,
+        getMentionRefs: mentions.getDraftMentionRefs,
+        pendingImeta: media.pendingImetaRef.current,
+        queuedAttachments: media.queuedAttachmentsRef.current,
         spoileredAttachmentUrls,
-      );
-
-      // NIP-30: attach `["emoji", shortcode, url]` tags for custom emoji in the
-      // edited body, exactly like the send path. Without this an edited message
-      // ships with no emoji tags, so the receiver can't resolve a `:shortcode:`
-      // and renders the literal text. `?? []` preserves edit semantics (a
-      // defined-but-empty media set means "wipe attachments").
-      const outgoingTags =
-        mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
-        ) ?? [];
-
-      // Notify only mentions this edit *newly adds* (see
-      // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
-      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
-      // composer state is cleared below.
-      const addedMentionPubkeys = diffAddedMentionPubkeys(
-        extractMentionPubkeysRef.current(editTargetRef.current.body),
-        extractMentionPubkeysRef.current(finalContent),
-        ownerPubkeyRef.current ?? "",
-      );
-
-      const savedContent = trimmed;
-      const savedImeta = [...currentPendingImeta];
-      const savedSpoileredAttachmentUrls = new Set(spoileredAttachmentUrls);
-      setComposerContent("");
-      richText.clearContent();
-      media.setPendingImeta([]);
-      setSpoileredAttachmentUrls(new Set());
-      mentions.clearMentions();
-      channelLinks.clearChannels();
-      emojiAutocomplete.clearEmojis();
-      setIsEmojiPickerOpen(false);
-
-      try {
-        await onEditSaveRef.current(
-          finalContent,
-          outgoingTags,
-          addedMentionPubkeys,
-        );
-      } catch {
-        setComposerContent(savedContent);
-        richText.setContent(savedContent);
-        media.setPendingImeta(savedImeta);
-        setSpoileredAttachmentUrls(savedSpoileredAttachmentUrls);
-      }
+        extractMentionPubkeys: extractMentionPubkeysRef.current,
+        save: onEditSaveRef.current,
+        clearComposer: () => {
+          setComposerContent("");
+          richText.clearContent();
+          media.setPendingImeta([]);
+          media.clearQueuedAttachments();
+          setSpoileredAttachmentUrls(new Set());
+          mentions.clearMentions();
+          channelLinks.clearChannels();
+          emojiAutocomplete.clearEmojis();
+          setIsEmojiPickerOpen(false);
+        },
+        restoreComposer: (draft) => {
+          setComposerContent(draft.content);
+          richText.setContent(draft.content);
+          media.setPendingImeta(draft.pendingImeta);
+          media.restoreQueuedAttachments(draft.queuedAttachments);
+          setSpoileredAttachmentUrls(draft.spoileredAttachmentUrls);
+        },
+        restoreMentionRefs: mentions.restoreDraftMentionRefs,
+        shouldRestoreComposer: () => canRestoreEditDraftRef.current,
+        setDeferredUploadPending: setDeferredEditPending,
+        setUploadError: (message) =>
+          media.setUploadState({ status: "error", message }),
+      });
       return;
     }
-
     // Normal send
     const currentPendingImeta = media.pendingImetaRef.current;
-    const hasMedia = currentPendingImeta.length > 0;
+    const currentQueuedAttachments = media.queuedAttachmentsRef.current;
+    const hasMedia =
+      currentPendingImeta.length > 0 || currentQueuedAttachments.length > 0;
     if (
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
@@ -679,7 +567,6 @@ function MessageComposerImpl({
     ) {
       return;
     }
-
     const capturedThreadContext = onCaptureSendContext?.() ?? null;
     if (
       capturedThreadContext !== null &&
@@ -687,7 +574,6 @@ function MessageComposerImpl({
     ) {
       return;
     }
-
     onPreparingMentionSendChange?.(true);
     persistentMentionHydration.beginSubmit();
     try {
@@ -695,10 +581,13 @@ function MessageComposerImpl({
         capturedChannelId: channelId,
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
+        queuedAttachments: currentQueuedAttachments,
+        linkPreviewTags: getReadyLinkPreviewTags(),
         sentDraftKey: resolveSentDraftKey(
           effectiveDraftKeyRef.current,
           drafts.loadDraft,
         ),
+        recoveryDraftKey: effectiveDraftKey,
         spoileredAttachmentUrls,
         trimmed,
         audienceGeneration: persistentAudience.generation,
@@ -714,8 +603,13 @@ function MessageComposerImpl({
     customEmoji,
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
+    getReadyLinkPreviewTags,
+    media.clearQueuedAttachments,
     media.pendingImetaRef,
+    media.queuedAttachmentsRef,
+    media.restoreQueuedAttachments,
     media.setPendingImeta,
+    media.setUploadState,
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
@@ -730,9 +624,12 @@ function MessageComposerImpl({
     persistentMentionHydration,
     persistentAudience.generation,
     persistentAudience.revision,
+    isEditSubmissionLocked,
+    effectiveDraftKey,
+    mentions.getDraftMentionRefs,
+    mentions.restoreDraftMentionRefs,
   ]);
   submitMessageRef.current = submitMessage;
-
   // ── Auto-submit on draft send ────────────────────────────────────────────
   // When `autoSubmitDraftKey` is set (the user clicked "Send message" in the
   // Drafts panel and confirmed), fire `submitMessage` once after mount so the
@@ -746,7 +643,6 @@ function MessageComposerImpl({
   // runs, preventing re-fire on re-render or back-navigation.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
   onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
-
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
   React.useEffect(() => {
     if (
@@ -769,7 +665,6 @@ function MessageComposerImpl({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // mount-only
-
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -777,7 +672,6 @@ function MessageComposerImpl({
     },
     [submitMessage],
   );
-
   // ── Keyboard handling ───────────────────────────────────────────────
   // Tiptap handles formatting shortcuts (⌘B, ⌘I, etc.) natively.
   // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
@@ -793,7 +687,6 @@ function MessageComposerImpl({
         }
         return;
       }
-
       const channelResult = channelLinks.handleChannelKeyDown(event);
       if (channelResult.handled) {
         if (channelResult.suggestion) {
@@ -801,7 +694,6 @@ function MessageComposerImpl({
         }
         return;
       }
-
       const { handled, suggestion } = mentions.handleMentionKeyDown(event);
       if (handled) {
         if (suggestion) {
@@ -809,7 +701,6 @@ function MessageComposerImpl({
         }
         return;
       }
-
       if (event.key === "Tab" && !event.shiftKey && linkEditor.isCardOpen) {
         event.preventDefault();
         if (!linkEditor.focusCardFirstControl()) {
@@ -817,9 +708,13 @@ function MessageComposerImpl({
         }
         return;
       }
-
       // Escape in edit mode
-      if (event.key === "Escape" && editTargetRef.current && onCancelEdit) {
+      if (
+        event.key === "Escape" &&
+        !isDeferredEditPending &&
+        editTargetRef.current &&
+        onCancelEdit
+      ) {
         event.preventDefault();
         onCancelEdit();
         return;
@@ -834,17 +729,15 @@ function MessageComposerImpl({
       applyMentionInsert,
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
+      isDeferredEditPending,
       onCancelEdit,
     ],
   );
-
   // ── Media paste + ⌘K link shortcut via Tiptap editorProps ──────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
-
   React.useEffect(() => {
     if (!richText.editor) return;
-
     richText.editor.setOptions({
       editorProps: {
         ...richText.editor.options.editorProps,
@@ -862,7 +755,6 @@ function MessageComposerImpl({
             }
             return true;
           }
-
           // --- Buzz code-block paste ---
           // The code block copy button writes a small Buzz marker alongside
           // plain text. Use it to paste back as a literal code block so Markdown
@@ -889,7 +781,6 @@ function MessageComposerImpl({
             scrollComposerToBottom();
             return true;
           }
-
           // Restore Buzz snapshots before normal styled-HTML normalization.
           if (handleAgentSnapshotPaste(event, media.setPendingImeta))
             return true;
@@ -901,37 +792,34 @@ function MessageComposerImpl({
             _view.pasteHTML(cleanHtml);
             return true;
           }
-
           const plainText = event.clipboardData?.getData("text/plain") ?? "";
           if (plainText.includes("\n")) {
             scrollComposerToBottom();
           }
-
           return false;
         },
       },
     });
   }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
-
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(
     () =>
-      disabled ||
+      composerDisabled ||
       media.isUploading ||
       mentionSendFlow.isPreparingMentionSend ||
-      (isContentEmpty && media.pendingImeta.length === 0),
+      (isContentEmpty &&
+        media.pendingImeta.length === 0 &&
+        media.queuedAttachments.length === 0),
     [
-      disabled,
+      composerDisabled,
       media.isUploading,
       mentionSendFlow.isPreparingMentionSend,
       isContentEmpty,
       media.pendingImeta.length,
+      media.queuedAttachments.length,
     ],
   );
-
-  const handleCaptureSelection = React.useCallback(() => {
-    // No-op for Tiptap — selection is managed by ProseMirror.
-  }, []);
+  const handleCaptureSelection = React.useCallback(() => {}, []);
 
   const handlePaperclipClick = React.useCallback(() => {
     void media.handlePaperclip();
@@ -985,12 +873,26 @@ function MessageComposerImpl({
         <div className="relative flex w-full flex-col gap-0">
           <ComposerReplyEditBanner
             isEditing={editTarget != null}
+            isEditCancelDisabled={isDeferredEditPending}
             replyTarget={replyTarget}
             onCancelEdit={onCancelEdit}
             onCancelReply={onCancelReply}
           />
+          {showBackgroundUploadProgress ? (
+            <ComposerUploadProgressPill
+              canCancel={backgroundUpload.canCancel}
+              isUploading={backgroundUpload.isUploading}
+              onCancel={cancelBackgroundMediaUploads}
+              phase={backgroundUpload.phase}
+              percentage={backgroundUpload.percentage}
+            />
+          ) : null}
           <form
-            className="relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55 sm:px-4"
+            className={cn(
+              "relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:supports-[backdrop-filter]:bg-background/55 sm:px-4",
+              layoutMode === "standalone" &&
+                "backdrop-blur-md dark:backdrop-blur-xl",
+            )}
             data-testid="message-composer"
             onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
             onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}
@@ -998,6 +900,10 @@ function MessageComposerImpl({
             onDrop={
               ownsDropZone
                 ? (e) => {
+                    if (isDeferredEditPending) {
+                      e.preventDefault();
+                      return;
+                    }
                     void media.handleDrop(e);
                   }
                 : undefined
@@ -1044,12 +950,18 @@ function MessageComposerImpl({
               </div>
             ) : null}
 
-            {(media.pendingImeta.length > 0 || media.isUploading) && (
+            {composerLinkPreviews}
+            {(media.pendingImeta.length > 0 ||
+              media.queuedAttachments.length > 0 ||
+              media.isUploading) && (
               <div className="mb-2 flex items-center gap-2">
                 <ComposerAttachments
                   attachments={media.pendingImeta}
                   isUploading={media.isUploading}
                   onCancelUpload={media.cancelUpload}
+                  onRemoveQueued={media.removeQueuedAttachment}
+                  onToggleQueuedSpoiler={media.toggleQueuedAttachmentSpoiler}
+                  queuedPreviews={media.queuedPreviews}
                   uploadingCount={media.uploadingCount}
                   uploadingPreviews={media.uploadingPreviews}
                   onEditSave={handleAttachmentEditSave}
@@ -1072,11 +984,12 @@ function MessageComposerImpl({
               <EditorContent editor={richText.editor} />
             </div>
 
-            <MessageComposerToolbar
-              composerDisabled={disabled}
+            <ComposerDockToolbar
+              layoutMode={layoutMode}
+              composerDisabled={composerDisabled}
               editor={richText.editor}
               extraActions={toolbarExtraActions}
-              formattingDisabled={disabled}
+              formattingDisabled={composerDisabled}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
@@ -1094,15 +1007,7 @@ function MessageComposerImpl({
         </div>
       </footer>
 
-      <NonMemberMentionDialog
-        error={mentionSendFlow.nonMemberPromptError}
-        isInvitePending={mentionSendFlow.isInvitePending}
-        names={mentionSendFlow.pendingNonMemberNames}
-        onDismiss={mentionSendFlow.dismissNonMemberPrompt}
-        onDoNothing={mentionSendFlow.sendWithoutInviting}
-        onInvite={mentionSendFlow.inviteNonMembers}
-        open={mentionSendFlow.pendingNonMemberSend !== null}
-      />
+      <NonMemberMentionDialog {...mentionSendFlow.nonMemberPromptProps} />
 
       {linkEditor.card}
       {linkEditor.dialog}

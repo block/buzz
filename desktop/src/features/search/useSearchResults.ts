@@ -11,6 +11,14 @@ import {
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
+import {
+  isChannelUuid,
+  isHexPubkey,
+  normalizeFromHandle,
+  normalizeInChannel,
+  parseSearchOperators,
+  type OperatorResolveResult,
+} from "@/features/search/lib/parseSearchOperators";
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -34,6 +42,56 @@ function dedupeSearchHits(hits: SearchHit[]) {
   });
 }
 
+function resolveChannelIdFromOperator(
+  raw: string | null,
+  channels: Channel[],
+  channelLabels?: Record<string, string>,
+): OperatorResolveResult<string> {
+  if (!raw) {
+    return { status: "none" };
+  }
+  const value = normalizeInChannel(raw);
+  if (!value) {
+    return { status: "none" };
+  }
+  if (isChannelUuid(value)) {
+    return { status: "resolved", value };
+  }
+  const needle = value.toLowerCase();
+  const match = channels.find((channel) => {
+    const label = channelLabels?.[channel.id]?.trim() || channel.name;
+    return (
+      channel.name.toLowerCase() === needle || label.toLowerCase() === needle
+    );
+  });
+  return match
+    ? { status: "resolved", value: match.id }
+    : { status: "unresolved" };
+}
+
+function resolveAuthorFromOperator(
+  raw: string | null,
+  candidates: Array<{ pubkey: string; displayName?: string | null }>,
+): OperatorResolveResult<string> {
+  if (!raw) {
+    return { status: "none" };
+  }
+  if (isHexPubkey(raw)) {
+    return { status: "resolved", value: normalizePubkey(raw) };
+  }
+  const handle = normalizeFromHandle(raw).toLowerCase();
+  if (!handle) {
+    return { status: "unresolved" };
+  }
+  const match = candidates.find((candidate) => {
+    const name = candidate.displayName?.trim().toLowerCase();
+    return name === handle || normalizePubkey(candidate.pubkey) === handle;
+  });
+  return match
+    ? { status: "resolved", value: normalizePubkey(match.pubkey) }
+    : { status: "unresolved" };
+}
+
 export function useSearchResults({
   channelLabels,
   channels,
@@ -55,21 +113,128 @@ export function useSearchResults({
     [channels],
   );
 
-  const searchQuery = useSearchMessagesQuery(debouncedQuery, {
-    enabled,
+  const parsedQuery = React.useMemo(
+    () => parseSearchOperators(debouncedQuery),
+    [debouncedQuery],
+  );
+
+  const channelResolution = React.useMemo(
+    () => resolveChannelIdFromOperator(parsedQuery.in, channels, channelLabels),
+    [parsedQuery.in, channels, channelLabels],
+  );
+
+  const ftsQuery = parsedQuery.text;
+
+  const hasSearchQuery =
+    debouncedQuery.trim().length >= MIN_SEARCH_QUERY_LENGTH ||
+    parsedQuery.since !== null ||
+    parsedQuery.until !== null ||
+    parsedQuery.from !== null ||
+    parsedQuery.in !== null;
+
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+
+  const fromHandleForLookup =
+    parsedQuery.from && !isHexPubkey(parsedQuery.from)
+      ? normalizeFromHandle(parsedQuery.from)
+      : "";
+
+  const managedAgentsQuery = useManagedAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
+  const relayAgentsQuery = useRelayAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
+  // Resolve `from:@name` against people, not only agents.
+  const fromUserSearchQuery = useUserSearchQuery(fromHandleForLookup, {
+    enabled: searchBackedQueriesEnabled && fromHandleForLookup.length >= 1,
+    limit,
+  });
+  const userSearchQuery = useUserSearchQuery(ftsQuery, {
+    enabled: searchBackedQueriesEnabled,
     limit,
   });
 
-  const messageResults = React.useMemo(
-    () => dedupeSearchHits(searchQuery.data?.hits ?? []),
-    [searchQuery.data?.hits],
+  const authorCandidateSeed = React.useMemo(() => {
+    const candidates: Array<{ pubkey: string; displayName?: string | null }> =
+      [];
+    const seen = new Set<string>();
+    const push = (pubkey: string, displayName?: string | null) => {
+      const key = normalizePubkey(pubkey);
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      candidates.push({ pubkey: key, displayName });
+    };
+    for (const agent of managedAgentsQuery.data ?? []) {
+      push(agent.pubkey, agent.name);
+    }
+    for (const agent of relayAgentsQuery.data ?? []) {
+      push(agent.pubkey, agent.name);
+    }
+    for (const user of fromUserSearchQuery.data ?? []) {
+      push(user.pubkey, user.displayName);
+    }
+    for (const user of userSearchQuery.data ?? []) {
+      push(user.pubkey, user.displayName);
+    }
+    return candidates;
+  }, [
+    managedAgentsQuery.data,
+    relayAgentsQuery.data,
+    fromUserSearchQuery.data,
+    userSearchQuery.data,
+  ]);
+
+  const authorResolution = React.useMemo(
+    () => resolveAuthorFromOperator(parsedQuery.from, authorCandidateSeed),
+    [parsedQuery.from, authorCandidateSeed],
   );
+
+  const hasUnresolvedOperator =
+    authorResolution.status === "unresolved" ||
+    channelResolution.status === "unresolved";
+
+  // While `from:@name` user search is still loading, hold off so we do not
+  // flash an unresolved empty state before candidates arrive.
+  const waitingOnFromResolution =
+    Boolean(fromHandleForLookup) &&
+    fromUserSearchQuery.isLoading &&
+    authorResolution.status === "unresolved";
+
+  const searchQuery = useSearchMessagesQuery(ftsQuery, {
+    enabled:
+      enabled &&
+      !hasUnresolvedOperator &&
+      !waitingOnFromResolution &&
+      ftsQuery.length >= MIN_SEARCH_QUERY_LENGTH,
+    limit,
+    channelId:
+      channelResolution.status === "resolved"
+        ? channelResolution.value
+        : undefined,
+    authors:
+      authorResolution.status === "resolved"
+        ? [authorResolution.value]
+        : undefined,
+    since: parsedQuery.since,
+    until: parsedQuery.until,
+    unresolvedOperator: hasUnresolvedOperator,
+  });
+
+  const messageResults = React.useMemo(() => {
+    if (hasUnresolvedOperator) {
+      return [];
+    }
+    return dedupeSearchHits(searchQuery.data?.hits ?? []);
+  }, [hasUnresolvedOperator, searchQuery.data?.hits]);
   const channelResults = React.useMemo(() => {
-    if (debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
-    const normalizedQuery = debouncedQuery.toLowerCase();
+    const normalizedQuery = ftsQuery.toLowerCase();
 
     return channels
       .filter(
@@ -100,21 +265,7 @@ export function useSearchResults({
         return aDisplayName.localeCompare(bDisplayName);
       })
       .slice(0, 5);
-  }, [channelLabels, channels, debouncedQuery]);
-
-  const hasSearchQuery = debouncedQuery.length >= MIN_SEARCH_QUERY_LENGTH;
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
-
-  const userSearchQuery = useUserSearchQuery(debouncedQuery, {
-    enabled: searchBackedQueriesEnabled,
-    limit,
-  });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
-  });
-  const relayAgentsQuery = useRelayAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
-  });
+  }, [channelLabels, channels, ftsQuery]);
   const managedAgentPubkeys = React.useMemo(
     () =>
       new Set(
@@ -145,11 +296,11 @@ export function useSearchResults({
     return pubkeys;
   }, [managedAgentPubkeys, relayAgentsQuery.data]);
   const userResults = React.useMemo<UserSearchResult[]>(() => {
-    if (debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
-    const normalizedQuery = debouncedQuery.toLowerCase();
+    const normalizedQuery = ftsQuery.toLowerCase();
     const candidatesByPubkey = new Map<string, UserSearchResult>();
 
     const matchesQuery = (candidate: UserSearchResult) =>
@@ -241,11 +392,11 @@ export function useSearchResults({
       candidates: [...candidatesByPubkey.values()],
       getLabel: formatUserResultName,
       limit,
-      query: debouncedQuery,
+      query: ftsQuery,
     });
   }, [
-    debouncedQuery,
     eligibleAgentPubkeys,
+    ftsQuery,
     isArchivedDiscovery,
     limit,
     managedAgentPubkeys,
@@ -318,6 +469,7 @@ export function useSearchResults({
     channelLookup,
     channelResults,
     debouncedQuery,
+    isWaitingOnFromResolution: waitingOnFromResolution,
     messageResults,
     query,
     resultProfiles: resultProfilesQuery.data?.profiles,

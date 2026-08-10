@@ -22,6 +22,10 @@ export function getAllTags(event, name) {
     .map((tag) => tag[1]);
 }
 
+export function getImetaTags(event) {
+  return event.tags.filter((tag) => tag[0] === "imeta");
+}
+
 function repoOwnerFromAddress(repoAddress) {
   const owner = (repoAddress ?? "").split(":")[1] ?? "";
   return /^[a-fA-F0-9]{64}$/.test(owner) ? owner.toLowerCase() : null;
@@ -80,6 +84,7 @@ function commentsForIssue(issueId, commentEvents) {
     .map((event) => ({
       id: event.id,
       content: event.content,
+      tags: getImetaTags(event),
       author: event.pubkey,
       createdAt: event.created_at,
     }));
@@ -101,9 +106,12 @@ export function eventToProjectIssue(
     id: issue.id,
     title,
     content: issue.content,
+    tags: getImetaTags(issue),
     author: issue.pubkey,
     createdAt: issue.created_at,
     repoAddress: getTag(issue, "a") ?? null,
+    channelId: getTag(issue, "h") ?? null,
+    originAgentName: getTag(issue, "buzz-origin-agent") ?? null,
     labels: getAllTags(issue, "t"),
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),
@@ -126,6 +134,17 @@ export function projectIssueEventsToIssues(
   return [...issueEvents]
     .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+/** Keep consecutive comments ordered across whole-second Nostr timestamps. */
+export function nextProjectIssueCommentCreatedAt(issue, now, author) {
+  const normalizedAuthor = author.toLowerCase();
+  return Math.max(
+    now,
+    ...issue.comments
+      .filter((comment) => comment.author.toLowerCase() === normalizedAuthor)
+      .map((comment) => comment.createdAt + 1),
+  );
 }
 
 export function buildGitIssueTags({

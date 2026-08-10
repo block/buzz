@@ -19,12 +19,14 @@ use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
 /// The large pick is resolved through mesh-llm's remote catalog
 /// (huggingface.co/datasets/meshllm/catalog), so it does not need to exist in
 /// the compiled `MODEL_CATALOG`; the entry is synthesized below.
-const CURATED_LARGE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
+const CURATED_LARGE: &str = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M";
+const CURATED_LARGE_ALIAS: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
 const CURATED_LARGE_SIZE: &str = "17GB";
 const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
 const CURATED_LARGE_DESCRIPTION: &str =
     "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
-const CURATED_SMALL: &str = "Gemma-4-E4B-it-Q4_K_M";
+const CURATED_SMALL: &str = "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M";
+const CURATED_SMALL_ALIAS: &str = "Gemma-4-E4B-it-Q4_K_M";
 /// Rated-capacity boundary between the two curated tiers, in GB (marketing
 /// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
 const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
@@ -34,6 +36,16 @@ fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
     match rated_gb {
         Some(gb) if gb >= CURATED_LARGE_MIN_RATED_GB => CURATED_LARGE,
         _ => CURATED_SMALL,
+    }
+}
+
+/// Convert Buzz's pre-0.74 curated package aliases into the canonical model
+/// ids advertised and accepted by Mesh's OpenAI ingress.
+pub(crate) fn canonical_curated_model_id(model_id: &str) -> &str {
+    match model_id.trim() {
+        CURATED_SMALL_ALIAS => CURATED_SMALL,
+        CURATED_LARGE_ALIAS => CURATED_LARGE,
+        other => other,
     }
 }
 
@@ -146,12 +158,13 @@ fn build_catalog(
         .filter(|m| !is_draft_only(&m.name))
         .map(|m| {
             let size_gb = parse_size_gb(&m.size);
+            let name = canonical_curated_model_id(&m.name).to_string();
             MeshCatalogEntry {
                 fit: fit_code(size_gb, vram_gb),
-                installed: is_installed(&m.file, &m.name),
+                installed: is_installed(&m.file, &name) || is_installed(&m.file, &m.name),
                 recommended: false,
                 curated: false,
-                name: m.name.clone(),
+                name,
                 size: m.size.clone(),
                 size_gb,
                 description: m.description.clone(),
@@ -166,7 +179,8 @@ fn build_catalog(
         let size_gb = parse_size_gb(CURATED_LARGE_SIZE);
         entries.push(MeshCatalogEntry {
             fit: fit_code(size_gb, vram_gb),
-            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE),
+            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE)
+                || is_installed(CURATED_LARGE_FILE, CURATED_LARGE_ALIAS),
             recommended: false,
             curated: false,
             name: CURATED_LARGE.to_string(),
@@ -256,6 +270,8 @@ mod tests {
 
     #[test]
     fn recommendation_follows_buzz_curated_tiers() {
+        assert_eq!(CURATED_SMALL, "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M");
+        assert_eq!(CURATED_LARGE, "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M");
         // 64GB+ rated machines get the large curated pick.
         let large = build_catalog(None, 64_000_000_000, 64.0, &[]);
         assert_eq!(large.recommended.as_deref(), Some(CURATED_LARGE));
@@ -267,6 +283,22 @@ mod tests {
         assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
         let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
         assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+    }
+
+    #[test]
+    fn curated_package_aliases_migrate_to_openai_model_ids() {
+        assert_eq!(
+            canonical_curated_model_id(CURATED_SMALL_ALIAS),
+            CURATED_SMALL
+        );
+        assert_eq!(
+            canonical_curated_model_id(CURATED_LARGE_ALIAS),
+            CURATED_LARGE
+        );
+        assert_eq!(
+            canonical_curated_model_id("other/model:Q4"),
+            "other/model:Q4"
+        );
     }
 
     #[test]
