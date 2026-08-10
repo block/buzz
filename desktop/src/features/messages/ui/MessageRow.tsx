@@ -895,28 +895,30 @@ export const MessageRow = React.memo(
     // from parent create new refs every render — including them defeats memo.
   },
   (prev, next) =>
-    prev.message.id === next.message.id &&
-    prev.message.pubkey === next.message.pubkey &&
-    prev.message.body === next.message.body &&
-    prev.message.author === next.message.author &&
-    prev.message.isAgent === next.message.isAgent &&
-    prev.message.ownerPubkey === next.message.ownerPubkey &&
-    prev.message.ownerLabel === next.message.ownerLabel &&
-    prev.message.avatarUrl === next.message.avatarUrl &&
-    prev.message.accent === next.message.accent &&
-    prev.message.time === next.message.time &&
-    prev.message.depth === next.message.depth &&
-    prev.message.kind === next.message.kind &&
-    prev.message.pending === next.message.pending &&
-    prev.message.edited === next.message.edited &&
-    // Value comparisons, not identity: these arrays are rebuilt with fresh
-    // identities on every ingest/refetch even when unchanged — identity
-    // checks made every row re-render on every streamed event in an open
-    // thread (see messageRowEquality.ts).
-    reactionsEqual(prev.message.reactions, next.message.reactions) &&
-    tagsEqual(prev.message.tags, next.message.tags) &&
-    prev.message.role === next.message.role &&
-    prev.message.personaDisplayName === next.message.personaDisplayName &&
+    // Structure-shared rows keep the same message object — skip the field walk.
+    (prev.message === next.message ||
+      (prev.message.id === next.message.id &&
+        prev.message.pubkey === next.message.pubkey &&
+        prev.message.body === next.message.body &&
+        prev.message.author === next.message.author &&
+        prev.message.isAgent === next.message.isAgent &&
+        prev.message.ownerPubkey === next.message.ownerPubkey &&
+        prev.message.ownerLabel === next.message.ownerLabel &&
+        prev.message.avatarUrl === next.message.avatarUrl &&
+        prev.message.accent === next.message.accent &&
+        prev.message.time === next.message.time &&
+        prev.message.depth === next.message.depth &&
+        prev.message.kind === next.message.kind &&
+        prev.message.pending === next.message.pending &&
+        prev.message.edited === next.message.edited &&
+        // Value comparisons, not identity: these arrays are rebuilt with fresh
+        // identities on every ingest/refetch even when unchanged — identity
+        // checks made every row re-render on every streamed event in an open
+        // thread (see messageRowEquality.ts).
+        reactionsEqual(prev.message.reactions, next.message.reactions) &&
+        tagsEqual(prev.message.tags, next.message.tags) &&
+        prev.message.role === next.message.role &&
+        prev.message.personaDisplayName === next.message.personaDisplayName)) &&
     depthGuideActionsEqual(
       prev.collapseDepthGuideActions,
       next.collapseDepthGuideActions,

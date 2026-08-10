@@ -1,0 +1,10 @@
+n=10 file=desktop/tests/e2e/perf-proof/wave1b/after-success.txt
+quiet_median: median=16.0 p95=16.0 min=16.0 max=16.0 mean=16.0
+quiet_p95: median=24.0 p95=35.6 min=16.0 max=32.0 mean=22.4
+quiet_over50: median=0.0 p95=1.4 min=0.0 max=1.0 mean=0.1
+quiet_longtask: median=0.0 p95=187.1 min=0.0 max=129.0 mean=12.9
+busy_median: median=28.0 p95=32.0 min=24.0 max=32.0 mean=28.0
+busy_p95: median=32.0 p95=43.6 min=32.0 max=40.0 mean=32.8
+busy_over50: median=0.0 p95=1.4 min=0.0 max=1.0 mean=0.1
+busy_longtask: median=327.0 p95=593.0 min=211.0 max=562.0 mean=360.5
+busy_minus_quiet_median: median=12.0 mean=12.0

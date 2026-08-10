@@ -185,7 +185,7 @@ function getActiveContinuationDepths({
   return depths;
 }
 
-export function MessageThreadPanel({
+export const MessageThreadPanel = React.memo(function MessageThreadPanel({
   channel,
   channelId,
   channelName,
@@ -984,4 +984,4 @@ export function MessageThreadPanel({
       </AuxiliaryPanel>
     </VideoReviewNavigationProvider>
   );
-}
+});

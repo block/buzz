@@ -1,0 +1,10 @@
+WAVE1_PERF repeat=0 quiet_median=16 quiet_p95=16 quiet_over50=0 quiet_longtask=0 busy_median=32 busy_p95=32 busy_over50=0 busy_longtask=339
+WAVE1_PERF repeat=1 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=24 busy_p95=48 busy_over50=0 busy_longtask=295
+WAVE1_PERF repeat=2 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=32 busy_p95=32 busy_over50=0 busy_longtask=362
+WAVE1_PERF repeat=3 quiet_median=16 quiet_p95=16 quiet_over50=0 quiet_longtask=0 busy_median=24 busy_p95=32 busy_over50=1 busy_longtask=404
+WAVE1_PERF repeat=4 quiet_median=16 quiet_p95=16 quiet_over50=0 quiet_longtask=0 busy_median=32 busy_p95=32 busy_over50=0 busy_longtask=550
+WAVE1_PERF repeat=5 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=24 busy_p95=32 busy_over50=0 busy_longtask=338
+WAVE1_PERF repeat=6 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=16 busy_p95=32 busy_over50=0 busy_longtask=227
+WAVE1_PERF repeat=7 quiet_median=16 quiet_p95=24 quiet_over50=1 quiet_longtask=136 busy_median=24 busy_p95=32 busy_over50=0 busy_longtask=563
+WAVE1_PERF repeat=8 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=32 busy_p95=32 busy_over50=0 busy_longtask=420
+WAVE1_PERF repeat=9 quiet_median=16 quiet_p95=24 quiet_over50=0 quiet_longtask=0 busy_median=32 busy_p95=32 busy_over50=0 busy_longtask=539
