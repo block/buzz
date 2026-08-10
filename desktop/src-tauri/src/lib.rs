@@ -503,6 +503,10 @@ pub fn run() {
                 }
             }
 
+            if let Err(error) = managed_agents::recover_abandoned_isolation_runs() {
+                eprintln!("buzz-desktop: filesystem-isolation recovery failed closed: {error}");
+            }
+
             try_regenerate_nest(&app_handle);
 
             if let Some(mgr) = huddle::models::global_model_manager() {

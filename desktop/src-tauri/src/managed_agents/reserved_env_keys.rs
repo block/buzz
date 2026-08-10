@@ -75,6 +75,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // point tools at a different root than the enforced profile.
     "BUZZ_FILESYSTEM_ISOLATION_ATTESTATION",
     "BUZZ_FILESYSTEM_ISOLATION_RUN_ROOT",
+    "BUZZ_FILESYSTEM_ISOLATION_CONTROL_URL",
+    "BUZZ_FILESYSTEM_ISOLATION_CONTROL_TOKEN",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

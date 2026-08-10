@@ -71,6 +71,11 @@ fn mutations() -> Vec<Mutation> {
             s.max_turn_duration_seconds = None
         }),
         ("parallelism", |s| s.parallelism = 8),
+        ("filesystem_isolation", |s| {
+            s.filesystem_isolation = Some(super::super::super::FilesystemIsolationProfile::Ephemeral {
+                read_only_roots: Vec::new(),
+            })
+        }),
     ]
 }
 

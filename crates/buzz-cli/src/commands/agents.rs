@@ -86,17 +86,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::IsolationExplain { pubkey } => {
-            let raw = std::env::var("BUZZ_FILESYSTEM_ISOLATION_ATTESTATION").map_err(|_| {
-                CliError::Usage(
-                    "this process is not running inside a Buzz filesystem-isolated agent run"
-                        .into(),
-                )
-            })?;
-            let receipt: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
-                CliError::Other(format!(
-                    "invalid filesystem-isolation attestation from Desktop: {error}"
-                ))
-            })?;
+            let receipt = fetch_isolation_receipt_from_desktop().await?;
             if let Some(expected) = pubkey {
                 crate::validate::validate_hex64(&expected)?;
                 let actual = receipt
@@ -197,6 +187,52 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+    }
+}
+
+async fn fetch_isolation_receipt_from_desktop() -> Result<serde_json::Value, CliError> {
+    // Every child-delivered value is intentionally ignored, including the
+    // legacy receipt, URL, token, PID, and key variables. The fixed operator-
+    // side Unix socket is protected by the sandbox; Desktop authenticates the
+    // kernel-reported peer PID against its live process-tree registry.
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect("/private/tmp/buzz-isolation-control-v1.sock")
+            .map_err(|error| {
+                CliError::Other(format!(
+                    "Desktop isolation control plane unavailable: {error}"
+                ))
+            })?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .map_err(|error| {
+                CliError::Other(format!("failed to configure control read: {error}"))
+            })?;
+        stream.write_all(b"EXPLAIN\n").map_err(|error| {
+            CliError::Other(format!("failed to request isolation receipt: {error}"))
+        })?;
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).map_err(|error| {
+            CliError::Other(format!("failed to read isolation receipt: {error}"))
+        })?;
+        let receipt: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
+            CliError::Other(format!("invalid Desktop isolation receipt: {error}"))
+        })?;
+        if let Some(error) = receipt.get("error").and_then(serde_json::Value::as_str) {
+            return Err(CliError::Other(format!(
+                "Desktop refused the isolation receipt: {error}"
+            )));
+        }
+        Ok(receipt)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(CliError::Other(
+            "filesystem isolation explain is currently supported only on macOS".into(),
+        ))
     }
 }
 

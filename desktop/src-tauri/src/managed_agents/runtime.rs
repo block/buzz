@@ -524,7 +524,12 @@ pub fn spawn_agent_child(
     let (mut command, isolation_run) = match &record.filesystem_isolation {
         Some(profile) => {
             let (command, run) =
-                super::isolated_agent_command(profile, &record.pubkey, &resolved_acp_command)?;
+                super::isolated_agent_command(
+                    profile,
+                    &record.pubkey,
+                    &current_instance_id(app),
+                    &resolved_acp_command,
+                )?;
             (command, Some(run))
         }
         None => {
@@ -885,6 +890,15 @@ pub fn spawn_agent_child(
             record.name
         )
     })?;
+    let mut isolation_run = isolation_run;
+    if let Some(run) = isolation_run.as_mut() {
+        if let Err(error) = run.bind_pid(child.id()) {
+            let _ = terminate_process(child.id());
+            return Err(format!(
+                "failed to bind filesystem isolation to the tracked process: {error}"
+            ));
+        }
+    }
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
