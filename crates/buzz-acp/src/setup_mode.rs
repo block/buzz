@@ -464,6 +464,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         if let Err(e) = publish_setup_nudge(
             &publisher,
             &config.keys,
+            &rest_client,
             buzz_event.channel_id,
             &buzz_event.event,
             &payload,
@@ -588,6 +589,48 @@ async fn handle_setup_membership(
     }
 }
 
+/// Fetch and verify the original event targeted by a kind:40003 edit.
+async fn fetch_edit_original(
+    target_event_id: &str,
+    rest_client: &crate::relay::RestClient,
+) -> Option<nostr::Event> {
+    use std::time::Duration;
+
+    let target_id = nostr::EventId::from_hex(target_event_id).ok()?;
+    let filter = nostr::Filter::new().id(target_id).limit(1);
+    let response = match tokio::time::timeout(
+        Duration::from_millis(2_000),
+        rest_client.query(&[filter]),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target_event_id,
+                "setup-mode: edit original fetch failed: {error}"
+            );
+            return None;
+        }
+        Err(_) => return None,
+    };
+    let raw = response.as_array()?.first()?;
+    match serde_json::from_value::<nostr::Event>(raw.clone()) {
+        Ok(event) if event.id == target_id && event.verify().is_ok() => Some(event),
+        _ => None,
+    }
+}
+
+/// Construct the flat thread reference used by a setup nudge.
+fn setup_nudge_thread_ref(target_event_id: &str) -> Result<buzz_sdk::ThreadRef> {
+    let target_id = nostr::EventId::from_hex(target_event_id)
+        .map_err(|e| anyhow::anyhow!("invalid nudge anchor event id: {e}"))?;
+    Ok(buzz_sdk::ThreadRef {
+        root_event_id: target_id,
+        parent_event_id: target_id,
+    })
+}
+
 /// Build and publish a setup nudge reply to the triggering event.
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
@@ -595,30 +638,31 @@ async fn handle_setup_membership(
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
+    rest_client: &crate::relay::RestClient,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
     payload: &SetupPayload,
 ) -> Result<()> {
-    use buzz_sdk::ThreadRef;
-
-    // Parse NIP-10 thread tags to determine reply target.
-    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
-
-    let thread_ref = if let Some(root_str) = &thread_tags.root_event_id {
-        // Threaded event: reply flat to the root.
-        let root_id = nostr::EventId::from_hex(root_str)
-            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
-        Some(ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: root_id,
-        })
-    } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
-        })
+    let edit_target = crate::queue::edit_target_id(triggering_event);
+    let target_event_id = match edit_target.as_deref() {
+        Some(target) => match fetch_edit_original(target, rest_client).await {
+            Some(original) => {
+                let thread_tags = crate::queue::parse_thread_tags(&original);
+                thread_tags
+                    .root_event_id
+                    .unwrap_or_else(|| target.to_string())
+            }
+            None => {
+                tracing::warn!(edit_event_id = %triggering_event.id, target_event_id = target,
+                    "setup-mode: original edit target unavailable; using target as nudge anchor");
+                target.to_string()
+            }
+        },
+        None => crate::queue::parse_thread_tags(triggering_event)
+            .root_event_id
+            .unwrap_or_else(|| triggering_event.id.to_hex()),
     };
+    let thread_ref = Some(setup_nudge_thread_ref(&target_event_id)?);
 
     let body = payload.nudge_body();
     let author_hex = triggering_event.pubkey.to_hex();
@@ -992,6 +1036,14 @@ mod tests {
     // (a) non-allowlisted author → no nudge, (b) same event-id → exactly one
     // nudge. They use the extracted `should_nudge_for_event` helper, which is
     // the exact code the live loop calls.
+
+    #[test]
+    fn setup_nudge_edit_fallback_anchors_edit_target_not_edit_event() {
+        let target = "66".repeat(32);
+        let thread_ref = setup_nudge_thread_ref(&target).unwrap();
+        assert_eq!(thread_ref.root_event_id.to_hex(), target);
+        assert_eq!(thread_ref.parent_event_id.to_hex(), target);
+    }
 
     fn fake_event_id(byte: u8) -> EventId {
         EventId::from_byte_array([byte; 32])

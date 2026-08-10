@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nostr::EventId;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
@@ -2045,8 +2046,28 @@ pub async fn run_prompt_task(
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
         let channel_info = ctx.channel_info.resolve(b.channel_id).await;
 
+        let resolved_edit = match b.events.last() {
+            Some(event) => resolve_edit_routing(&event.event, &ctx.rest_client).await,
+            None => None,
+        };
+
         let conversation_context = if ctx.context_message_limit > 0 {
-            fetch_conversation_context(b, &channel_info, &ctx).await
+            match resolved_edit
+                .as_ref()
+                .and_then(|edit| edit.target_thread_tags.root_event_id.as_deref())
+            {
+                Some(root_id) => {
+                    fetch_thread_context(
+                        b.channel_id,
+                        root_id,
+                        ctx.context_message_limit,
+                        ctx.agent_keys.public_key(),
+                        &ctx.rest_client,
+                    )
+                    .await
+                }
+                None => fetch_conversation_context(b, &channel_info, &ctx).await,
+            }
         } else {
             None
         };
@@ -2104,6 +2125,7 @@ pub async fn run_prompt_task(
                 conversation_context: conversation_context.as_ref(),
                 conversation_context_had_delivered_events,
                 profile_lookup: profile_lookup.as_ref(),
+                resolved_edit: resolved_edit.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: standing.base_prompt,
                 system_prompt: standing.system_prompt,
@@ -2996,6 +3018,47 @@ fn conversation_context_delta(
             })
         }
     }
+}
+
+/// Resolve a kind:40003 edit through its original event for reply routing.
+/// Failure deliberately falls back to the edit target id in `format_prompt`.
+async fn resolve_edit_routing(
+    event: &nostr::Event,
+    rest: &RestClient,
+) -> Option<crate::queue::ResolvedEdit> {
+    let target_event_id = crate::queue::edit_target_id(event)?;
+    let target_id = EventId::from_hex(&target_event_id).ok()?;
+    let filter = nostr::Filter::new().id(target_id).limit(1);
+    let response = match timeout(Duration::from_millis(2_000), rest.query(&[filter])).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event fetch failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event fetch timed out");
+            return None;
+        }
+    };
+    let Some(raw) = response.as_array().and_then(|events| events.first()) else {
+        tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event was not returned");
+        return None;
+    };
+    let original = match serde_json::from_value::<nostr::Event>(raw.clone()) {
+        Ok(original) if original.id == target_id && original.verify().is_ok() => original,
+        Ok(_) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event failed id/signature verification");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: malformed original event: {error}");
+            return None;
+        }
+    };
+    Some(crate::queue::ResolvedEdit {
+        target_event_id,
+        target_thread_tags: crate::queue::parse_thread_tags(&original),
+    })
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.

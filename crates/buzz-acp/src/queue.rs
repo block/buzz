@@ -884,6 +884,23 @@ pub struct ThreadTags {
 /// NOTE: Only handles NIP-10 marker-based format (preferred). The deprecated
 /// positional format (no markers, `["e", id, relay_url]`) is not supported —
 /// Buzz always generates marker-based tags (see relay messages.rs:762-783).
+/// Return the original message id targeted by a kind:40003 edit event.
+///
+/// Edit events deliberately use a bare two-element `e` tag; this is not the
+/// deprecated positional NIP-10 thread format and must not be accepted by
+/// [`parse_thread_tags`] for other event kinds.
+pub fn edit_target_id(event: &Event) -> Option<String> {
+    (event.kind.as_u16() == 40003)
+        .then(|| {
+            event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() == 2 && parts.first().map(String::as_str) == Some("e"))
+                    .then(|| parts[1].clone())
+            })
+        })
+        .flatten()
+}
+
 pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     let mut root = None;
     let mut reply = None;
@@ -1444,6 +1461,13 @@ fn format_conversation_context(
     s
 }
 
+/// Original-message routing recovered for a kind:40003 edit event.
+#[derive(Debug, Clone)]
+pub struct ResolvedEdit {
+    pub target_event_id: String,
+    pub target_thread_tags: ThreadTags,
+}
+
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
 #[derive(Default)]
 pub struct FormatPromptArgs<'a> {
@@ -1456,6 +1480,10 @@ pub struct FormatPromptArgs<'a> {
     /// live session had already received. Trigger-only context does not set it.
     pub conversation_context_had_delivered_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// Routing derived by resolving a kind:40003 edit target. When present,
+    /// prompt scope and reply instructions use the original message rather
+    /// than the invisible edit auxiliary event.
+    pub resolved_edit: Option<&'a ResolvedEdit>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
     /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
@@ -1577,7 +1605,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             return Vec::new();
         }
     };
-    let thread_tags = parse_thread_tags(&last_event.event);
+    let edit_target = edit_target_id(&last_event.event);
+    let resolved_edit = args.resolved_edit.filter(|_| edit_target.is_some());
+    // An edit's own bare `e` tag is not a thread tag. Route via the original
+    // message when it was fetched, or its target id as the safe fallback.
+    let thread_tags = resolved_edit
+        .map(|edit| edit.target_thread_tags.clone())
+        .unwrap_or_else(|| parse_thread_tags(&last_event.event));
+    let routing_event_id = resolved_edit
+        .map(|edit| edit.target_event_id.clone())
+        .or(edit_target.clone())
+        .unwrap_or_else(|| last_event.event.id.to_hex());
     let is_dm = args
         .channel_info
         .map(|ci| ci.channel_type == "dm")
@@ -1616,12 +1654,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         thread_tags
             .root_event_id
             .is_some()
-            .then(|| last_event.event.id.to_hex())
+            .then(|| routing_event_id.to_string())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
             &thread_tags,
-            &last_event.event.id.to_hex(),
+            &routing_event_id,
             args.profile_lookup,
         )
     };
@@ -1634,6 +1672,16 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
     ));
+    if let Some(edit) = resolved_edit {
+        sections.push(format!(
+            "[Edit routing]\nTrigger is a kind:40003 edit event; original message ID: {}",
+            edit.target_event_id
+        ));
+    } else if let Some(target_id) = edit_target {
+        sections.push(format!(
+            "[Edit routing]\nTrigger is a kind:40003 edit event; original message ID: {target_id} (original event fetch failed; using target as reply anchor)"
+        ));
+    }
 
     // 3. Conversation context (thread or DM).
     if let Some(ctx) = args.conversation_context {
@@ -5114,6 +5162,78 @@ mod tests {
             q.in_flight_channels.contains(&ch),
             "ch must still be in-flight after has_flushable_work finds ch2 work"
         );
+    }
+
+    fn edit_event(target: &str) -> Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([nostr::Tag::parse(["e", target]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn one_event_batch(event: Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn edit_of_top_level_anchors_original_message_in_rendered_prompt() {
+        let original_id = "11".repeat(32);
+        let edit = edit_event(&original_id);
+        let prompt = format_prompt(
+            &one_event_batch(edit),
+            &FormatPromptArgs {
+                resolved_edit: Some(&ResolvedEdit {
+                    target_event_id: original_id.clone(),
+                    target_thread_tags: ThreadTags::default(),
+                }),
+                ..Default::default()
+            },
+        )
+        .join("\n");
+        assert!(prompt.contains(&format!("--reply-to {original_id}")));
+        assert!(prompt.contains(&format!("original message ID: {original_id}")));
+    }
+
+    #[test]
+    fn edit_of_threaded_reply_anchors_original_thread_root_in_rendered_prompt() {
+        let original_id = "22".repeat(32);
+        let root_id = "33".repeat(32);
+        let prompt = format_prompt(
+            &one_event_batch(edit_event(&original_id)),
+            &FormatPromptArgs {
+                resolved_edit: Some(&ResolvedEdit {
+                    target_event_id: original_id,
+                    target_thread_tags: ThreadTags {
+                        root_event_id: Some(root_id.clone()),
+                        parent_event_id: Some("44".repeat(32)),
+                        mentioned_pubkeys: vec![],
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+        .join("\n");
+        assert!(prompt.contains(&format!("--reply-to {root_id}")));
+    }
+
+    #[test]
+    fn edit_fetch_failure_anchors_target_never_auxiliary_edit_event() {
+        let original_id = "55".repeat(32);
+        let edit = edit_event(&original_id);
+        let edit_id = edit.id.to_hex();
+        let prompt = format_prompt(&one_event_batch(edit), &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {original_id}")));
+        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
     }
 
     // ── F2 case 2.5: steer renewal is monotonic across repeated steers ───────
