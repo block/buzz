@@ -21,7 +21,13 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
-type WelcomeSetupPage = "welcome" | "existing" | "join" | "member" | "owned";
+type WelcomeSetupPage =
+  | "welcome"
+  | "existing"
+  | "owner"
+  | "join"
+  | "member"
+  | "owned";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -41,6 +47,11 @@ export function WelcomeSetup({
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
+  // Where "member" (relay URL) was entered from, so Back returns correctly
+  // for both "I'm a member" and "Connect a self-hosted relay".
+  const [memberBackPage, setMemberBackPage] = React.useState<
+    "existing" | "owner" | "welcome"
+  >("existing");
   // While true, the Builderlab sign-in modal floats over the current page —
   // we only navigate to the hosted stage once sign-in completes, so the page
   // behind the modal never changes out from under the user.
@@ -201,7 +212,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="existing-choice-owner"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => showPage("owner")}
                     type="button"
                   >
                     I own the community
@@ -214,7 +225,10 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="existing-choice-member"
-                    onClick={() => showPage("member")}
+                    onClick={() => {
+                      setMemberBackPage("existing");
+                      showPage("member");
+                    }}
                     type="button"
                   >
                     I’m a member or admin
@@ -226,6 +240,65 @@ export function WelcomeSetup({
                   className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
                   data-testid="existing-back"
                   onClick={() => showPage("welcome")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "owner" ? (
+            <OnboardingSlideTransition
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
+              direction={transitionDirection}
+              transitionKey={`owner-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[760px]">
+                <h1 className="text-title font-normal">
+                  Connect the community you own
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  Self-hosted relays connect by URL. Hosted communities use
+                  Builderlab sign-in.
+                </p>
+              </div>
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="owner-choice-self-hosted"
+                    onClick={() => {
+                      setMemberBackPage("owner");
+                      showPage("member");
+                    }}
+                    type="button"
+                  >
+                    Connect a self-hosted relay
+                  </button>
+                </Card>
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="owner-choice-hosted"
+                    onClick={() => setIsHostedSignInOpen(true)}
+                    type="button"
+                  >
+                    Sign in with Builderlab
+                  </button>
+                </Card>
+              </div>
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="owner-back"
+                  onClick={() => showPage("existing")}
                   type="button"
                   variant="ghost"
                 >
@@ -264,7 +337,7 @@ export function WelcomeSetup({
                   error={null}
                   isRedeeming={false}
                   onCancel={() =>
-                    showPage(page === "member" ? "existing" : "welcome")
+                    showPage(page === "member" ? memberBackPage : "welcome")
                   }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
