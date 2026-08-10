@@ -95,6 +95,7 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useFilesystemIsolationDraft } from "./filesystemIsolation";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -145,6 +146,7 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const filesystemIsolation = useFilesystemIsolationDraft(agent, open);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -167,14 +169,10 @@ export function AgentInstanceEditDialog({
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  // Runtime selector: defaults to "custom" until the dialog opens and the
-  // catalog loads. The open-effect re-derives the correct id from the catalog.
+  // The open-effect replaces this default after the runtime catalog loads.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
-
-  // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
 
-  // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
     if (open) {
@@ -613,6 +611,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    filesystemIsolation.valid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -713,6 +712,7 @@ export function AgentInstanceEditDialog({
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
+        filesystemIsolation: filesystemIsolation.update,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
@@ -729,8 +729,7 @@ export function AgentInstanceEditDialog({
 
       const result = await updateMutation.mutateAsync(input);
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
+        // Lifecycle preference uses its standalone setter.
         await setManagedAgentAutoRestart(
           agent.pubkey,
           autoRestartOnConfigChange,
@@ -1180,6 +1179,7 @@ export function AgentInstanceEditDialog({
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
+                      filesystemIsolation={filesystemIsolation.fieldProps}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
                       hiddenEnvKeys={
                         topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
