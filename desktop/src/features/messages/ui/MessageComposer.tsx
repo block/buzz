@@ -58,6 +58,7 @@ import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
+import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
@@ -663,15 +664,10 @@ function MessageComposerImpl({
     // Clear the trigger BEFORE firing so any navigation from the send cannot
     // loop back with the param still present.
     onAutoSubmitCompleteRef.current?.();
-    // Defer by one macrotask so the draft-persist lifecycle effect (which runs
-    // synchronously after mount) has a chance to load the draft content into
-    // the Tiptap editor before we try to submit.
-    const timer = window.setTimeout(() => {
-      submitMessageRef.current();
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-    };
+    return scheduleSettleGatedAutoSubmit({
+      isPending: () => hasPendingLinkPreviewSnapshotsRef.current,
+      submit: () => submitMessageRef.current(),
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // mount-only
   const handleSubmit = React.useCallback(

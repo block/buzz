@@ -300,14 +300,16 @@ test.beforeEach(async ({ page }, testInfo) => {
                                         "send does not wait",
                                       )
                                     ? 3_000
-                                    : testInfo.title.includes(
-                                          "style defaults",
-                                        ) ||
-                                        testInfo.title.includes(
-                                          "attachment-sized",
-                                        )
-                                      ? 1_500
-                                      : undefined,
+                                    : testInfo.title.includes("draft auto-send")
+                                      ? 500
+                                      : testInfo.title.includes(
+                                            "style defaults",
+                                          ) ||
+                                          testInfo.title.includes(
+                                            "attachment-sized",
+                                          )
+                                        ? 1_500
+                                        : undefined,
                               linkPreviewMetadataStartBlockMs:
                                 testInfo.title.includes(
                                   "loading card before cold resolver work",
@@ -855,6 +857,96 @@ test("Enter during an in-flight snapshot upload cannot ship a bare link", async 
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toBeVisible();
+
+  const linkPreviewTags = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((entry) => entry.command === "send_channel_message");
+    return (
+      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
+    )?.linkPreviewTags;
+  });
+  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+});
+
+test("draft auto-send with a link preview waits for settling and sends exactly once", async ({
+  page,
+}) => {
+  // Regression for the one-shot auto-submit blocker: a confirmed Drafts-panel
+  // "Send message" for a draft containing a supported link is normally still
+  // inside the preview settling window when the mount-only auto-submit effect
+  // fires. The old effect cleared the ?autoSend trigger then fired submit once
+  // at setTimeout(0); submit bailed at the pending-snapshot guard and the
+  // one-shot never retried, so the confirmed draft was silently never sent.
+  // The effect must instead wait until settling finishes, then send exactly
+  // once — with the resolved snapshot tag attached.
+  const previewUrl = "https://github.com/block/buzz/pull/3246?draft=autosend";
+  const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+
+  // Seed a channel draft under the legacy store key (migrated on startup). The
+  // main composer keys its draft off the bare channel id, and the Drafts panel
+  // navigates with ?autoSend=<that key>, so seeding under the bare id mirrors
+  // the real "Send message" target exactly.
+  await page.addInitScript(
+    ({ storeKey, draftKey, content, channel }) => {
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storeKey,
+        JSON.stringify({
+          [draftKey]: {
+            channelId: channel,
+            content,
+            createdAt: timestamp,
+            pendingImeta: [],
+            selectionEnd: content.length,
+            selectionStart: content.length,
+            spoileredAttachmentUrls: [],
+            status: "active",
+            updatedAt: timestamp,
+          },
+        }),
+      );
+    },
+    {
+      storeKey: `buzz-drafts.v1:${"deadbeef".repeat(8)}`,
+      draftKey: channelId,
+      content: previewUrl,
+      channel: channelId,
+    },
+  );
+
+  // Drive the real Drafts-panel "Send message" confirm flow. This does an
+  // in-app client navigation to the channel with ?autoSend=<draftKey>, arming
+  // the main composer's auto-submit effect — the exact production path.
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("home-inbox")).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Drafts" }).click();
+  await page.keyboard.press("Escape");
+
+  const draftRow = page.locator(`[data-testid='home-draft-item-${channelId}']`);
+  await expect(draftRow).toBeVisible({ timeout: 8_000 });
+  await draftRow.hover();
+  await draftRow
+    .getByRole("button", { name: "Send message", exact: true })
+    .click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible({ timeout: 4_000 });
+  await dialog.getByRole("button", { name: "Send", exact: true }).click();
+
+  // Exactly one send eventually fires (after the ~500 ms metadata settle), and
+  // it carries the link preview snapshot tag — proving the draft was not
+  // dropped during the settling window and did not double-send on retry.
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    )
+    .toBe(1);
 
   const linkPreviewTags = await page.evaluate(() => {
     const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]

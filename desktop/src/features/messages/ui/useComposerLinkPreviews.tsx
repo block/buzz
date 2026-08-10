@@ -44,6 +44,26 @@ function previewHostname(href: string): string {
   }
 }
 
+// Pure selector for the snapshot tags emitted on submit. Keyed off `liveHrefs`
+// (the hrefs in the content being sent RIGHT NOW), never the debounced active
+// set — a ready tag for URL A lingers in `tagsByHref` for the 350 ms until the
+// debounce drops A, so keying off live hrefs is what stops "delete A, send
+// replacement text within the window" from leaking A's tag (and media refs)
+// onto a body that no longer contains A. When `suppressed`, emit only the
+// "none" marker. Live hrefs without a ready tag (dead/slow link past the
+// anti-trap cap) are omitted and the message sends as a bare link.
+export function selectSubmitTags(
+  liveHrefs: readonly string[],
+  tagsByHref: Record<string, string[]>,
+  suppressed: boolean,
+): string[][] {
+  if (suppressed) return [["link-preview", "none"]];
+  return liveHrefs.flatMap((href) => {
+    const tag = tagsByHref[href];
+    return tag ? [tag] : [];
+  });
+}
+
 function ComposerLinkPreviewCard({
   preview,
   tagReady,
@@ -398,20 +418,21 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
       </div>
     </div>
   ) : null;
-  // Snapshot tags for a submit, read synchronously at submit start from the href
-  // set currently backing the previews (activeHrefsRef) — so the tags always
-  // correspond to the content being sent. No await: Send is disabled until every
+  // Snapshot tags for a submit, read synchronously at submit start from the
+  // LIVE candidate set (liveCandidatesRef) via `selectSubmitTags` — so the tags
+  // always correspond to the content actually being sent, never a debounced set
+  // that still holds a just-removed URL. No await: Send is disabled until every
   // settling preview has its tag (or the anti-trap cap fires), so at submit time
-  // the tags that will ever exist already exist. A suppressed preview list emits
-  // the "none" marker; hrefs without a ready tag (dead/slow link past the cap)
-  // are omitted and the message sends as a bare link.
-  const getReadyTags = React.useCallback(() => {
-    if (suppressedRef.current) return [["link-preview", "none"]];
-    return [...activeHrefsRef.current].flatMap((href) => {
-      const tag = readyTagsByHrefRef.current[href];
-      return tag ? [tag] : [];
-    });
-  }, []);
+  // the tags that will ever exist already exist.
+  const getReadyTags = React.useCallback(
+    () =>
+      selectSubmitTags(
+        liveCandidatesRef.current,
+        readyTagsByHrefRef.current,
+        suppressedRef.current,
+      ),
+    [],
+  );
   return {
     previewList,
     getReadyTags,
