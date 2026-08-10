@@ -85,6 +85,39 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             Ok(())
         }
 
+        AgentsCmd::IsolationExplain { pubkey } => {
+            let raw = std::env::var("BUZZ_FILESYSTEM_ISOLATION_ATTESTATION").map_err(|_| {
+                CliError::Usage(
+                    "this process is not running inside a Buzz filesystem-isolated agent run"
+                        .into(),
+                )
+            })?;
+            let receipt: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+                CliError::Other(format!(
+                    "invalid filesystem-isolation attestation from Desktop: {error}"
+                ))
+            })?;
+            if let Some(expected) = pubkey {
+                crate::validate::validate_hex64(&expected)?;
+                let actual = receipt
+                    .get("identity_pubkey")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if !actual.eq_ignore_ascii_case(&expected) {
+                    return Err(CliError::Other(format!(
+                        "filesystem-isolation receipt is bound to {actual}, not {expected}"
+                    )));
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&receipt).map_err(|error| {
+                    CliError::Other(format!("failed to render isolation receipt: {error}"))
+                })?
+            );
+            Ok(())
+        }
+
         AgentsCmd::Archive {
             target_pubkey,
             reason,

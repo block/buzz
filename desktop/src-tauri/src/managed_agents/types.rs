@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
+/// Owner-reviewed filesystem boundary for a local managed agent.
+///
+/// The profile is instance-local and is never published with a persona. Each
+/// start creates a new run root; additional roots are read-only and must be
+/// explicitly declared by the owner. The shared Buzz nest is denied even when
+/// a configured root would otherwise overlap it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum FilesystemIsolationProfile {
+    Ephemeral {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        read_only_roots: Vec<PathBuf>,
+    },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendKind {
@@ -120,6 +135,7 @@ impl AgentDefinition {
             provider: self.provider,
             persona_source_version: None,
             env_vars: self.env_vars,
+            filesystem_isolation: None,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -307,6 +323,10 @@ pub struct ManagedAgentRecord {
     /// To "override" a persona env var: set the same key here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    /// Enforced local process-tree filesystem boundary. `None` preserves the
+    /// pre-isolation behavior for existing agents and remote backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_isolation: Option<FilesystemIsolationProfile>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
     /// Auto-restart this agent when its effective spawn config drifts from
@@ -482,6 +502,10 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
+    /// Owns the fresh run root. Dropping it after the process tree exits
+    /// removes all per-run residue before another session can start.
+    #[allow(dead_code)] // lifecycle ownership is the read: Drop performs cleanup
+    pub isolation_run: Option<super::FilesystemIsolationRun>,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -550,6 +574,8 @@ pub struct ManagedAgentSummary {
     pub restart_diff: Vec<super::spawn_snapshot::RestartDiffEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_isolation: Option<FilesystemIsolationProfile>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
     pub status: String,

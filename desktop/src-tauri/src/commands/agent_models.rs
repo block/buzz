@@ -813,6 +813,18 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
+        if let Some(filesystem_isolation) = input.filesystem_isolation {
+            if let Some(profile) = &filesystem_isolation {
+                if record.backend != crate::managed_agents::BackendKind::Local {
+                    return Err(
+                        "filesystem isolation is available only for local managed agents"
+                            .to_string(),
+                    );
+                }
+                crate::managed_agents::validate_filesystem_isolation_profile(profile)?;
+            }
+            record.filesystem_isolation = filesystem_isolation;
+        }
 
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for

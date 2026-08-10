@@ -28,6 +28,7 @@ fn base() -> SpawnConfigSnapshot {
         idle_timeout_seconds: Some(600),
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
+        filesystem_isolation: None,
     }
 }
 
@@ -442,6 +443,7 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
+        isolation_run: None,
         #[cfg(windows)]
         job: None,
     };

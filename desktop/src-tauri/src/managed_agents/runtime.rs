@@ -322,6 +322,7 @@ pub fn build_managed_agent_summary(
         needs_restart,
         restart_diff,
         env_vars: record.env_vars.clone(),
+        filesystem_isolation: record.filesystem_isolation.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
         status,
@@ -517,10 +518,23 @@ pub fn spawn_agent_child(
         nvm_bin,
     );
 
-    let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    // The boundary wraps the outer buzz-acp process, not the inner runtime.
+    // That is the only shared spawn seam inherited by the harness, ACP
+    // runtime, MCP/tool servers, shells, and background descendants.
+    let (mut command, isolation_run) = match &record.filesystem_isolation {
+        Some(profile) => {
+            let (command, run) =
+                super::isolated_agent_command(profile, &record.pubkey, &resolved_acp_command)?;
+            (command, Some(run))
+        }
+        None => {
+            let mut command = std::process::Command::new(&resolved_acp_command);
+            if let Some(home) = super::default_agent_workdir() {
+                command.current_dir(home);
+            }
+            (command, None)
+        }
+    };
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -898,6 +912,7 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        isolation_run,
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -908,6 +923,7 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        isolation_run,
     })
 }
 

@@ -583,6 +583,14 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    if let Some(profile) = &input.filesystem_isolation {
+        crate::managed_agents::validate_filesystem_isolation_profile(profile)?;
+        if input.backend != BackendKind::Local {
+            return Err(
+                "filesystem isolation is available only for local managed agents".to_string(),
+            );
+        }
+    }
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
@@ -882,6 +890,7 @@ pub async fn create_managed_agent(
             persona_team_dir: None,
             persona_name_in_team: None,
             env_vars: input.env_vars.clone(),
+            filesystem_isolation: input.filesystem_isolation.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,

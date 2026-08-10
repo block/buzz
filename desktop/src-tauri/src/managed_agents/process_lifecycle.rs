@@ -137,6 +137,7 @@ pub fn finish_spawn(
     setup_mode: bool,
     adapter_availability: Option<super::AcpAvailabilityStatus>,
     start_nonce: String,
+    isolation_run: Option<super::FilesystemIsolationRun>,
     agent_name: &str,
 ) -> super::ManagedAgentProcess {
     let job = create_job_for_child(child.id());
@@ -153,6 +154,7 @@ pub fn finish_spawn(
         setup_mode,
         adapter_availability,
         start_nonce,
+        isolation_run,
         job,
     }
 }
