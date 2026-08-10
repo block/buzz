@@ -7,6 +7,7 @@ import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { getOsIdleSeconds } from "@/shared/api/osIdle";
 import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import {
   mergePresenceUpdate,
   parseLivePresenceEvent,
@@ -83,6 +84,7 @@ export function usePresenceQuery(
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
+  const refetchInterval = useFocusedRefetchInterval(connected ? 60_000 : false);
 
   return useQuery<PresenceLookup>({
     enabled,
@@ -92,7 +94,8 @@ export function usePresenceQuery(
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
     // (crashed clients). WS events handle the fast path. Pause on degraded
     // connections — HTTP presence calls fail anyway and consume relay quota.
-    refetchInterval: connected ? 60_000 : false,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
