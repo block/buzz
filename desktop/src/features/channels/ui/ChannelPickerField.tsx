@@ -165,6 +165,7 @@ export function ChannelPickerField({
                 id={optionId(channel.id)}
                 key={channel.id}
                 onClick={() => onChange(channel.id)}
+                onMouseDown={(event) => event.preventDefault()}
                 role="option"
                 tabIndex={-1}
                 type="button"

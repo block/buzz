@@ -134,6 +134,13 @@ test("channel picker lists joined channels first and exposes the selection to AT
     firstOptionId ?? "",
   );
 
+  // Mouse selection must preserve focus on the combobox so keyboard
+  // navigation can continue without an extra click back into the input.
+  await options.nth(1).click();
+  await expect(searchInput).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(options.first()).toHaveAttribute("aria-selected", "true");
+
   await waitForAnimations(page);
   await dialog.screenshot({ path: `${OUTDIR}/01-picker-default.png` });
 });
