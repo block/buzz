@@ -46,6 +46,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         AgentsCmd::DraftUpdate {
             channel,
             agent_name,
+            pubkey,
             display_name,
             system_prompt,
             runtime,
@@ -54,12 +55,18 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             respond_to,
         } => {
             let owner = require_owner(client)?;
+            if agent_name.is_none() && pubkey.is_none() {
+                return Err(CliError::Usage(
+                    "provide --agent-name or --pubkey for the target instance".into(),
+                ));
+            }
             let built = build_update(
                 client.keys(),
                 &owner,
                 UpdateAgentDraft {
                     channel_id: channel,
-                    agent_name,
+                    agent_name: agent_name.unwrap_or_default(),
+                    agent_pubkey: pubkey,
                     display_name,
                     system_prompt: system_prompt.map(|v| read_or_stdin(&v)).transpose()?,
                     runtime,

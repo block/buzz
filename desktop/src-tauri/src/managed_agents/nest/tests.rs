@@ -510,8 +510,8 @@ fn test_render_dynamic_section_with_agents() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Kit", Some("p1"))];
     let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
-    assert!(output.contains("| Kit | Builder | @Kit |"));
-    assert!(output.contains("| Name | Persona | How to address |"));
+    assert!(output.contains("| Kit | Builder | `` | @Kit |"));
+    assert!(output.contains("| Name | Persona | Instance pubkey | How to address |"));
     assert!(output.contains("## Workspace"));
 }
 
@@ -526,7 +526,7 @@ fn test_render_dynamic_section_agent_no_persona() {
     let personas = vec![make_persona("p1", "Builder")];
     let agents = vec![make_agent("Scout", Some("nonexistent"))];
     let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
-    assert!(output.contains("| Scout | — | @Scout |"));
+    assert!(output.contains("| Scout | — | `` | @Scout |"));
 }
 
 #[test]

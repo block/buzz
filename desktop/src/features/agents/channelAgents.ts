@@ -1,5 +1,6 @@
 import {
   commandsMatch,
+  findPersonaAgentInChannel,
   findReusableGenericAgent,
   findReusablePersonaAgent,
   pickPreferredManagedAgent,
@@ -76,7 +77,7 @@ export type CreateChannelManagedAgentInput = {
   respondTo?: RespondToMode;
   /** Hex pubkeys for allowlist mode. */
   respondToAllowlist?: string[];
-  /** Skip reuse logic and always create a fresh agent instance. */
+  /** Skip reuse logic and always create a fresh agent instance. Reserved for deliberate multi-instance deploys; team-to-channel attach uses reuse + in-channel dedup instead. */
   forceNewInstance?: boolean;
 };
 
@@ -265,6 +266,25 @@ export async function provisionChannelManagedAgent(
     throw new Error("Agent name is required.");
   }
 
+  if (
+    input.personaId &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const alreadyInChannel = findPersonaAgentInChannel(
+      context.managedAgents,
+      input.personaId,
+      context.channelMemberPubkeys,
+    );
+    if (alreadyInChannel) {
+      return {
+        agent: alreadyInChannel,
+        created: false,
+        runtimeId: input.runtime.id,
+      };
+    }
+  }
+
   // Smart reuse: if a managed agent with the same personaId already exists
   // and is not already in this channel, attach it instead of creating a new one.
   if (
@@ -418,19 +438,34 @@ export async function createChannelManagedAgents(
   const channelMemberPubkeys = new Set(
     members.map((m) => normalizePubkey(m.pubkey)),
   );
-  const context = { managedAgents, channelMemberPubkeys };
 
   // Sequential loop: each agent must be fully created and its relay membership
   // written before the next starts. Concurrent writes to the replaceable
   // kind:39002 membership event cause last-write-wins data loss.
   const successes: CreateChannelManagedAgentResult[] = [];
   const failures: CreateChannelManagedAgentBatchFailure[] = [];
+  let context = {
+    managedAgents,
+    channelMemberPubkeys,
+  };
 
   for (let i = 0; i < inputs.length; i++) {
     const input = inputs[i];
     try {
       const result = await createChannelManagedAgent(channelId, input, context);
       successes.push(result);
+      if (result.agent?.pubkey) {
+        context = {
+          managedAgents: context.managedAgents.some(
+            (a) => a.pubkey === result.agent.pubkey,
+          )
+            ? context.managedAgents
+            : [...context.managedAgents, result.agent],
+          channelMemberPubkeys: new Set(context.channelMemberPubkeys).add(
+            normalizePubkey(result.agent.pubkey),
+          ),
+        };
+      }
     } catch (error) {
       failures.push({
         kind: input.personaId ? "persona" : "generic",

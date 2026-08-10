@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod agents_roster;
 mod config;
 mod engram_fetch;
 mod filter;

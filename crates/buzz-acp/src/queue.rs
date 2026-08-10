@@ -1377,6 +1377,8 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// When the managed block in `AGENTS.md` changed since the prior turn.
+    pub agents_roster_refresh: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1460,6 +1462,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         if let Some(canvas) = args.agent_canvas {
             sections.push(canvas.to_string());
         }
+    }
+
+    if let Some(refresh) = args
+        .agents_roster_refresh
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("[Agents roster]\n{refresh}"));
     }
 
     // 2. Context hints (with a human-aware reply anchor).
