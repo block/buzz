@@ -250,6 +250,7 @@ export async function fetchBuzzEntityMetadata(
 
   const base = {
     siteName: repository.name,
+    faviconDataUrl: null,
     imageDataUrl: null,
     imageDomain: null,
   };

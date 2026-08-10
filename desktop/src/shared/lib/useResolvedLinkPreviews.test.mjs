@@ -357,6 +357,7 @@ test("Buzz PR metadata includes repository identity and trusted root context", a
   assert.equal(result?.siteName, "Buzz Desktop");
   assert.equal(result?.title, "Restore entity cards");
   assert.equal(result?.description, "Open · fix/cards → release · 1234567");
+  assert.equal(result?.faviconDataUrl, null);
   assert.equal(result?.imageDataUrl, null);
 });
 
@@ -427,6 +428,7 @@ test("Buzz repository metadata stays image-less and exposes default branch", asy
   assert.equal(result?.siteName, "Relay Tools");
   assert.equal(result?.title, "Operator tooling for relays");
   assert.equal(result?.description, "active · default: trunk");
+  assert.equal(result?.faviconDataUrl, null);
   assert.equal(result?.imageDataUrl, null);
   assert.equal(result?.imageDomain, null);
 });

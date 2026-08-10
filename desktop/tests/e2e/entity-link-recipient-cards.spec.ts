@@ -85,6 +85,14 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(prCard).toContainText(
     "Open · fix/entity-cards → main · abc1230",
   );
+  await expect(prCard).toHaveAttribute("data-image-state", "none");
+  await expect(prCard.locator("[data-link-preview-thumbnail]")).toHaveCount(0);
+  await expect(
+    prCard.locator("[data-link-preview-hostname-buzz-mark]"),
+  ).toBeVisible();
+  await expect(
+    prCard.locator("[data-link-preview-hostname-favicon]"),
+  ).toHaveCount(0);
 
   // The repository card uses its signed announcement metadata and remains
   // image-less.
@@ -96,6 +104,15 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   );
   await expect(repoCard).toContainText("active · default: main");
   await expect(repoCard).toHaveAttribute("data-image-state", "none");
+  await expect(repoCard.locator("[data-link-preview-thumbnail]")).toHaveCount(
+    0,
+  );
+  await expect(
+    repoCard.locator("[data-link-preview-hostname-buzz-mark]"),
+  ).toBeVisible();
+  await expect(
+    repoCard.locator("[data-link-preview-hostname-favicon]"),
+  ).toHaveCount(0);
   expect(
     await repoCard.evaluate((card) => card.getBoundingClientRect().height),
   ).toBeLessThan(84);
