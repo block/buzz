@@ -16,8 +16,12 @@ import * as React from "react";
  * On identity change, the in-memory map is swapped to the current pubkey's
  * persisted data. Old pubkey data is NOT wiped from localStorage.
  *
- * NOT synced to the relay — NIP-RS markers are monotonic and cannot represent
- * a retrograde "unread" state. localStorage is best-effort (per-device).
+ * The forced-unread state is backed by NIP-RS override registers synced to the
+ * relay. Marking a channel unread creates a register whose set-counter exceeds
+ * the clear-counter; clearing it (mark-read) advances the clear-counter via
+ * applyOverrideRead. localStorage stores the local evidence map so the badge
+ * survives reload and is readable for inactive communities without a live
+ * relay subscription.
  */
 
 export type ForcedUnreadSource = "inbox" | "manual";
@@ -166,17 +170,5 @@ export function useForcedUnreadActions(
     },
     [forcedUnreadRef, getOwnTimestamp, persist],
   );
-  const clearChannelUnreadSource = React.useCallback(
-    (channelId: string, source: ForcedUnreadSource) => {
-      if (!Object.hasOwn(forcedUnreadRef.current, channelId)) return;
-      const current = forcedUnreadRef.current[channelId];
-      const next = removeForcedUnreadSource(current, source);
-      if (next === current) return;
-      if (next === undefined) delete forcedUnreadRef.current[channelId];
-      else forcedUnreadRef.current[channelId] = next;
-      persist();
-    },
-    [forcedUnreadRef, persist],
-  );
-  return { clearChannelUnreadSource, markChannelUnread };
+  return { markChannelUnread };
 }

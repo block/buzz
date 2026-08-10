@@ -36,6 +36,13 @@ export function handleRelayClosed({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode !== "live") {
+    if (subscription.mode === "fenced") {
+      // CLOSED lapses the fence — mark and resolve (unblocks any awaiter).
+      subscription.lapsed = true;
+      subscription.resolveEstablished();
+      subscriptions.delete(subId);
+      return;
+    }
     // Classify before rejecting so a `rate-limited:` history CLOSED arms the
     // gate for concurrent ops. A history sub can't be retried (the caller holds
     // the promise), so we still reject immediately after arming.
@@ -136,6 +143,11 @@ export function prepareSubscriptionEvent(
   if (subscription.mode === "first") {
     return false;
   }
+  if (subscription.mode === "fenced") {
+    // Fenced events are delivered synchronously — caller delivers directly.
+    subscription.onEvent(event);
+    return false; // handled here; do NOT enqueue in the batch buffer
+  }
   subscription.closedRetryAttempt = 0;
   clearClosedRetry(subscription);
   subscription.lastSeenCreatedAt = Math.max(
@@ -156,6 +168,11 @@ export function handleSubscriptionEose({
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
+  if (subscription.mode === "fenced") {
+    // EOSE proves this subscription's fence is established.
+    subscription.resolveEstablished();
+    return;
+  }
   if (subscription.mode === "live") {
     subscription.resolveReady?.();
     subscription.resolveReady = undefined;

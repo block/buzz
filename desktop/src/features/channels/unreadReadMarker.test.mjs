@@ -11,12 +11,12 @@ import {
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
+import { addThreadActivityItems } from "./threadActivityStorage.ts";
 import {
-  addThreadActivityItems,
   channelCatchUpEventKinds,
   resolveChannelReadMarker,
   resolveObservedUnreadRootId,
-} from "./useUnreadChannels.ts";
+} from "./useUnreadChannelsHelpers.ts";
 import {
   isChannelUnreadTriggerKind,
   trackSeenEvent,
