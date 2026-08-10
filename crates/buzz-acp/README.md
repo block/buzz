@@ -125,6 +125,8 @@ All configuration is via environment variables (or CLI flags — every env var h
 |------|---------|---------|-------------|
 | `--agents` | `BUZZ_ACP_AGENTS` | `1` | Number of agent subprocesses (1–32). |
 | `--lazy-pool` | `BUZZ_ACP_LAZY_POOL` | `false` | Connect, subscribe, and queue accepted work before starting ACP/LLM subprocesses. The first accepted event wakes one pool initialization task; failures retry with bounded exponential backoff while work remains. |
+| `--dedup` | `BUZZ_ACP_DEDUP` | `queue` | While a channel has a turn in flight, queue new events or drop them. |
+| `--multiple-event-handling` | `BUZZ_ACP_MULTIPLE_EVENT_HANDLING` | `steer` | Handle a new event for an in-flight channel with `steer`, `queue`, `interrupt`, or `owner-interrupt`. The non-queue modes require `--dedup queue`. |
 | `--heartbeat-interval` | `BUZZ_ACP_HEARTBEAT_INTERVAL` | `0` | Seconds between heartbeat prompts. `0` = disabled. Must be `0` or ≥10 when enabled. |
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
@@ -144,10 +146,12 @@ Controls which authors' events the harness forwards to the agent. Events from di
 |------|----------|
 | `owner-only` | Forward only events from the agent's registered owner. If no owner is set, all events are dropped until the owner is resolved. |
 | `allowlist` | Forward events from the listed pubkeys plus the owner. |
-| `anyone` | Forward all events (no author filtering). |
+| `anyone` | Forward all normal-channel events (no author filtering). DMs remain owner-only. |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
-The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
+For normal channels, the gate applies to **all** inbound events — @mentions, thread replies, and any other event delivered by the relay. DMs are hardened separately: `nobody` drops all DMs, while every other mode admits only the owner and cryptographically verified same-owner sibling agents. External allowlist entries and `anyone` do not grant DM access.
+
+Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 
 | Command | Effect |
 |---------|--------|
@@ -220,6 +224,44 @@ Heartbeat is designed for idle periods. Under sustained event load it will rarel
 
 Start with **N=2** for most deployments. Increase if queue depth grows under load. Each agent spawns its own MCP server subprocess, so resource usage scales approximately as N × (agent memory + MCP server memory). Maximum is 32.
 
+### Shared coding agents
+
+Each channel has an independent conversation session, but every session for an
+agent shares the same workspace on disk. Queue isolation is per channel, not per
+repository: with `agents > 1`, two channels can modify the same checkout at the
+same time. The harness does not provide a repository lock.
+
+Use a conservative configuration when multiple people can ask an agent to edit
+code:
+
+```bash
+buzz-acp \
+  --agents 1 \
+  --respond-to allowlist \
+  --respond-to-allowlist "<alice-pubkey>,<bob-pubkey>" \
+  --dedup queue \
+  --multiple-event-handling queue
+```
+
+This configuration serializes work across channels and makes a new request in
+an active channel wait instead of steering or replacing the current turn. It
+does not isolate filesystem state, so also:
+
+- give each task a unique Git worktree and branch;
+- do not let agents modify the base checkout or work directly on the default
+  branch;
+- commit and open a pull request instead of pushing directly to the default
+  branch; and
+- run the agent with only the repository access, credentials, accounts, and
+  tools that every allowlisted person is trusted to use.
+
+For a Buzz Desktop managed agent, open **Edit agent → Advanced**, set **Who can
+send instructions** to **Selected people**, set **Parallelism** to `1`, and add
+`BUZZ_ACP_MULTIPLE_EVENT_HANDLING=queue` under **Environment variables**.
+Desktop's managed-agent parallelism default is `10`, while the standalone
+`buzz-acp` default is `1`, so set the Desktop value explicitly. `BUZZ_ACP_DEDUP`
+already defaults to `queue`; setting it explicitly is optional.
+
 ## Forum Channels
 
 By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
@@ -259,7 +301,14 @@ Forum event kinds:
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
-> **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
+> **Cold starts and reconnects:** On a cold start, the harness subscribes from
+> the current startup watermark, with a five-second overlap to close the setup
+> race. It does not automatically dispatch older @mentions from a previous run.
+> A relay reconnect within the same running harness instead resumes from its
+> last-seen timestamps, so events missed during that transient disconnect are
+> replayed. If work must survive a complete process or host outage, run the
+> harness on an always-on host, enable a heartbeat that checks pending mentions,
+> or ask the sender to mention the agent again after it is online.
 
 ## Bring Your Own Harness (BYOH)
 
