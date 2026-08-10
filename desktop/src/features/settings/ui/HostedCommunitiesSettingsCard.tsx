@@ -28,6 +28,8 @@ import {
   type HostedNostrIdentity as NostrIdentity,
   VALID_HOSTED_COMMUNITY_NAME as VALID_NAME,
 } from "@/features/communities/hostedCommunityApi";
+import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -52,8 +54,18 @@ import {
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
+function relayHost(url: string | null | undefined) {
+  if (!url) return null;
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export function HostedCommunitiesSettingsCard() {
   const onboarding = useCommunityOnboarding();
+  const { activeCommunity } = useCommunities();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
@@ -573,6 +585,10 @@ export function HostedCommunitiesSettingsCard() {
                       community={community}
                       busy={busy}
                       canConnect={!identityMismatch}
+                      showIconPicker={
+                        relayHost(relayUrl(community)) ===
+                        relayHost(activeCommunity?.relayUrl)
+                      }
                       onConnect={() => {
                         const url = relayUrl(community);
                         if (url)
@@ -719,6 +735,7 @@ function CommunityRow({
   onArchive,
   onUnarchive,
   onTransfer,
+  showIconPicker,
 }: {
   community: HostedCommunity;
   busy: boolean;
@@ -727,6 +744,7 @@ function CommunityRow({
   onArchive: () => void;
   onUnarchive: () => void;
   onTransfer: (npub: string) => Promise<boolean>;
+  showIconPicker: boolean;
 }) {
   const [confirmArchive, setConfirmArchive] = React.useState(false);
   const [confirmUnarchive, setConfirmUnarchive] = React.useState(false);
@@ -740,13 +758,17 @@ function CommunityRow({
       className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 p-4 ${
         archived ? "opacity-70" : ""
       }`}
+      data-testid="hosted-community-row"
     >
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{displayName}</p>
-        <p className="text-xs text-muted-foreground">
-          {community.normalized_host}
-          {archived ? " · Archived" : ""}
-        </p>
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        {showIconPicker ? <CommunityIconSettingsCard compact /> : null}
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">{displayName}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {community.normalized_host}
+            {archived ? " · Archived" : ""}
+          </p>
+        </div>
       </div>
 
       {archived ? (

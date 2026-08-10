@@ -38,9 +38,39 @@ Branch protections live in the same event — `buzz-protect` tags. The relay enf
 
 Agents inherit access from their owner via [NIP-OA](docs/nips/NIP-OA.md). The relay checks: does the push carry a valid NIP-OA auth tag, and is the owner pubkey in that tag listed in `push-allowed`? If yes, the push is accepted — the agent's own pubkey doesn't need to be in the list. Add a maintainer, and all their authorized agents can push. Remove the maintainer, and all their agents lose access instantly. Agents without NIP-OA attestation are treated as their own identity and must be listed explicitly.
 
-Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, zero custom kinds.
+Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, no custom kind for the repo itself.
 
 NIP-34 is the metadata and discovery layer. Git remains the transport. The transport is boring. The metadata is portable.
+
+---
+
+## One Project, Many Repos
+
+Real work spans repositories. The platform is a relay, a desktop app, and a mobile app — three repos, one project. Render one card per repo and they look like three unrelated things.
+
+Grouping is the one forge semantic that per-repo tags cannot express, and it's worth being precise about why, because everything else here deliberately avoids a custom kind.
+
+Put membership in each `kind:30617` and a project spanning Alice's and Bob's repos needs *both* of them to publish a tag naming the group. Alice can't enroll Bob's repo — she can't sign for his key. Cross-owner grouping becomes impossible, and the project's own name, description, and channel end up scattered across events with no single writer and no deletion story: dropping a repo from the group would mean editing an event you don't control.
+
+So there is exactly one custom kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:30621`. One signer, one replaceable event, all group state in one place:
+
+```json
+{
+  "kind": 30621,
+  "tags": [
+    ["d", "platform"],
+    ["name", "Platform"],
+    ["a", "30617:<alice-npub-hex>:buzz"],
+    ["a", "30617:<bob-npub-hex>:buzz-infra"],
+    ["buzz-channel", "<channel-uuid>"],
+    ["buzz-visibility", "listed"]
+  ]
+}
+```
+
+A project points at repos. That's all it does. The signer gets no authority over any member — no edit, no delete, no push, no admin. Adding Bob's repo to your project is your signed assertion that the two belong together, and it changes nothing about Bob's repo or who can push to it. Push policy reads the repo's own event, never the project's.
+
+The cost is stated plainly: a third-party NIP-34 client sees the member repos individually and ignores the grouping. Nothing degrades — the repos are still standard, portable `kind:30617` events. And a repo in no project still renders on its own, exactly as before.
 
 ---
 
@@ -205,6 +235,7 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 | **Workflows** | — | 46001-46012 | No NIP equivalent |
 | **Job dispatch** | — | 43001-43006 | Delegation trees |
 | **Project binding** | 30617 (NIP-34) | `buzz-` tags | Channel, visibility |
+| **Multi-repo projects** | — | 30621 ([NIP-MP](docs/nips/NIP-MP.md)) | Cross-owner grouping is unexpressible in per-repo tags |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
 
 If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
@@ -221,6 +252,7 @@ If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patc
 | Blossom media storage (SHA-256, S3) | ✅ Ships today |
 | Approval gates | 🚧 Infrastructure exists; executor wiring in progress |
 | Project binding (kind:30617 + `buzz-` tags) | 📋 Designed |
+| Multi-repo projects (kind:30621, [NIP-MP](docs/nips/NIP-MP.md)) | 📋 Designed |
 | Git hosting (smart HTTP + NIP-34) | ✅ Ships today |
 | Merge coordinator | 📋 Designed |
 | NIP-34 issues (kind:1621) | 📋 Designed |

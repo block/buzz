@@ -44,6 +44,7 @@ function isEmptySharedComputeError(message: string): boolean {
 export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
+  agentLabel?: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
 
@@ -87,6 +88,19 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
+  // Spec-reserved auth error text (agent-client-protocol ErrorCode::AuthRequired),
+  // surfaced verbatim through buzz-acp's stderr — generic across conformant
+  // harnesses (e.g. cursor-agent when not signed in). Match the message text,
+  // NOT code -32000: that code is also the catch-all fallback for unclassified
+  // errors, so matching it would swallow unrelated failures into "sign in".
+  if (message.toLowerCase().includes("authentication required")) {
+    const label = agentLabel?.trim();
+    return {
+      message: `${label || "This agent"} requires sign-in before models can load. Sign in with the ${label || "agent's"} CLI in a terminal, then try again.`,
+      tone: "warning",
+    };
+  }
+
   if (message.includes("ANTHROPIC_API_KEY required")) {
     return {
       message: "Enter an Anthropic API key to load Anthropic models.",
@@ -96,7 +110,8 @@ export function formatModelDiscoveryErrorStatus(
 
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
-      message: "Enter an OpenAI API key to load OpenAI models.",
+      message:
+        "Enter an OpenAI runtime API key (OPENAI_COMPAT_API_KEY) to load OpenAI models.",
       tone: "warning",
     };
   }

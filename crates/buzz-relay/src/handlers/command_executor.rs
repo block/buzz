@@ -685,6 +685,24 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
     let workflow_name = extract_tag(event, "name").unwrap_or_else(|| def.name.clone());
 
+    // SEC-006: definitions with exfiltration-capable actions (call_webhook)
+    // require elevated channel authority to save — plain membership is not
+    // enough, because the workflow will forward channel content outward with
+    // the owner's standing authority. Fail-closed on lookup errors.
+    if def.requires_elevated_authority() {
+        let role = state
+            .db
+            .get_member_role(tenant.community(), channel_id, &self_bytes)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: role check: {e}")))?;
+        if !matches!(role.as_deref(), Some("owner") | Some("admin")) {
+            return Err(IngestError::Rejected(
+                "forbidden: workflows with call_webhook actions require the owner or admin role"
+                    .into(),
+            ));
+        }
+    }
+
     let mut definition_json: serde_json::Value = serde_json::from_str(&definition_json_str)
         .map_err(|e| IngestError::Internal(format!("error: json parse of definition: {e}")))?;
 
@@ -842,6 +860,31 @@ async fn handle_workflow_trigger(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
     }
+
+    // SEC-006: manual triggers must honor the workflow's lifecycle state and
+    // recheck the owner's *current* channel authority before creating a run.
+    // Without this, a disabled workflow — including one disabled because its
+    // owner was removed from the channel — could still be fired by the owner.
+    if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
+        return Err(IngestError::Rejected(
+            "forbidden: workflow is disabled or inactive".into(),
+        ));
+    }
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+        .map_err(|e| IngestError::Internal(format!("error: corrupt workflow definition: {e}")))?;
+    let Some(wf_channel_id) = workflow.channel_id else {
+        // No channel scope means no channel authority to verify — fail closed.
+        return Err(IngestError::Rejected(
+            "forbidden: workflow has no channel scope".into(),
+        ));
+    };
+    state
+        .workflow_engine
+        .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
+        .await
+        .map_err(|_| {
+            IngestError::Rejected("forbidden: not authorized to trigger this workflow".into())
+        })?;
 
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel

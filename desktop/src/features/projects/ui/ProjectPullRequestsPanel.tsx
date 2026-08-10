@@ -16,13 +16,12 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { ProjectOriginReference } from "./ProjectOriginReference";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
-  type Project,
   type ProjectPullRequest,
+  type Repository as Project,
   type ProjectPullRequestCommentAnchor,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
@@ -35,8 +34,8 @@ import { canReviewProjectPullRequest } from "@/features/projects/pullRequestRevi
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -49,6 +48,7 @@ import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
+import { ProjectRichContent } from "./ProjectRichContent";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
@@ -252,6 +252,7 @@ function PullRequestRow({
 
   return (
     <ProjectFeedRow
+      eventId={pullRequest.id}
       meta={
         <>
           <ProfileIdentityButton
@@ -329,14 +330,6 @@ export function PullRequestDetailHeader({
   pullRequest: ProjectPullRequest;
 }) {
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
-  const sourceChannelId = pullRequest.channelId;
-  const { goChannel } = useAppNavigation();
-  const channelsQuery = useChannelsQuery({
-    enabled: Boolean(sourceChannelId),
-  });
-  const sourceChannel = channelsQuery.data?.find(
-    (channel) => channel.id === sourceChannelId,
-  );
 
   return (
     <header className="min-w-0 space-y-1 p-4 pb-4">
@@ -362,27 +355,10 @@ export function PullRequestDetailHeader({
         <span title={formatExactTimestamp(pullRequest.createdAt)}>
           created {relativeTime(pullRequest.createdAt)}
         </span>
-        {sourceChannelId ? (
-          <span
-            className="inline-flex min-w-0 items-center gap-1"
-            title="Source channel is claimed by the pull request author and is not relay-verified."
-          >
-            <span>linked from</span>
-            {sourceChannel ? (
-              <button
-                aria-label={`Open author-claimed source channel #${sourceChannel.name}`}
-                className="truncate font-medium text-foreground underline-offset-2 hover:underline"
-                onClick={() => void goChannel(sourceChannel.id)}
-                type="button"
-              >
-                #{sourceChannel.name}
-              </button>
-            ) : (
-              <span>an unavailable channel</span>
-            )}
-            <span>(author-claimed)</span>
-          </span>
-        ) : null}
+        <ProjectOriginReference
+          agentName={pullRequest.originAgentName}
+          channelId={pullRequest.channelId}
+        />
       </p>
     </header>
   );
@@ -393,10 +369,12 @@ export function PullRequestMetaRail({
   profiles,
   project,
   pullRequest,
+  stacked = false,
 }: {
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
+  stacked?: boolean;
 }) {
   const identityQuery = useIdentityQuery();
   const authorProfile = profileForPubkey(pullRequest.author, profiles);
@@ -414,7 +392,12 @@ export function PullRequestMetaRail({
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
 
   return (
-    <aside className="min-w-0 space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+    <aside
+      className={cn(
+        "min-w-0 space-y-6 border-border/60 p-4",
+        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
+      )}
+    >
       <OverviewRailSection title="Status">
         <span
           className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
@@ -488,7 +471,8 @@ export function PullRequestMetaRail({
   );
 }
 
-function PullRequestDetail({
+/** Full pull-request conversation, review actions, and comment composer. */
+export function ProjectPullRequestDetail({
   mode,
   onOpenInlineComment,
   onOpenCommit,
@@ -639,10 +623,9 @@ function PullRequestDetail({
     <div>
       {pullRequest.content ? (
         <header className="p-4">
-          <Markdown
-            className="text-sm"
+          <ProjectRichContent
             content={pullRequest.content}
-            interactive={false}
+            tags={pullRequest.tags}
           />
         </header>
       ) : null}
@@ -670,9 +653,11 @@ function PullRequestDetail({
                 ) : null}
               </div>
               {update.content ? (
-                <p className="text-sm text-muted-foreground">
-                  {update.content}
-                </p>
+                <ProjectRichContent
+                  className="text-sm text-muted-foreground"
+                  content={update.content}
+                  tags={update.tags}
+                />
               ) : null}
             </article>
           ))}
@@ -829,10 +814,10 @@ function PullRequestDetail({
                     </span>
                   </div>
                   {activityContent ? (
-                    <Markdown
+                    <ProjectRichContent
                       className="mt-1 text-sm text-foreground/90"
                       content={activityContent}
-                      interactive={false}
+                      tags={item.tags}
                     />
                   ) : null}
                   {item.anchor ? (
@@ -950,7 +935,7 @@ export function PullRequestsPanel({
 
   if (selectedPullRequest) {
     return (
-      <PullRequestDetail
+      <ProjectPullRequestDetail
         mode={mode}
         onOpenInlineComment={onOpenInlineComment}
         onOpenCommit={onOpenCommit}

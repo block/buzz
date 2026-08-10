@@ -7,6 +7,8 @@ export type DiscoverAgentModelsInput = {
   agentArgs?: string[];
   provider?: string;
   envVars?: Record<string, string>;
+  /** Definition-level env from the harness definition (custom/preset). Merged below user envVars. */
+  definitionEnv?: Record<string, string>;
 };
 
 export async function discoverAgentModels(input: DiscoverAgentModelsInput) {

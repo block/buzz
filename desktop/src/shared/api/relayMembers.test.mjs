@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  canEditCommunityProfile,
+  canManageCommunityMembers,
   loadRelayMembershipLookup,
   shouldWarnMissingMembershipSnapshot,
 } from "./relayMembers.ts";
@@ -36,21 +36,21 @@ test("membership relays request their membership snapshot", async () => {
   assert.equal(lookup.membership?.role, "admin");
 });
 
-test("community profile editing is visible on open relays", () => {
+test("community member management is hidden on open relays", () => {
   assert.equal(
-    canEditCommunityProfile({
+    canManageCommunityMembers({
       snapshotFound: false,
       membershipRequired: false,
       membership: null,
     }),
-    true,
+    false,
   );
 });
 
-test("community profile editing is visible to closed-relay admins and owners", () => {
+test("community member management is visible to closed-relay admins and owners", () => {
   for (const role of ["admin", "owner"]) {
     assert.equal(
-      canEditCommunityProfile({
+      canManageCommunityMembers({
         snapshotFound: true,
         membershipRequired: true,
         membership: { pubkey: "a".repeat(64), role },
@@ -60,10 +60,10 @@ test("community profile editing is visible to closed-relay admins and owners", (
   }
 });
 
-test("community profile editing stays hidden while loading and from closed-relay non-admins", () => {
-  assert.equal(canEditCommunityProfile(undefined), false);
+test("community member management stays hidden while loading and from closed-relay non-admins", () => {
+  assert.equal(canManageCommunityMembers(undefined), false);
   assert.equal(
-    canEditCommunityProfile({
+    canManageCommunityMembers({
       snapshotFound: true,
       membershipRequired: true,
       membership: { pubkey: "a".repeat(64), role: "member" },
@@ -71,7 +71,7 @@ test("community profile editing stays hidden while loading and from closed-relay
     false,
   );
   assert.equal(
-    canEditCommunityProfile({
+    canManageCommunityMembers({
       snapshotFound: true,
       membershipRequired: true,
       membership: null,

@@ -9,7 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
-import '../read_state/read_state_time.dart';
+import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sections_storage.dart';
 
 const _uuid = Uuid();
@@ -48,6 +48,15 @@ class ChannelSectionsManager {
   void Function()? _unsubscribe;
   bool _disposed = false;
 
+  /// Base delay for the startup-sync retry backoff. Overridable in tests.
+  final Duration _startupRetryBaseDelay;
+  Timer? _startupRetryTimer;
+  int _startupRetryAttempt = 0;
+  bool _startupFetchSucceeded = false;
+  Future<void>? _syncInFlight;
+  bool _syncAgain = false;
+  int _subscriptionGeneration = 0;
+
   ChannelSectionsManager({
     required this.pubkey,
     required SharedPreferences prefs,
@@ -56,12 +65,15 @@ class ChannelSectionsManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
+    @visibleForTesting
+    Duration startupRetryBaseDelay = const Duration(seconds: 2),
   }) : _storage = ChannelSectionsStorage(prefs),
        _crypto = crypto,
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
+       _startupRetryBaseDelay = startupRetryBaseDelay,
        _store = ChannelSectionsStorage(prefs).read(pubkey);
 
   ChannelSectionStore get store => _store;
@@ -74,14 +86,95 @@ class ChannelSectionsManager {
       return;
     }
 
-    await _fetchAndMerge();
-    await _startLiveSubscription();
+    await _syncWithRelay();
     _onChanged();
+  }
+
+  /// One startup-sync attempt: fetch the remote blob, then start the live
+  /// subscription. Either step can lose a transient race on cold start (the
+  /// relay rate-limits the burst of per-channel subscriptions and rejects
+  /// with `rate-limited: quota exceeded`) — retry with backoff instead of
+  /// silently giving up, which left desktop-created groups invisible until
+  /// an unrelated refetch.
+  ///
+  /// Retries are intentionally unbounded for the manager's lifetime: this
+  /// sync must eventually land for groups to appear at all, and at the 30s
+  /// delay ceiling a persistent retry is cheap. Do not "fix" this into a
+  /// bounded loop — giving up permanently is the exact bug this replaces.
+  Future<void> _syncWithRelay() {
+    if (_disposed) return Future.value();
+    final inFlight = _syncInFlight;
+    if (inFlight != null) {
+      _syncAgain = true;
+      return inFlight;
+    }
+
+    final sync = _runSyncWithRelay();
+    _syncInFlight = sync;
+    return sync.whenComplete(() {
+      _syncInFlight = null;
+      if (_disposed || !_syncAgain) return;
+      _syncAgain = false;
+      unawaited(_syncWithRelay());
+    });
+  }
+
+  Future<void> _runSyncWithRelay() async {
+    if (!_startupFetchSucceeded) {
+      final fetched = await _fetchAndMerge();
+      if (_disposed) return;
+      _startupFetchSucceeded = fetched;
+    }
+
+    final subscribed = _unsubscribe != null || await _startLiveSubscription();
+    if (_disposed) return;
+
+    if (!_startupFetchSucceeded || !subscribed) {
+      _scheduleStartupRetry();
+    } else {
+      // Fully recovered — later transient failures (e.g. a late relay
+      // CLOSED) start backing off from the base delay again instead of the
+      // ceiling the cold start climbed to.
+      _startupRetryAttempt = 0;
+    }
+  }
+
+  void _scheduleStartupRetry() {
+    if (_disposed) return;
+    _startupRetryTimer?.cancel();
+    // The inner shift cap is overflow protection, not the delay policy: the
+    // consecutive-failure counter is unbounded, and an unchecked `<<`
+    // past 62 wraps negative, which would make the Timer fire immediately in
+    // a hot loop. At the default 2s base the outer 30s clamp is what callers
+    // actually observe (2s, 4s, …, 30s); the shift cap only bites for the
+    // tiny injected bases used in tests.
+    final delayMs = min(
+      _startupRetryBaseDelay.inMilliseconds << min(_startupRetryAttempt, 5),
+      30000,
+    );
+    _startupRetryAttempt++;
+    debugPrint(
+      '[ChannelSectionsManager] startup sync incomplete; '
+      'retrying in ${delayMs}ms (attempt $_startupRetryAttempt)',
+    );
+    _startupRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      _startupRetryTimer = null;
+      unawaited(
+        _syncWithRelay().then((_) {
+          if (!_disposed) _onChanged();
+        }),
+      );
+    });
   }
 
   void dispose({bool flushPending = true}) {
     if (_disposed) return;
     _disposed = true;
+    _subscriptionGeneration++;
+    _syncAgain = false;
+
+    _startupRetryTimer?.cancel();
+    _startupRetryTimer = null;
 
     final hadPending = _publishDebounce != null;
     _publishDebounce?.cancel();
@@ -201,8 +294,10 @@ class ChannelSectionsManager {
     });
   }
 
-  Future<void> _fetchAndMerge() async {
-    if (_relaySession == null) return;
+  /// Returns whether the fetch reached the relay (regardless of whether a
+  /// remote blob exists).
+  Future<bool> _fetchAndMerge({bool allowDisposed = false}) async {
+    if (_relaySession == null) return false;
     try {
       final events = await _relaySession.fetchHistory(
         NostrFilter(
@@ -214,18 +309,24 @@ class ChannelSectionsManager {
           limit: 1,
         ),
       );
+      if (_disposed && !allowDisposed) return false;
       _mergeEvents(events);
       _persist();
       if (!_disposed) _onChanged();
-    } catch (_) {
+      return true;
+    } catch (error) {
+      debugPrint('[ChannelSectionsManager] fetch failed: $error');
       // Local state remains usable when relay is unavailable.
+      return false;
     }
   }
 
-  Future<void> _startLiveSubscription() async {
-    if (_relaySession == null) return;
+  /// Returns whether the live subscription was established.
+  Future<bool> _startLiveSubscription() async {
+    if (_relaySession == null || _disposed) return false;
+    final generation = ++_subscriptionGeneration;
     try {
-      _unsubscribe = await _relaySession.subscribe(
+      final unsubscribe = await _relaySession.subscribe(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -235,10 +336,35 @@ class ChannelSectionsManager {
           limit: 1,
         ),
         _handleIncomingEvent,
+        onClosed: (message) => _handleSubscriptionClosed(generation, message),
       );
-    } catch (_) {
-      // Non-fatal — local state and history still work.
+      if (_disposed || generation != _subscriptionGeneration) {
+        unsubscribe();
+        return false;
+      }
+      _unsubscribe = unsubscribe;
+      return true;
+    } catch (error) {
+      debugPrint('[ChannelSectionsManager] live subscription failed: $error');
+      // Non-fatal — local state and history still work; retried by the
+      // startup-sync backoff.
+      return false;
     }
+  }
+
+  /// A relay `CLOSED` can arrive after `subscribe()` already reported
+  /// success: the 500ms readiness wait times out silently under load, and
+  /// the rate-limit rejection lands later. Without this handler the manager
+  /// would keep a dead subscription and never retry — the exact
+  /// load-correlated cold-start failure this retry exists for.
+  void _handleSubscriptionClosed(int generation, String message) {
+    if (_disposed || generation != _subscriptionGeneration) return;
+    debugPrint(
+      '[ChannelSectionsManager] live subscription closed by relay: $message',
+    );
+    _unsubscribe = null;
+    _subscriptionGeneration++;
+    _scheduleStartupRetry();
   }
 
   void _mergeEvents(List<NostrEvent> events) {
@@ -312,7 +438,7 @@ class ChannelSectionsManager {
     }
 
     // Read-before-write: merge remote state before publishing
-    await _fetchAndMerge();
+    await _fetchAndMerge(allowDisposed: allowDisposed);
 
     // No-op suppression: skip if nothing changed
     if (_isIdenticalToLastPublished()) return;

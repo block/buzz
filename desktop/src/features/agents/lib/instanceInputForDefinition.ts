@@ -143,7 +143,13 @@ export async function buildInstanceInputForDefinition(
     ...base,
     acpCommand: "buzz-acp",
     agentCommand: runtime.command,
-    agentArgs: runtime.defaultArgs,
+    // Do NOT seed agentArgs from runtime.defaultArgs: record.agent_args must
+    // remain empty so spawn resolves args live from the definition on every
+    // start.  Seeding here would freeze the args at create-time, silently
+    // ignoring any later definition-arg edits (Thufir F5 / phase B-5).
+    // envVars are intentionally never seeded for the same reason (see comment
+    // at top of this function).
+    agentArgs: [],
     mcpCommand: runtime.mcpCommand ?? "",
     harnessOverride: !persona.runtime || persona.runtime === runtime.id,
     model: persona.model ?? undefined,

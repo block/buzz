@@ -493,10 +493,6 @@ async fn authenticate_media_read(
 ) -> Result<MediaReadAuth, MediaError> {
     let tenant = bind_media_read_tenant(state, headers).await?;
 
-    if !state.config.require_media_get_auth {
-        return Ok(MediaReadAuth { tenant });
-    }
-
     let auth_event = extract_blossom_auth(headers)?;
     let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
     buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
@@ -514,12 +510,8 @@ async fn authenticate_media_read(
     Ok(MediaReadAuth { tenant })
 }
 
-fn blob_cache_control(require_auth: bool) -> &'static str {
-    if require_auth {
-        "private, max-age=31536000, immutable"
-    } else {
-        "public, max-age=31536000, immutable"
-    }
+fn blob_cache_control() -> &'static str {
+    "private, max-age=31536000, immutable"
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -623,7 +615,7 @@ pub(crate) async fn serve_blob_for_tenant(
     req_headers: &HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(sha256_ext)?;
-    let cache_control = blob_cache_control(state.config.require_media_get_auth);
+    let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
@@ -801,10 +793,9 @@ pub async fn head_blob(
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let require_media_get_auth = state.config.require_media_get_auth;
     let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
     let tenant = media_auth.tenant;
-    let cache_control = blob_cache_control(require_media_get_auth);
+    let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
@@ -946,13 +937,8 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
-        test_state_with_media_get_auth(false).await
-    }
-
-    async fn test_state_with_media_get_auth(require_media_get_auth: bool) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
-        config.require_media_get_auth = require_media_get_auth;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;
         config.media_max_concurrent_uploads = 2;
@@ -994,8 +980,8 @@ mod tests {
         Arc::new(state)
     }
 
-    async fn media_get_auth_router(require_media_get_auth: bool) -> axum::Router {
-        let state = test_state_with_media_get_auth(require_media_get_auth).await;
+    async fn media_get_auth_router() -> axum::Router {
+        let state = test_state().await;
         axum::Router::new()
             .route(
                 "/media/{sha256_ext}",
@@ -1041,20 +1027,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_off_allows_unauthenticated_read_until_sidecar_gate() {
-        let response = media_get_auth_router(false)
-            .await
-            .oneshot(media_request("GET", None))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate() {
+    async fn media_reads_reject_unauthenticated_get_and_head_before_sidecar_gate() {
         for method in ["GET", "HEAD"] {
-            let response = media_get_auth_router(true)
+            let response = media_get_auth_router()
                 .await
                 .oneshot(media_request(method, None))
                 .await
@@ -1065,10 +1040,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_valid_server_scoped_token_reaches_sidecar_gate() {
+    async fn media_read_with_valid_server_scoped_token_reaches_sidecar_gate() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
-        let response = media_get_auth_router(true)
+        let response = media_get_auth_router()
             .await
             .oneshot(media_request("GET", Some(auth)))
             .await
@@ -1078,7 +1053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_rejects_upload_verb_wrong_server_and_wrong_x() {
+    async fn media_read_rejects_upload_verb_wrong_server_and_wrong_x() {
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
         let expiration = (now + 300).to_string();
@@ -1102,7 +1077,7 @@ mod tests {
 
         for tags in cases {
             let auth = media_get_auth_header(&keys, tags);
-            let response = media_get_auth_router(true)
+            let response = media_get_auth_router()
                 .await
                 .oneshot(media_request("GET", Some(auth)))
                 .await
@@ -1119,7 +1094,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_get_auth_flag_on_accepts_range_header_only_after_auth() {
+    async fn media_read_accepts_range_header_only_after_auth() {
         let keys = Keys::generate();
         let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
         let mut request = media_request("GET", Some(auth));
@@ -1127,7 +1102,7 @@ mod tests {
             .headers_mut()
             .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
 
-        let response = media_get_auth_router(true)
+        let response = media_get_auth_router()
             .await
             .oneshot(request)
             .await

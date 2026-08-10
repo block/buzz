@@ -2,6 +2,41 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Sanitized inherited config tiers passed to the reader.
+///
+/// Built at the `agent_config` command boundary with spawn-equivalent
+/// sanitization: reserved, malformed, NUL-value, and oversize-value env keys
+/// are stripped (matching `merged_user_env`). Structured fields are
+/// normalized: blank/whitespace-only values collapse to `None`.
+///
+/// Orphaned persona links (persona_id references a missing persona) produce
+/// an empty persona env tier and `None` for all structured persona fields —
+/// the panel still renders from record/global. This diverges deliberately from
+/// spawn's `OrphanedInstance` refusal, which is a spawn-safety property the
+/// display surface does not need to enforce.
+#[derive(Debug, Clone, Default)]
+pub struct InheritedConfigTiers {
+    /// Sanitized env vars from the linked persona definition.
+    pub persona_env: BTreeMap<String, String>,
+    /// Sanitized env vars from the global agent config.
+    pub global_env: BTreeMap<String, String>,
+    /// Sanitized env vars from the resolved harness definition (`HarnessDefinition::env`).
+    /// Sits below global env and above structured values, matching spawn Layer 2b.
+    /// Empty for preset harnesses (all shipped presets have `env: {}`); only
+    /// user-authored custom harness JSONs with a non-empty `env` block contribute here.
+    pub definition_env: BTreeMap<String, String>,
+    /// Structured model from the linked persona (non-blank only).
+    pub persona_model: Option<String>,
+    /// Structured provider from the linked persona (non-blank only).
+    pub persona_provider: Option<String>,
+    /// Structured system_prompt from the linked persona (non-blank only).
+    pub persona_prompt: Option<String>,
+    /// Structured model from global config (non-blank only).
+    pub global_model: Option<String>,
+    /// Structured provider from global config (non-blank only).
+    pub global_provider: Option<String>,
+}
+
 /// Where a config value came from — determines precedence and UI annotations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,14 +52,12 @@ pub enum ConfigOrigin {
     /// Read from harness config file on disk (tier 2b, lowest precedence).
     ConfigFile,
     /// Value inherited from persona defaults.
-    /// Populated by the `get_agent_config_surface` call site: persona values are
-    /// resolved before calling the reader, then the surface is post-processed to
-    /// re-tag injected fields from `BuzzExplicit` to `PersonaDefault`.
+    /// Populated when a persona's env var or structured field wins for this
+    /// field in the reader's candidate resolution.
     PersonaDefault,
     /// Value inherited from global agent configuration defaults.
     /// The lowest user-settable layer — active when neither the agent record nor
-    /// the linked persona specifies a value. Re-tagged from `BuzzExplicit` by the
-    /// `resolve_config_surface` call site, analogously to `PersonaDefault`.
+    /// the linked persona specifies a value.
     GlobalDefault,
     /// Live runtime model override applied via the ModelPicker (Phase 3).
     /// The ACP session's current model diverges from the persona model because
@@ -35,6 +68,11 @@ pub enum ConfigOrigin {
     /// env var. E.g. Claude Code only supports Anthropic as a provider; the
     /// "locked" display is synthesized by the config bridge, not read from disk.
     HarnessConstraint,
+    /// Value comes from a custom harness definition's `env` block.
+    /// Sits below global env and above structured persona/global values,
+    /// matching spawn Layer 2b. Only reachable for user-authored custom harness
+    /// JSONs with a non-empty `env` block; preset harnesses always have empty env.
+    HarnessDefault,
 }
 
 /// How a config field can be written back to the runtime.

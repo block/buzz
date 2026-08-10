@@ -21,9 +21,9 @@
                                             HTTPS
                                               │
                                               ▼
-                                  Anthropic Messages API
-                                   or any OpenAI-compat
-                                  (vLLM, llama.cpp, OpenRouter,
+                                  Anthropic Messages API,
+                                   OpenRouter, or any OpenAI-compat
+                                  (vLLM, llama.cpp, Databricks,
                                    Block Gateway, Ollama, …)
 ```
 
@@ -48,6 +48,12 @@ BUZZ_AGENT_PROVIDER=openai \
 OPENAI_COMPAT_API_KEY=sk-... \
 OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
+  ./target/release/buzz-agent
+
+# Or OpenRouter
+BUZZ_AGENT_PROVIDER=openrouter \
+OPENROUTER_API_KEY=sk-or-v1-... \
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.5 \
   ./target/release/buzz-agent
 
 # Or Databricks model serving via OAuth 2.0 PKCE
@@ -129,15 +135,18 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
+| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
+| `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
+| `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -154,6 +163,67 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_LINE_BYTES` | `4194304` | 4 MiB. Hard cap on inbound JSON-RPC frames. |
 | `BUZZ_AGENT_MAX_HISTORY_BYTES` | `1048576` | 1 MiB. Old turns are evicted past this. |
 | `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` | `51200` | 50 KiB. Per-result cap on tool-output text; oversize is middle-elided (head + tail kept) with an inline marker. Images are exempt. |
+| `BUZZ_AGENT_REQUIRE_REPLY` | `0` (`1` on mesh) | `1` enables the [reply guard](#reply-guard) — remind the model to publish when a turn is about to end with nothing posted to Buzz. Desktop defaults it to `1` for Buzz shared-compute agents. |
+
+
+## Reply Guard
+
+Off by default, except on Buzz shared-compute (mesh) agents, where Buzz Desktop
+sets `BUZZ_AGENT_REQUIRE_REPLY=1` automatically. With it enabled, a turn that is
+about to end without any recognized attempt to post to Buzz gets a reminder that
+its assistant text is invisible to humans, and is rerolled.
+
+This exists because a Buzz agent's reasoning and tool output are not shown to
+anyone. A turn that does real work and never posts is a silent failure — the
+requester waits on a result that was produced and thrown away.
+
+Mesh agents get it by default because they run on small local models, which are
+the ones most likely to do the work and then end the turn without publishing it.
+Setting `BUZZ_AGENT_REQUIRE_REPLY=0` on the agent, persona, or global env opts a
+mesh agent back out; the default never overrides an explicit value.
+
+**Advisory, never a trap.** At most two reminders, then the turn ends whether or
+not anything was published. The guard catches accidental omission; it does not
+compel speech. The reminder text explicitly licenses silence, because the
+built-in system prompt says publishing is optional and silence is often the
+correct outcome.
+
+**Recognition contract.** A turn counts as having replied when it issues a call
+that:
+
+- resolves to a registered, non-hook tool (a hallucinated tool name is rejected
+  at preflight and never runs, so it must not disarm the guard),
+- whose qualified name ends in `__shell` — i.e. the bare tool name is exactly
+  `shell`, which is `buzz-dev-mcp`'s shell tool and any other server's, and
+- whose `command` argument contains `messages send` or `reactions add`.
+
+`messages send` also covers `messages send-diff`. Reactions count because the
+built-in prompt directs agents to react rather than post a bare
+acknowledgement, so nagging an agent that reacted would punish documented
+behavior.
+
+Detection is checked **after** the per-turn tool-call cap
+(`MAX_TOOL_CALLS_PER_TURN`) is applied: a publish-shaped call that was discarded
+never ran.
+
+**It recognizes an attempt, not a successful publish.** Only the command text is
+inspected, never the exit status. A send that fails still satisfies the guard —
+which is fine, since a failed send already returns a non-zero exit and error
+JSON to the model, louder feedback than a reminder.
+
+**Known limits**, both deliberate. A command assembled at runtime (`$CMD`) or
+buried in a wrapper script is missed, so that turn is reminded despite having
+posted. Text that merely quotes a send (`echo "buzz messages send"`) matches, so
+that turn is not reminded. Missing a real post is the expensive direction, and
+substring matching is the forgiving one there. Neither edge is pinned by a test;
+the matcher is free to improve.
+
+**Budget.** Reminders ride the existing `_Stop` gate and share
+`BUZZ_AGENT_STOP_MAX_REJECTIONS` — the outer cap on every end-turn objection.
+At the default 3 both reminders fit; at 1 only one does; at 0 the guard is off
+along with the hooks. A round carrying both a `_Stop` hook objection and a
+reminder costs one rejection and delivers both texts. This is not a new
+lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 
 
 ## Providers
@@ -167,16 +237,23 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | vLLM | `openai` | `POST {base}/chat/completions` | any tool-calling model |
 | llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
-| OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
+
+`provider=openrouter` is first-class, not routed through `provider=openai`: it speaks OpenAI's Chat Completions wire format but with OpenRouter-specific extensions layered on top —
+
+- `reasoning.effort` is set on the request when reasoning effort is configured. The request deliberately carries no `provider.require_parameters` filter: that filter routes only to endpoints advertising every parameter in the body, and 83 of 274 tools-capable OpenRouter models do not advertise `reasoning`, so it turns an effort setting into a hard 404 on a valid model id. A model that cannot reason answers without reasoning instead.
+- The response's `reasoning_details` array (opaque extended-thinking payload) is captured and replayed byte-for-byte on the next turn's assistant message, so multi-turn tool use keeps the model's chain-of-thought.
+- `anthropic/*` models get Anthropic-style `cache_control` breakpoints injected on the system message and the last two user messages.
+- Retryable statuses (429 and typed `provider_overloaded` 503) honor the documented `Retry-After` header (clamped to a small ceiling — see `RETRY_AFTER_CAP_SECS` in `llm.rs` — since the sleep happens outside `BUZZ_AGENT_LLM_TIMEOUT_SECS`); 502 and untyped 503 retry with jittered backoff instead. `401` is treated as an expired/invalid key and refreshed once, while `402` (no credits) and `403` (guardrail/moderation/permission) fail immediately without retry.
 
 `Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
 

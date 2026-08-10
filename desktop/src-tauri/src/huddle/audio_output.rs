@@ -39,7 +39,8 @@ fn list_audio_output_devices_blocking() -> Result<Vec<AudioOutputDevice>, String
 #[tauri::command]
 pub fn set_audio_output_device(name: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state
-        .audio_output_device
+        .huddle_audio
+        .output_device
         .lock()
         .map_err(|e| e.to_string())?;
     *guard = if name.is_empty() { None } else { Some(name) };
@@ -50,7 +51,8 @@ pub fn set_audio_output_device(name: String, state: State<'_, AppState>) -> Resu
 #[tauri::command]
 pub fn get_audio_output_device(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state
-        .audio_output_device
+        .huddle_audio
+        .output_device
         .lock()
         .map_err(|e| e.to_string())?;
     Ok(guard.clone().unwrap_or_default())

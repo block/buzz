@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
-export const HOSTED_COMMUNITY_LIMIT = 3;
+export const HOSTED_COMMUNITY_LIMIT = 5;
 export const VALID_HOSTED_COMMUNITY_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export type BuilderlabAuth = {

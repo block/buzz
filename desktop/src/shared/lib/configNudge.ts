@@ -32,7 +32,7 @@ export type ConfigNudgeRequirement =
        * Determines which message and CTA the nudge card shows:
        * - "available"         → tooling installed, needs login
        * - "adapter_missing"   → CLI installed but ACP adapter missing
-       * - "adapter_outdated"  → ACP adapter present but from deprecated package; reinstall required
+       * - "adapter_outdated"  → ACP adapter present but unsupported/outdated; reinstall required
        * - "cli_missing"       → ACP adapter installed but CLI missing
        * - "not_installed"     → neither adapter nor CLI found
        */
@@ -50,7 +50,17 @@ export type ConfigNudgeRequirement =
       /** One-line stderr excerpt from the CLI's parse error. */
       diagnostic: string;
     }
-  | { surface: "git_bash" };
+  | { surface: "git_bash" }
+  | {
+      /**
+       * A custom harness command that cannot be resolved in the current PATH.
+       * No in-app action can fix this — the user must install the binary or
+       * update their PATH.
+       */
+      surface: "missing_binary";
+      /** The command name that was not found (e.g. "my-acp-agent"). */
+      command: string;
+    };
 
 /**
  * The structured payload embedded in the `buzz:config-nudge` sentinel block.
@@ -155,6 +165,8 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
         typeof r.setup_copy === "string" &&
         typeof r.diagnostic === "string"
       );
+    case "missing_binary":
+      return typeof r.command === "string";
     default:
       return false;
   }

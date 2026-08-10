@@ -19,6 +19,40 @@ just mobile-dev
 cd mobile && flutter run
 ```
 
+### Worktree-aware debug identity
+
+Debug builds produced from a git worktree get a unique app identifier keyed
+to the **worktree directory name** (`com.buzz.buzzMobile.<slug>` on iOS,
+`xyz.block.buzz.mobile.<slug>` on Android) plus a display-only branch label
+in the app name (`Buzz (my-branch)`, or a short SHA when the worktree is
+detached). Because the identifier follows the directory rather than the
+branch, one worktree keeps exactly one installed app — and its login state —
+across branch switches, and builds from multiple worktrees install side by
+side, mirroring the desktop dev experience. Release and profile builds
+always keep the production identity and name.
+
+`just mobile-dev` and `just mobile-build-android` apply this automatically by
+running `scripts/mobile-worktree-overrides.sh`, which writes two gitignored
+files:
+
+- `mobile/ios/Flutter/WorktreeOverrides.xcconfig` (included by Debug builds
+  only; a developer's `AppOverrides.xcconfig` is included after it, so
+  app-specific overrides like a personal `BUNDLE_IDENTIFIER` for device
+  signing always win)
+- `mobile/android/worktree.properties` (read by the debug build type only)
+
+For direct Xcode / Android Studio / `flutter run` development, run
+`./scripts/mobile-worktree-overrides.sh` from the repo root once per branch
+switch to refresh the display label (the install identity never changes);
+the persisted files are then picked up by any subsequent build. In the main
+checkout the script is a no-op that removes stale override files, restoring
+the plain `Buzz` identity.
+
+To remove leftover worktree-suffixed installs from booted iOS simulators and
+connected Android emulators, run `just mobile-clean` (add `--dry-run` via
+`./scripts/mobile-worktree-clean.sh --dry-run` to preview). Production
+installs are never touched.
+
 ## Checks
 
 ```bash

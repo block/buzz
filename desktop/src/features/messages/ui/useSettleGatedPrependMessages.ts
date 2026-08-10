@@ -4,13 +4,13 @@ import * as React from "react";
  * Holds an older-history prepend out of the rendered timeline until the
  * scroller is genuinely at rest, then admits it atomically.
  *
- * Why: every prepend-compensation mechanism in this design — Virtua's shift
- * correction, the pre-paint scrollBy, the semantic-anchor watcher — is a
- * scrollTop write. On macOS WKWebView those writes can be dropped or
- * overridden while trackpad momentum owns the committed offset, so a page
- * commit that lands mid-fling displaces the viewport by the full prepended
- * height with no reliable way to correct it. Committing only at rest keeps
- * all three writers operating in the regime where they are exact.
+ * Why: Virtua reconciles an active prepend by correcting scrollTop as the
+ * inserted rows are measured. On macOS WKWebView those corrections can be
+ * dropped or overridden while trackpad momentum owns the committed offset, so
+ * a page admitted mid-fling can displace the viewport by the full prepended
+ * height. Admitting only at rest gives Virtua a stable geometry window in
+ * which to complete that reconciliation exactly; subsequent reader wheel input
+ * then retires it.
  *
  * The fetched store stays authoritative and fetches still start immediately;
  * this hook only delays when the fetched page joins the rendered snapshot.

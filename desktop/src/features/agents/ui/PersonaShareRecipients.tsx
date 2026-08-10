@@ -34,7 +34,6 @@ export function PersonaShareRecipients({
   excludedPubkeys = [],
   onSelectionChange,
   open,
-  renderEndControl,
   selectedUsers,
   testIdPrefix = "persona-share",
 }: {
@@ -42,7 +41,6 @@ export function PersonaShareRecipients({
   excludedPubkeys?: readonly string[];
   onSelectionChange: (users: UserSearchResult[]) => void;
   open: boolean;
-  renderEndControl?: (onOpenChange: (open: boolean) => void) => React.ReactNode;
   selectedUsers: UserSearchResult[];
   testIdPrefix?: string;
 }) {
@@ -228,11 +226,6 @@ export function PersonaShareRecipients({
                 value={searchQuery}
               />
             </div>
-            {selectedUsers.length > 0 && renderEndControl
-              ? renderEndControl((controlOpen) => {
-                  if (controlOpen) setIsPickerOpen(false);
-                })
-              : null}
           </div>
         </PopoverAnchor>
         <PopoverContent

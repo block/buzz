@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
-import type { ChannelTemplate } from "../../src/shared/api/types";
+import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
+import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -43,24 +44,6 @@ type MockCommandAvailability = {
   resolvedPath?: string | null;
 };
 
-type MockManagedAgentSeed = {
-  pubkey: string;
-  name: string;
-  personaId?: string | null;
-  status?: "running" | "stopped" | "deployed" | "not_deployed";
-  channelNames?: string[];
-  channelIds?: string[];
-  backend?:
-    | { type: "local" }
-    | { type: "provider"; id: string; config: Record<string, unknown> };
-  lastError?: string | null;
-  lastErrorCode?: number | null;
-  needsRestart?: boolean;
-  autoRestartOnConfigChange?: boolean;
-  respondTo?: "owner-only" | "allowlist" | "anyone";
-  respondToAllowlist?: string[];
-};
-
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -83,12 +66,28 @@ type MockRelayAgentSeed = {
   status?: "online" | "away" | "offline";
 };
 
+type MockHuddleSeed = {
+  parentChannelId: string;
+  ephemeralChannelId: string;
+  huddleThreadEventId?: string | null;
+  phase?: "creating" | "connected" | "active";
+  members: Array<{
+    pubkey: string;
+    role: "owner" | "admin" | "member" | "guest" | "bot";
+  }>;
+  transcriptionEnabled?: boolean;
+  ttsEnabled?: boolean;
+  isCreator?: boolean;
+};
+
 type MockPersonaSeed = {
   id?: string;
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
+  shared?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
   /**
@@ -103,6 +102,8 @@ type MockPersonaSeed = {
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -127,13 +128,47 @@ export type MockAgentMemoryListing = {
   fetchedAt: number;
 };
 
+/** Result returned by the `install_acp_runtime` mock command. */
+type MockInstallRuntimeResult = {
+  success: boolean;
+  steps: {
+    step: string;
+    command: string;
+    success: boolean;
+    stdout: string;
+    stderr: string;
+    exit_code: number | null;
+    hint?: string;
+  }[];
+  /** Install log the failure message points at. Omitted = no log was written. */
+  log_path?: string | null;
+};
+
 type MockBridgeOptions = {
+  /** Tauri window label exposed to the app. Defaults to the main window. */
+  windowLabel?: string;
+  ttsSettings?: {
+    version: number;
+    agentTextToSpeech: boolean;
+    voicePreferences: string[];
+  };
+  /** Native picker boundary result for Pocket voice import tests. */
+  pocketVoiceImportResult?: "success" | "cancel" | "invalid";
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
+  /** Native-like huddle state seeded from authoritative role-bearing membership. */
+  huddle?: MockHuddleSeed;
   /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
   builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
+  /** Optional policy returned by the native join-policy discovery command. */
+  joinPolicy?: {
+    terms_markdown?: string;
+    privacy_markdown?: string;
+    age_attestation_required: boolean;
+    version: string;
+  } | null;
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */
@@ -152,41 +187,27 @@ type MockBridgeOptions = {
   /** Catalog responses for successive discovery calls. The final response repeats. */
   acpRuntimesCatalogSequence?: Record<string, unknown>[][];
   acpRuntimesDelayMs?: number;
+  /** When true, the mock catalog discovery command throws an error. */
+  acpRuntimesError?: boolean;
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
+  /** When set, the `delete_custom_harness` mock command throws with this message. */
+  deleteCustomHarnessError?: string;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
   connectAcpRuntimeError?: string;
   installAcpRuntimeDelayMs?: number;
+  /** Live output lines the mocked install emits before it settles, in order.
+   *  Each arrives as an `acp-install-output` event, preceded by the clear
+   *  signal the backend sends at the start of an attempt. */
+  installAcpRuntimeOutputLines?: string[];
   /** Override the result returned by the `install_acp_runtime` mock command.
    *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
-  installAcpRuntimeResult?: {
-    success: boolean;
-    steps: {
-      step: string;
-      command: string;
-      success: boolean;
-      stdout: string;
-      stderr: string;
-      exit_code: number | null;
-      hint?: string;
-    }[];
-  };
+  installAcpRuntimeResult?: MockInstallRuntimeResult;
   /** Sequence of results for successive `install_acp_runtime` calls. Call N
    *  returns results[N]; when exhausted the last entry repeats. Takes precedence
    *  over `installAcpRuntimeResult`. Use for fail-then-succeed Retry tests. */
-  installAcpRuntimeResults?: Array<{
-    success: boolean;
-    steps: {
-      step: string;
-      command: string;
-      success: boolean;
-      stdout: string;
-      stderr: string;
-      exit_code: number | null;
-      hint?: string;
-    }[];
-  }>;
+  installAcpRuntimeResults?: MockInstallRuntimeResult[];
   activePersonaIds?: string[];
   /**
    * Listing returned by the mocked `get_agent_memory` command. Pass a single
@@ -198,6 +219,18 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  /** Result returned by the mocked `add_agent_to_huddle` command. */
+  addAgentToHuddleResult?: {
+    ephemeral_added: boolean;
+    parent_added: boolean;
+    parent_error: string | null;
+  };
+  /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
+  huddleStateReadDelayMs?: number;
+  /** Delay companion creation to expose the newly-started huddle handoff state. */
+  openHuddleWindowDelayMs?: number;
+  /** Delay the native start result after membership arrives in the channel list. */
+  startHuddleReturnDelayMs?: number;
   /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{
     pubkey: string;
@@ -211,8 +244,13 @@ type MockBridgeOptions = {
       | "stopped";
   }>;
   personas?: MockPersonaSeed[];
+  /** Community catalog replaceable-event heads returned by relay queries. */
+  personaCatalogEvents?: RelayEvent[];
+  /** Outcomes for successive explicit persona share publications. */
+  personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   channelTemplates?: ChannelTemplate[];
@@ -237,6 +275,8 @@ type MockBridgeOptions = {
   applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Hold mock send live echoes until the E2E release seam is invoked. */
+  deferSendMessageLiveEcho?: boolean;
   /** Close the first channel-window live REQ; its retry is accepted. */
   closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
@@ -251,8 +291,36 @@ type MockBridgeOptions = {
   channelWindowDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
+  /** Override whether get_profile reports a real kind:0 event. */
+  profileHasEvent?: boolean;
   profileUpdateError?: string;
   profileUpdateErrors?: string[];
+  linkPreviewMetadata?: {
+    title: string;
+    siteName: string | null;
+    description: string | null;
+    imageDataUrl: string | null;
+    imageDomain: string | null;
+    imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+    imageRetryAfterMs?: number | null;
+    faviconDataUrl?: string | null;
+  } | null;
+  linkPreviewMetadataByHref?: Record<
+    string,
+    {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null
+  >;
+  linkPreviewMetadataDelayMs?: number;
+  /** Simulates native cold-cache startup work before the async response. */
+  linkPreviewMetadataStartBlockMs?: number;
   searchProfiles?: MockSearchProfileSeed[];
   updateAvailable?: boolean;
   updateChannelDelayMs?: number;
@@ -269,23 +337,6 @@ type MockBridgeOptions = {
   websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
-  /**
-   * Value returned by the `observer_archive_default_enabled` mock command.
-   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
-   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
-   */
-  observerArchiveDefaultEnabled?: boolean;
-  /**
-   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * assert the pending-reconciliation state (toggle disabled, no
-   * `list_save_subscriptions` call yet) before the policy resolves.
-   */
-  observerArchiveDefaultEnabledDelayMs?: number;
-  /**
-   * When set, `observer_archive_default_enabled` throws with this message —
-   * drives the fail-closed path when the policy check itself fails.
-   */
-  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -301,6 +352,8 @@ type MockBridgeOptions = {
   oaOwnerIsMe?: boolean;
   /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
   relayRequiresMembership?: boolean;
+  /** Delay EOSE for membership snapshots after delivering the event. */
+  relayMembershipEoseDelayMs?: number;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch
@@ -314,12 +367,16 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Exercise the production composer path that queues files until send. */
+  deferredComposerUploads?: boolean;
   /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
    *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
   encodeDelayMs?: number;
   /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
+  /** Delay (ms) applied to `start_pairing` so pairing loading UI is observable. */
+  pairingStartDelayMs?: number;
   /**
    * Sequenced results for `confirm_team_snapshot_import`. String = throw
    * with that message; null = succeed. Call N uses results[N]; last entry
@@ -399,6 +456,7 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  ownerOnlyAccessBuild?: boolean;
   /** File-layer config returned by runtime id. */
   runtimeFileConfigs?: Record<
     string,
@@ -418,6 +476,16 @@ type MockBridgeOptions = {
   /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
    *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
   setGlobalAgentConfigDelayMs?: number;
+  /** Sequenced save failures. A string rejects that call; null succeeds. */
+  setGlobalAgentConfigErrors?: (string | null)[];
+  /** Errors returned by successive backup verification attempts. Null succeeds. */
+  backupVerificationErrors?: (string | null)[];
+  /** Public identities returned by successive successful backup verifications. */
+  backupVerificationPubkeys?: string[];
+  /** Delay (ms) applied to backup encryption so specs can observe pending UI. */
+  backupEncryptionDelayMs?: number;
+  /** Native paths returned by successive backup saves. */
+  backupSavePaths?: Array<string | null>;
   /**
    * When set, `get_nsec` throws with this message. For a single always-fail
    * scenario. Use `nsecErrors` for sequenced fail/succeed.
@@ -467,6 +535,25 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /**
+   * Providers returned by `discover_backend_providers`. Defaults to `[]`
+   * (the "Run on" section stays hidden). Setting this renders the remote
+   * backend selector in the create-agent dialog.
+   */
+  backendProviders?: Array<{ id: string; binaryPath: string }>;
+  /**
+   * Result returned by `probe_backend_provider`. Defaults to
+   * `{ ok: false, error: "mock: no providers available" }`.
+   */
+  backendProviderProbeResult?: Record<string, unknown>;
+  /**
+   * Delay (ms) applied to `probe_backend_provider` so a spec can assert the
+   * pre-resolution state (config fields stay probe-gated until the result
+   * lands). Typing while a probe is in flight is unreachable through the UI
+   * for the same reason; that merge path is pinned at the unit level
+   * (`applyProbeResult` in whereToRunIntent.test.mjs).
+   */
+  backendProviderProbeDelayMs?: number;
 };
 
 type BridgeOptions = {
