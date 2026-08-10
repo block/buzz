@@ -131,6 +131,21 @@ export function readSelfProfileCache(
 
 function trimSelfProfileCaches(relayUrl: string, preservedKey: string): void {
   const relayPrefix = `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}:`;
+  let totalEntryCount = 0;
+  let relayEntryCount = 0;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const key = window.localStorage.key(i);
+    if (!key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) continue;
+    totalEntryCount += 1;
+    if (key.startsWith(relayPrefix)) relayEntryCount += 1;
+  }
+  if (
+    totalEntryCount <= MAX_SELF_PROFILE_CACHES &&
+    relayEntryCount <= MAX_SELF_PROFILE_CACHES_PER_RELAY
+  ) {
+    return;
+  }
+
   const entries: Array<{ key: string; updatedAt: number }> = [];
   for (let i = 0; i < window.localStorage.length; i++) {
     const key = window.localStorage.key(i);

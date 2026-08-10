@@ -22,16 +22,12 @@ export function getOverrides(): FeatureOverrides {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return {};
     const featureIds = new Set(manifest.features.map((feature) => feature.id));
-    const overrides = Object.fromEntries(
+    return Object.fromEntries(
       Object.entries(parsed).filter(
         (entry): entry is [string, boolean] =>
           featureIds.has(entry[0]) && typeof entry[1] === "boolean",
       ),
     );
-    const serialized = JSON.stringify(overrides);
-    if (serialized !== raw)
-      window.localStorage.setItem(OVERRIDES_KEY, serialized);
-    return overrides;
   } catch {
     return {};
   }

@@ -6,7 +6,9 @@
 
 const ICON_CACHE_KEY = "buzz-community-icons";
 export const MAX_CACHED_COMMUNITY_ICONS = 32;
-export const MAX_CACHED_COMMUNITY_ICON_LENGTH = 64 * 1024;
+// Keep aligned with MAX_WORKSPACE_ICON_DATA_URL_LEN in
+// crates/buzz-relay/src/handlers/relay_admin.rs.
+export const MAX_CACHED_COMMUNITY_ICON_LENGTH = 98_304;
 
 export function boundCommunityIconCache(
   cache: Record<string, string>,

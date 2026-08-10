@@ -51,7 +51,7 @@ test("storageKey: different pubkeys produce different keys", () => {
   assert.notEqual(a, b);
 });
 
-function installStorage() {
+function installStorage(onGetItem = () => {}) {
   const values = new Map();
   globalThis.window = {
     dispatchEvent: () => true,
@@ -59,7 +59,10 @@ function installStorage() {
       get length() {
         return values.size;
       },
-      getItem: (key) => values.get(key) ?? null,
+      getItem: (key) => {
+        onGetItem(key);
+        return values.get(key) ?? null;
+      },
       key: (index) => [...values.keys()][index] ?? null,
       removeItem: (key) => values.delete(key),
       setItem: (key, value) => values.set(key, String(value)),
@@ -97,6 +100,24 @@ test("writeSelfProfileCache caps each relay and the global cache by updatedAt", 
   );
   assert.equal(profileKeys.length, MAX_SELF_PROFILE_CACHES);
   assert.equal(values.has(storageKey(relayA, "pubkey-1")), false);
+});
+
+test("writeSelfProfileCache does not read existing payloads below both caps", () => {
+  const readKeys = [];
+  const values = installStorage((key) => readKeys.push(key));
+  const relay = "wss://relay.example";
+  const existingKey = storageKey(relay, "existing");
+  const writtenKey = storageKey(relay, "written");
+  values.set(existingKey, JSON.stringify(makeCache({ updatedAt: 1 })));
+
+  assert.equal(
+    writeSelfProfileCache(relay, "written", makeCache({ updatedAt: 2 })),
+    true,
+  );
+
+  assert.deepEqual(readKeys, [writtenKey]);
+  assert.equal(values.has(existingKey), true);
+  assert.equal(values.has(writtenKey), true);
 });
 
 test("parseSelfProfileCache: valid v1 payload round-trips", () => {
