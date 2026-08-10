@@ -153,9 +153,15 @@ OPENAI_COMPAT_API_KEY=ollama
 BUZZ_AGENT_MAX_CONTEXT_TOKENS=32768
 BUZZ_AGENT_MAX_OUTPUT_TOKENS=2048
 BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES=8000
-BUZZ_AGENT_MAX_HISTORY_BYTES=48000
 BUZZ_AGENT_REQUIRE_REPLY=1
 ```
+
+> **Не чіпай `BUZZ_AGENT_MAX_HISTORY_BYTES`.** Здається логічним зрізати його
+> під невелике вікно, але це байтова межа стенограми, а не конкурент токенному
+> вікну, і крейт має жорсткий поріг: значення нижче `MAX_PROMPT_BYTES`
+> (1 048 576) валить агента на старті з `config: BUZZ_AGENT_MAX_HISTORY_BYTES
+> (…) must be >= MAX_PROMPT_BYTES (1048576)`. Реальний дефолт — 16 МіБ, попри
+> те що README крейта каже 1 МіБ.
 
 > **Провайдер саме `openai-compat`.** При значенні `openai` десктоп фільтрує
 > список моделей до відомих йому текстових моделей OpenAI, і жодна модель

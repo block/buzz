@@ -82,7 +82,6 @@ OPENAI_COMPAT_API_KEY=ollama
 BUZZ_AGENT_MAX_CONTEXT_TOKENS=32768
 BUZZ_AGENT_MAX_OUTPUT_TOKENS=2048
 BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES=8000
-BUZZ_AGENT_MAX_HISTORY_BYTES=48000
 BUZZ_AGENT_REQUIRE_REPLY=1
 ```
 
@@ -92,7 +91,23 @@ BUZZ_AGENT_REQUIRE_REPLY=1
 | `MAX_CONTEXT_TOKENS` | 200000 | реальне вікно 32768; при дефолті gate ніколи не спрацює, а Ollama мовчки обріже промпт |
 | `MAX_OUTPUT_TOKENS` | 32768 | більше за саме вікно; водночас має вміщати міркування — 2048 |
 | `MAX_TOOL_RESULT_TEXT_BYTES` | 51200 | ≈12800 токенів, один результат інструмента більший за вікно |
-| `MAX_HISTORY_BYTES` | 1 МіБ | та сама причина |
+
+### Пороги, які крейт перевіряє на старті
+
+Валідація в `crates/buzz-agent/src/config.rs` відкидає конфіг і агент не
+стартує взагалі:
+
+| Змінна | Дозволений діапазон |
+|---|---|
+| `MAX_HISTORY_BYTES` | ≥ 1 048 576 (`MAX_PROMPT_BYTES`); реальний дефолт 16 МіБ |
+| `MAX_TOOL_RESULT_TEXT_BYTES` | 1024 … 8 МіБ |
+| `MAX_CONTEXT_TOKENS` | строго більше за `MAX_OUTPUT_TOKENS` |
+
+`MAX_HISTORY_BYTES` виглядає як щось, що варто зрізати під мале вікно —
+не варто. Це байтова межа стенограми, не конкурент токенному вікну.
+Значення 48000 валить усі десять процесів харнеса з
+`all 10 agents failed to start`. README крейта тут теж вводить в оману:
+він називає дефолтом 1 МіБ, тоді як у коді 16 МіБ.
 | `REQUIRE_REPLY` | 0 | вимкнений для не-mesh агентів, а саме малі локальні моделі роблять роботу й завершують хід, нічого не запостивши |
 
 `OPENAI_COMPAT_API_KEY` має бути непорожнім — крейт відкидає порожнє значення,
