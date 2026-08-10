@@ -19,12 +19,18 @@ import { TeamShareDialog } from "./TeamShareDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { SharedFleetSection } from "./SharedFleetSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
-import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import {
+  useRelayAgentsQuery,
+  useBakedBuildEnvQuery,
+} from "@/features/agents/hooks";
+import { useTeamCatalogQuery } from "@/features/agents/teamCatalogHooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
@@ -44,6 +50,10 @@ export function AgentsView() {
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  const relayAgentsQuery = useRelayAgentsQuery();
+  const teamCatalogQuery = useTeamCatalogQuery();
+  const identityQuery = useIdentityQuery();
+  const catalogOwnerPubkey = identityQuery.data?.pubkey ?? "";
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -267,6 +277,8 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
             />
 
+            <SharedFleetSection />
+
             <TeamsSection
               error={
                 teamActions.teamsQuery.error instanceof Error
@@ -289,6 +301,9 @@ export function AgentsView() {
                 teamImportInputRef.current?.click();
               }}
               personas={personas.libraryPersonas}
+              relayAgents={relayAgentsQuery.data ?? []}
+              sharedCatalogTeams={teamCatalogQuery.data ?? []}
+              catalogOwnerPubkey={catalogOwnerPubkey}
               teams={teamActions.teams}
             />
           </div>
@@ -571,6 +586,9 @@ export function AgentsView() {
           }}
           open={teamActions.teamToAddToChannel !== null}
           personas={personas.libraryPersonas}
+          relayAgents={relayAgentsQuery.data ?? []}
+          sharedCatalogTeams={teamCatalogQuery.data ?? []}
+          catalogOwnerPubkey={catalogOwnerPubkey}
           team={teamActions.teamToAddToChannel}
         />
       ) : null}

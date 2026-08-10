@@ -7,8 +7,9 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
-import type { AgentPersona, AgentTeam } from "@/shared/api/types";
+import { resolveTeamMembers } from "@/features/agents/lib/teamPersonas";
+import type { TeamCatalogPublication } from "@/features/agents/lib/teamCatalogRelay";
+import type { AgentPersona, AgentTeam, RelayAgent } from "@/shared/api/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,6 +28,9 @@ const TEAM_CARD_COLUMN_CLASS = "w-full";
 type TeamsSectionProps = {
   teams: AgentTeam[];
   personas: AgentPersona[];
+  relayAgents: RelayAgent[];
+  sharedCatalogTeams: TeamCatalogPublication[];
+  catalogOwnerPubkey: string;
   error: Error | null;
   isLoading: boolean;
   isPending: boolean;
@@ -42,6 +46,9 @@ type TeamsSectionProps = {
 export function TeamsSection({
   teams,
   personas,
+  relayAgents,
+  sharedCatalogTeams,
+  catalogOwnerPubkey,
   error,
   isLoading,
   isPending,
@@ -90,7 +97,13 @@ export function TeamsSection({
             onImport={onImport}
           />
           {teams.map((team) => {
-            const resolution = resolveTeamPersonas(team, personas);
+            const resolution = resolveTeamMembers(
+              team,
+              personas,
+              relayAgents,
+              sharedCatalogTeams,
+              catalogOwnerPubkey,
+            );
             const missingPersonaCount = resolution.missingPersonaCount;
             const hasMissingPersonas = resolution.hasMissingPersonas;
 
@@ -112,7 +125,7 @@ export function TeamsSection({
                       onCloseAutoFocus={(event) => event.preventDefault()}
                     >
                       <DropdownMenuItem
-                        disabled={isPending || hasMissingPersonas}
+                        disabled={isPending || !resolution.isUsable}
                         onClick={() => onAddToChannel(team)}
                       >
                         <Rocket className="h-4 w-4" />
@@ -167,8 +180,16 @@ export function TeamsSection({
                   <p className="border-t border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                     {missingPersonaCount} agent
                     {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
-                    {missingPersonaCount === 1 ? "is" : "are"} no longer in your
-                    agents. Edit the team to fix it before deploying or sharing.
+                    {missingPersonaCount === 1 ? "is" : "are"} missing locally.
+                    Edit the team to fix it before deploying or sharing.
+                  </p>
+                ) : null}
+                {resolution.hasRemoteMembers ? (
+                  <p className="border-t border-warning/20 bg-warning-bg px-3 py-2 text-xs text-warning">
+                    {resolution.remoteMemberCount} agent
+                    {resolution.remoteMemberCount === 1 ? "" : "s"} resolved via
+                    the relay. Remote members cannot be deployed from this
+                    device.
                   </p>
                 ) : null}
               </TeamIdentityCard>

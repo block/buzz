@@ -6,7 +6,9 @@ import { isRateLimited } from "@/shared/api/relayRateLimitGate";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { getOsIdleSeconds } from "@/shared/api/osIdle";
 import { getPresence } from "@/shared/api/tauri";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   mergePresenceUpdate,
   parseLivePresenceEvent,
@@ -29,8 +31,22 @@ function normalizePubkeys(pubkeys: string[]) {
     .sort();
 }
 
-function presenceQueryKey(pubkeys: string[]) {
-  return ["presence", ...normalizePubkeys(pubkeys)] as const;
+function presenceQueryKey(
+  relayUrl: string,
+  normalizedPubkeys: readonly string[],
+) {
+  return [
+    "presence",
+    normalizeRelayUrl(relayUrl),
+    ...normalizedPubkeys,
+  ] as const;
+}
+
+export function presenceQueryKeyForScope(
+  relayUrl: string,
+  pubkeys: readonly string[],
+) {
+  return presenceQueryKey(relayUrl, normalizePubkeys([...pubkeys]));
 }
 
 function presencePreferenceStorageKey(pubkey: string) {
@@ -80,13 +96,18 @@ export function usePresenceQuery(
   },
 ) {
   const normalizedPubkeys = normalizePubkeys(pubkeys);
-  const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
+  const { activeCommunity } = useCommunities();
+  const relayUrl = normalizeRelayUrl(activeCommunity?.relayUrl ?? "");
+  const enabled =
+    (options?.enabled ?? true) &&
+    relayUrl.length > 0 &&
+    normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
 
   return useQuery<PresenceLookup>({
     enabled,
-    queryKey: presenceQueryKey(normalizedPubkeys),
+    queryKey: presenceQueryKey(relayUrl, normalizedPubkeys),
     queryFn: () => getPresence(normalizedPubkeys),
     staleTime: 30_000,
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry

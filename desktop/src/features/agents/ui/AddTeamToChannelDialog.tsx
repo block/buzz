@@ -9,8 +9,9 @@ import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
-  resolveTeamPersonas,
+  resolveTeamMembers,
 } from "@/features/agents/lib/teamPersonas";
+import type { TeamCatalogPublication } from "@/features/agents/lib/teamCatalogRelay";
 import {
   collectRuntimeWarnings,
   getDefaultPersonaRuntime,
@@ -23,6 +24,7 @@ import type {
   AgentTeam,
   Channel,
   ChannelRole,
+  RelayAgent,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -36,6 +38,9 @@ import {
 type AddTeamToChannelDialogProps = {
   team: AgentTeam | null;
   personas: AgentPersona[];
+  relayAgents: RelayAgent[];
+  sharedCatalogTeams: TeamCatalogPublication[];
+  catalogOwnerPubkey: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDeployed: (
@@ -47,6 +52,9 @@ type AddTeamToChannelDialogProps = {
 export function AddTeamToChannelDialog({
   team,
   personas,
+  relayAgents,
+  sharedCatalogTeams,
+  catalogOwnerPubkey,
   open,
   onOpenChange,
   onDeployed,
@@ -78,11 +86,25 @@ export function AddTeamToChannelDialog({
 
   const teamPersonaResolution = React.useMemo(
     () =>
-      team ? resolveTeamPersonas(team, personas) : emptyResolvedTeamPersonas(),
-    [team, personas],
+      team
+        ? resolveTeamMembers(
+            team,
+            personas,
+            relayAgents,
+            sharedCatalogTeams,
+            catalogOwnerPubkey,
+          )
+        : {
+            ...emptyResolvedTeamPersonas(),
+            hasRemoteMembers: false,
+            remoteMemberCount: 0,
+            resolvedRemoteMemberIds: [],
+          },
+    [team, personas, relayAgents, sharedCatalogTeams, catalogOwnerPubkey],
   );
   const resolved = teamPersonaResolution.resolvedPersonas;
   const missingPersonaCount = teamPersonaResolution.missingPersonaCount;
+  const remoteMemberCount = teamPersonaResolution.remoteMemberCount;
 
   // Surface warnings when a persona's preferred runtime is unavailable.
   // This dialog has no runtime selector, so the fallback is always
@@ -118,7 +140,12 @@ export function AddTeamToChannelDialog({
     channels.find((channel) => channel.id === channelId) ?? null;
 
   async function handleDeploy() {
-    if (!team || !selectedChannel || !defaultProvider) {
+    if (
+      !team ||
+      !selectedChannel ||
+      !defaultProvider ||
+      !teamPersonaResolution.isUsable
+    ) {
       return;
     }
 
@@ -250,8 +277,15 @@ export function AddTeamToChannelDialog({
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 This team references {missingPersonaCount} agent
                 {missingPersonaCount === 1 ? "" : "s"} that{" "}
-                {missingPersonaCount === 1 ? "is" : "are"} no longer in My
-                Agents. Add them back or edit the team before deploying.
+                {missingPersonaCount === 1 ? "is" : "are"} missing locally. Add
+                them back or edit the team before deploying.
+              </p>
+            ) : null}
+            {remoteMemberCount > 0 ? (
+              <p className="rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3 text-sm text-warning">
+                {remoteMemberCount} team member
+                {remoteMemberCount === 1 ? " is" : "s are"} resolved via the
+                relay. Remote members cannot be deployed from this device.
               </p>
             ) : null}
 
@@ -303,6 +337,7 @@ export function AddTeamToChannelDialog({
                 !defaultProvider ||
                 resolved.length === 0 ||
                 missingPersonaCount > 0 ||
+                remoteMemberCount > 0 ||
                 channelsQuery.isLoading ||
                 providersQuery.isLoading ||
                 deployMutation.isPending

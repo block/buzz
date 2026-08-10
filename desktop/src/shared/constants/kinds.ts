@@ -22,6 +22,10 @@ export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
+// Agent directory profiles published by remote worker hosts.
+export const KIND_AGENT_DIRECTORY = 10100;
+// Ephemeral presence updates. Directory status is not current liveness.
+export const KIND_PRESENCE_UPDATE = 20001;
 export const KIND_JOB_REQUEST = 43001;
 export const KIND_JOB_ACCEPTED = 43002;
 export const KIND_JOB_PROGRESS = 43003;
@@ -53,6 +57,8 @@ export const KIND_COMMUNITY_THEME = 30078;
 export const KIND_PERSONA = 30175;
 export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
+// Read-only shared team-catalog heads with bounded public projections.
+export const KIND_TEAM_CATALOG = 30178;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;
