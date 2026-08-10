@@ -62,7 +62,7 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 
 Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.
 
-For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
+For human-facing work, follow the human's threading choice and keep the conversation easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or no reply anchor when the human posted at the top level.
 
 For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
 
