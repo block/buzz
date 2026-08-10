@@ -371,9 +371,9 @@ async fn acquire_channel_membership_lock(
 /// Role enforcement:
 /// - Open channels: `invited_by` is optional; role is forced to `Member` regardless of
 ///   what the caller passes — callers cannot self-assign elevated roles.
-/// - Private channels: requires an `invited_by` who is an active owner/admin, the channel
-///   creator bootstrapping their own first membership, or the target adding themselves
-///   (idempotent re-add — an active member's *role* still cannot change this way).
+/// - Private channels: requires an `invited_by` who is an active member, or the channel
+///   creator bootstrapping their own first membership. Any active member may add an
+///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
 /// - Elevated roles (`Owner`, `Admin`) may only be granted by an existing owner/admin,
 ///   even on open channels.
 ///
@@ -421,14 +421,12 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            // Only owners/admins may extend private-channel access to another
-            // identity. `inviter == pubkey` keeps a member's own idempotent
-            // re-add working; it is not a role-escalation hole, because the
-            // active-role-change guard below still rejects a self-targeted
-            // promotion from any non-elevated caller.
-            if !inviter_role.is_elevated() && inviter != pubkey {
+            // Any active member may extend private-channel access with an
+            // ordinary role. Granting owner/admin remains reserved for an
+            // existing owner/admin.
+            if role.is_elevated() && !inviter_role.is_elevated() {
                 return Err(DbError::AccessDenied(
-                    "only owners/admins may add private-channel members".to_string(),
+                    "only owners/admins may grant elevated roles".to_string(),
                 ));
             }
         }
