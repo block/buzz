@@ -598,3 +598,25 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+<!-- launchpad-26 fork: begin. Cohort-added block — keep contiguous for clean upstream merges. -->
+---
+
+## ⚠️ This checkout is the launchpad-26 fork
+
+This repository is a fork of `block/buzz` operated by the launchpad-26 cohort. **We
+operate Buzz; we do not develop it.** Our work is deployment, CI/CD, documentation and
+cohort process — not Rust crates or React features.
+
+Everything above this line is upstream's contributor guide. It is correct for changing
+Buzz itself, and **wrong** for the work most people do in this fork.
+
+**If your task involves deployment, infrastructure, documentation, upstream tracking, or
+how we file issues and PRs — read [`launchpad/README.md`](launchpad/README.md) and
+[`launchpad/AGENTS.md`](launchpad/AGENTS.md) first.** Those supersede this file for
+anything under `launchpad/` and `.github/workflows/launchpad-*`.
+
+Genuine product bugs in Buzz still belong at
+[block/buzz/issues](https://github.com/block/buzz/issues).
+<!-- launchpad-26 fork: end -->
+

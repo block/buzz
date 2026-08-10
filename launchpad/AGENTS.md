@@ -2,8 +2,12 @@
 
 **Read this before filing an issue, opening a PR, or changing anything in this repo.**
 
-This file is for humans and agents equally. Agents: read it in full before your first
-action in this repository.
+This file is the **normative spec** for how work is filed, reviewed and merged in this
+fork. Agents: read it in full before your first action in this repository.
+
+Humans usually want [README.md](README.md) first — it covers the same ground with
+examples and less rule-text. Where the two disagree, **this file wins**; fix the drift
+rather than living with it.
 
 ---
 
