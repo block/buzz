@@ -11,12 +11,16 @@
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
+
+mod reply_recipients;
+pub use reply_recipients::ThreadRef;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 
-/// Maximum mention count — matches buzz-sdk.
+/// Maximum caller-supplied mention count — matches buzz-sdk. Replies may add
+/// one automatic parent-author recipient after this limit is enforced.
 const MAX_MENTIONS: usize = 50;
 
 /// Maximum emoji length in characters — matches buzz-sdk.
@@ -39,12 +43,6 @@ fn check_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// NIP-10 thread reference.
-pub struct ThreadRef {
-    pub root_event_id: EventId,
-    pub parent_event_id: EventId,
-}
-
 fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
     let root = tr.root_event_id.to_hex();
     let parent = tr.parent_event_id.to_hex();
@@ -60,7 +58,7 @@ fn thread_tags(tr: &ThreadRef) -> Result<Vec<Tag>, String> {
 
 fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
     if mentions.len() > MAX_MENTIONS {
-        return Err(format!("too many mentions (max {MAX_MENTIONS})"));
+        return Err(format!("too many explicit mentions (max {MAX_MENTIONS})"));
     }
     let mut seen = std::collections::HashSet::new();
     let mut tags = Vec::new();
@@ -341,7 +339,7 @@ pub fn build_message_with_client_tags(
     if let Some(tr) = thread_ref {
         tags.extend(thread_tags(tr)?);
     }
-    tags.extend(mention_tags(mentions)?);
+    tags.extend(reply_recipients::tags(thread_ref, mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
@@ -395,7 +393,7 @@ pub fn build_forum_comment(
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     tags.extend(thread_tags(thread_ref)?);
-    tags.extend(mention_tags(mentions)?);
+    tags.extend(reply_recipients::tags(Some(thread_ref), mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
@@ -855,6 +853,7 @@ mod tests {
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
     }
+
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.
     #[test]

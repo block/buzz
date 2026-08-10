@@ -24,10 +24,12 @@ import test from "node:test";
 
 import {
   createOptimisticMessage,
+  getCachedReplyContextEvents,
   resolveEffectiveChannel,
   resolveSendChannel,
   resolveThreadReplyTarget,
 } from "../hooks.ts";
+import { buildReplyTags } from "./threading.ts";
 
 // ---------------------------------------------------------------------------
 // Minimal stubs
@@ -35,6 +37,11 @@ import {
 const IDENTITY = {
   pubkey: "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
 };
+const PARENT_IDENTITY = {
+  pubkey: "bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333",
+};
+const MENTION_PUBKEY =
+  "cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc3333dddd4444";
 
 function makeChannel(id) {
   return {
@@ -113,7 +120,7 @@ test("createOptimisticMessage_withReply_hTagStillCarriesSuppliedChannelId", () =
   const parentEvent = createOptimisticMessage(
     "channel-A",
     "parent",
-    IDENTITY,
+    PARENT_IDENTITY,
     [],
     [],
     null,
@@ -135,6 +142,94 @@ test("createOptimisticMessage_withReply_hTagStillCarriesSuppliedChannelId", () =
     hTag[1],
     composeChannelId,
     "reply h-tag must match the compose-time channelId",
+  );
+  assert.deepEqual(
+    replyMsg.tags.filter(([name]) => name === "p"),
+    [["p", PARENT_IDENTITY.pubkey]],
+    "reply must notify the immediate parent author",
+  );
+});
+
+test("nested reply resolves its immediate parent from the thread cache", () => {
+  const root = createOptimisticMessage(
+    "channel-A",
+    "root",
+    IDENTITY,
+    [],
+    [],
+    null,
+    [],
+  );
+  const immediateParent = createOptimisticMessage(
+    "channel-A",
+    "nested parent",
+    PARENT_IDENTITY,
+    [root],
+    [],
+    root.id,
+    [],
+  );
+  const queryClient = {
+    getQueryData: () => [root],
+    getQueriesData: () => [
+      [["thread-replies", "channel-A", root.id], [immediateParent]],
+    ],
+  };
+  const replyContextEvents = getCachedReplyContextEvents(
+    queryClient,
+    "channel-A",
+  );
+  const reply = createOptimisticMessage(
+    "channel-A",
+    "nested reply",
+    IDENTITY,
+    replyContextEvents,
+    [],
+    immediateParent.id,
+    [],
+  );
+
+  assert.deepEqual(
+    reply.tags.filter(([name]) => name === "p"),
+    [["p", PARENT_IDENTITY.pubkey]],
+  );
+  assert.deepEqual(
+    reply.tags.filter(([name]) => name === "e"),
+    [
+      ["e", root.id, "", "root"],
+      ["e", immediateParent.id, "", "reply"],
+    ],
+  );
+});
+
+test("buildReplyTags deduplicates parent and explicit recipients", () => {
+  const tags = buildReplyTags(
+    "channel-A",
+    IDENTITY.pubkey,
+    PARENT_IDENTITY.pubkey,
+    "parent-id",
+    "root-id",
+    [
+      PARENT_IDENTITY.pubkey.toUpperCase(),
+      MENTION_PUBKEY,
+      PARENT_IDENTITY.pubkey,
+      IDENTITY.pubkey,
+    ],
+  );
+
+  assert.deepEqual(
+    tags.filter(([name]) => name === "p"),
+    [
+      ["p", PARENT_IDENTITY.pubkey],
+      ["p", MENTION_PUBKEY],
+    ],
+  );
+  assert.deepEqual(
+    tags.filter(([name]) => name === "e"),
+    [
+      ["e", "root-id", "", "root"],
+      ["e", "parent-id", "", "reply"],
+    ],
   );
 });
 
