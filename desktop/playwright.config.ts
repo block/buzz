@@ -24,6 +24,7 @@ export default defineConfig({
         "**/identity-key-help.spec.ts",
         "**/key-import-reveal.spec.ts",
         "**/navigation.spec.ts",
+        "**/magic-board.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
         "**/channel-composer-overflow.spec.ts",

@@ -41,6 +41,7 @@ function ForumPostRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={null}
         channelId={channelId}
+        hasStreamRouteIntent={false}
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}
