@@ -11,20 +11,22 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
-type IngestionAgent = Pick<ManagedAgent, "pubkey" | "status">;
+type IngestionAgent = Pick<ManagedAgent, "pubkey" | "status"> & {
+  canProcessOwnerFrames: boolean;
+};
 
 /**
- * Combine locally managed agents with relay agents the current identity
- * declared-owns (NIP-OA `ownerPubkey == me`) into one ingestion list.
+ * Combine locally managed agents with every directory-listed relay agent into
+ * one ingestion list.
  *
- * Managed agents keep their real status; owned relay agents that are not
- * managed locally are treated as `deployed` so the observer subscription
- * starts and their frames decrypt. Registering non-owned agents would be
- * pointless — observer frames are `#p`-addressed to the owner, so frames for
- * agents we do not own never arrive on our subscription in the first place.
+ * Managed agents keep their real status and owner-frame privileges. Relay
+ * agents are treated as `deployed` so requester-addressed turn frames can be
+ * decrypted even when the current identity is not their owner. Declared
+ * ownership is retained separately to gate control/config/lifecycle side
+ * effects in the observer store.
  */
 export function combineObserverIngestionAgents(
-  managedAgents: readonly IngestionAgent[],
+  managedAgents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
   relayAgentPubkeys: readonly string[],
   ownerByPubkey: ReadonlyMap<string, string>,
   currentPubkey: string | null | undefined,
@@ -32,27 +34,29 @@ export function combineObserverIngestionAgents(
   const managed = managedAgents.map((agent) => ({
     pubkey: agent.pubkey,
     status: agent.status,
+    canProcessOwnerFrames: true,
   }));
-  if (!currentPubkey) {
-    return managed;
-  }
 
   const managedSet = new Set(
     managed.map((agent) => normalizePubkey(agent.pubkey)),
   );
-  const me = normalizePubkey(currentPubkey);
-  const owned: IngestionAgent[] = [];
+  const me = currentPubkey ? normalizePubkey(currentPubkey) : null;
+  const relay: IngestionAgent[] = [];
   for (const pubkey of relayAgentPubkeys) {
     const key = normalizePubkey(pubkey);
     if (managedSet.has(key)) {
       continue;
     }
     const owner = ownerByPubkey.get(key);
-    if (owner && normalizePubkey(owner) === me) {
-      owned.push({ pubkey, status: "deployed" as const });
-    }
+    relay.push({
+      pubkey,
+      status: "deployed" as const,
+      canProcessOwnerFrames: Boolean(
+        me && owner && normalizePubkey(owner) === me,
+      ),
+    });
   }
-  return [...managed, ...owned];
+  return [...managed, ...relay];
 }
 
 /**
@@ -63,13 +67,13 @@ export function combineObserverIngestionAgents(
  * which screen or panel happens to be open. Individual surfaces read from the
  * stores; none of them need to mount their own bridge for ingestion to work.
  *
- * This is the product invariant: if the current identity owns an agent (local
- * managed agent or declared-owned relay agent), its turn activity is ingested
- * app-wide — not only while a panel that happens to mount a bridge is open.
+ * This is the product invariant: owner and requester-addressed turn activity
+ * is ingested app-wide, not only while a panel that happens to mount a bridge
+ * is open. Owner-only side effects remain separately gated.
  *
  * Mounts before identity resolves by design: while `currentPubkey` is still
- * `undefined`, `combineObserverIngestionAgents` returns managed agents only,
- * and relay-owned agents are folded in on the render after identity arrives.
+ * `undefined`, relay agents are already registered for requester telemetry;
+ * ownership privileges are folded in after identity and profiles resolve.
  * Do not gate this hook on identity/startup readiness — that would drop
  * managed-agent observer coverage during startup.
  */
@@ -111,6 +115,14 @@ export function useAgentObserverIngestion() {
     );
   }, [currentPubkey, managedAgents, profiles, relayAgentPubkeys]);
 
-  useManagedAgentObserverBridge(ingestionAgents);
+  const ownerFrameAgentPubkeys = React.useMemo(
+    () =>
+      ingestionAgents
+        .filter((agent) => agent.canProcessOwnerFrames)
+        .map((agent) => agent.pubkey),
+    [ingestionAgents],
+  );
+
+  useManagedAgentObserverBridge(ingestionAgents, ownerFrameAgentPubkeys);
   useActiveAgentTurnsBridge(ingestionAgents);
 }

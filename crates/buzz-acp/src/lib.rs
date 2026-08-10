@@ -31,7 +31,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, ObserverVisibility, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -504,9 +504,9 @@ impl ObserverPublishQueue {
     }
 
     /// Pack and remove AT MOST ONE publishable frame: the front event's
-    /// channel, gathered queue-wide in FIFO order (packed greedily until
-    /// adding the next event would push the envelope over
-    /// `OBSERVER_MAX_PLAINTEXT_LEN`). Singletons ship unwrapped.
+    /// channel and requester audience, gathered queue-wide in FIFO order
+    /// (packed greedily until adding the next event would push the envelope
+    /// over `OBSERVER_MAX_PLAINTEXT_LEN`). Singletons ship unwrapped.
     ///
     /// Two invariants bound the gather:
     /// - A frame never mixes channels (the desktop archive indexes a frame
@@ -535,13 +535,17 @@ impl ObserverPublishQueue {
             self.enqueue(source_events, ready);
         }
         let channel = self.events.front()?.2.channel_id.clone();
+        let requester_pubkeys = self.events.front()?.2.requester_pubkeys.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
         while let Some((bytes, source_events, event)) = self.events.pop_front() {
-            if gathering && event.channel_id == channel {
+            if gathering
+                && event.channel_id == channel
+                && event.requester_pubkeys == requester_pubkeys
+            {
                 picked.push(event);
                 if picked.len() > 1
                     && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
@@ -594,19 +598,25 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
+        requester_pubkeys: last.requester_pubkeys.clone(),
         payload: serde_json::json!({
             "events": serde_json::to_value(events).unwrap_or_default(),
         }),
     }
 }
 
+struct ObserverPublishTarget {
+    agent_pubkey_hex: String,
+    owner_pubkey_hex: String,
+    owner_pubkey: PublicKey,
+    visibility: ObserverVisibility,
+}
+
 fn spawn_relay_observer_publisher(
     observer: observer::ObserverHandle,
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
+    target: ObserverPublishTarget,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Subscribe BEFORE snapshotting so an event emitted between the two
@@ -615,16 +625,7 @@ fn spawn_relay_observer_publisher(
         // high-water `seq` (monotonic, assigned at emit).
         let rx = observer.subscribe();
         let snapshot = observer.snapshot();
-        run_relay_observer_publisher(
-            snapshot,
-            rx,
-            publisher,
-            keys,
-            agent_pubkey_hex,
-            owner_pubkey_hex,
-            owner_pubkey,
-        )
-        .await;
+        run_relay_observer_publisher(snapshot, rx, publisher, keys, target).await;
     })
 }
 
@@ -633,14 +634,12 @@ async fn run_relay_observer_publisher(
     mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
+    target: ObserverPublishTarget,
 ) {
     let mut queue = ObserverPublishQueue::default();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
-        queue.ingest(event);
+        queue.ingest(prepare_relay_observer_event(event, &target));
     }
 
     // Global pacer: AT MOST ONE relay frame per tick, no matter how many
@@ -654,6 +653,7 @@ async fn run_relay_observer_publisher(
     );
     publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut closed = false;
+    let mut current_frame: Option<(observer::ObserverEvent, VecDeque<(String, PublicKey)>)> = None;
     loop {
         tokio::select! {
             result = rx.recv(), if !closed => {
@@ -664,7 +664,7 @@ async fn run_relay_observer_publisher(
                         if event.seq <= max_snapshot_seq {
                             continue;
                         }
-                        queue.ingest(event);
+                        queue.ingest(prepare_relay_observer_event(event, &target));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
@@ -679,13 +679,36 @@ async fn run_relay_observer_publisher(
                 }
             }
             _ = publish_tick.tick() => {
-                if let Some(frame) = queue.next_frame() {
+                if current_frame.is_none() {
+                    if let Some(frame) = queue.next_frame() {
+                        let recipients = observer_frame_recipients(&frame, &target);
+                        current_frame = Some((frame, recipients));
+                    }
+                }
+                let delivery = current_frame.as_mut().and_then(|(frame, recipients)| {
+                    recipients
+                        .pop_front()
+                        .map(|(recipient_hex, recipient_pubkey)| {
+                            (frame.clone(), recipient_hex, recipient_pubkey)
+                        })
+                });
+                if let Some((frame, recipient_hex, recipient_pubkey)) = delivery {
                     publish_relay_observer_event(
-                        &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, frame,
+                        &publisher,
+                        &keys,
+                        &target.agent_pubkey_hex,
+                        &recipient_hex,
+                        &recipient_pubkey,
+                        frame,
                     ).await;
                 }
-                if closed && queue.is_empty() {
+                if current_frame
+                    .as_ref()
+                    .is_some_and(|(_, recipients)| recipients.is_empty())
+                {
+                    current_frame = None;
+                }
+                if closed && queue.is_empty() && current_frame.is_none() {
                     break;
                 }
             }
@@ -693,6 +716,48 @@ async fn run_relay_observer_publisher(
     }
 }
 
+fn prepare_relay_observer_event(
+    mut event: observer::ObserverEvent,
+    target: &ObserverPublishTarget,
+) -> observer::ObserverEvent {
+    if target.visibility != ObserverVisibility::Requester
+        || !requester_visible_observer_event(&event)
+    {
+        event.requester_pubkeys.clear();
+        return event;
+    }
+
+    let mut seen = HashSet::new();
+    event.requester_pubkeys.retain(|requester| {
+        let normalized = requester.to_ascii_lowercase();
+        !requester.eq_ignore_ascii_case(&target.owner_pubkey_hex) && seen.insert(normalized)
+    });
+    event
+        .requester_pubkeys
+        .sort_by_key(|requester| requester.to_ascii_lowercase());
+    event
+}
+
+fn observer_frame_recipients(
+    frame: &observer::ObserverEvent,
+    target: &ObserverPublishTarget,
+) -> VecDeque<(String, PublicKey)> {
+    let mut recipients = VecDeque::from([(target.owner_pubkey_hex.clone(), target.owner_pubkey)]);
+    for requester_hex in &frame.requester_pubkeys {
+        match PublicKey::from_hex(requester_hex) {
+            Ok(requester_pubkey) => {
+                recipients.push_back((requester_hex.clone(), requester_pubkey));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    requester = requester_hex,
+                    "skipping invalid observer requester pubkey: {error}"
+                );
+            }
+        }
+    }
+    recipients
+}
 #[derive(Default)]
 struct ObserverChunkCoalescer {
     pending: Vec<PendingObserverChunk>,
@@ -725,6 +790,7 @@ struct ObserverChunkKey {
     session_id: Option<String>,
     turn_id: Option<String>,
     agent_index: Option<usize>,
+    requester_pubkeys: Vec<String>,
 }
 
 /// Flush coalesced chunks before they exceed the NIP-44 plaintext limit (65,535 bytes).
@@ -839,6 +905,7 @@ fn observer_chunk_key_and_text(
             session_id: event.session_id.clone(),
             turn_id: event.turn_id.clone(),
             agent_index: event.agent_index,
+            requester_pubkeys: event.requester_pubkeys.clone(),
         },
         text,
     ))
@@ -1024,29 +1091,35 @@ async fn publish_relay_observer_event(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
     agent_pubkey_hex: &str,
-    owner_pubkey_hex: &str,
-    owner_pubkey: &PublicKey,
+    recipient_pubkey_hex: &str,
+    recipient_pubkey: &PublicKey,
     mut event: observer::ObserverEvent,
 ) {
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
-    let encrypted = match encrypt_observer_payload(keys, owner_pubkey, &event) {
+    let encrypted = match encrypt_observer_payload(keys, recipient_pubkey, &event) {
         Ok(encrypted) => encrypted,
         Err(error) => {
-            tracing::warn!("failed to encrypt relay observer event: {error}");
+            tracing::warn!(
+                recipient = recipient_pubkey_hex,
+                "failed to encrypt relay observer event: {error}"
+            );
             return;
         }
     };
     let builder = match buzz_sdk::build_agent_observer_frame(
-        owner_pubkey_hex,
+        recipient_pubkey_hex,
         agent_pubkey_hex,
         OBSERVER_FRAME_TELEMETRY,
         &encrypted,
     ) {
         Ok(builder) => builder,
         Err(error) => {
-            tracing::warn!("failed to build relay observer event: {error}");
+            tracing::warn!(
+                recipient = recipient_pubkey_hex,
+                "failed to build relay observer event: {error}"
+            );
             return;
         }
     };
@@ -1058,8 +1131,36 @@ async fn publish_relay_observer_event(
         }
     };
     if let Err(error) = publisher.publish_event(signed).await {
-        tracing::warn!("relay observer event dropped: {error}");
+        tracing::warn!(
+            recipient = recipient_pubkey_hex,
+            "relay observer event dropped: {error}"
+        );
     }
+}
+
+fn requester_visible_observer_event(event: &observer::ObserverEvent) -> bool {
+    if event.turn_id.is_none() {
+        return false;
+    }
+
+    match event.kind.as_str() {
+        "turn_started" | "turn_liveness" | "turn_completed" => true,
+        "acp_read" => requester_visible_session_update(&event.payload),
+        _ => false,
+    }
+}
+
+fn requester_visible_session_update(payload: &serde_json::Value) -> bool {
+    if payload.get("method").and_then(serde_json::Value::as_str) != Some("session/update") {
+        return false;
+    }
+
+    matches!(
+        payload
+            .pointer("/params/update/sessionUpdate")
+            .and_then(serde_json::Value::as_str),
+        Some("agent_message_chunk" | "tool_call" | "tool_call_update" | "plan")
+    )
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
@@ -1143,12 +1244,7 @@ fn handle_cancel_turn_control(
         observer.emit(
             "control_result",
             None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-                started_at: None,
-            },
+            &observer::context_for(Some(channel_id), None, None),
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
@@ -1220,12 +1316,7 @@ fn handle_switch_model_control(
         observer.emit(
             "control_result",
             None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-                started_at: None,
-            },
+            &observer::context_for(Some(channel_id), None, None),
             serde_json::json!({
                 "type": "switch_model",
                 "status": status,
@@ -1387,6 +1478,7 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    requester_pubkey: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -1592,6 +1684,7 @@ async fn tokio_main() -> Result<()> {
                 "agentArgs": config.agent_args,
                 "parallelism": config.agents,
                 "relayObserver": config.relay_observer,
+                "observerVisibility": config.observer_visibility.to_string(),
             }),
         );
     }
@@ -1690,6 +1783,7 @@ async fn tokio_main() -> Result<()> {
                         pubkey_hex.clone(),
                         owner_pubkey_hex,
                         owner_pubkey,
+                        config.observer_visibility,
                     ));
                     relay
                         .subscribe_observer_controls()
@@ -1769,16 +1863,19 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner, visibility)) =
         relay_observer_publisher.take()
     {
         relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
             observer,
             publisher,
             keys,
-            agent_pubkey,
-            owner_pubkey,
-            owner,
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_pubkey,
+                owner_pubkey_hex: owner_pubkey,
+                owner_pubkey: owner,
+                visibility,
+            },
         ));
     }
 
@@ -2743,6 +2840,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                requester_pubkey,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -2855,6 +2953,13 @@ async fn tokio_main() -> Result<()> {
                     "non-cancelling steer ack received"
                 );
                 if matches!(ack, Ok(pool::SteerAck::Success)) {
+                    if !pool.add_task_requester_pubkey(channel_id, &requester_pubkey) {
+                        tracing::debug!(
+                            channel = %channel_id,
+                            requester = %requester_pubkey,
+                            "native steer succeeded after task metadata was already removed"
+                        );
+                    }
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
                 }
                 if drop_withheld {
@@ -3174,6 +3279,7 @@ fn try_native_steer(
     // steering (which is to inject only what's new).
     let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
+    let requester_pubkey = event.pubkey.to_hex();
     let be = queue::BatchEvent {
         event,
         prompt_tag: prompt_tag.clone(),
@@ -3185,6 +3291,7 @@ fn try_native_steer(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
         prompt_blocks: vec![body],
+        requester_pubkey: requester_pubkey.clone(),
         ack_tx,
     };
 
@@ -3218,6 +3325,7 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    requester_pubkey,
                     ack,
                 });
             });
@@ -3272,6 +3380,7 @@ fn dispatch_pending(
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
         };
+        let requester_pubkeys = pool::batch_requester_pubkeys(Some(&batch));
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -3315,6 +3424,7 @@ fn dispatch_pending(
                 agent_index,
                 channel_id: Some(channel_id),
                 turn_id,
+                requester_pubkeys,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
@@ -3556,11 +3666,12 @@ fn handle_prompt_result(
         .to_string();
     let harness_pid = std::process::id();
 
-    let channel_id = match &result.source {
-        PromptSource::Channel(ch) => Some(*ch),
+    let mut terminal_observer_context = result.agent.acp.observer_context().clone();
+    terminal_observer_context.channel_id = match &result.source {
+        PromptSource::Channel(channel_id) => Some(channel_id.to_string()),
         PromptSource::Heartbeat => None,
     };
-    let turn_id = result.turn_id.clone();
+    terminal_observer_context.turn_id = Some(result.turn_id.clone());
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -3573,7 +3684,7 @@ fn handle_prompt_result(
             observer.emit(
                 "turn_error",
                 Some(agent_index),
-                &observer::context_for(channel_id, None, Some(turn_id.clone())),
+                &terminal_observer_context,
                 payload,
             );
         }
@@ -3799,10 +3910,12 @@ fn recover_panicked_agent(
     }
 
     if let Some(ref observer) = observer {
+        let context = observer::context_for(meta.channel_id, None, Some(meta.turn_id))
+            .with_requester_pubkeys(meta.requester_pubkeys);
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+            &context,
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -3929,6 +4042,7 @@ fn dispatch_heartbeat(
             agent_index,
             channel_id: None,
             turn_id,
+            requester_pubkeys: Vec::new(),
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
@@ -4700,6 +4814,7 @@ mod owner_control_command_tests {
                 agent_index: 0,
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -5162,9 +5277,12 @@ mod observer_snapshot_race_tests {
             rx,
             publisher,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
-            owner_keys.public_key(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::OwnerOnly,
+            },
         )
         .await;
 
@@ -5195,6 +5313,313 @@ mod observer_snapshot_race_tests {
 }
 
 #[cfg(test)]
+mod observer_visibility_publisher_tests {
+    use super::*;
+    use nostr::Keys;
+
+    async fn settle() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn recv_count(rx: &mut tokio::sync::mpsc::Receiver<nostr::Event>) -> usize {
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        count
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requester_visibility_encrypts_turn_frames_to_each_batch_author() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let requester_a = Keys::generate();
+        let requester_b = Keys::generate();
+        let context = observer::context_for_turn(
+            Some(Uuid::new_v4()),
+            Some("session-1".into()),
+            "turn-1".into(),
+            "2026-07-24T10:00:00Z".into(),
+        )
+        .with_requester_pubkeys(vec![
+            requester_b.public_key().to_hex(),
+            requester_a.public_key().to_hex(),
+            requester_a.public_key().to_hex(),
+        ]);
+        observer.emit("turn_started", Some(0), &context, serde_json::json!({}));
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        drop(observer);
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::Requester,
+            },
+        )
+        .await;
+
+        let mut owner_frames = 0;
+        let mut requester_a_frames = 0;
+        let mut requester_b_frames = 0;
+        while let Some(event) = published_rx.recv().await {
+            if decrypt_observer_payload::<serde_json::Value>(&owner_keys, &event).is_ok() {
+                owner_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester_a, &event).is_ok() {
+                requester_a_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester_b, &event).is_ok() {
+                requester_b_frames += 1;
+            }
+        }
+
+        assert_eq!(owner_frames, 1);
+        assert_eq!(requester_a_frames, 1);
+        assert_eq!(requester_b_frames, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requester_copies_share_the_global_publish_tick_budget() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let requester = Keys::generate();
+        let context = observer::context_for_turn(
+            Some(Uuid::new_v4()),
+            Some("session-1".into()),
+            "turn-1".into(),
+            "2026-07-24T10:00:00Z".into(),
+        )
+        .with_requester_pubkeys(vec![requester.public_key().to_hex()]);
+        observer.emit("turn_started", Some(0), &context, serde_json::json!({}));
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        drop(observer);
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::Requester,
+            },
+        ));
+
+        settle().await;
+        assert_eq!(recv_count(&mut published_rx), 0, "no startup burst");
+        tokio::time::advance(OBSERVER_PUBLISH_TICK).await;
+        settle().await;
+        assert_eq!(recv_count(&mut published_rx), 1, "owner copy on tick one");
+        tokio::time::advance(OBSERVER_PUBLISH_TICK - Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(recv_count(&mut published_rx), 0, "no between-tick copy");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(
+            recv_count(&mut published_rx),
+            1,
+            "requester copy waits for tick two"
+        );
+        settle().await;
+        assert!(task.is_finished(), "publisher exits after the paced copies");
+    }
+
+    fn observer_event(kind: &str, payload: serde_json::Value) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq: 1,
+            timestamp: "2026-07-24T10:00:00Z".into(),
+            kind: kind.into(),
+            agent_index: Some(0),
+            channel_id: Some(Uuid::new_v4().to_string()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            started_at: Some("2026-07-24T10:00:00Z".into()),
+            requester_pubkeys: vec![Keys::generate().public_key().to_hex()],
+            payload,
+        }
+    }
+
+    #[test]
+    fn requester_visibility_is_a_fail_closed_allowlist() {
+        for kind in ["turn_started", "turn_liveness", "turn_completed"] {
+            assert!(
+                requester_visible_observer_event(&observer_event(kind, serde_json::json!({}))),
+                "{kind}"
+            );
+        }
+
+        for update_type in [
+            "agent_message_chunk",
+            "tool_call",
+            "tool_call_update",
+            "plan",
+        ] {
+            let event = observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": update_type}},
+                }),
+            );
+            assert!(requester_visible_observer_event(&event), "{update_type}");
+        }
+
+        let private_events = [
+            observer_event(
+                "acp_write",
+                serde_json::json!({
+                    "method": "session/new",
+                    "params": {"systemPrompt": "owner-private instructions"},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "id": 1,
+                    "result": {"configOptions": [{"id": "system-prompt"}]},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/request_permission",
+                    "params": {"options": []},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": {"text": "private reasoning"},
+                        },
+                    },
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": [{"id": "system-prompt"}],
+                        },
+                    },
+                }),
+            ),
+            observer_event("turn_error", serde_json::json!({"error": "private path"})),
+            observer_event("unknown_future_kind", serde_json::json!({})),
+        ];
+        for event in private_events {
+            assert!(!requester_visible_observer_event(&event), "{}", event.kind);
+        }
+
+        let mut no_turn = observer_event("turn_started", serde_json::json!({}));
+        no_turn.turn_id = None;
+        assert!(!requester_visible_observer_event(&no_turn));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requester_visibility_keeps_session_setup_owner_only() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let requester = Keys::generate();
+        let context = observer::context_for_turn(
+            Some(Uuid::new_v4()),
+            None,
+            "turn-1".into(),
+            "2026-07-24T10:00:00Z".into(),
+        )
+        .with_requester_pubkeys(vec![requester.public_key().to_hex()]);
+        observer.emit(
+            "acp_write",
+            Some(0),
+            &context,
+            serde_json::json!({
+                "method": "session/new",
+                "params": {"systemPrompt": "owner-private instructions"},
+            }),
+        );
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        drop(observer);
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::Requester,
+            },
+        )
+        .await;
+
+        let mut owner_frames = 0;
+        let mut requester_frames = 0;
+        while let Some(event) = published_rx.recv().await {
+            if decrypt_observer_payload::<serde_json::Value>(&owner_keys, &event).is_ok() {
+                owner_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester, &event).is_ok() {
+                requester_frames += 1;
+            }
+        }
+
+        assert_eq!(owner_frames, 1);
+        assert_eq!(requester_frames, 0);
+    }
+
+    #[test]
+    fn legacy_owner_only_frame_kinds_never_fan_out_to_requesters() {
+        for kind in [
+            "control_result",
+            "session_config_captured",
+            "managed_agent_runtime_lifecycle",
+        ] {
+            let event = observer::ObserverEvent {
+                seq: 1,
+                timestamp: "2026-07-24T10:00:00Z".into(),
+                kind: kind.into(),
+                agent_index: Some(0),
+                channel_id: Some(Uuid::new_v4().to_string()),
+                session_id: Some("session-1".into()),
+                turn_id: Some("turn-1".into()),
+                started_at: Some("2026-07-24T10:00:00Z".into()),
+                requester_pubkeys: vec![Keys::generate().public_key().to_hex()],
+                payload: serde_json::json!({}),
+            };
+            assert!(!requester_visible_observer_event(&event), "{kind}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod observer_publish_queue_tests {
     use super::*;
 
@@ -5208,6 +5633,7 @@ mod observer_publish_queue_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload: serde_json::json!({ "seq": seq }),
         }
     }
@@ -5331,6 +5757,26 @@ mod observer_publish_queue_tests {
         assert_eq!(frame_seqs(&frame), [1, 2, 3], "arrival order preserved");
         let inner = frame.payload["events"].as_array().expect("events array");
         assert_eq!(inner[1]["kind"], "acp_read", "inner events keep their kind");
+    }
+
+    #[test]
+    fn batches_never_mix_requester_audiences() {
+        let mut first = event(1, "turn_started", Some("chan-a"));
+        first.requester_pubkeys = vec!["requester-a".to_string()];
+        let mut second = event(2, "turn_started", Some("chan-a"));
+        second.requester_pubkeys = vec!["requester-b".to_string()];
+        let mut third = event(3, "turn_completed", Some("chan-a"));
+        third.requester_pubkeys = vec!["requester-a".to_string()];
+        let mut queue = queue_of(vec![first, second, third]);
+
+        let first_frame = queue.next_frame().expect("first audience frame");
+        let second_frame = queue.next_frame().expect("second audience frame");
+
+        assert_eq!(frame_seqs(&first_frame), [1, 3]);
+        assert_eq!(first_frame.requester_pubkeys, ["requester-a"]);
+        assert_eq!(frame_seqs(&second_frame), [2]);
+        assert_eq!(second_frame.requester_pubkeys, ["requester-b"]);
+        assert!(queue.is_empty());
     }
 
     /// A single pending event is published unwrapped — no envelope, so
@@ -5886,9 +6332,12 @@ mod observer_publish_cadence_tests {
             rx,
             publisher,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
-            owner_keys.public_key(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::OwnerOnly,
+            },
         ));
 
         // t=0: nothing may publish, no matter how full the snapshot was.
@@ -5965,9 +6414,12 @@ mod observer_publish_cadence_tests {
             rx,
             publisher,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
-            owner_keys.public_key(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::OwnerOnly,
+            },
         ));
 
         settle().await;
@@ -6031,9 +6483,12 @@ mod observer_publish_cadence_tests {
             rx,
             publisher,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
-            owner_keys.public_key(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::OwnerOnly,
+            },
         ));
         settle().await;
 
@@ -6076,6 +6531,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -6104,6 +6560,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -6206,6 +6663,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_visibility: config::ObserverVisibility::OwnerOnly,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
@@ -6428,6 +6886,7 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_visibility: config::ObserverVisibility::OwnerOnly,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
@@ -6490,6 +6949,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -6566,6 +7026,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: Some(channel_id),
                 turn_id: "panic-turn-id".to_string(),
+                requester_pubkeys: vec!["requester".to_string()],
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -6613,6 +7074,7 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        assert_eq!(panic.requester_pubkeys, ["requester"]);
     }
 
     #[tokio::test]
@@ -6658,6 +7120,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -6749,6 +7212,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -6854,6 +7318,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -6930,6 +7395,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7024,6 +7490,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7140,6 +7607,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7279,6 +7747,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7467,6 +7936,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7552,6 +8022,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -7617,6 +8088,7 @@ mod observer_payload_trim_tests {
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload,
         }
     }

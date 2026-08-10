@@ -57,7 +57,7 @@ import {
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
-import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { useProfileActivityAgent } from "@/features/profile/ui/useProfileActivityAgent";
 import {
   AgentInfoFocusedView,
   AgentInstructionsFocusedView,
@@ -312,22 +312,17 @@ export function UserProfilePanel({
   // manage it locally (older agents may not advertise an owner pubkey). Every
   // real boundary is server-side, so this only controls what UI we paint.
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
-
-  const activityAgent = React.useMemo(
-    () =>
-      resolveProfileActivityAgent({
-        effectivePubkey,
-        isBot,
-        managedAgent,
-        profile: profile ?? null,
-        relayAgent,
-        viewerIsOwner,
-      }),
-    [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
-  );
-  // Observer ingestion (frame decryption + derived active-turn liveness) is
-  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
-  // covering both locally managed agents and declared-owned relay agents.
+  const { activityAgent, viewerCanObserve } = useProfileActivityAgent({
+    effectivePubkey,
+    isBot,
+    managedAgent,
+    profile: profile ?? null,
+    relayAgent,
+    viewerIsOwner,
+  });
+  // Observer ingestion is app-global. Owners see all turns, while a requester
+  // can open a shared agent only while requester-addressed activity proves an
+  // observable turn is live.
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined || resolvedPersona !== undefined);
@@ -339,7 +334,7 @@ export function UserProfilePanel({
     pubkeyLower.length > 0 &&
     pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity =
-    viewerIsOwner &&
+    viewerCanObserve &&
     Boolean(effectivePubkey) &&
     canOpenAgentActivity(effectivePubkey);
   const canOpenAgentLogs =
