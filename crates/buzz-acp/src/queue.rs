@@ -23,6 +23,13 @@ use crate::config::DedupMode;
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
 
+/// Maximum active root lanes retained for one channel in root-thread mode.
+const DEFAULT_MAX_LANES_PER_CHANNEL: usize = 128;
+
+/// Maximum aggregate pending events across queued, cancelled, and withheld
+/// root-thread state. Legacy channel mode keeps its historical per-channel cap.
+const DEFAULT_MAX_PENDING_EVENTS: usize = 5_000;
+
 /// Maximum events drained into a single batch.
 const MAX_BATCH_EVENTS: usize = 50;
 
@@ -40,6 +47,155 @@ const IN_FLIGHT_DEADLINE_BUFFER_SECS: u64 = 100;
 
 /// Default in-flight deadline: default max_turn (7200s) + 100s buffer.
 const DEFAULT_IN_FLIGHT_DEADLINE_SECS: u64 = 7300;
+
+/// Sentinel used to preserve one-lane-per-channel semantics for every legacy
+/// mode and for DMs. It cannot collide with a Nostr event id (64 hex chars).
+const CHANNEL_LANE_SENTINEL: &str = "__channel__";
+
+/// Dispatch affinity policy selected by the multiple-event handling mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AffinityPolicy {
+    /// Preserve the historical one-lane-per-channel behavior.
+    Channel,
+    /// Use one lane per validated NIP-10 root in non-DM channels.
+    RootThread,
+}
+
+/// Canonical identity for every queue, task, and ACP-session ownership seam.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LaneKey {
+    pub channel_id: Uuid,
+    pub root_event_id: String,
+}
+
+impl LaneKey {
+    /// Construct a root-thread lane from a canonical event id.
+    pub fn new(channel_id: Uuid, root_event_id: String) -> Self {
+        Self {
+            channel_id,
+            root_event_id: root_event_id.to_ascii_lowercase(),
+        }
+    }
+
+    /// Construct the channel sentinel lane used by legacy modes and DMs.
+    pub fn channel(channel_id: Uuid) -> Self {
+        Self::new(channel_id, CHANNEL_LANE_SENTINEL.to_string())
+    }
+
+    /// Resolve an event to its canonical lane, validating every required NIP-10
+    /// root/reply marker before the event can enter a root-affinity queue.
+    pub fn resolve(
+        channel_id: Uuid,
+        event: &Event,
+        policy: AffinityPolicy,
+        is_dm: bool,
+    ) -> Result<Self, LaneResolveError> {
+        if matches!(policy, AffinityPolicy::Channel) || is_dm {
+            return Ok(Self::channel(channel_id));
+        }
+
+        // Vec, not HashSet: a set collapses two IDENTICAL required tags into one
+        // entry, so a duplicated `root`/`reply` looked well-formed and resolved a
+        // lane instead of failing closed. Duplicates are counted here.
+        let mut roots: Vec<String> = Vec::new();
+        let mut replies: Vec<String> = Vec::new();
+        let mut positional = Vec::new();
+        for tag in event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) != Some("e") {
+                continue;
+            }
+            let marker = parts.get(3).map(String::as_str);
+            match marker {
+                // `mention` is standard NIP-10 and explicitly NON-AUTHORITATIVE:
+                // it names an event without making it this event's thread, so it
+                // is ignored rather than treated as malformed.
+                Some("mention") => continue,
+                Some("root") | Some("reply") | None | Some("") => {}
+                // An unrecognised marker is REJECTED, never skipped. Skipping it
+                // can hide the only thread tag on a reply, and the event then
+                // derives a top-level lane and runs in the wrong lane entirely.
+                Some(_) => return Err(LaneResolveError::MalformedRequiredTag),
+            }
+            let id = parts.get(1).ok_or(LaneResolveError::MalformedRequiredTag)?;
+            if !valid_event_id(id) {
+                return Err(LaneResolveError::InvalidEventId(id.clone()));
+            }
+            match marker {
+                Some("root") => roots.push(id.to_ascii_lowercase()),
+                Some("reply") => replies.push(id.to_ascii_lowercase()),
+                None | Some("") => positional.push(id.to_ascii_lowercase()),
+                _ => unreachable!("marker filtered above"),
+            }
+        }
+
+        if roots.len() > 1 || replies.len() > 1 {
+            return Err(LaneResolveError::ConflictingRequiredTags);
+        }
+
+        // Buzz's supported NIP-10 encoding uses only a `reply` marker when the
+        // immediate parent is also the thread root. Nested replies carry both
+        // markers, in which case the explicit `root` remains authoritative.
+        // Preferred marked tags are authoritative. If neither required marker
+        // exists, preserve NIP-10's deprecated positional compatibility: first
+        // unmarked `e` is the root (and with one tag also the direct parent).
+        let root = if !roots.is_empty() || !replies.is_empty() {
+            roots
+                .into_iter()
+                .next()
+                .or_else(|| replies.into_iter().next())
+                .expect("explicit set checked non-empty")
+        } else {
+            positional
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| event.id.to_hex())
+        };
+        Ok(Self::new(channel_id, root))
+    }
+
+    /// Whether this is the legacy/DM channel sentinel lane.
+    pub fn is_channel_scoped(&self) -> bool {
+        self.root_event_id == CHANNEL_LANE_SENTINEL
+    }
+}
+
+impl std::fmt::Display for LaneKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.channel_id, self.root_event_id)
+    }
+}
+
+/// Why an inbound event cannot be assigned to a root-thread lane.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LaneResolveError {
+    #[error("malformed required NIP-10 thread tag")]
+    MalformedRequiredTag,
+    #[error("invalid NIP-10 event id: {0}")]
+    InvalidEventId(String),
+    #[error("conflicting required NIP-10 thread tags")]
+    ConflictingRequiredTags,
+}
+
+/// Distinguishable queue overload causes for visible exact-event failure paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverloadReason {
+    TooManyChannelLanes,
+    AggregatePendingLimit,
+    LaneQueueFull,
+}
+
+/// Result of assigning an exact event to an already-resolved lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushResult {
+    Accepted,
+    DroppedInFlight,
+    Overloaded(OverloadReason),
+}
+
+fn valid_event_id(id: &str) -> bool {
+    id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 /// An event waiting in the queue.
 #[derive(Debug, Clone)]
@@ -75,6 +231,7 @@ pub enum CancelReason {
 /// A batch of events to prompt the agent with.
 #[derive(Debug, Clone)]
 pub struct FlushBatch {
+    pub lane: LaneKey,
     pub channel_id: Uuid,
     pub events: Vec<BatchEvent>,
     /// Events from a cancelled batch that triggered this re-prompt.
@@ -89,82 +246,70 @@ pub struct FlushBatch {
     pub cancel_reason: Option<CancelReason>,
 }
 
-/// Per-channel event queue with per-channel in-flight enforcement.
+/// Per-lane event queue with exact-lane in-flight enforcement.
+///
+/// Legacy and DM traffic use one channel-sentinel [`LaneKey`]; `steer-thread`
+/// traffic uses one lane per canonical root event.
 ///
 /// # State Machine
 ///
 /// ```text
-/// State:
-///   queues:               Map<channel_id, VecDeque<QueuedEvent>>  (capped at MAX_PENDING_PER_CHANNEL)
-///   in_flight_channels:   HashSet<Uuid>
-///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after in_flight_deadline)
-///   retry_after:          Map<channel_id, Instant>
-///   retry_counts:         Map<channel_id, u32>                    (dead-letter after MAX_RETRIES)
-///   dedup_mode:           DedupMode
+/// State (all keyed by LaneKey):
+///   queues:               Map<LaneKey, VecDeque<QueuedEvent>>
+///   in_flight_channels:   Set<LaneKey>
+///   in_flight_deadlines:  Map<LaneKey, Instant>
+///   in_flight_batch_sizes: Map<LaneKey, usize>
+///   in_flight_turn_ids:   Map<LaneKey, immutable turn_id>
+///   retry_after/counts, cancelled_batches, withheld_native_steer
 ///
 /// Transitions:
-///   push(event):
-///     if dedup_mode == Drop AND in_flight_channels.contains(event.channel_id):
-///       debug log + discard
-///     else if queues[channel].len() >= MAX_PENDING_PER_CHANNEL:
-///       drop oldest (pop_front), warn, push_back new event
-///     else:
-///       queues[event.channel_id].push_back(event)
+///   push_resolved(event, lane):
+///     if Drop mode and lane is in flight: discard
+///     in root mode: reject visibly at lane-count, aggregate-pending, or
+///       retained-event capacity; accepted in-flight work reserves retry space
+///     in legacy channel mode: preserve historical oldest-drop depth behavior
+///     otherwise append to queues[lane]
 ///
-///   flush_next() → Option<FlushBatch>:
-///     expire any stuck in-flight entries past their deadline
-///     candidates = channels where queue non-empty
-///                  AND NOT in in_flight_channels
-///                  AND (no retry_after OR retry_after[c] <= now)
-///     if candidates empty: return None
-///     channel = pick candidate with oldest head event (min received_at)
-///     events = drain up to MAX_BATCH_EVENTS from queues[channel]
-///     in_flight_channels.insert(channel)
-///     in_flight_deadlines.insert(channel, now + in_flight_deadline)
-///     return Some(FlushBatch { channel, events })
+///   flush_next() -> Option<FlushBatch>:
+///     expire orphaned lanes past their deadline
+///     choose the flushable lane with the oldest head event
+///     drain one event in root mode or up to MAX_BATCH_EVENTS in legacy mode
+///     merge exact-lane cancelled events and mark the full batch in flight
 ///
-///   mark_complete(channel_id):
-///     in_flight_channels.remove(channel_id)
-///     in_flight_deadlines.remove(channel_id)
-///     retry_counts.remove(channel_id)
-///     clean up expired retry_after entry if present
+///   bind_lane_turn(lane, turn_id):
+///     bind the dispatched lane generation before spawning its task
+///
+///   mark_lane_complete_for_turn(lane, turn_id):
+///     release state only when turn_id still owns the lane generation
 ///
 ///   requeue(batch):
-///     increment retry_counts[channel]
-///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, return batch to caller)
-///     else: push_front with original received_at, set exponential backoff retry_after with jitter
+///     restore original timestamps, increment exact-lane retry count, apply
+///     exponential backoff, and dead-letter after MAX_RETRIES
 /// ```
 pub struct EventQueue {
-    queues: HashMap<Uuid, VecDeque<QueuedEvent>>,
-    in_flight_channels: HashSet<Uuid>,
-    /// Per-channel deadline for auto-expiring stuck in-flight entries.
-    in_flight_deadlines: HashMap<Uuid, Instant>,
+    queues: HashMap<LaneKey, VecDeque<QueuedEvent>>,
+    in_flight_channels: HashSet<LaneKey>,
+    /// Per-lane deadline for auto-expiring stuck in-flight entries.
+    in_flight_deadlines: HashMap<LaneKey, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
-    in_flight_batch_sizes: HashMap<Uuid, usize>,
-    retry_after: HashMap<Uuid, Instant>,
-    /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
-    retry_counts: HashMap<Uuid, u32>,
+    in_flight_batch_sizes: HashMap<LaneKey, usize>,
+    /// Spawn-time turn id owning each lane. Used to reject late completion
+    /// from an expired/replaced task generation.
+    in_flight_turn_ids: HashMap<LaneKey, String>,
+    retry_after: HashMap<LaneKey, Instant>,
+    /// Per-lane retry attempt counter for exponential backoff / dead-lettering.
+    retry_counts: HashMap<LaneKey, u32>,
     dedup_mode: DedupMode,
-    /// Events from cancelled batches, keyed by channel. Merged into the next
-    /// `FlushBatch` for that channel as `cancelled_events` so `format_prompt()`
-    /// can produce annotated "[Previous request — interrupted]" sections.
-    cancelled_batches: HashMap<Uuid, Vec<BatchEvent>>,
-    /// Why each channel's cancelled batch was cancelled (steer vs interrupt).
-    /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
-    /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
-    cancel_reasons: HashMap<Uuid, CancelReason>,
-    /// Events withheld from `queues` while a goose-native steer is in flight
-    /// for that event. Invisible to `flush_next` / `has_flushable_work` /
-    /// `drain` (the events have been moved out of `queues`), so the queue's
-    /// no-double-deliver invariant holds without any change to the hot drain
-    /// path. Populated by [`mark_native_steer_pending`]; drained back to the
-    /// queue front by [`release_native_steer`] (preserving original
-    /// `received_at` fairness, same discipline as `requeue_preserve_timestamps`
-    /// at line 453). Bulk recovery on in-flight deadline expiry is performed
-    /// by `flush_next` / `has_flushable_work` (recover, not log-and-drop —
-    /// the events were never delivered to the agent).
-    withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
-    /// Duration after which an in-flight channel is auto-expired as orphaned.
+    affinity_policy: AffinityPolicy,
+    max_lanes_per_channel: usize,
+    max_pending_events: usize,
+    /// Events from cancelled batches, keyed by exact lane.
+    cancelled_batches: HashMap<LaneKey, Vec<BatchEvent>>,
+    /// Why each lane's cancelled batch was cancelled (steer vs interrupt).
+    cancel_reasons: HashMap<LaneKey, CancelReason>,
+    /// Events withheld while a native steer is in flight for an exact lane.
+    withheld_native_steer: HashMap<LaneKey, Vec<QueuedEvent>>,
+    /// Duration after which an in-flight lane is auto-expired as orphaned.
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
     in_flight_deadline: Duration,
@@ -177,19 +322,36 @@ impl EventQueue {
     /// Call [`with_in_flight_deadline`](Self::with_in_flight_deadline) to
     /// derive the deadline from the configured `max_turn_duration`.
     pub fn new(dedup_mode: DedupMode) -> Self {
+        Self::new_with_affinity(dedup_mode, AffinityPolicy::Channel)
+    }
+
+    /// Create an empty queue with an explicit dispatch-affinity policy.
+    pub fn new_with_affinity(dedup_mode: DedupMode, affinity_policy: AffinityPolicy) -> Self {
         Self {
             queues: HashMap::new(),
             in_flight_channels: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
+            in_flight_turn_ids: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
+            affinity_policy,
+            max_lanes_per_channel: DEFAULT_MAX_LANES_PER_CHANNEL,
+            max_pending_events: DEFAULT_MAX_PENDING_EVENTS,
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
+    }
+
+    /// Override finite root-thread queue limits (primarily for focused tests).
+    #[cfg(test)]
+    pub fn with_limits(mut self, max_lanes_per_channel: usize, max_pending_events: usize) -> Self {
+        self.max_lanes_per_channel = max_lanes_per_channel;
+        self.max_pending_events = max_pending_events;
+        self
     }
 
     /// Set the in-flight backstop deadline from the configured max turn
@@ -200,20 +362,22 @@ impl EventQueue {
         self
     }
 
-    /// Monotonically extend an existing in-flight deadline for `channel_id`.
-    ///
-    /// Called when a successful steer grants a fresh turn budget. The new
-    /// deadline is `max(current, now + max_turn_secs + buffer)` — it never
-    /// moves backward. If the channel is not in-flight (already completed
-    /// via `mark_complete`), this is a no-op: a late ack never resurrects
-    /// a deadline.
+    /// Monotonically extend an existing legacy channel-lane deadline.
+    #[cfg(test)]
     pub fn extend_in_flight_deadline(&mut self, channel_id: Uuid, max_turn_secs: u64) {
-        if let Some(current) = self.in_flight_deadlines.get_mut(&channel_id) {
+        self.extend_lane_deadline(&LaneKey::channel(channel_id), max_turn_secs);
+    }
+
+    /// Monotonically extend an existing exact-lane deadline. Late acks are
+    /// generation-fenced by the lane's continued presence in the deadline map.
+    pub fn extend_lane_deadline(&mut self, lane: &LaneKey, max_turn_secs: u64) {
+        if let Some(current) = self.in_flight_deadlines.get_mut(lane) {
             let extended = Instant::now()
                 + Duration::from_secs(max_turn_secs + IN_FLIGHT_DEADLINE_BUFFER_SECS);
             if extended > *current {
                 tracing::info!(
-                    %channel_id,
+                    channel_id = %lane.channel_id,
+                    lane_root = %lane.root_event_id,
                     "extending in-flight deadline by {max_turn_secs}s + {IN_FLIGHT_DEADLINE_BUFFER_SECS}s buffer"
                 );
                 *current = extended;
@@ -221,34 +385,137 @@ impl EventQueue {
         }
     }
 
-    /// Push an event into the queue for its channel.
-    ///
-    /// In [`DedupMode::Drop`], events for any currently in-flight channel are
-    /// silently discarded (debug-logged).
-    ///
-    /// Returns `true` if the event was accepted, `false` if dropped.
+    /// Preserve the historical channel-scoped push API for existing modes.
+    #[cfg(test)]
     pub fn push(&mut self, event: QueuedEvent) -> bool {
-        if matches!(self.dedup_mode, DedupMode::Drop)
-            && self.in_flight_channels.contains(&event.channel_id)
-        {
+        let lane = LaneKey::channel(event.channel_id);
+        matches!(self.push_resolved(event, lane), PushResult::Accepted)
+    }
+
+    /// Push an event into an exact, already-validated dispatch lane.
+    pub fn push_resolved(&mut self, event: QueuedEvent, lane: LaneKey) -> PushResult {
+        debug_assert_eq!(event.channel_id, lane.channel_id);
+        if matches!(self.dedup_mode, DedupMode::Drop) && self.in_flight_channels.contains(&lane) {
             tracing::debug!(
-                channel_id = %event.channel_id,
-                "dropping event for in-flight channel (drop mode)"
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                "dropping event for in-flight lane (drop mode)"
             );
-            return false;
+            return PushResult::DroppedInFlight;
         }
-        let queue = self.queues.entry(event.channel_id).or_default();
-        // Enforce per-channel depth cap: drop oldest to make room.
+
+        if matches!(self.affinity_policy, AffinityPolicy::RootThread) {
+            let lane_exists = self.lane_exists(&lane);
+            if !lane_exists
+                && self.active_lane_count_for_channel(lane.channel_id) >= self.max_lanes_per_channel
+            {
+                tracing::warn!(
+                    channel_id = %lane.channel_id,
+                    lane_root = %lane.root_event_id,
+                    limit = self.max_lanes_per_channel,
+                    "root-thread lane cap reached"
+                );
+                return PushResult::Overloaded(OverloadReason::TooManyChannelLanes);
+            }
+            if self.pending_event_count() >= self.max_pending_events {
+                tracing::warn!(
+                    channel_id = %lane.channel_id,
+                    lane_root = %lane.root_event_id,
+                    limit = self.max_pending_events,
+                    "aggregate pending-event cap reached"
+                );
+                return PushResult::Overloaded(OverloadReason::AggregatePendingLimit);
+            }
+            if self.retained_event_count_for_lane(&lane) >= MAX_PENDING_PER_CHANNEL {
+                tracing::warn!(
+                    channel_id = %lane.channel_id,
+                    lane_root = %lane.root_event_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "root-thread lane retained-event cap reached"
+                );
+                return PushResult::Overloaded(OverloadReason::LaneQueueFull);
+            }
+        }
+
+        let queue = self.queues.entry(lane.clone()).or_default();
+        // Preserve the legacy per-channel depth behavior. Root-thread lanes are
+        // additionally bounded by the aggregate cap above.
         if queue.len() >= MAX_PENDING_PER_CHANNEL {
+            if matches!(self.affinity_policy, AffinityPolicy::RootThread) {
+                tracing::warn!(
+                    channel_id = %lane.channel_id,
+                    lane_root = %lane.root_event_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "root-thread lane depth cap reached"
+                );
+                return PushResult::Overloaded(OverloadReason::LaneQueueFull);
+            }
             queue.pop_front();
             tracing::warn!(
-                channel_id = %event.channel_id,
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
                 limit = MAX_PENDING_PER_CHANNEL,
                 "queue depth cap reached — dropped oldest event"
             );
         }
         queue.push_back(event);
-        true
+        PushResult::Accepted
+    }
+
+    fn lane_exists(&self, lane: &LaneKey) -> bool {
+        self.queues.contains_key(lane)
+            || self.in_flight_channels.contains(lane)
+            || self.retry_after.contains_key(lane)
+            || self.retry_counts.contains_key(lane)
+            || self.cancelled_batches.contains_key(lane)
+            || self.withheld_native_steer.contains_key(lane)
+    }
+
+    fn active_lane_count_for_channel(&self, channel_id: Uuid) -> usize {
+        let mut lanes = HashSet::new();
+        lanes.extend(
+            self.queues
+                .keys()
+                .filter(|lane| lane.channel_id == channel_id)
+                .cloned(),
+        );
+        lanes.extend(
+            self.in_flight_channels
+                .iter()
+                .filter(|lane| lane.channel_id == channel_id)
+                .cloned(),
+        );
+        lanes.extend(
+            self.cancelled_batches
+                .keys()
+                .filter(|lane| lane.channel_id == channel_id)
+                .cloned(),
+        );
+        lanes.extend(
+            self.withheld_native_steer
+                .keys()
+                .filter(|lane| lane.channel_id == channel_id)
+                .cloned(),
+        );
+        lanes.len()
+    }
+
+    fn pending_event_count(&self) -> usize {
+        self.queues.values().map(VecDeque::len).sum::<usize>()
+            + self.in_flight_batch_sizes.values().sum::<usize>()
+            + self.cancelled_batches.values().map(Vec::len).sum::<usize>()
+            + self
+                .withheld_native_steer
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+    }
+
+    fn retained_event_count_for_lane(&self, lane: &LaneKey) -> usize {
+        self.queues.get(lane).map_or(0, VecDeque::len)
+            + self.in_flight_batch_sizes.get(lane).copied().unwrap_or(0)
+            + self.cancelled_batches.get(lane).map_or(0, Vec::len)
+            + self.withheld_native_steer.get(lane).map_or(0, Vec::len)
     }
 
     /// Try to flush the next batch.
@@ -257,84 +524,142 @@ impl EventQueue {
     /// Otherwise picks the channel with the oldest pending event (FIFO fairness
     /// across channels), drains ALL events for that channel into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
+    #[cfg(test)]
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
+        self.flush_next_matching(|_| true)
+    }
+
+    /// Flush the oldest lane that is currently eligible for a worker claim.
+    /// Busy authoritative lane owners are skipped so independent lanes can use
+    /// other idle workers instead of head-of-line blocking behind the owner.
+    pub fn flush_next_matching<F>(&mut self, eligible: F) -> Option<FlushBatch>
+    where
+        F: Fn(&LaneKey) -> bool,
+    {
         let now = Instant::now();
+        self.expire_claimable_in_flight_lanes(now, &eligible);
 
-        // Auto-expire any stuck in-flight entries that missed mark_complete.
-        let expired: Vec<Uuid> = self
-            .in_flight_deadlines
-            .iter()
-            .filter(|(_, deadline)| now >= **deadline)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in expired {
-            let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
-            tracing::error!(
-                channel_id = %id,
-                lost_events,
-                deadline_secs = self.in_flight_deadline.as_secs(),
-                "BUG: in-flight channel expired without mark_complete — \
-                 auto-releasing; {lost_events} dispatched event(s) orphaned"
-            );
-            self.in_flight_channels.remove(&id);
-            self.in_flight_deadlines.remove(&id);
-            // Recover any withheld goose-native steer events for the expired
-            // channel back to the queue front so normal dispatch delivers
-            // them. Unlike the in-flight batch above (already delivered to a
-            // now-hung prompt — nothing to recover), these events were never
-            // delivered to the agent.
-            self.recover_withheld_for_expired_channel(id);
-        }
-
-        // Find the channel whose head event has the oldest received_at,
-        // excluding in-flight channels and throttled channels.
-        let channel_id = self
-            .queues
-            .iter()
-            .filter(|(id, q)| {
-                !q.is_empty()
-                    && !self.in_flight_channels.contains(id)
-                    && self.retry_after.get(id).is_none_or(|&t| t <= now)
-            })
-            .min_by_key(|(_, q)| q.front().unwrap().received_at)
-            .map(|(id, _)| *id);
-
-        // Fallback: if no queued events are ready but a channel has cancelled
-        // events waiting (e.g., explicit !cancel with no new @mention), flush
-        // those as a regular batch (re-dispatch unchanged).
-        let channel_id = match channel_id {
-            Some(id) => id,
-            None => {
-                let cancelled_id = self
-                    .cancelled_batches
-                    .keys()
-                    .find(|id| !self.in_flight_channels.contains(id))
-                    .copied();
-                match cancelled_id {
-                    Some(id) => {
-                        // Move cancelled events into the regular events slot.
-                        // No new events to merge — re-dispatch the original batch.
-                        let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
-                        let cancel_reason = self.cancel_reasons.remove(&id);
-                        self.in_flight_channels.insert(id);
-                        self.in_flight_deadlines
-                            .insert(id, now + self.in_flight_deadline);
-                        self.in_flight_batch_sizes.insert(id, cancelled.len());
-                        return Some(FlushBatch {
-                            channel_id: id,
-                            events: cancelled,
-                            cancelled_events: vec![],
-                            cancel_reason,
-                        });
-                    }
-                    None => return None,
-                }
-            }
+        let work_order = |(lane_a, time_a): &(LaneKey, Instant),
+                          (lane_b, time_b): &(LaneKey, Instant)| {
+            time_a
+                .cmp(time_b)
+                .then_with(|| lane_a.channel_id.cmp(&lane_b.channel_id))
+                .then_with(|| lane_a.root_event_id.cmp(&lane_b.root_event_id))
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
-        let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+        let queued_lane = self
+            .queues
+            .iter()
+            .filter(|(lane, q)| {
+                !q.is_empty()
+                    && !self.in_flight_channels.contains(*lane)
+                    && self.retry_after.get(*lane).is_none_or(|&t| t <= now)
+                    && eligible(lane)
+            })
+            .map(|(lane, q)| {
+                let oldest = q
+                    .front()
+                    .map(|event| event.received_at)
+                    .into_iter()
+                    .chain(
+                        self.cancelled_batches
+                            .get(lane)
+                            .into_iter()
+                            .flatten()
+                            .map(|event| event.received_at),
+                    )
+                    .min()
+                    .expect("non-empty queue must have retained work");
+                (lane.clone(), oldest)
+            })
+            .min_by(&work_order);
+
+        // A cancelled batch has no retry throttle. Exclude lanes whose normal
+        // queue is already eligible because that path merges both halves into
+        // one prompt; otherwise cancelled-only work competes globally by age.
+        let cancelled_lane = self
+            .cancelled_batches
+            .iter()
+            .filter(|(lane, cancelled)| {
+                !cancelled.is_empty()
+                    && !self.in_flight_channels.contains(*lane)
+                    && self.retry_after.get(*lane).is_none_or(|&t| t <= now)
+                    && eligible(lane)
+                    && !self.queues.get(*lane).is_some_and(|queue| {
+                        !queue.is_empty() && self.retry_after.get(*lane).is_none_or(|&t| t <= now)
+                    })
+            })
+            .map(|(lane, cancelled)| {
+                let oldest = cancelled
+                    .iter()
+                    .map(|event| event.received_at)
+                    .min()
+                    .expect("non-empty cancelled batch must have retained work");
+                (lane.clone(), oldest)
+            })
+            .min_by(&work_order);
+
+        let (lane, drain_queue) = match (queued_lane, cancelled_lane) {
+            (Some(queued), Some(cancelled)) => {
+                if work_order(&queued, &cancelled) != std::cmp::Ordering::Greater {
+                    (queued.0, true)
+                } else {
+                    (cancelled.0, false)
+                }
+            }
+            (Some(queued), None) => (queued.0, true),
+            (None, Some(cancelled)) => (cancelled.0, false),
+            (None, None) => return None,
+        };
+
+        if !drain_queue {
+            let (events, clear_cancelled_state) =
+                if matches!(self.affinity_policy, AffinityPolicy::RootThread) {
+                    let cancelled = self
+                        .cancelled_batches
+                        .get_mut(&lane)
+                        .expect("selected cancelled lane must retain work");
+                    let oldest_index = cancelled
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, event)| event.received_at)
+                        .map(|(index, _)| index)
+                        .expect("selected cancelled lane must be non-empty");
+                    let event = cancelled.remove(oldest_index);
+                    (vec![event], cancelled.is_empty())
+                } else {
+                    (
+                        self.cancelled_batches.remove(&lane).unwrap_or_default(),
+                        true,
+                    )
+                };
+            let cancel_reason = if clear_cancelled_state {
+                self.cancelled_batches.remove(&lane);
+                self.cancel_reasons.remove(&lane)
+            } else {
+                self.cancel_reasons.get(&lane).copied()
+            };
+            self.in_flight_channels.insert(lane.clone());
+            self.in_flight_deadlines
+                .insert(lane.clone(), now + self.in_flight_deadline);
+            self.in_flight_batch_sizes
+                .insert(lane.clone(), events.len());
+            return Some(FlushBatch {
+                channel_id: lane.channel_id,
+                lane,
+                events,
+                cancelled_events: vec![],
+                cancel_reason,
+            });
+        }
+
+        let queue = self.queues.entry(lane.clone()).or_default();
+        let max_batch = if matches!(self.affinity_policy, AffinityPolicy::RootThread) {
+            1
+        } else {
+            MAX_BATCH_EVENTS
+        };
+        let drain_count = max_batch.min(queue.len());
         let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
@@ -343,70 +668,117 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
-        // Relay replay delivers stored events newest-first (`ORDER BY
-        // created_at DESC`), but batch consumers — `format_prompt` scope and
-        // reply-anchor selection — require the LAST event to be the newest.
-        // Stable sort: same-second events keep delivery order.
         events.sort_by_key(|be| be.event.created_at);
 
-        // Remove the queue entry if now empty.
-        if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
-            self.queues.remove(&channel_id);
+        if self.queues.get(&lane).is_some_and(VecDeque::is_empty) {
+            self.queues.remove(&lane);
         }
 
-        self.in_flight_channels.insert(channel_id);
-        self.in_flight_deadlines
-            .insert(channel_id, now + self.in_flight_deadline);
-        self.in_flight_batch_sizes.insert(channel_id, events.len());
+        let cancelled_events = self.cancelled_batches.remove(&lane).unwrap_or_default();
+        let cancel_reason = self.cancel_reasons.remove(&lane);
+        let in_flight_event_count = events.len() + cancelled_events.len();
 
-        // Merge any cancelled events stored by requeue_as_cancelled().
-        let cancelled_events = self
-            .cancelled_batches
-            .remove(&channel_id)
-            .unwrap_or_default();
-        let cancel_reason = if cancelled_events.is_empty() {
-            self.cancel_reasons.remove(&channel_id);
-            None
-        } else {
-            self.cancel_reasons.remove(&channel_id)
-        };
+        self.in_flight_channels.insert(lane.clone());
+        self.in_flight_deadlines
+            .insert(lane.clone(), now + self.in_flight_deadline);
+        self.in_flight_batch_sizes
+            .insert(lane.clone(), in_flight_event_count);
 
         Some(FlushBatch {
-            channel_id,
+            channel_id: lane.channel_id,
+            lane,
             events,
             cancelled_events,
             cancel_reason,
         })
     }
 
-    /// Mark the prompt for `channel_id` as complete.
-    ///
-    /// Removes the channel from `in_flight_channels` and `in_flight_deadlines`.
-    ///
-    /// If the channel was NOT requeued (no active `retry_after` throttle), the
-    /// retry counter is reset — the channel is healthy and the next failure
-    /// starts fresh. If the channel WAS requeued, `retry_counts` is left intact
-    /// so the backoff sequence continues on the next attempt.
-    ///
-    /// Also cleans up any already-expired `retry_after` entry.
+    /// Mark a legacy channel-sentinel prompt complete.
     pub fn mark_complete(&mut self, channel_id: Uuid) {
-        self.in_flight_channels.remove(&channel_id);
-        self.in_flight_deadlines.remove(&channel_id);
-        self.in_flight_batch_sizes.remove(&channel_id);
+        self.mark_lane_complete(&LaneKey::channel(channel_id));
+    }
+
+    /// Mark the exact prompt lane complete without touching sibling roots.
+    pub fn mark_lane_complete(&mut self, lane: &LaneKey) {
+        self.in_flight_channels.remove(lane);
+        self.in_flight_deadlines.remove(lane);
+        self.in_flight_batch_sizes.remove(lane);
+        self.in_flight_turn_ids.remove(lane);
         let now = Instant::now();
-        match self.retry_after.get(&channel_id) {
-            // Active throttle → channel was requeued; keep retry_counts intact.
-            Some(&deadline) if deadline > now => {}
-            // Expired or absent throttle → successful completion; reset counter
-            // and clean up the stale retry_after entry.
-            Some(_) => {
-                self.retry_after.remove(&channel_id);
-                self.retry_counts.remove(&channel_id);
-            }
+        if self
+            .retry_after
+            .get(lane)
+            .is_some_and(|deadline| *deadline <= now)
+        {
+            self.retry_after.remove(lane);
+        }
+    }
+
+    /// Bind an in-flight lane to the spawned task's immutable turn id.
+    pub fn bind_lane_turn(&mut self, lane: &LaneKey, turn_id: &str) -> bool {
+        if !self.in_flight_channels.contains(lane) {
+            return false;
+        }
+        match self.in_flight_turn_ids.get(lane) {
+            Some(current) => current == turn_id,
             None => {
-                self.retry_counts.remove(&channel_id);
+                self.in_flight_turn_ids
+                    .insert(lane.clone(), turn_id.to_string());
+                true
             }
         }
+    }
+
+    /// Whether `turn_id` still owns the current in-flight lane generation.
+    pub fn lane_turn_matches(&self, lane: &LaneKey, turn_id: &str) -> bool {
+        self.in_flight_turn_ids.get(lane).map(String::as_str) == Some(turn_id)
+    }
+
+    /// Return the bound turn id for the current exact-lane generation.
+    pub fn lane_turn_id(&self, lane: &LaneKey) -> Option<&str> {
+        self.in_flight_turn_ids.get(lane).map(String::as_str)
+    }
+
+    /// Whether a different bound turn currently owns this exact lane.
+    pub fn lane_turn_conflicts(&self, lane: &LaneKey, turn_id: &str) -> bool {
+        self.in_flight_turn_ids
+            .get(lane)
+            .is_some_and(|current| current != turn_id)
+    }
+
+    /// Complete a lane only if `turn_id` still owns its current generation.
+    /// Retry-attempt history is preserved for cancellation and other nonterminal
+    /// release paths; use [`Self::mark_lane_settled_for_turn`] for terminal work.
+    pub fn mark_lane_complete_for_turn(&mut self, lane: &LaneKey, turn_id: &str) -> bool {
+        if !self.lane_turn_matches(lane, turn_id) {
+            tracing::warn!(
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                turn_id,
+                "ignoring stale lane completion"
+            );
+            return false;
+        }
+        self.mark_lane_complete(lane);
+        true
+    }
+
+    /// Terminally settle the current lane generation and reset its retry budget.
+    /// A stale generation cannot mutate the replacement lane's retry state.
+    pub fn mark_lane_settled_for_turn(&mut self, lane: &LaneKey, turn_id: &str) -> bool {
+        if !self.lane_turn_matches(lane, turn_id) {
+            tracing::warn!(
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                turn_id,
+                "ignoring stale lane settlement"
+            );
+            return false;
+        }
+        self.retry_after.remove(lane);
+        self.retry_counts.remove(lane);
+        self.mark_lane_complete(lane);
+        true
     }
 
     /// Re-queue a batch of events that failed to process.
@@ -428,8 +800,9 @@ impl EventQueue {
     /// `mark_complete` separately.
     pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
+        let lane = batch.lane.clone();
         let attempt = {
-            let count = self.retry_counts.entry(channel_id).or_insert(0);
+            let count = self.retry_counts.entry(lane.clone()).or_insert(0);
             *count += 1;
             *count
         };
@@ -443,10 +816,10 @@ impl EventQueue {
                 MAX_RETRIES,
                 batch.events.len(),
             );
-            self.retry_counts.remove(&channel_id);
-            // Also clear retry_after so fresh traffic on this channel isn't
+            self.retry_counts.remove(&lane);
+            // Also clear retry_after so fresh traffic on this lane isn't
             // throttled by stale backoff from the discarded poison batch.
-            self.retry_after.remove(&channel_id);
+            self.retry_after.remove(&lane);
             return Some(batch);
         }
 
@@ -465,6 +838,7 @@ impl EventQueue {
 
         tracing::warn!(
             channel_id = %channel_id,
+            lane_root = %lane.root_event_id,
             attempt,
             max = MAX_RETRIES,
             delay_secs = delay.as_secs_f64(),
@@ -472,7 +846,7 @@ impl EventQueue {
             "requeueing failed batch with backoff"
         );
 
-        let queue = self.queues.entry(channel_id).or_default();
+        let queue = self.queues.entry(lane.clone()).or_default();
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
             queue.push_front(QueuedEvent {
@@ -493,7 +867,26 @@ impl EventQueue {
                 "requeue overflow — dropped oldest event to enforce cap"
             );
         }
-        self.retry_after.insert(channel_id, Instant::now() + delay);
+
+        if !batch.cancelled_events.is_empty() {
+            let entry = self.cancelled_batches.entry(lane.clone()).or_default();
+            entry.splice(0..0, batch.cancelled_events);
+            if entry.len() > MAX_PENDING_PER_CHANNEL {
+                let overflow = entry.len() - MAX_PENDING_PER_CHANNEL;
+                entry.drain(..overflow);
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    lane_root = %lane.root_event_id,
+                    dropped = overflow,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "requeued cancelled state overflow — dropped oldest event(s)"
+                );
+            }
+            if let Some(reason) = batch.cancel_reason {
+                self.cancel_reasons.entry(lane.clone()).or_insert(reason);
+            }
+        }
+        self.retry_after.insert(lane, Instant::now() + delay);
         None
     }
 
@@ -507,7 +900,8 @@ impl EventQueue {
     /// caller must call `mark_complete` separately.
     pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
         let channel_id = batch.channel_id;
-        let queue = self.queues.entry(channel_id).or_default();
+        let lane = batch.lane.clone();
+        let queue = self.queues.entry(lane.clone()).or_default();
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
             queue.push_front(QueuedEvent {
@@ -526,6 +920,25 @@ impl EventQueue {
                 "requeue_preserve overflow — dropped newest event to enforce cap"
             );
         }
+
+        if !batch.cancelled_events.is_empty() {
+            let entry = self.cancelled_batches.entry(lane.clone()).or_default();
+            entry.splice(0..0, batch.cancelled_events);
+            if entry.len() > MAX_PENDING_PER_CHANNEL {
+                let overflow = entry.len() - MAX_PENDING_PER_CHANNEL;
+                entry.drain(..overflow);
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    lane_root = %lane.root_event_id,
+                    dropped = overflow,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "requeued cancelled state overflow — dropped oldest event(s)"
+                );
+            }
+            if let Some(reason) = batch.cancel_reason {
+                self.cancel_reasons.entry(lane).or_insert(reason);
+            }
+        }
     }
 
     /// Requeue a cancelled batch so its events appear as `cancelled_events`
@@ -540,11 +953,23 @@ impl EventQueue {
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
-        let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
+        let lane = batch.lane.clone();
+        let entry = self.cancelled_batches.entry(lane.clone()).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        if entry.len() > MAX_PENDING_PER_CHANNEL {
+            let overflow = entry.len() - MAX_PENDING_PER_CHANNEL;
+            entry.drain(..overflow);
+            tracing::warn!(
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                dropped = overflow,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "cancelled merge state overflow — dropped oldest event(s)"
+            );
+        }
+        self.cancel_reasons.insert(lane, reason);
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -554,40 +979,55 @@ impl EventQueue {
     /// This is a `&mut self` method so expiry can happen without requiring a
     /// full `flush_next` call.
     pub fn has_flushable_work(&mut self) -> bool {
-        let now = Instant::now();
+        self.has_flushable_work_matching(|_| true)
+    }
 
-        // Auto-expire stuck in-flight entries (same logic as flush_next).
-        let expired: Vec<Uuid> = self
-            .in_flight_deadlines
-            .iter()
-            .filter(|(_, deadline)| now >= **deadline)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in expired {
-            let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
-            tracing::error!(
-                channel_id = %id,
-                lost_events,
-                deadline_secs = self.in_flight_deadline.as_secs(),
-                "BUG: in-flight channel expired without mark_complete — \
-                 auto-releasing; {lost_events} dispatched event(s) orphaned"
-            );
-            self.in_flight_channels.remove(&id);
-            self.in_flight_deadlines.remove(&id);
-            // Symmetric with the flush_next expiry block: recover withheld
-            // goose-native steer events for the expired channel so they are
-            // not permanently orphaned in the side table.
-            self.recover_withheld_for_expired_channel(id);
-        }
+    /// Owner-aware form of [`has_flushable_work`](Self::has_flushable_work).
+    /// Expired lanes remain fenced while their authoritative worker is still
+    /// checked out; only lanes that can actually claim a worker are recovered.
+    pub fn has_flushable_work_matching<F>(&mut self, eligible: F) -> bool
+    where
+        F: Fn(&LaneKey) -> bool,
+    {
+        let now = Instant::now();
+        self.expire_claimable_in_flight_lanes(now, &eligible);
 
         self.queues.iter().any(|(id, q)| {
             !q.is_empty()
                 && !self.in_flight_channels.contains(id)
                 && self.retry_after.get(id).is_none_or(|&t| t <= now)
-        }) || self
-            .cancelled_batches
-            .keys()
-            .any(|id| !self.in_flight_channels.contains(id))
+                && eligible(id)
+        }) || self.cancelled_batches.keys().any(|id| {
+            !self.in_flight_channels.contains(id)
+                && self.retry_after.get(id).is_none_or(|&t| t <= now)
+                && eligible(id)
+        })
+    }
+
+    fn expire_claimable_in_flight_lanes<F>(&mut self, now: Instant, eligible: &F)
+    where
+        F: Fn(&LaneKey) -> bool,
+    {
+        let expired: Vec<LaneKey> = self
+            .in_flight_deadlines
+            .iter()
+            .filter(|(lane, deadline)| now >= **deadline && eligible(lane))
+            .map(|(lane, _)| lane.clone())
+            .collect();
+        for lane in expired {
+            let lost_events = self.in_flight_batch_sizes.remove(&lane).unwrap_or(0);
+            tracing::error!(
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
+                lost_events,
+                deadline_secs = self.in_flight_deadline.as_secs(),
+                "BUG: in-flight lane expired without mark_complete — auto-releasing"
+            );
+            self.in_flight_channels.remove(&lane);
+            self.in_flight_deadlines.remove(&lane);
+            self.in_flight_turn_ids.remove(&lane);
+            self.recover_withheld_for_expired_lane(&lane);
+        }
     }
 
     /// Number of channels with pending events.
@@ -595,20 +1035,39 @@ impl EventQueue {
         self.queues.len()
     }
 
-    /// Number of queued events for a specific channel. Test-only.
+    /// Number of queued events for a legacy channel lane. Test-only.
     #[cfg(test)]
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
-        self.queues.get(channel_id).map_or(0, |q| q.len())
+        self.queues
+            .get(&LaneKey::channel(*channel_id))
+            .map_or(0, VecDeque::len)
     }
 
-    /// Force a channel's retry-attempt counter to `count`, simulating `count`
-    /// prior failed attempts without needing to drive fake flush/requeue
-    /// cycles through the queue (which would leave artifact events behind).
-    /// Test-only — lets integration tests outside this module exercise
-    /// `requeue()`'s dead-letter threshold directly.
+    /// Number of distinct lane keys retained in any queue state map.
+    #[cfg(test)]
+    pub fn lane_state_count(&self) -> usize {
+        let mut lanes = HashSet::new();
+        lanes.extend(self.queues.keys().cloned());
+        lanes.extend(self.in_flight_channels.iter().cloned());
+        lanes.extend(self.in_flight_deadlines.keys().cloned());
+        lanes.extend(self.retry_after.keys().cloned());
+        lanes.extend(self.retry_counts.keys().cloned());
+        lanes.extend(self.cancelled_batches.keys().cloned());
+        lanes.extend(self.withheld_native_steer.keys().cloned());
+        lanes.len()
+    }
+
+    /// Force a legacy channel lane's retry-attempt counter in tests.
     #[cfg(test)]
     pub fn set_retry_count_for_test(&mut self, channel_id: Uuid, count: u32) {
-        self.retry_counts.insert(channel_id, count);
+        self.retry_counts
+            .insert(LaneKey::channel(channel_id), count);
+    }
+
+    /// Read an exact lane's retry-attempt counter in tests.
+    #[cfg(test)]
+    pub fn retry_count_for_test(&self, lane: &LaneKey) -> Option<u32> {
+        self.retry_counts.get(lane).copied()
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
@@ -623,27 +1082,70 @@ impl EventQueue {
     /// Returns the event IDs of dropped events so the caller can clean up
     /// any reactions (👀) that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
+        let mut ids = Vec::new();
+        let queue_lanes: Vec<LaneKey> = self
             .queues
-            .remove(&channel_id)
-            .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
-            .unwrap_or_default();
-        self.retry_after.remove(&channel_id);
-        self.retry_counts.remove(&channel_id);
-        self.cancelled_batches.remove(&channel_id);
-        self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
-        // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
-        // task will eventually complete (calling mark_complete) or the deadline
-        // will expire (auto-cleaning the channel). Removing deadlines without
-        // removing in_flight_channels would disable auto-expiry and leave a
-        // wedged task permanently blocking the channel.
+            .keys()
+            .filter(|lane| lane.channel_id == channel_id)
+            .cloned()
+            .collect();
+        for lane in queue_lanes {
+            if let Some(events) = self.queues.remove(&lane) {
+                ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+            }
+        }
+        let cancelled_lanes: Vec<LaneKey> = self
+            .cancelled_batches
+            .keys()
+            .filter(|lane| lane.channel_id == channel_id)
+            .cloned()
+            .collect();
+        for lane in cancelled_lanes {
+            if let Some(events) = self.cancelled_batches.remove(&lane) {
+                ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+            }
+        }
+        let withheld_lanes: Vec<LaneKey> = self
+            .withheld_native_steer
+            .keys()
+            .filter(|lane| lane.channel_id == channel_id)
+            .cloned()
+            .collect();
+        for lane in withheld_lanes {
+            if let Some(events) = self.withheld_native_steer.remove(&lane) {
+                ids.extend(events.into_iter().map(|event| event.event.id.to_hex()));
+            }
+        }
+        self.retry_after
+            .retain(|lane, _| lane.channel_id != channel_id);
+        self.retry_counts
+            .retain(|lane, _| lane.channel_id != channel_id);
+        self.cancel_reasons
+            .retain(|lane, _| lane.channel_id != channel_id);
         ids
     }
 
-    /// Whether a prompt is currently in-flight for the given channel.
-    pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
-        self.in_flight_channels.contains(&channel_id)
+    /// Permanently remove all queue ownership for a channel.
+    ///
+    /// Unlike [`Self::drain_channel`], this also invalidates active exact-lane
+    /// generations and deadlines. Use it only for channel removal, where every
+    /// associated task is being cancelled and its late result must be stale.
+    pub fn purge_channel(&mut self, channel_id: Uuid) -> Vec<String> {
+        let ids = self.drain_channel(channel_id);
+        self.in_flight_channels
+            .retain(|lane| lane.channel_id != channel_id);
+        self.in_flight_deadlines
+            .retain(|lane, _| lane.channel_id != channel_id);
+        self.in_flight_batch_sizes
+            .retain(|lane, _| lane.channel_id != channel_id);
+        self.in_flight_turn_ids
+            .retain(|lane, _| lane.channel_id != channel_id);
+        ids
+    }
+
+    /// Whether the exact resolved lane is currently in flight.
+    pub fn is_lane_in_flight(&self, lane: &LaneKey) -> bool {
+        self.in_flight_channels.contains(lane)
     }
 
     /// Whether any channel currently has a turn in flight.
@@ -675,21 +1177,27 @@ impl EventQueue {
     /// after `pool.send_steer` returns `Ok(())` and before any watcher task
     /// is spawned, so the withhold is established before `mark_complete` /
     /// any subsequent `flush_next` tick can run.
+    #[cfg(test)]
     pub fn mark_native_steer_pending(&mut self, channel_id: Uuid, event_id: &str) -> bool {
-        let Some(q) = self.queues.get_mut(&channel_id) else {
+        self.mark_lane_native_steer_pending(&LaneKey::channel(channel_id), event_id)
+    }
+
+    /// Withhold an event from one exact lane while native steer is unresolved.
+    pub fn mark_lane_native_steer_pending(&mut self, lane: &LaneKey, event_id: &str) -> bool {
+        let Some(q) = self.queues.get_mut(lane) else {
             return false;
         };
         let Some(pos) = q.iter().position(|qe| qe.event.id.to_hex() == event_id) else {
             return false;
         };
-        let qe = q
-            .remove(pos)
-            .expect("position came from iter so remove must succeed");
+        let Some(qe) = q.remove(pos) else {
+            return false;
+        };
         if q.is_empty() {
-            self.queues.remove(&channel_id);
+            self.queues.remove(lane);
         }
         self.withheld_native_steer
-            .entry(channel_id)
+            .entry(lane.clone())
             .or_default()
             .push(qe);
         true
@@ -705,8 +1213,14 @@ impl EventQueue {
     ///
     /// Push-to-front matches the discipline of `requeue_preserve_timestamps`
     /// at line 453, preserving fairness across channels.
+    #[cfg(test)]
     pub fn release_native_steer(&mut self, channel_id: Uuid, event_id: &str) {
-        let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) else {
+        self.release_lane_native_steer(&LaneKey::channel(channel_id), event_id);
+    }
+
+    /// Release one withheld event into its exact lane.
+    pub fn release_lane_native_steer(&mut self, lane: &LaneKey, event_id: &str) {
+        let Some(entries) = self.withheld_native_steer.get_mut(lane) else {
             return;
         };
         let Some(pos) = entries
@@ -717,17 +1231,15 @@ impl EventQueue {
         };
         let qe = entries.remove(pos);
         if entries.is_empty() {
-            self.withheld_native_steer.remove(&channel_id);
+            self.withheld_native_steer.remove(lane);
         }
-        // Push to FRONT so original `received_at` keeps the event at the head
-        // of the channel's queue. Per-channel cap is enforced below in case
-        // a flood of events arrived during the ack window.
-        let queue = self.queues.entry(channel_id).or_default();
+        let queue = self.queues.entry(lane.clone()).or_default();
         queue.push_front(qe);
         while queue.len() > MAX_PENDING_PER_CHANNEL {
             queue.pop_back();
             tracing::warn!(
-                channel_id = %channel_id,
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
                 limit = MAX_PENDING_PER_CHANNEL,
                 "release_native_steer overflow — dropped newest event to enforce cap"
             );
@@ -740,17 +1252,18 @@ impl EventQueue {
     /// Called on `SteerAck::Success` — the agent received the steer, so the
     /// event has been "delivered" via the non-cancelling path and must not
     /// be redelivered via normal dispatch. Idempotent across both stores.
-    pub fn remove_event(&mut self, channel_id: Uuid, event_id: &str) {
-        if let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) {
+    /// Remove an event only from the exact lane named by its steer attempt.
+    pub fn remove_lane_event(&mut self, lane: &LaneKey, event_id: &str) {
+        if let Some(entries) = self.withheld_native_steer.get_mut(lane) {
             entries.retain(|qe| qe.event.id.to_hex() != event_id);
             if entries.is_empty() {
-                self.withheld_native_steer.remove(&channel_id);
+                self.withheld_native_steer.remove(lane);
             }
         }
-        if let Some(q) = self.queues.get_mut(&channel_id) {
+        if let Some(q) = self.queues.get_mut(lane) {
             q.retain(|qe| qe.event.id.to_hex() != event_id);
             if q.is_empty() {
-                self.queues.remove(&channel_id);
+                self.queues.remove(lane);
             }
         }
     }
@@ -768,28 +1281,29 @@ impl EventQueue {
     /// Iterates the stored entries in reverse so per-entry `push_front`
     /// composes to original-FIFO order at the queue front (same discipline
     /// as `requeue_preserve_timestamps` at line 453).
-    fn recover_withheld_for_expired_channel(&mut self, channel_id: Uuid) {
-        let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
+    fn recover_withheld_for_expired_lane(&mut self, lane: &LaneKey) {
+        let Some(entries) = self.withheld_native_steer.remove(lane) else {
             return;
         };
         let n = entries.len();
-        let queue = self.queues.entry(channel_id).or_default();
+        let queue = self.queues.entry(lane.clone()).or_default();
         for qe in entries.into_iter().rev() {
             queue.push_front(qe);
         }
         while queue.len() > MAX_PENDING_PER_CHANNEL {
             queue.pop_back();
             tracing::warn!(
-                channel_id = %channel_id,
+                channel_id = %lane.channel_id,
+                lane_root = %lane.root_event_id,
                 limit = MAX_PENDING_PER_CHANNEL,
                 "withheld-steer recovery overflow — dropped newest event to enforce cap"
             );
         }
         tracing::warn!(
-            channel_id = %channel_id,
+            channel_id = %lane.channel_id,
+            lane_root = %lane.root_event_id,
             recovered = n,
-            "in-flight expiry recovered withheld steer event(s) — \
-             steer ack never arrived; normal dispatch will deliver"
+            "in-flight expiry recovered withheld steer event(s)"
         );
     }
 
@@ -848,24 +1362,25 @@ pub struct ThreadTags {
 /// - If only `reply` marker found (direct reply to root), root == parent
 /// - `p` tags → mentioned pubkeys
 ///
-/// NOTE: Only handles NIP-10 marker-based format (preferred). The deprecated
-/// positional format (no markers, `["e", id, relay_url]`) is not supported —
-/// Buzz always generates marker-based tags (see relay messages.rs:762-783).
+/// Preferred marked tags are authoritative. When no `root`/`reply` marker is
+/// present, deprecated positional tags remain supported for older network
+/// events: the first unmarked `e` is root and the last is direct parent.
 pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     let mut root = None;
     let mut reply = None;
+    let mut positional = Vec::new();
     let mut mentions = Vec::new();
 
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
         match parts.first().map(|s| s.as_str()) {
-            Some("e") if parts.len() >= 4 => {
-                let id = &parts[1];
-                let marker = &parts[3];
-                match marker.as_str() {
-                    "root" => root = Some(id.clone()),
-                    "reply" => reply = Some(id.clone()),
-                    _ => {}
+            Some("e") if parts.len() >= 2 => {
+                let id = parts[1].clone();
+                match parts.get(3).map(String::as_str) {
+                    Some("root") => root = Some(id),
+                    Some("reply") => reply = Some(id),
+                    None | Some("") => positional.push(id),
+                    Some(_) => {}
                 }
             }
             Some("p") if parts.len() >= 2 => {
@@ -881,7 +1396,10 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         (Some(r), Some(p)) => (Some(r), Some(p)),
         (Some(r), None) => (Some(r.clone()), Some(r)),
         (None, Some(p)) => (Some(p.clone()), Some(p)),
-        (None, None) => (None, None),
+        (None, None) => match (positional.first(), positional.last()) {
+            (Some(r), Some(p)) => (Some(r.clone()), Some(p.clone())),
+            _ => (None, None),
+        },
     };
 
     ThreadTags {
@@ -1645,6 +2163,581 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn root_thread_lane_is_canonical_and_legacy_and_dm_stay_channel_scoped() {
+        let channel_id = Uuid::new_v4();
+        let top = make_event("top level");
+        let top_id = top.id.to_hex();
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &top, AffinityPolicy::RootThread, false).unwrap(),
+            LaneKey::new(channel_id, top_id)
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &top, AffinityPolicy::Channel, false).unwrap(),
+            LaneKey::channel(channel_id)
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &top, AffinityPolicy::RootThread, true).unwrap(),
+            LaneKey::channel(channel_id)
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_malformed_and_conflicting_required_markers() {
+        let channel_id = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let conflicting = make_event_with_tags(
+            "reply",
+            vec![
+                vec!["e".into(), root_a, "".into(), "root".into()],
+                vec!["e".into(), root_b, "".into(), "root".into()],
+            ],
+        );
+        let malformed = make_event_with_tags(
+            "reply",
+            vec![vec![
+                "e".into(),
+                "not-an-event-id".into(),
+                "".into(),
+                "root".into(),
+            ]],
+        );
+
+        assert!(
+            LaneKey::resolve(channel_id, &conflicting, AffinityPolicy::RootThread, false).is_err()
+        );
+        assert!(
+            LaneKey::resolve(channel_id, &malformed, AffinityPolicy::RootThread, false).is_err()
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_duplicate_required_and_unknown_markers() {
+        let channel_id = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let duplicate_root = make_event_with_tags(
+            "duplicate root",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+            ],
+        );
+        let unknown_marker = make_event_with_tags(
+            "unknown marker",
+            vec![vec![
+                "e".into(),
+                root_id.clone(),
+                "".into(),
+                "thread-root".into(),
+            ]],
+        );
+        let mention = make_event_with_tags(
+            "valid mention",
+            vec![vec!["e".into(), root_id, "".into(), "mention".into()]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &duplicate_root,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::ConflictingRequiredTags),
+        );
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &unknown_marker,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::MalformedRequiredTag),
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &mention, AffinityPolicy::RootThread, false),
+            Ok(LaneKey::new(channel_id, mention.id.to_hex())),
+            "the standard NIP-10 mention marker is non-authoritative, not malformed",
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_duplicate_identical_reply_marker() {
+        // A HashSet collapses two identical `reply` tags into one entry, so a
+        // duplicate looks like a single well-formed reply and the lane resolves
+        // instead of failing closed.
+        let channel_id = Uuid::new_v4();
+        let reply_id = "c".repeat(64);
+        let duplicate_reply = make_event_with_tags(
+            "duplicate reply",
+            vec![
+                vec!["e".into(), reply_id.clone(), "".into(), "reply".into()],
+                vec!["e".into(), reply_id, "".into(), "reply".into()],
+            ],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(
+                channel_id,
+                &duplicate_reply,
+                AffinityPolicy::RootThread,
+                false,
+            ),
+            Err(LaneResolveError::ConflictingRequiredTags),
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_rejects_unknown_marker_that_would_hide_a_reply() {
+        // The dangerous shape: the ONLY thread tag carries an unrecognised
+        // marker. Skipping it silently derives a top-level lane for what is
+        // actually a reply, so the event runs in the wrong lane entirely.
+        let channel_id = Uuid::new_v4();
+        let parent = "d".repeat(64);
+        let hidden_reply = make_event_with_tags(
+            "unknown marker hiding a reply",
+            vec![vec![
+                "e".into(),
+                parent.clone(),
+                "".into(),
+                "in-reply-to".into(),
+            ]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &hidden_reply, AffinityPolicy::RootThread, false),
+            Err(LaneResolveError::MalformedRequiredTag),
+            "an unknown marker must fail closed, never fall through to a top-level lane",
+        );
+
+        // And it must not be rescued by an accompanying valid root: an event
+        // carrying an unparseable thread tag is malformed regardless.
+        let mixed = make_event_with_tags(
+            "unknown marker beside a valid root",
+            vec![
+                vec!["e".into(), parent.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent, "".into(), "in-reply-to".into()],
+            ],
+        );
+        assert_eq!(
+            LaneKey::resolve(channel_id, &mixed, AffinityPolicy::RootThread, false),
+            Err(LaneResolveError::MalformedRequiredTag),
+        );
+    }
+
+    #[test]
+    fn root_thread_lane_accepts_direct_reply_marker_as_canonical_root() {
+        let channel_id = Uuid::new_v4();
+        let root_id = "b".repeat(64);
+        let direct_reply = make_event_with_tags(
+            "direct reply",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &direct_reply, AffinityPolicy::RootThread, false),
+            Ok(LaneKey::new(channel_id, root_id))
+        );
+    }
+
+    #[test]
+    fn positional_direct_reply_keeps_lane_and_context_parser_aligned() {
+        let channel_id = Uuid::new_v4();
+        let root_id = "c".repeat(64);
+        let legacy_reply = make_event_with_tags(
+            "legacy direct reply",
+            vec![vec!["e".into(), root_id.clone(), "".into()]],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &legacy_reply, AffinityPolicy::RootThread, false),
+            Ok(LaneKey::new(channel_id, root_id.clone()))
+        );
+        let tags = parse_thread_tags(&legacy_reply);
+        assert_eq!(tags.root_event_id.as_deref(), Some(root_id.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(root_id.as_str()));
+    }
+
+    #[test]
+    fn positional_nested_reply_uses_first_as_root_and_last_as_parent() {
+        let channel_id = Uuid::new_v4();
+        let root_id = "d".repeat(64);
+        let cited_id = "e".repeat(64);
+        let parent_id = "f".repeat(64);
+        let legacy_reply = make_event_with_tags(
+            "legacy nested reply",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into()],
+                vec!["e".into(), cited_id, "".into()],
+                vec!["e".into(), parent_id.clone(), "".into()],
+            ],
+        );
+
+        assert_eq!(
+            LaneKey::resolve(channel_id, &legacy_reply, AffinityPolicy::RootThread, false),
+            Ok(LaneKey::new(channel_id, root_id.clone()))
+        );
+        let tags = parse_thread_tags(&legacy_reply);
+        assert_eq!(tags.root_event_id.as_deref(), Some(root_id.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(parent_id.as_str()));
+    }
+
+    #[test]
+    fn root_lanes_in_one_channel_flush_concurrently_one_event_at_a_time() {
+        let channel_id = Uuid::new_v4();
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let event_a = make_event("root a");
+        let event_b = make_event("root b");
+        let lane_a = LaneKey::new(channel_id, event_a.id.to_hex());
+        let lane_b = LaneKey::new(channel_id, event_b.id.to_hex());
+
+        assert_eq!(
+            queue.push_resolved(
+                QueuedEvent {
+                    channel_id,
+                    event: event_a,
+                    received_at: Instant::now(),
+                    prompt_tag: "test".into(),
+                },
+                lane_a.clone(),
+            ),
+            PushResult::Accepted
+        );
+        assert_eq!(
+            queue.push_resolved(
+                QueuedEvent {
+                    channel_id,
+                    event: event_b,
+                    received_at: Instant::now(),
+                    prompt_tag: "test".into(),
+                },
+                lane_b.clone(),
+            ),
+            PushResult::Accepted
+        );
+
+        let first = queue.flush_next().unwrap();
+        let second = queue.flush_next().unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(second.events.len(), 1);
+        assert_ne!(first.lane, second.lane);
+        assert!(queue.is_lane_in_flight(&lane_a));
+        assert!(queue.is_lane_in_flight(&lane_b));
+
+        queue.mark_lane_complete(&lane_a);
+        assert!(!queue.is_lane_in_flight(&lane_a));
+        assert!(queue.is_lane_in_flight(&lane_b));
+    }
+
+    #[test]
+    fn busy_owned_lane_does_not_block_newer_eligible_lane() {
+        let channel_id = Uuid::new_v4();
+        let blocked_lane = LaneKey::new(channel_id, "a".repeat(64));
+        let eligible_lane = LaneKey::new(channel_id, "b".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let mut blocked = make_queued(channel_id, "older blocked work");
+        blocked.received_at = Instant::now() - Duration::from_secs(1);
+
+        assert_eq!(
+            queue.push_resolved(blocked, blocked_lane.clone()),
+            PushResult::Accepted
+        );
+        assert_eq!(
+            queue.push_resolved(
+                make_queued(channel_id, "newer eligible work"),
+                eligible_lane.clone(),
+            ),
+            PushResult::Accepted
+        );
+
+        let batch = queue
+            .flush_next_matching(|lane| lane != &blocked_lane)
+            .expect("eligible lane must dispatch");
+        assert_eq!(batch.lane, eligible_lane);
+        assert!(!queue.is_lane_in_flight(&blocked_lane));
+        assert_eq!(
+            queue.queues.get(&blocked_lane).map(VecDeque::len),
+            Some(1),
+            "blocked work remains queued losslessly"
+        );
+    }
+
+    #[test]
+    fn late_completion_generation_cannot_clear_replacement_lane() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "old turn"), lane.clone()),
+            PushResult::Accepted
+        );
+        let old = queue.flush_next().expect("old turn flush");
+        assert_eq!(old.lane, lane);
+        assert!(!queue.mark_lane_complete_for_turn(&lane, "unbound-turn"));
+        assert!(queue.is_lane_in_flight(&lane));
+        assert!(queue.bind_lane_turn(&lane, "old-turn"));
+
+        // Model the backstop expiring the old ownership before its task result arrives.
+        queue.mark_lane_complete(&lane);
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "replacement"), lane.clone()),
+            PushResult::Accepted
+        );
+        let replacement = queue.flush_next().expect("replacement flush");
+        assert_eq!(replacement.lane, lane);
+        assert!(queue.bind_lane_turn(&lane, "new-turn"));
+
+        assert!(!queue.mark_lane_complete_for_turn(&lane, "old-turn"));
+        assert!(queue.is_lane_in_flight(&lane));
+        assert!(queue.mark_lane_complete_for_turn(&lane, "new-turn"));
+        assert!(!queue.is_lane_in_flight(&lane));
+    }
+
+    #[test]
+    fn purge_channel_clears_all_exact_lane_generation_ownership() {
+        let removed_channel = Uuid::new_v4();
+        let retained_channel = Uuid::new_v4();
+        let lane_a = LaneKey::new(removed_channel, "a".repeat(64));
+        let lane_b = LaneKey::new(removed_channel, "b".repeat(64));
+        let retained_lane = LaneKey::new(retained_channel, "c".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+
+        for (lane, content) in [(&lane_a, "a"), (&lane_b, "b")] {
+            assert_eq!(
+                queue.push_resolved(make_queued(removed_channel, content), lane.clone()),
+                PushResult::Accepted
+            );
+        }
+        assert_eq!(
+            queue.push_resolved(
+                make_queued(retained_channel, "retained"),
+                retained_lane.clone(),
+            ),
+            PushResult::Accepted
+        );
+
+        for turn_id in ["turn-a", "turn-b", "turn-c"] {
+            let batch = queue.flush_next().expect("lane flush");
+            assert!(queue.bind_lane_turn(&batch.lane, turn_id));
+        }
+        let retained_turn = queue.lane_turn_id(&retained_lane).map(str::to_owned);
+
+        queue.purge_channel(removed_channel);
+
+        for lane in [&lane_a, &lane_b] {
+            assert!(!queue.is_lane_in_flight(lane));
+            assert_eq!(queue.lane_turn_id(lane), None);
+        }
+        assert!(queue.is_lane_in_flight(&retained_lane));
+        assert_eq!(queue.lane_turn_id(&retained_lane), retained_turn.as_deref());
+    }
+
+    #[test]
+    fn repeated_cancelled_batches_stay_bounded_and_keep_newest_event() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let old = make_queued(channel_id, "old");
+        let old_batch_event = BatchEvent {
+            event: old.event,
+            prompt_tag: old.prompt_tag,
+            received_at: old.received_at,
+        };
+        queue.cancelled_batches.insert(
+            lane.clone(),
+            std::iter::repeat_n(old_batch_event, MAX_PENDING_PER_CHANNEL).collect(),
+        );
+        let newest = make_queued(channel_id, "newest");
+        let newest_id = newest.event.id.to_hex();
+
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                lane: lane.clone(),
+                channel_id,
+                events: vec![BatchEvent {
+                    event: newest.event,
+                    prompt_tag: newest.prompt_tag,
+                    received_at: newest.received_at,
+                }],
+                cancelled_events: Vec::new(),
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            CancelReason::Steer,
+        );
+
+        let retained = queue.cancelled_batches.get(&lane).unwrap();
+        assert_eq!(retained.len(), MAX_PENDING_PER_CHANNEL);
+        assert_eq!(retained.last().unwrap().event.id.to_hex(), newest_id);
+    }
+
+    #[test]
+    fn root_lane_in_flight_reservation_includes_cancelled_merge_events() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let carried = make_queued(channel_id, "carried");
+        let carried = BatchEvent {
+            event: carried.event,
+            prompt_tag: carried.prompt_tag,
+            received_at: carried.received_at,
+        };
+        queue
+            .cancelled_batches
+            .insert(lane.clone(), vec![carried; 2]);
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "regular"), lane.clone()),
+            PushResult::Accepted
+        );
+        let dispatched = queue.flush_next().expect("merged flush");
+        assert_eq!(dispatched.cancelled_events.len(), 2);
+        assert!(queue.bind_lane_turn(&lane, "current-turn"));
+
+        let pending = make_queued(channel_id, "pending");
+        queue.queues.insert(
+            lane.clone(),
+            std::iter::repeat_n(pending, MAX_PENDING_PER_CHANNEL - 3).collect(),
+        );
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "overflow"), lane.clone()),
+            PushResult::Overloaded(OverloadReason::LaneQueueFull),
+            "all events carried by the in-flight merged prompt must reserve slots"
+        );
+    }
+
+    #[test]
+    fn root_lane_reserves_capacity_for_in_flight_retry() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let original = make_queued(channel_id, "original");
+        let original_id = original.event.id;
+        assert_eq!(
+            queue.push_resolved(original, lane.clone()),
+            PushResult::Accepted
+        );
+        let original_batch = queue.flush_next().expect("original flush");
+        assert_eq!(original_batch.lane, lane);
+        assert!(queue.bind_lane_turn(&lane, "current-turn"));
+
+        let pending = make_queued(channel_id, "pending");
+        queue.queues.insert(
+            lane.clone(),
+            std::iter::repeat_n(pending, MAX_PENDING_PER_CHANNEL - 1).collect(),
+        );
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "overflow"), lane.clone()),
+            PushResult::Overloaded(OverloadReason::LaneQueueFull),
+            "the recoverable in-flight event must reserve one lane slot"
+        );
+        assert_eq!(
+            queue.queues.get(&lane).unwrap().len(),
+            MAX_PENDING_PER_CHANNEL - 1
+        );
+
+        assert!(queue.requeue(original_batch).is_none());
+        assert!(queue.mark_lane_complete_for_turn(&lane, "current-turn"));
+        let retained = queue.queues.get(&lane).expect("retry queue retained");
+        assert_eq!(retained.len(), MAX_PENDING_PER_CHANNEL);
+        assert_eq!(retained.front().unwrap().event.id, original_id);
+    }
+
+    #[test]
+    fn aggregate_limit_reserves_recoverable_in_flight_batch() {
+        let channel_id = Uuid::new_v4();
+        let lane_a = LaneKey::new(channel_id, "a".repeat(64));
+        let lane_b = LaneKey::new(channel_id, "b".repeat(64));
+        let lane_c = LaneKey::new(channel_id, "c".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread)
+            .with_limits(10, 2);
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "active"), lane_a.clone()),
+            PushResult::Accepted
+        );
+        let _active = queue.flush_next().expect("active batch");
+        assert!(queue.bind_lane_turn(&lane_a, "active-turn"));
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "queued"), lane_b),
+            PushResult::Accepted
+        );
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "overflow"), lane_c),
+            PushResult::Overloaded(OverloadReason::AggregatePendingLimit),
+            "recoverable active work must consume aggregate admission capacity"
+        );
+    }
+
+    #[test]
+    fn root_lane_depth_overflow_rejects_new_event_without_dropping_oldest() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let oldest = make_queued(channel_id, "oldest");
+        let oldest_id = oldest.event.id.to_hex();
+        queue.queues.insert(
+            lane.clone(),
+            std::iter::repeat_n(oldest, MAX_PENDING_PER_CHANNEL).collect(),
+        );
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "overflow"), lane.clone()),
+            PushResult::Overloaded(OverloadReason::LaneQueueFull)
+        );
+        let queued = queue.queues.get(&lane).expect("lane must remain queued");
+        assert_eq!(queued.len(), MAX_PENDING_PER_CHANNEL);
+        assert_eq!(queued.front().unwrap().event.id.to_hex(), oldest_id);
+    }
+
+    #[test]
+    fn root_lane_limits_are_finite_distinguishable_and_clean_up() {
+        let channel_id = Uuid::new_v4();
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread)
+            .with_limits(2, 2);
+
+        for suffix in ['a', 'b'] {
+            let event = make_event(&format!("root {suffix}"));
+            let lane = LaneKey::new(channel_id, event.id.to_hex());
+            assert_eq!(
+                queue.push_resolved(
+                    QueuedEvent {
+                        channel_id,
+                        event,
+                        received_at: Instant::now(),
+                        prompt_tag: "test".into(),
+                    },
+                    lane,
+                ),
+                PushResult::Accepted
+            );
+        }
+
+        let overloaded = make_event("root c");
+        let overloaded_lane = LaneKey::new(channel_id, overloaded.id.to_hex());
+        assert_eq!(
+            queue.push_resolved(
+                QueuedEvent {
+                    channel_id,
+                    event: overloaded,
+                    received_at: Instant::now(),
+                    prompt_tag: "test".into(),
+                },
+                overloaded_lane,
+            ),
+            PushResult::Overloaded(OverloadReason::TooManyChannelLanes)
+        );
+
+        let first = queue.flush_next().unwrap();
+        queue.mark_lane_complete(&first.lane);
+        let second = queue.flush_next().unwrap();
+        queue.mark_lane_complete(&second.lane);
+        assert_eq!(queue.lane_state_count(), 0);
+    }
+
     /// Build a QueuedEvent for the given channel.
     fn make_queued(channel_id: Uuid, content: &str) -> QueuedEvent {
         QueuedEvent {
@@ -1872,6 +2965,7 @@ mod tests {
             .unwrap_or_else(|_| event.pubkey.to_hex());
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -1902,6 +2996,7 @@ mod tests {
     fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
         let ch = Uuid::new_v4();
         FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event: make_event("the new message"),
@@ -2033,6 +3128,7 @@ mod tests {
         // Multi-event header path must also branch on reason.
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![
                 BatchEvent {
@@ -2090,6 +3186,7 @@ mod tests {
         let _steering_id = steering.id.to_hex();
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event: steering,
@@ -2142,13 +3239,228 @@ mod tests {
         queue.mark_complete(ch);
 
         // retry_after is set, so manually clear it for this test.
-        queue.retry_after.remove(&ch);
+        queue.retry_after.remove(&LaneKey::channel(ch));
 
         // Should be able to flush again and get the same events in order.
         let batch2 = queue.flush_next().unwrap();
         assert_eq!(batch2.events.len(), 2);
         assert_eq!(batch2.events[0].event.content, "msg1");
         assert_eq!(batch2.events[1].event.content, "msg2");
+    }
+
+    #[test]
+    fn requeue_preserve_timestamps_keeps_cancelled_half_of_merged_prompt() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        queue.push(make_queued(ch, "original work"));
+        let original = queue.flush_next().unwrap();
+        queue.push(make_queued(ch, "steering update"));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(ch);
+
+        let merged = queue.flush_next().unwrap();
+        assert_eq!(merged.events.len(), 1);
+        assert_eq!(merged.cancelled_events.len(), 1);
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
+
+        queue.requeue_preserve_timestamps(merged);
+        queue.mark_complete(ch);
+
+        let retry = queue.flush_next().unwrap();
+        assert_eq!(retry.events.len(), 1);
+        assert_eq!(retry.events[0].event.content, "steering update");
+        assert_eq!(retry.cancelled_events.len(), 1);
+        assert_eq!(retry.cancelled_events[0].event.content, "original work");
+        assert_eq!(retry.cancel_reason, Some(CancelReason::Steer));
+    }
+
+    #[test]
+    fn requeue_keeps_cancelled_half_of_merged_prompt() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let lane = LaneKey::channel(ch);
+
+        queue.push(make_queued(ch, "original work"));
+        let original = queue.flush_next().unwrap();
+        queue.push(make_queued(ch, "steering update"));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(ch);
+
+        let merged = queue.flush_next().unwrap();
+        assert!(queue.requeue(merged).is_none());
+        queue.mark_complete(ch);
+        queue.retry_after.remove(&lane);
+
+        let retry = queue.flush_next().unwrap();
+        assert_eq!(retry.events.len(), 1);
+        assert_eq!(retry.events[0].event.content, "steering update");
+        assert_eq!(retry.cancelled_events.len(), 1);
+        assert_eq!(retry.cancelled_events[0].event.content, "original work");
+        assert_eq!(retry.cancel_reason, Some(CancelReason::Steer));
+    }
+
+    #[test]
+    fn retry_throttle_blocks_cancelled_half_of_failed_merged_prompt() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "original work"));
+        let original = queue.flush_next().expect("original batch");
+        queue.push(make_queued(channel_id, "steering update"));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(channel_id);
+
+        let merged = queue.flush_next().expect("merged prompt");
+        assert!(queue.requeue(merged).is_none());
+        queue.mark_complete(channel_id);
+        assert!(
+            queue
+                .retry_after
+                .get(&lane)
+                .is_some_and(|deadline| *deadline > Instant::now()),
+            "failed merged work must establish a future retry deadline"
+        );
+
+        assert!(
+            !queue.has_flushable_work(),
+            "cancelled context must observe the same retry deadline as ordinary work"
+        );
+        assert!(
+            queue.flush_next().is_none(),
+            "cancelled context must not bypass retry throttling"
+        );
+    }
+
+    #[test]
+    fn cancelled_only_lane_competes_in_global_fifo_order() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let cancelled_channel = Uuid::new_v4();
+        let queued_channel = Uuid::new_v4();
+
+        queue.push(make_queued_at(
+            cancelled_channel,
+            "cancelled-old",
+            Duration::from_secs(5),
+        ));
+        let cancelled = queue.flush_next().expect("initial cancelled batch");
+        queue.requeue_as_cancelled(cancelled, CancelReason::Steer);
+        queue.mark_complete(cancelled_channel);
+
+        queue.push(make_queued_at(
+            queued_channel,
+            "queued-new",
+            Duration::from_secs(1),
+        ));
+
+        let next = queue.flush_next().expect("oldest retained work");
+        assert_eq!(
+            next.channel_id, cancelled_channel,
+            "cancelled-only work must compete with queued work by received_at"
+        );
+        assert_eq!(next.events[0].event.content, "cancelled-old");
+    }
+
+    #[test]
+    fn root_cancelled_only_lane_dispatches_one_primary_event() {
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let first = make_queued_at(channel_id, "cancelled-first", Duration::from_secs(2));
+        let second = make_queued_at(channel_id, "cancelled-second", Duration::from_secs(1));
+
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                lane: lane.clone(),
+                channel_id,
+                events: vec![
+                    BatchEvent {
+                        event: first.event,
+                        prompt_tag: first.prompt_tag,
+                        received_at: first.received_at,
+                    },
+                    BatchEvent {
+                        event: second.event,
+                        prompt_tag: second.prompt_tag,
+                        received_at: second.received_at,
+                    },
+                ],
+                cancelled_events: Vec::new(),
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            CancelReason::Steer,
+        );
+
+        let batch = queue.flush_next().expect("cancelled-only root batch");
+        assert_eq!(
+            batch.events.len(),
+            1,
+            "RootThread must never dispatch multiple primary events in one batch"
+        );
+        assert_eq!(batch.events[0].event.content, "cancelled-first");
+        assert_eq!(
+            queue.cancelled_batches.get(&lane).map(Vec::len),
+            Some(1),
+            "the later retained event must remain queued for global FIFO scheduling"
+        );
+    }
+
+    #[test]
+    fn root_cancelled_only_events_preserve_global_fifo_between_dispatches() {
+        let cancelled_channel = Uuid::new_v4();
+        let queued_channel = Uuid::new_v4();
+        let cancelled_lane = LaneKey::new(cancelled_channel, "a".repeat(64));
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        let oldest = make_queued_at(
+            cancelled_channel,
+            "cancelled-oldest",
+            Duration::from_secs(3),
+        );
+        let newest = make_queued_at(
+            cancelled_channel,
+            "cancelled-newest",
+            Duration::from_secs(1),
+        );
+
+        queue.requeue_as_cancelled(
+            FlushBatch {
+                lane: cancelled_lane.clone(),
+                channel_id: cancelled_channel,
+                events: [oldest, newest]
+                    .into_iter()
+                    .map(|event| BatchEvent {
+                        event: event.event,
+                        prompt_tag: event.prompt_tag,
+                        received_at: event.received_at,
+                    })
+                    .collect(),
+                cancelled_events: Vec::new(),
+                cancel_reason: Some(CancelReason::Steer),
+            },
+            CancelReason::Steer,
+        );
+        queue.push_resolved(
+            make_queued_at(queued_channel, "queued-middle", Duration::from_secs(2)),
+            LaneKey::new(queued_channel, "b".repeat(64)),
+        );
+
+        let first = queue.flush_next().expect("oldest cancelled work");
+        assert_eq!(first.events[0].event.content, "cancelled-oldest");
+        assert!(
+            first
+                .events
+                .iter()
+                .all(|event| event.event.content != "cancelled-newest"),
+            "later cancelled work must not be bundled ahead of globally older queued work"
+        );
+        queue.mark_lane_complete(&cancelled_lane);
+
+        let second = queue.flush_next().expect("middle queued work");
+        assert_eq!(
+            second.events[0].event.content, "queued-middle",
+            "later cancelled work must not jump ahead of globally older queued work"
+        );
     }
 
     #[test]
@@ -2182,6 +3494,7 @@ mod tests {
         let e3 = make_event("third message");
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![
                 BatchEvent {
@@ -2222,6 +3535,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2245,6 +3559,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2277,6 +3592,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2307,6 +3623,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hi");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2334,6 +3651,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2358,6 +3676,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2414,6 +3733,7 @@ mod tests {
         let event = make_event("hello");
 
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2452,6 +3772,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -2665,8 +3986,8 @@ mod tests {
         // Complete only A.
         q.mark_complete(ch_a);
         assert_eq!(q.in_flight_channels.len(), 1);
-        assert!(q.in_flight_channels.contains(&ch_b));
-        assert!(!q.in_flight_channels.contains(&ch_a));
+        assert!(q.in_flight_channels.contains(&LaneKey::channel(ch_b)));
+        assert!(!q.in_flight_channels.contains(&LaneKey::channel(ch_a)));
 
         // B still in-flight.
         assert!(any_in_flight(&q));
@@ -2712,7 +4033,7 @@ mod tests {
         q.mark_complete(ch);
 
         // No retry_after — channel should be immediately flushable.
-        assert!(!q.retry_after.contains_key(&ch));
+        assert!(!q.retry_after.contains_key(&LaneKey::channel(ch)));
         assert!(q.flush_next().is_some());
     }
 
@@ -2788,6 +4109,40 @@ mod tests {
     }
 
     #[test]
+    fn expired_in_flight_lane_keeps_generation_while_owner_is_ineligible() {
+        let mut queue = EventQueue::new_with_affinity(DedupMode::Queue, AffinityPolicy::RootThread);
+        queue.in_flight_deadline = Duration::ZERO;
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::new(channel_id, "a".repeat(64));
+
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "first"), lane.clone()),
+            PushResult::Accepted
+        );
+        let first = queue.flush_next().expect("first batch");
+        assert_eq!(first.lane, lane);
+        assert!(queue.bind_lane_turn(&lane, "turn-one"));
+        assert_eq!(
+            queue.push_resolved(make_queued(channel_id, "second"), lane.clone()),
+            PushResult::Accepted
+        );
+
+        assert!(!queue.has_flushable_work_matching(|candidate| candidate != &lane));
+        assert!(queue.is_lane_in_flight(&lane));
+        assert!(queue.lane_turn_matches(&lane, "turn-one"));
+        assert!(queue
+            .flush_next_matching(|candidate| candidate != &lane)
+            .is_none());
+        assert!(queue.lane_turn_matches(&lane, "turn-one"));
+
+        assert!(queue.has_flushable_work_matching(|_| true));
+        let replacement = queue
+            .flush_next_matching(|_| true)
+            .expect("orphaned lane may recover once claimable");
+        assert_eq!(replacement.lane, lane);
+    }
+
+    #[test]
     fn test_has_flushable_work() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -2817,8 +4172,10 @@ mod tests {
         );
 
         // Manually expire the retry_after to simulate time passing.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.retry_after.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
         assert!(
             q.has_flushable_work(),
             "expired throttle should be flushable"
@@ -2832,8 +4189,10 @@ mod tests {
 
         q.push(make_queued(ch, "poison"));
         for attempt in 1..=MAX_RETRIES {
-            q.retry_after
-                .insert(ch, Instant::now() - Duration::from_secs(1));
+            q.retry_after.insert(
+                LaneKey::channel(ch),
+                Instant::now() - Duration::from_secs(1),
+            );
             let batch = q.flush_next().expect("flush");
             assert!(
                 q.requeue(batch).is_none(),
@@ -2843,16 +4202,69 @@ mod tests {
         }
 
         // The MAX_RETRIES+1'th failure dead-letters: batch is returned.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.retry_after.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
         let batch = q.flush_next().expect("flush");
         let dead = q.requeue(batch).expect("should dead-letter");
         assert_eq!(dead.channel_id, ch);
         assert_eq!(dead.events.len(), 1);
         q.mark_complete(ch);
         // Retry state is cleared so fresh traffic isn't throttled.
-        assert!(!q.retry_counts.contains_key(&ch));
-        assert!(!q.retry_after.contains_key(&ch));
+        assert!(!q.retry_counts.contains_key(&LaneKey::channel(ch)));
+        assert!(!q.retry_after.contains_key(&LaneKey::channel(ch)));
+    }
+
+    #[test]
+    fn cancellation_after_retry_preserves_attempt_count() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "poison work"));
+        let first = queue.flush_next().expect("first attempt");
+        assert!(queue.requeue(first).is_none());
+        queue.mark_complete(channel_id);
+        assert_eq!(queue.retry_counts.get(&lane), Some(&1));
+
+        queue
+            .retry_after
+            .insert(lane.clone(), Instant::now() - Duration::from_secs(1));
+        let retry = queue.flush_next().expect("retry attempt");
+        queue.requeue_as_cancelled(retry, CancelReason::Steer);
+        queue.mark_complete(channel_id);
+
+        assert_eq!(
+            queue.retry_counts.get(&lane),
+            Some(&1),
+            "cancellation must not reset the failure budget for poison work"
+        );
+    }
+
+    #[test]
+    fn terminal_settlement_clears_retry_attempt_state() {
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let channel_id = Uuid::new_v4();
+        let lane = LaneKey::channel(channel_id);
+
+        queue.push(make_queued(channel_id, "eventually succeeds"));
+        let first = queue.flush_next().expect("first attempt");
+        assert!(queue.bind_lane_turn(&lane, "first-turn"));
+        assert!(queue.requeue(first).is_none());
+        assert!(queue.mark_lane_complete_for_turn(&lane, "first-turn"));
+        assert_eq!(queue.retry_counts.get(&lane), Some(&1));
+
+        queue
+            .retry_after
+            .insert(lane.clone(), Instant::now() - Duration::from_secs(1));
+        queue.flush_next().expect("retry attempt");
+        assert!(queue.bind_lane_turn(&lane, "retry-turn"));
+        assert!(queue.mark_lane_settled_for_turn(&lane, "retry-turn"));
+
+        assert!(!queue.retry_counts.contains_key(&lane));
+        assert!(!queue.retry_after.contains_key(&lane));
+        assert!(!queue.is_lane_in_flight(&lane));
     }
 
     #[test]
@@ -2877,8 +4289,10 @@ mod tests {
         assert_eq!(batch2.channel_id, ch2);
 
         // After retry_after expires, ch should be flushable again.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.retry_after.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
         q.mark_complete(ch2);
         let batch3 = q
             .flush_next()
@@ -2969,6 +4383,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3000,6 +4415,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3038,6 +4454,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3066,6 +4483,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3110,6 +4528,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("ok do that");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3159,6 +4578,7 @@ mod tests {
         );
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3366,6 +4786,7 @@ mod tests {
             ]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3423,6 +4844,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3463,6 +4885,7 @@ mod tests {
         let event = make_event("test");
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3487,6 +4910,7 @@ mod tests {
         let hex = event.pubkey.to_hex();
         let npub = event.pubkey.to_bech32().unwrap();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3510,6 +4934,7 @@ mod tests {
         // Kind 9 (stream message) — tags were previously stripped.
         let event = make_event_with_tags("hello", vec![vec!["h".into(), ch.to_string()]]);
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3608,25 +5033,30 @@ mod tests {
         let batch = q.flush_next().unwrap();
         q.requeue(batch);
         q.mark_complete(ch);
-        assert!(q.retry_after.contains_key(&ch));
-        assert!(q.retry_counts.contains_key(&ch));
+        assert!(q.retry_after.contains_key(&LaneKey::channel(ch)));
+        assert!(q.retry_counts.contains_key(&LaneKey::channel(ch)));
 
         // The requeued event is back in the queue. Flush it again so the
         // queue is empty (simulating a successful retry dispatch).
         // We need to wait for retry_after to expire first.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.retry_after.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
         let _batch2 = q.flush_next().unwrap();
-        // Now mark_complete with no active throttle — clears retry_counts.
-        q.mark_complete(ch);
-        assert!(!q.retry_counts.contains_key(&ch));
+        // Terminal success is explicit and generation-qualified; ordinary
+        // mark_complete intentionally preserves retry history for cancellation.
+        let lane = LaneKey::channel(ch);
+        assert!(q.bind_lane_turn(&lane, "successful-retry"));
+        assert!(q.mark_lane_settled_for_turn(&lane, "successful-retry"));
+        assert!(!q.retry_counts.contains_key(&lane));
 
         // Re-create the orphan scenario: manually insert stale retry_counts
         // with no queue, no throttle, and no in-flight.
-        q.retry_counts.insert(ch, 3);
+        q.retry_counts.insert(LaneKey::channel(ch), 3);
         q.compact_expired_state();
         assert!(
-            !q.retry_counts.contains_key(&ch),
+            !q.retry_counts.contains_key(&LaneKey::channel(ch)),
             "orphaned retry_counts should be removed"
         );
     }
@@ -3643,18 +5073,23 @@ mod tests {
         q.mark_complete(ch);
 
         // Expire the throttle so the requeued event can be flushed.
-        q.retry_after
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.retry_after.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
         let _batch2 = q.flush_next().unwrap();
         // Channel is now in-flight with empty queue and expired throttle.
-        assert!(q.in_flight_channels.contains(&ch));
-        assert!(q.queues.get(&ch).is_none_or(|q| q.is_empty()));
+        assert!(q.in_flight_channels.contains(&LaneKey::channel(ch)));
+        assert!(q
+            .queues
+            .get(&LaneKey::channel(ch))
+            .is_none_or(|q| q.is_empty()));
 
         // compact must NOT remove retry_counts — the in-flight attempt
         // may fail and requeue, which needs the existing count.
         q.compact_expired_state();
         assert!(
-            q.retry_counts.contains_key(&ch),
+            q.retry_counts.contains_key(&LaneKey::channel(ch)),
             "retry_counts must survive while channel is in-flight"
         );
     }
@@ -3666,11 +5101,11 @@ mod tests {
 
         // Manually set up: retry_counts exists, queue is non-empty, no throttle.
         q.push(make_queued(ch, "msg1"));
-        q.retry_counts.insert(ch, 2);
+        q.retry_counts.insert(LaneKey::channel(ch), 2);
 
         q.compact_expired_state();
         assert!(
-            q.retry_counts.contains_key(&ch),
+            q.retry_counts.contains_key(&LaneKey::channel(ch)),
             "retry_counts should survive when queue is non-empty"
         );
     }
@@ -3876,6 +5311,7 @@ mod tests {
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3918,6 +5354,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3952,6 +5389,7 @@ mod tests {
         let event = make_event("hello world");
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -3981,6 +5419,7 @@ mod tests {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -4023,6 +5462,7 @@ mod tests {
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -4059,6 +5499,7 @@ mod tests {
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event,
@@ -4094,6 +5535,7 @@ mod tests {
             vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![
                 BatchEvent {
@@ -4131,6 +5573,7 @@ mod tests {
         let plain = make_event("latest top-level");
         let plain_id = plain.id.to_hex();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![
                 BatchEvent {
@@ -4163,8 +5606,10 @@ mod tests {
 
     /// Build a single-event FlushBatch with the given content.
     fn make_single_batch(content: &str) -> FlushBatch {
+        let channel_id = Uuid::new_v4();
         FlushBatch {
-            channel_id: Uuid::new_v4(),
+            lane: LaneKey::channel(channel_id),
+            channel_id,
             events: vec![BatchEvent {
                 event: make_event(content),
                 prompt_tag: "test".into(),
@@ -4299,7 +5744,12 @@ mod tests {
             "withheld-only channel must not register as flushable work"
         );
         assert_eq!(pending_count(&q), 0);
-        assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(1));
+        assert_eq!(
+            q.withheld_native_steer
+                .get(&LaneKey::channel(ch))
+                .map(|v| v.len()),
+            Some(1)
+        );
     }
 
     /// Earlier events on the same channel must flush normally during the
@@ -4367,17 +5817,20 @@ mod tests {
 
         // Simulate a prompt in flight for `ch`, then withhold the queued
         // event for an in-flight goose-native steer.
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines.insert(ch, Instant::now());
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines
+            .insert(LaneKey::channel(ch), Instant::now());
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 1);
         assert!(q.mark_native_steer_pending(ch, &event_id));
 
         // Force the in-flight deadline to be in the past, simulating the
         // steer ack never arriving and the read loop hanging long enough
         // for `in_flight_deadline` to elapse. Same expiry-simulation
         // trick used by `test_retry_throttle_blocks_requeue_channel`.
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
 
         // `has_flushable_work` runs the expiry block first; it must recover
         // the withheld event so the channel registers as flushable.
@@ -4429,20 +5882,27 @@ mod tests {
         assert!(q.mark_native_steer_pending(ch, &e2_id));
         assert!(q.mark_native_steer_pending(ch, &e3_id));
         assert_eq!(pending_count(&q), 0);
-        assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(3));
+        assert_eq!(
+            q.withheld_native_steer
+                .get(&LaneKey::channel(ch))
+                .map(|v| v.len()),
+            Some(3)
+        );
 
         // Trigger expiry → bulk-release path.
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() - Duration::from_secs(1));
-        q.in_flight_batch_sizes.insert(ch, 3);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() - Duration::from_secs(1),
+        );
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 3);
         assert!(q.has_flushable_work());
 
         // After recovery, the queue front-to-back order must match the
         // original FIFO: e1, e2, e3.
         let recovered: Vec<String> = q
             .queues
-            .get(&ch)
+            .get(&LaneKey::channel(ch))
             .expect("queue restored")
             .iter()
             .map(|qe| qe.event.id.to_hex())
@@ -4458,6 +5918,7 @@ mod tests {
         let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event: make_event("hi"),
@@ -4487,6 +5948,7 @@ mod tests {
         let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event: make_event("hi"),
@@ -4515,6 +5977,7 @@ mod tests {
     fn test_format_prompt_no_canvas_produces_no_canvas_section() {
         let ch = Uuid::new_v4();
         let batch = FlushBatch {
+            lane: LaneKey::channel(ch),
             channel_id: ch,
             events: vec![BatchEvent {
                 event: make_event("hi"),
@@ -4564,11 +6027,12 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
         let old_deadline = Instant::now() + Duration::from_secs(100);
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines.insert(ch, old_deadline);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines
+            .insert(LaneKey::channel(ch), old_deadline);
 
         q.extend_in_flight_deadline(ch, 7200);
-        let new = *q.in_flight_deadlines.get(&ch).unwrap();
+        let new = *q.in_flight_deadlines.get(&LaneKey::channel(ch)).unwrap();
         assert!(
             new > old_deadline,
             "extended deadline must be past the original"
@@ -4580,11 +6044,12 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
         let far_future = Instant::now() + Duration::from_secs(999_999);
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines.insert(ch, far_future);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines
+            .insert(LaneKey::channel(ch), far_future);
 
         q.extend_in_flight_deadline(ch, 7200);
-        let after = *q.in_flight_deadlines.get(&ch).unwrap();
+        let after = *q.in_flight_deadlines.get(&LaneKey::channel(ch)).unwrap();
         assert_eq!(after, far_future, "deadline must never move backward");
     }
 
@@ -4592,17 +6057,19 @@ mod tests {
     fn extend_in_flight_deadline_noop_after_mark_complete() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() + Duration::from_secs(100));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() + Duration::from_secs(100),
+        );
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 1);
 
         q.mark_complete(ch);
-        assert!(!q.in_flight_deadlines.contains_key(&ch));
+        assert!(!q.in_flight_deadlines.contains_key(&LaneKey::channel(ch)));
 
         q.extend_in_flight_deadline(ch, 7200);
         assert!(
-            !q.in_flight_deadlines.contains_key(&ch),
+            !q.in_flight_deadlines.contains_key(&LaneKey::channel(ch)),
             "extend after mark_complete must not resurrect a deadline"
         );
     }
@@ -4612,17 +6079,17 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
         let extended = Instant::now() + Duration::from_secs(9999);
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines.insert(ch, extended);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(LaneKey::channel(ch), extended);
 
         q.compact_expired_state();
 
         assert!(
-            q.in_flight_deadlines.contains_key(&ch),
+            q.in_flight_deadlines.contains_key(&LaneKey::channel(ch)),
             "compaction must not touch in-flight deadlines"
         );
         assert_eq!(
-            *q.in_flight_deadlines.get(&ch).unwrap(),
+            *q.in_flight_deadlines.get(&LaneKey::channel(ch)).unwrap(),
             extended,
             "compaction must leave extended deadline intact"
         );
@@ -4641,9 +6108,10 @@ mod tests {
 
         // Insert the channel as in-flight with a deadline already in the past
         // (Instant::now() — by the time flush_next runs, now >= deadline).
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines.insert(ch, Instant::now());
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines
+            .insert(LaneKey::channel(ch), Instant::now());
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 1);
 
         // Also push an event so flush_next has something to do after expiry.
         q.push(make_queued(ch, "after-expiry"));
@@ -4669,10 +6137,12 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // Put the channel in-flight with an extended deadline far in the future.
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() + Duration::from_secs(9999));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() + Duration::from_secs(9999),
+        );
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 1);
 
         // Push an event for another channel so flush_next has work to do.
         let ch2 = Uuid::new_v4();
@@ -4686,11 +6156,11 @@ mod tests {
 
         // ch must still be in-flight — the extended deadline did not expire.
         assert!(
-            q.in_flight_channels.contains(&ch),
+            q.in_flight_channels.contains(&LaneKey::channel(ch)),
             "ch must remain in-flight after flush_next with an extended deadline"
         );
         assert!(
-            q.in_flight_deadlines.contains_key(&ch),
+            q.in_flight_deadlines.contains_key(&LaneKey::channel(ch)),
             "in-flight deadline for ch must not be removed by flush_next"
         );
     }
@@ -4707,10 +6177,12 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // In-flight channel with extended (far-future) deadline.
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() + Duration::from_secs(9999));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() + Duration::from_secs(9999),
+        );
+        q.in_flight_batch_sizes.insert(LaneKey::channel(ch), 1);
 
         // No other channels — nothing flushable.
         assert!(
@@ -4718,7 +6190,7 @@ mod tests {
             "has_flushable_work must return false when the only channel is in-flight with extended deadline"
         );
         assert!(
-            q.in_flight_channels.contains(&ch),
+            q.in_flight_channels.contains(&LaneKey::channel(ch)),
             "ch must remain in-flight after has_flushable_work with extended deadline"
         );
 
@@ -4731,7 +6203,7 @@ mod tests {
         );
         // ch still in-flight and not expired.
         assert!(
-            q.in_flight_channels.contains(&ch),
+            q.in_flight_channels.contains(&LaneKey::channel(ch)),
             "ch must still be in-flight after has_flushable_work finds ch2 work"
         );
     }
@@ -4746,15 +6218,17 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
-        q.in_flight_channels.insert(ch);
-        q.in_flight_deadlines
-            .insert(ch, Instant::now() + Duration::from_secs(100));
+        q.in_flight_channels.insert(LaneKey::channel(ch));
+        q.in_flight_deadlines.insert(
+            LaneKey::channel(ch),
+            Instant::now() + Duration::from_secs(100),
+        );
 
         q.extend_in_flight_deadline(ch, 7200);
-        let after_first = *q.in_flight_deadlines.get(&ch).unwrap();
+        let after_first = *q.in_flight_deadlines.get(&LaneKey::channel(ch)).unwrap();
 
         q.extend_in_flight_deadline(ch, 7200);
-        let after_second = *q.in_flight_deadlines.get(&ch).unwrap();
+        let after_second = *q.in_flight_deadlines.get(&LaneKey::channel(ch)).unwrap();
 
         assert!(
             after_second >= after_first,

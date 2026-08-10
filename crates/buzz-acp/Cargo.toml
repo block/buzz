@@ -76,6 +76,11 @@ evalexpr = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
+# Windows Job Objects provide stable process-tree ownership and kill-on-close.
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "creation-flags", "job-object", "kill-on-drop"] }
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"

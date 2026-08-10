@@ -10,11 +10,21 @@
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout};
+#[cfg(not(windows))]
+use tokio::process::Child;
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
+
+#[cfg(windows)]
+use process_wrap::tokio::ChildWrapper;
 
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
+
+#[cfg(not(windows))]
+type ManagedChild = Child;
+#[cfg(windows)]
+type ManagedChild = Box<dyn ChildWrapper>;
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -101,6 +111,9 @@ pub enum AcpError {
     #[error("Write timeout — agent stopped reading stdin (blocked for {0:?})")]
     WriteTimeout(std::time::Duration),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Protocol error: {0}")]
     Protocol(String),
 
@@ -138,7 +151,7 @@ fn build_initialize_params() -> serde_json::Value {
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
-    child: Child,
+    child: ManagedChild,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -188,14 +201,8 @@ pub struct AcpClient {
     /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
     /// Whether the agent advertised `_meta.steering.supported: true` in its
-    /// `initialize` response, meaning it implements the cross-adapter
-    /// [`ACP_STEER_METHOD`] extension.
-    ///
-    /// Set once by [`initialize`](Self::initialize); `false` for agents that
-    /// omit the key. This is the **only** gate on writing an
-    /// [`ACP_STEER_METHOD`] request. It must never be replaced by error-code
-    /// probing: codex-acp answers unrecognized extension methods with `{}` —
-    /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
+    /// `initialize` response. Retained for observability and compatibility;
+    /// Buzz does not emit the unowned extension without an exact run identity.
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
@@ -358,33 +365,22 @@ pub(crate) fn build_codex_config_env(
 /// goose's non-standard mid-turn steer method. Requires `expectedRunId`, so it
 /// is only usable once a `session_info_update` has supplied
 /// `_meta.goose.activeRunId`. Emitted by goose and buzz-agent only.
+#[allow(dead_code)]
 const GOOSE_STEER_METHOD: &str = "_goose/unstable/session/steer";
 
-/// The cross-adapter mid-turn steer method, shipped by claude-agent-acp
-/// (`src/acp-agent.ts:200`) and codex-acp (`src/AcpExtensions.ts:11`).
-/// Params are `{sessionId, prompt}` — no run id — and the result is
-/// `{outcome}`. Gated on [`AcpClient::steering_supported`].
-const ACP_STEER_METHOD: &str = "_session/steering";
-
-/// `outcome` value meaning the steer was applied to the turn Buzz is waiting
-/// on, which therefore keeps running.
-const STEER_OUTCOME_INJECTED: &str = "injected";
-
-/// `outcome` value meaning the turn Buzz was steering had already finished, so
-/// the adapter began a fresh turn carrying the message. Still a delivery
-/// success, but the awaited turn is over — see the steer-response arm for why
-/// this must not renew the hard deadline.
-const STEER_OUTCOME_STARTED_NEW_TURN: &str = "startedNewTurn";
-
-/// Which wire method carried an in-flight steer request, recorded so the
-/// response arm decodes the shape that method actually returns.
+/// Which wire method carried an in-flight steer request.
+///
+/// Buzz only emits the Goose transport because it binds the request to an
+/// immutable `expectedRunId`. The advertised cross-adapter
+/// `_session/steering` extension has no run identity; real adapters can
+/// acknowledge `injected` before rejecting the owning prompt or answer after
+/// that prompt has completed, so its delivery cannot be fenced or classified
+/// without loss/duplication risk. Those agents use cancel+merge and a normal
+/// host-owned `session/prompt` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SteerTransport {
-    /// [`GOOSE_STEER_METHOD`] — any success result is a delivered steer.
     Goose,
-    /// [`ACP_STEER_METHOD`] — success carries an `outcome` that must be
-    /// positively recognized before the steer counts as delivered.
-    AcpExtension,
 }
 
 fn build_client_capabilities() -> serde_json::Value {
@@ -410,20 +406,88 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Stable-enough process generation identity for panic recovery on Linux.
+/// A numeric PID alone is never authority to kill: it may have been reused
+/// after the task-owned `AcpClient` unwound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessIdentity {
+    pid: u32,
+    linux_start_time_ticks: Option<u64>,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn capture(pid: u32) -> Self {
+        Self {
+            pid,
+            linux_start_time_ticks: linux_process_start_time(pid),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_current(self) -> bool {
+        process_generation_matches(
+            self.linux_start_time_ticks,
+            linux_process_start_time(self.pid),
+        )
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn is_current(self) -> bool {
+        false
+    }
+}
+
+/// Parse field 22 (`starttime`) from `/proc/<pid>/stat`.
+/// The command name in field 2 may contain spaces and `)`, so split after its
+/// final closing parenthesis rather than splitting the whole line on spaces.
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_proc_start_time(stat: &str) -> Option<u64> {
+    let after_comm = stat.rsplit_once(')')?.1.trim_start();
+    // `after_comm` starts at field 3 (`state`); field 22 is zero-based index 19.
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn process_generation_matches(expected: Option<u64>, current: Option<u64>) -> bool {
+    matches!((expected, current), (Some(expected), Some(current)) if expected == current)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_linux_proc_start_time(&stat)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_process_start_time(_pid: u32) -> Option<u64> {
+    None
+}
+
 impl AcpClient {
+    #[cfg(test)]
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    pub(crate) fn process_identity(&self) -> Option<ProcessIdentity> {
+        self.child.id().map(ProcessIdentity::capture)
+    }
+
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
     /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
+        // Unix children own a process group. Windows children own a Job Object;
+        // its ChildWrapper::start_kill terminates the entire owned tree.
+        #[cfg(windows)]
+        {
+            if let Err(error) = self.child.start_kill() {
+                tracing::warn!(%error, "failed to terminate Windows ACP job object");
+            }
+        }
+        #[cfg(not(windows))]
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -519,18 +583,42 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Suppress the console window that Windows otherwise allocates for every
-        // console-subsystem child process spawned from a GUI/non-console parent.
-        configure_no_window(&mut cmd);
-
+        #[cfg(not(windows))]
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        let mut child = {
+            use process_wrap::tokio::{CommandWrap, CreationFlags, JobObject, KillOnDrop};
+            use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
+            // Spawn suspended, attach the process to a Windows Job Object, then
+            // resume it. KILL_ON_JOB_CLOSE gives this client one stable OS
+            // ownership handle for the leader and every descendant; PID reuse
+            // never participates in Windows termination authority.
+            let mut wrapped = CommandWrap::from(cmd);
+            wrapped.wrap(CreationFlags(CREATE_NO_WINDOW));
+            wrapped.wrap(KillOnDrop);
+            wrapped.wrap(JobObject);
+            wrapped.spawn()?
+        };
+
+        #[cfg(not(windows))]
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdin".into()))?;
+        #[cfg(windows)]
+        let stdin = child
+            .stdin()
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stdin".into()))?;
+        #[cfg(not(windows))]
         let stdout = child
             .stdout
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
+        #[cfg(windows)]
+        let stdout = child
+            .stdout()
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
@@ -591,10 +679,8 @@ impl AcpClient {
     /// Must be called exactly once, before any other ACP method.
     /// The caller may inspect `agentCapabilities` in the returned value.
     ///
-    /// Records `_meta.steering.supported` into
-    /// [`steering_supported`](Self::steering_supported) so the read loop's steer
-    /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
-    /// Parsed here rather than at each call site so no caller can forget it.
+    /// Records `_meta.steering.supported` for observability. Capability alone
+    /// is not authority to emit an unbound steer request.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
@@ -858,8 +944,7 @@ impl AcpClient {
         self.active_run_id.as_deref()
     }
 
-    /// Whether the agent advertised the [`ACP_STEER_METHOD`] extension at
-    /// `initialize` time (`_meta.steering.supported`).
+    /// Whether the agent advertised cross-adapter steering at initialize time.
     ///
     /// The read loop's steer arm reads the field directly; this accessor exists
     /// for the supervisor's post-initialize log line.
@@ -1294,7 +1379,7 @@ impl AcpClient {
     /// in the main loop.
     async fn read_until_response_with_idle_timeout(
         &mut self,
-        session_id: &str,
+        _session_id: &str,
         expected_id: u64,
         idle_timeout: std::time::Duration,
         hard_deadline: tokio::time::Instant,
@@ -1389,79 +1474,26 @@ impl AcpClient {
                     // value matches what goose's run-id check will compare
                     // against.
                     //
-                    // Transport precedence:
-                    //   Some(run_id)              → GOOSE_STEER_METHOD. goose
-                    //     wins whenever a run id exists: `expectedRunId` is
-                    //     strictly more precise about *which* run is steered.
-                    //   None + steering_supported → ACP_STEER_METHOD, the
-                    //     cross-adapter extension (claude-agent-acp,
-                    //     codex-acp), which takes no run id.
-                    //   None + !steering_supported → write nothing and ack
-                    //     `ExpectedRunIdMissing`; the main loop maps this to
-                    //     the universal cancel+merge `Steer` fallback.
-                    //
-                    // The capability flag is the ONLY gate on writing
-                    // ACP_STEER_METHOD. Probing an unknown method is unsafe:
-                    // codex-acp answers unrecognized extension methods with
-                    // `{}` — a JSON-RPC success — which would be read as a
-                    // delivered steer and silently drop the user's message.
-                    let prompt_block_refs: Vec<&str> =
-                        req.prompt_blocks.iter().map(String::as_str).collect();
-                    let selected = match (&self.active_run_id, self.steering_supported) {
-                        (Some(run_id), _) => Some((
-                            SteerTransport::Goose,
-                            GOOSE_STEER_METHOD,
-                            build_goose_steer_params(session_id, run_id, &prompt_block_refs),
-                        )),
-                        (None, true) => Some((
-                            SteerTransport::AcpExtension,
-                            ACP_STEER_METHOD,
-                            build_acp_steer_params(session_id, &prompt_block_refs),
-                        )),
-                        (None, false) => None,
-                    };
-                    match selected {
-                        None => {
-                            tracing::warn!(
-                                "steer: no active_run_id and agent did not advertise \
-                                 {ACP_STEER_METHOD} — falling back to cancel+merge"
-                            );
-                            let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
-                                crate::pool::SteerError::ExpectedRunIdMissing,
-                            ));
-                        }
-                        Some((transport, method, params)) => {
-                            let id = self.next_id;
-                            self.next_id += 1;
-                            let msg = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "method": method,
-                                "params": params,
-                            });
-                            tracing::debug!(
-                                target: "acp::wire",
-                                "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
-                            );
-                            match self.write_ndjson(&msg).await {
-                                Ok(()) => {
-                                    pending_steer = Some((id, transport, req.ack_tx));
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "steer write failed ({method}): {e} — releasing withheld event"
-                                    );
-                                    let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
-                                        crate::pool::SteerError::Transport(e.to_string()),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // Loop back to the next iteration without consuming a
-                    // reader line; we'll wait for either the prompt
-                    // response or the steer response next.
+                    // Only Goose exposes an immutable `active_run_id`; without
+                    // one, write nothing and ask the main loop to use its
+                    // universal cancel+merge fallback. `_session/steering`
+                    // capability advertisement is intentionally insufficient:
+                    // that extension cannot prove which prompt owns the work.
+                    // Neither the generic ACP extension nor Goose's exact-run
+                    // extension provides a consumption-level owning-turn receipt.
+                    // Goose acknowledges channel enqueue, which can still be lost
+                    // when the current provider round terminates without another
+                    // drain. Fail closed: write nothing and drive the host-owned
+                    // cancel+merge fallback so the immutable event remains queued.
+                    tracing::warn!(
+                        steering_advertised = self.steering_supported,
+                        has_active_run_id = self.active_run_id.is_some(),
+                        "steer: no consumption-level contract — refusing native extension and falling back to cancel+merge"
+                    );
+                    let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
+                        crate::pool::SteerError::ExpectedRunIdMissing,
+                    ));
+                    // Loop back without consuming a reader line.
                     None
                 }
                 _ = tokio::time::sleep_until(next_deadline) => {
@@ -1568,48 +1600,8 @@ impl AcpClient {
                                             crate::pool::SteerError::AgentError { code, message },
                                         )
                                     } else {
-                                        // Success result. Whether it counts as
-                                        // a delivered steer — and whether the
-                                        // turn Buzz awaits is still running —
-                                        // depends on the transport.
-                                        let outcome = match transport {
-                                            // goose returns no outcome field;
-                                            // a success response means the
-                                            // steer landed in the live run.
-                                            SteerTransport::Goose => Some(STEER_OUTCOME_INJECTED),
-                                            // The outcome must be positively
-                                            // recognized. An unknown or absent
-                                            // value (codex-acp answers
-                                            // unrecognized ext methods with a
-                                            // bare `{}`) is a rejection, never
-                                            // a delivery — treating it as
-                                            // success would drop the event.
-                                            SteerTransport::AcpExtension => msg
-                                                .pointer("/result/outcome")
-                                                .and_then(|v| v.as_str())
-                                                .filter(|o| {
-                                                    *o == STEER_OUTCOME_INJECTED
-                                                        || *o == STEER_OUTCOME_STARTED_NEW_TURN
-                                                }),
-                                        };
-                                        match outcome {
-                                            Some(STEER_OUTCOME_STARTED_NEW_TURN) => {
-                                                // Delivered, but into a NEW
-                                                // turn: the one this read loop
-                                                // is awaiting had already
-                                                // finished. Renewing the hard
-                                                // deadline here would extend
-                                                // the clock on a settled turn,
-                                                // so leave it alone and let the
-                                                // prompt response land on its
-                                                // original budget.
-                                                tracing::info!(
-                                                    "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
-                                                     awaited turn had ended — hard deadline not renewed"
-                                                );
-                                                crate::pool::SteerAck::Success
-                                            }
-                                            Some(_) => {
+                                        match transport {
+                                            SteerTransport::Goose => {
                                                 let renew_now = Instant::now();
                                                 let new_deadline = renew_now + max_duration;
                                                 if new_deadline > hard_deadline {
@@ -1620,29 +1612,6 @@ impl AcpClient {
                                                     );
                                                 }
                                                 crate::pool::SteerAck::Success
-                                            }
-                                            None => {
-                                                // Report the raw string when
-                                                // there is one, so logs read
-                                                // `failed` not `"failed"`;
-                                                // fall back to the JSON for a
-                                                // non-string value.
-                                                let reported = match msg.pointer("/result/outcome")
-                                                {
-                                                    None => "<absent>".to_string(),
-                                                    Some(serde_json::Value::String(s)) => s.clone(),
-                                                    Some(other) => other.to_string(),
-                                                };
-                                                tracing::warn!(
-                                                    "steer rejected: {ACP_STEER_METHOD} returned \
-                                                     unrecognized outcome {reported} — releasing \
-                                                     withheld event for cancel+merge"
-                                                );
-                                                crate::pool::SteerAck::Err(
-                                                    crate::pool::SteerError::OutcomeRejected {
-                                                        outcome: reported,
-                                                    },
-                                                )
                                             }
                                         }
                                     };
@@ -1718,9 +1687,8 @@ impl AcpClient {
     /// the client must observe — notably goose's `session_info_update` with
     /// `_meta.goose.activeRunId`, which seeds [`active_run_id`](Self::active_run_id)
     /// so the steer arm can target `_goose/unstable/session/steer` at the
-    /// correct run. Agents that never emit it (claude-agent-acp, codex-acp)
-    /// leave it `None` and are steered via `_session/steering` instead, which
-    /// needs no run id.
+    /// correct run. Agents that never emit it leave it `None` and use
+    /// cancel+merge followed by a normal host-owned prompt.
     fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
         let update = &msg["params"]["update"];
         let update_type = update
@@ -1990,6 +1958,7 @@ fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::
 /// matches goose's *current* run (it advances on each `session/update`).
 /// See [`crate::pool::SteerRequest`] for why this is the read loop's job
 /// and not the main loop's.
+#[allow(dead_code)]
 fn build_goose_steer_params(
     session_id: &str,
     expected_run_id: &str,
@@ -2002,25 +1971,9 @@ fn build_goose_steer_params(
     })
 }
 
-/// Build the params for an [`ACP_STEER_METHOD`] request.
-///
-/// Wire shape:
-/// ```json
-/// { "sessionId": "...", "prompt": [{"type":"text","text":"..."}, ...] }
-/// ```
-///
-/// Deliberately carries **no** `expectedRunId`: the cross-adapter method
-/// steers whatever turn is currently running and neither claude-agent-acp nor
-/// codex-acp emits a run id to target.
-fn build_acp_steer_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
-    serde_json::json!({
-        "sessionId": session_id,
-        "prompt": steer_prompt_blocks(prompt_blocks),
-    })
-}
-
-/// Render steer body strings as ACP `text` content blocks. Shared by both
-/// steer transports so the prompt shape cannot drift between them.
+/// Render steer body strings as ACP `text` content blocks for the exact-run
+/// Goose transport.
+#[allow(dead_code)]
 fn steer_prompt_blocks(prompt_blocks: &[&str]) -> Vec<serde_json::Value> {
     prompt_blocks
         .iter()
@@ -2200,9 +2153,16 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
-        // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
-        // Kill the process group when possible so subprocesses don't leak.
+        // Best-effort kill + reap. We cannot await in Drop (sync context).
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
+        #[cfg(windows)]
+        {
+            // JobObject + KillOnDrop closes stable ownership over the complete
+            // process tree. start_kill is synchronous TerminateJobObject; no PID
+            // lookup or shell helper participates in termination authority.
+            let _ = self.child.start_kill();
+        }
+        #[cfg(not(windows))]
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
@@ -2214,6 +2174,38 @@ impl Drop for AcpClient {
         let _ = self.child.try_wait();
     }
 }
+
+/// Kill and reap a child whose `AcpClient` was dropped during panic unwind.
+/// The lane owner must not be released until this future resolves.
+#[cfg(unix)]
+pub(crate) async fn retire_orphaned_process(identity: ProcessIdentity) {
+    let _ = tokio::task::spawn_blocking(move || {
+        use nix::sys::signal::{kill, Signal};
+        use nix::sys::wait::waitpid;
+        use nix::unistd::Pid;
+
+        let pid = identity.pid;
+        if !identity.is_current() {
+            tracing::warn!(
+                pid,
+                expected_start_time = ?identity.linux_start_time_ticks,
+                "refusing to kill orphan by reused or unverifiable raw PID"
+            );
+            return;
+        }
+        if !kill_process_group(pid) {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+        match waitpid(Pid::from_raw(pid as i32), None) {
+            Ok(_) | Err(nix::errno::Errno::ECHILD) => {}
+            Err(error) => tracing::warn!(pid, %error, "failed to reap panicked ACP process"),
+        }
+    })
+    .await;
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn retire_orphaned_process(_identity: ProcessIdentity) {}
 
 /// Send SIGKILL to an entire process group. Returns `true` if the signal was sent.
 ///
@@ -2232,29 +2224,128 @@ fn kill_process_group(pid: u32) -> bool {
     killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
 }
 
-/// Fallback for non-Unix: process-group kill not available.
+/// Fallback for platforms with neither Unix process groups nor Windows Job
+/// Objects: only the direct child can be killed.
 /// Returns `false` so the caller falls back to `child.start_kill()`.
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn kill_process_group(_pid: u32) -> bool {
     false
-}
-
-/// Suppress the console window that Windows otherwise allocates for every
-/// console-subsystem child process spawned from a GUI (non-console) parent.
-/// No-op on non-Windows platforms.
-fn configure_no_window(cmd: &mut tokio::process::Command) {
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_proc_stat_parser_reads_start_time_after_complex_comm() {
+        let fields_4_through_21 = (4..=21)
+            .map(|field| field.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stat = format!("4242 (worker ) with spaces) S {fields_4_through_21} 987654 23 24");
+        assert_eq!(parse_linux_proc_start_time(&stat), Some(987654));
+    }
+
+    #[test]
+    fn raw_pid_kill_generation_gate_fails_closed_on_reuse_or_unknown_identity() {
+        assert!(process_generation_matches(Some(12345), Some(12345)));
+        assert!(!process_generation_matches(Some(12345), Some(54321)));
+        assert!(!process_generation_matches(None, Some(12345)));
+        assert!(!process_generation_matches(Some(12345), None));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stale_process_generation_cannot_kill_live_reused_pid_fixture() {
+        let mut child = std::process::Command::new("setsid")
+            .args(["sleep", "60"])
+            .spawn()
+            .expect("spawn live process-generation fixture");
+        let pid = child.id();
+        let live = ProcessIdentity::capture(pid);
+        let stale = ProcessIdentity {
+            pid,
+            linux_start_time_ticks: live.linux_start_time_ticks.map(|ticks| ticks + 1),
+        };
+
+        retire_orphaned_process(stale).await;
+        assert!(
+            child.try_wait().expect("query fixture status").is_none(),
+            "a mismatched process generation must never authorize a raw-PID kill"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_job_object_shutdown_retires_real_grandchild() {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        fn pid_is_running(pid: u32) -> bool {
+            let filter = format!("PID eq {pid}");
+            let output = std::process::Command::new("tasklist")
+                .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .expect("query Windows process status");
+            String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+        }
+
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-job-object-grandchild-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let marker_ps = marker.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$c=Start-Process ping.exe -ArgumentList '-t','127.0.0.1' \
+             -PassThru -WindowStyle Hidden; Set-Content -LiteralPath \
+             '{marker_ps}' -Value $c.Id -NoNewline; Wait-Process -Id $c.Id"
+        );
+        let args = vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            script,
+        ];
+        let mut client = AcpClient::spawn("powershell.exe", &args, &[], false)
+            .await
+            .expect("spawn Job Object process-tree fixture");
+        let parent_pid = client.process_id().expect("fixture parent pid");
+
+        let mut grandchild_pid = None;
+        for _ in 0..100 {
+            if let Ok(raw) = std::fs::read_to_string(&marker) {
+                grandchild_pid = raw.trim().parse::<u32>().ok();
+                if grandchild_pid.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let grandchild_pid = grandchild_pid.expect("fixture must publish grandchild pid");
+        assert!(pid_is_running(parent_pid));
+        assert!(pid_is_running(grandchild_pid));
+
+        client.shutdown().await;
+        let parent_gone = !pid_is_running(parent_pid);
+        let grandchild_gone = !pid_is_running(grandchild_pid);
+        if !grandchild_gone {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &grandchild_pid.to_string(), "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+        }
+        let _ = std::fs::remove_file(marker);
+
+        assert!(parent_gone, "Job Object shutdown must reap the leader");
+        assert!(
+            grandchild_gone,
+            "Job Object shutdown must terminate and reap the real grandchild"
+        );
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -2885,7 +2976,7 @@ mod tests {
             .expect("failed to spawn test script")
     }
 
-    /// Spawn a probe script whose file name carries a runtime identity (e.g.
+    /// Spawn a probe shell whose symlink name carries a runtime identity (e.g.
     /// `hermes-acp`) and return the value of `var` as the child observed it.
     /// `<unset>` means the child did not receive the var.
     #[cfg(unix)]
@@ -2894,23 +2985,17 @@ mod tests {
         var: &str,
         extra_env: &[(String, String)],
     ) -> String {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
 
         let dir = std::env::temp_dir().join(format!("buzz-acp-env-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create env probe dir");
         let path = dir.join(file_name);
-        std::fs::write(
-            &path,
-            format!("#!/bin/sh\nprintf '%s\\n' \"${{{var}:-<unset>}}\"\n"),
-        )
-        .expect("write env probe script");
-        let mut permissions = std::fs::metadata(&path).expect("stat probe").permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&path, permissions).expect("chmod probe");
+        symlink("/bin/sh", &path).expect("create named env probe shell");
+        let script = format!("printf '%s\\n' \"${{{var}:-<unset>}}\"\n");
 
         let mut client = AcpClient::spawn(
             path.to_str().expect("probe path is UTF-8"),
-            &[],
+            &["-c".into(), script],
             extra_env,
             false,
         )
@@ -3720,14 +3805,11 @@ mod tests {
         }
     }
 
-    /// Steer with `active_run_id` set writes the JSON-RPC request and
-    /// routes the matching response to the ack oneshot as `Success`.
-    /// Verifies the wire shape (`sessionId` + `expectedRunId` + `prompt`)
-    /// indirectly: the bash script emits a response keyed by the steer
-    /// id (0), and `Success` only fires if the read loop matched that
-    /// id to its `pending_steer` entry.
+    /// An observed active run ID does not upgrade enqueue into consumption.
+    /// The read loop must return the fallback signal without matching the
+    /// adapter's unsolicited success response.
     #[tokio::test]
-    async fn native_steer_with_active_run_id_routes_response_to_ack() {
+    async fn native_steer_with_active_run_id_still_falls_back() {
         // Script: pause briefly so the test task can install the steer
         // and we can be sure the response doesn't race ahead of the
         // write — then emit the steer response (id=0 because next_id
@@ -3783,32 +3865,21 @@ mod tests {
             "expected IdleTimeout or AgentExited after steer ack, got {read_result:?}"
         );
 
-        // Ack must be Success: the steer response (id=0) was routed to
-        // pending_steer.ack_tx.
+        // The exact-run extension is still consumption-ambiguous.
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
-            other => panic!("expected SteerAck::Success, got {other:?}"),
+            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
+            other => panic!("expected fail-closed fallback ack, got {other:?}"),
         }
     }
 
-    /// Steer-success renewal keeps the turn alive past the original hard
-    /// deadline. This is the red-on-old/green-on-new test for the core bug
-    /// fix (acp.rs:1440-1444): without renewal, the read loop returns
-    /// `HardTimeout` before the prompt response arrives.
-    ///
-    /// Timeline:
-    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
-    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
-    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
-    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
-    ///
-    /// Old code: `HardTimeout` at t≈1s (before prompt response).
-    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    /// A rejected enqueue-only steer must not renew the owning prompt's hard
+    /// deadline. The late prompt response therefore cannot cross the original
+    /// deadline merely because an unconsumed steer was attempted.
     #[tokio::test]
-    async fn steer_success_renews_hard_deadline_and_survives_past_original() {
+    async fn rejected_native_steer_does_not_renew_hard_deadline() {
         let script = "sleep 0.5; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
                       sleep 1; \
@@ -3841,25 +3912,23 @@ mod tests {
         send_task.await.expect("send_task should complete");
 
         assert!(
-            result.is_ok(),
-            "expected Ok (prompt response after renewed deadline), got {result:?}"
+            matches!(result, Err(AcpError::HardTimeout { .. })),
+            "expected original hard deadline to fire, got {result:?}"
         );
-        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
 
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
-            other => panic!("expected SteerAck::Success, got {other:?}"),
+            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
+            other => panic!("expected fail-closed fallback ack, got {other:?}"),
         }
     }
 
     // ── Cross-harness steer transport tests ───────────────────────────────
     //
-    // These cover the `_session/steering` transport added alongside the
-    // goose-native method: capability capture at `initialize`, write-time
-    // transport selection, and outcome decoding. Wire-shape assertions read
+    // These cover capability capture, fail-closed refusal of unowned extension
+    // requests, and exact-run Goose transport selection. Wire assertions read
     // the actual serialized request bytes via `capture_steer_request` rather
     // than inferring the shape from response-id routing.
 
@@ -3995,55 +4064,38 @@ mod tests {
         );
     }
 
-    /// Test 2: no `active_run_id` + capability advertised → the bytes on the
-    /// wire are an `_session/steering` request carrying `sessionId` and
-    /// `prompt`, and carrying **no** `expectedRunId` (the adapters reject
-    /// unknown required fields, and there is no run id to report anyway).
+    /// An adapter advertisement without an immutable run identity is not
+    /// sufficient to own mid-turn work. Buzz must write no extension request
+    /// and return the typed signal that drives cancel+merge fallback.
     #[tokio::test]
-    async fn acp_steer_request_omits_expected_run_id_and_carries_session_and_prompt() {
-        let capture = capture_path("acp_shape");
+    async fn advertised_acp_steering_without_run_id_writes_nothing_and_falls_back() {
+        let capture = capture_path("acp_unowned_refused");
         let mut client = spawn_steer_capture_script(
             &capture,
-            r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":"injected"}}"#,
+            r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":"startedNewTurn"}}"#,
         )
         .await;
         set_steering_supported(&mut client);
-        assert!(
-            client.active_run_id().is_none(),
-            "precondition: no active_run_id"
-        );
+        assert!(client.active_run_id().is_none());
 
         let (written, ack) = run_one_steer(&mut client, &capture).await;
 
-        let written = written.expect("steer request must have been written");
-        let msg: serde_json::Value =
-            serde_json::from_str(&written).expect("written line must be valid JSON");
-        assert_eq!(
-            msg["method"].as_str(),
-            Some(ACP_STEER_METHOD),
-            "must use the cross-adapter steer method; wrote: {written}"
-        );
-        assert_eq!(msg["params"]["sessionId"].as_str(), Some("sess-test"));
-        assert_eq!(
-            msg["params"]["prompt"][0]["text"].as_str(),
-            Some("steer body"),
-            "prompt must carry the steer body as a text block"
-        );
         assert!(
-            msg["params"].get("expectedRunId").is_none(),
-            "_session/steering must not carry expectedRunId; wrote: {written}"
+            written.is_none(),
+            "unowned _session/steering must never reach the wire; wrote: {written:?}"
         );
-        assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
-            "injected outcome must ack Success, got {ack:?}"
-        );
+        assert!(matches!(
+            ack,
+            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing)
+        ));
     }
 
-    /// Test 3: goose keeps priority. With both an `active_run_id` and the
-    /// advertised capability, the goose method wins — `expectedRunId` is
-    /// strictly more precise about which run is being steered.
+    /// An immutable run ID prevents cross-run delivery, but Goose acknowledges
+    /// channel enqueue rather than model consumption. Until a consumption-level
+    /// owning-turn settlement exists, exact-run Goose steering must write nothing
+    /// and use cancel+merge normal dispatch.
     #[tokio::test]
-    async fn goose_transport_wins_when_both_run_id_and_capability_present() {
+    async fn goose_run_id_without_consumption_contract_writes_nothing_and_falls_back() {
         let capture = capture_path("goose_priority");
         let mut client =
             spawn_steer_capture_script(&capture, r#"{"jsonrpc":"2.0","id":0,"result":{}}"#).await;
@@ -4053,184 +4105,14 @@ mod tests {
 
         let (written, ack) = run_one_steer(&mut client, &capture).await;
 
-        let written = written.expect("steer request must have been written");
-        let msg: serde_json::Value =
-            serde_json::from_str(&written).expect("written line must be valid JSON");
-        assert_eq!(
-            msg["method"].as_str(),
-            Some(GOOSE_STEER_METHOD),
-            "goose method must win when a run id exists; wrote: {written}"
-        );
-        assert_eq!(msg["params"]["expectedRunId"].as_str(), Some("run-77"));
-        // A bare `{}` result is a success on the goose transport (goose sends
-        // no `outcome`) — the OutcomeRejected guard applies only to
-        // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
-            "goose success result must ack Success, got {ack:?}"
+            written.is_none(),
+            "enqueue-only Goose steer must never reach the wire; wrote: {written:?}"
         );
-    }
-
-    /// Test 7: codex-acp's third outcome, `failed`
-    /// (`src/AcpExtensions.ts:92`), is a delivery rejection despite being a
-    /// JSON-RPC success — release the event and fall back.
-    #[tokio::test]
-    async fn acp_steer_failed_outcome_acks_outcome_rejected() {
-        let capture = capture_path("outcome_failed");
-        let mut client = spawn_steer_capture_script(
-            &capture,
-            r#"{"jsonrpc":"2.0","id":0,"result":{"outcome":"failed"}}"#,
-        )
-        .await;
-        set_steering_supported(&mut client);
-
-        let (_written, ack) = run_one_steer(&mut client, &capture).await;
-
-        match ack {
-            crate::pool::SteerAck::Err(crate::pool::SteerError::OutcomeRejected { outcome }) => {
-                assert_eq!(
-                    outcome, "failed",
-                    "rejected outcome must report what the agent said, unquoted"
-                );
-            }
-            other => panic!("expected Err(OutcomeRejected), got {other:?}"),
-        }
-    }
-
-    /// Test 8: **codex `extMethod` silent-loss regression guard.** codex-acp's
-    /// ext dispatcher answers unrecognized methods with a bare `{}` — a
-    /// JSON-RPC *success*, not `-32601` (`src/CodexAcpServer.ts:255-258`).
-    /// Buzz maps `SteerAck::Success` to `queue.remove_event`, so decoding
-    /// `{}` as success would delete the user's message with no error, no
-    /// fallback, and no log. An absent `outcome` must therefore be a
-    /// rejection, which releases the event and fires cancel+merge.
-    #[tokio::test]
-    async fn acp_steer_missing_outcome_acks_outcome_rejected_and_never_drops_event() {
-        let capture = capture_path("outcome_absent");
-        let mut client =
-            spawn_steer_capture_script(&capture, r#"{"jsonrpc":"2.0","id":0,"result":{}}"#).await;
-        set_steering_supported(&mut client);
-
-        let (_written, ack) = run_one_steer(&mut client, &capture).await;
-
-        match ack {
-            crate::pool::SteerAck::Err(crate::pool::SteerError::OutcomeRejected { outcome }) => {
-                assert_eq!(
-                    outcome, "<absent>",
-                    "a result with no outcome field must be reported as absent"
-                );
-            }
-            other => panic!(
-                "expected Err(OutcomeRejected) for a bare {{}} success — \
-                 anything else risks dropping the event, got {other:?}"
-            ),
-        }
-    }
-
-    /// Test 5: `injected` renews the hard deadline, so the turn survives past
-    /// its original one. Mirrors
-    /// `steer_success_renews_hard_deadline_and_survives_past_original` for
-    /// the `_session/steering` transport.
-    ///
-    /// Timeline: original hard deadline at t≈1s; steer response at t≈0.5s
-    /// renews it to t≈3.5s; prompt response at t≈1.5s lands inside it.
-    #[tokio::test]
-    async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
-                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
-                      sleep 1; \
-                      echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
-        set_steering_supported(&mut client);
-
-        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
-        client.install_steer_rx(steer_rx);
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
-        let send_task = tokio::spawn(async move {
-            steer_tx
-                .send(crate::pool::SteerRequest {
-                    prompt_blocks: vec!["steer body".into()],
-                    ack_tx,
-                })
-                .await
-                .expect("steer_tx send should succeed");
-        });
-
-        let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-        let result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
-            .await;
-        send_task.await.expect("send_task should complete");
-
-        assert!(
-            result.is_ok(),
-            "injected must renew the deadline so the prompt response still lands, got {result:?}"
-        );
-        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
-        let ack = ack_rx.await.expect("ack must be received");
-        assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
-            "injected must ack Success, got {ack:?}"
-        );
-    }
-
-    /// Test 6: **red/green for the no-renewal rule.** `startedNewTurn` means
-    /// the turn Buzz was steering had already ended and the adapter began a
-    /// fresh, detached one. It acks `Success` (the message WAS delivered, so
-    /// the event must not be redelivered) but must NOT renew the hard
-    /// deadline — that clock belongs to a turn which is already settled.
-    ///
-    /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈1s, steer response at
-    /// t≈0.5s, prompt response at t≈1.5s. With renewal the prompt response
-    /// would land and this returns `Ok`; without renewal the original
-    /// deadline fires first and we get `HardTimeout`.
-    #[tokio::test]
-    async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
-        let script = "sleep 0.5; \
-             echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"startedNewTurn\"}}'; \
-             sleep 1; \
-             echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
-        set_steering_supported(&mut client);
-
-        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
-        client.install_steer_rx(steer_rx);
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
-        let send_task = tokio::spawn(async move {
-            steer_tx
-                .send(crate::pool::SteerRequest {
-                    prompt_blocks: vec!["steer body".into()],
-                    ack_tx,
-                })
-                .await
-                .expect("steer_tx send should succeed");
-        });
-
-        let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-        let result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
-            .await;
-        send_task.await.expect("send_task should complete");
-
-        // The original deadline must still fire — renewal here would extend
-        // the clock on a turn the adapter has already finished.
-        assert!(
-            matches!(result, Err(AcpError::HardTimeout { .. })),
-            "startedNewTurn must NOT renew the hard deadline, so the original \
-             one must still fire; got {result:?}"
-        );
-        // Delivery still succeeded, so the withheld event must be dropped
-        // rather than released — hence Success, not an Err.
-        let ack = ack_rx.await.expect("ack must be received");
-        assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
-            "startedNewTurn is a delivery success, got {ack:?}"
-        );
+        assert!(matches!(
+            ack,
+            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing)
+        ));
     }
 
     /// Test 4 (companion to the existing

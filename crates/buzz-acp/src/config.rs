@@ -73,6 +73,14 @@ pub enum MultipleEventHandling {
     /// admits (owner ∪ allowlist ∪ siblings). This is the default mid-turn
     /// delivery path. Requires DedupMode::Queue.
     Steer,
+    /// Opt-in root-thread affinity. Each validated NIP-10 root in a non-DM
+    /// channel owns an independent queue, task, and ACP session lane while
+    /// retaining Steer's native-steer/cancel+merge delivery semantics.
+    /// Top-level events use their own event id as the root; DMs remain scoped
+    /// to their channel conversation. Requires DedupMode::Queue and a nonzero
+    /// context-message limit so required root context can be fetched.
+    #[value(name = "steer-thread")]
+    SteerThread,
     /// Cancel the in-flight turn and re-dispatch a merged prompt combining
     /// the original events with the new ones, framed as a **supersede** (the
     /// new request replaces the old), for ANY new @mention.
@@ -362,7 +370,8 @@ pub struct CliArgs {
     pub no_ignore_self: bool,
 
     /// Maximum number of context messages to include for thread replies and DMs.
-    /// Set to 0 to disable automatic context fetching. Max 100.
+    /// Set to 0 to disable automatic context fetching (not valid with
+    /// `--multiple-event-handling=steer-thread`). Max 100.
     #[arg(long, env = "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", default_value_t = 12,
           value_parser = clap::value_parser!(u32).range(0..=100))]
     pub context_message_limit: u32,
@@ -661,14 +670,30 @@ fn validate_multiple_event_handling(
     let is_cancel_mode = matches!(
         handling,
         MultipleEventHandling::Steer
+            | MultipleEventHandling::SteerThread
             | MultipleEventHandling::Interrupt
             | MultipleEventHandling::OwnerInterrupt
     );
     if is_cancel_mode && matches!(dedup, DedupMode::Drop) {
         return Err(ConfigError::ConfigFile(
-            "--multiple-event-handling=steer (or interrupt/owner-interrupt) requires \
+            "--multiple-event-handling=steer/steer-thread (or interrupt/owner-interrupt) requires \
              --dedup=queue. DedupMode::Drop discards events during the cancel drain window, \
              producing incomplete merged prompts."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_thread_context(
+    handling: MultipleEventHandling,
+    context_message_limit: u32,
+) -> Result<(), ConfigError> {
+    if matches!(handling, MultipleEventHandling::SteerThread) && context_message_limit == 0 {
+        return Err(ConfigError::ConfigFile(
+            "--multiple-event-handling=steer-thread requires \
+             --context-message-limit to be greater than 0 because exact replies \
+             fail closed when their root context cannot be fetched."
                 .into(),
         ));
     }
@@ -1059,6 +1084,7 @@ impl Config {
             };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
+        validate_thread_context(args.multiple_event_handling, args.context_message_limit)?;
 
         let config = Config {
             keys,
@@ -2561,6 +2587,40 @@ channels = "ALL"
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
+    }
+
+    #[test]
+    fn test_multiple_event_handling_parses_opt_in_steer_thread() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--multiple-event-handling",
+            "steer-thread",
+        ])
+        .expect("steer-thread should be a parsed opt-in mode");
+
+        assert_eq!(
+            args.multiple_event_handling,
+            MultipleEventHandling::SteerThread
+        );
+        assert!(validate_multiple_event_handling(
+            MultipleEventHandling::SteerThread,
+            DedupMode::Queue
+        )
+        .is_ok());
+        assert!(validate_multiple_event_handling(
+            MultipleEventHandling::SteerThread,
+            DedupMode::Drop
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_steer_thread_requires_context_fetching() {
+        assert!(validate_thread_context(MultipleEventHandling::SteerThread, 0).is_err());
+        assert!(validate_thread_context(MultipleEventHandling::SteerThread, 1).is_ok());
+        assert!(validate_thread_context(MultipleEventHandling::Steer, 0).is_ok());
     }
 
     #[test]
