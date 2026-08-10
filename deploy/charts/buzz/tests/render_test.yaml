@@ -168,6 +168,33 @@ tests:
         template: templates/secret-chart.yaml
         documentIndex: 0
 
+  - it: marks REDIS_URL required even at a single replica when the Valkey subchart is enabled
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      valkey.enabled: true
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      # replicaCount defaults to 1 here — no HA pubsub requirement — but the
+      # bundled Valkey subchart is running and composes REDIS_URL, so the mount
+      # is still required (optional:false). Mirrors the single-replica Redis
+      # behavior; guards the optional: expression's valkey.enabled clause.
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_URL
+            valueFrom:
+              secretKeyRef:
+                name: rel-buzz-relay
+                key: REDIS_URL
+                optional: false
+        template: templates/deployment.yaml
+
   - it: mounts a per-pod emptyDir git scratch volume when persistence is disabled
     set:
       relayUrl: wss://buzz.example.com
