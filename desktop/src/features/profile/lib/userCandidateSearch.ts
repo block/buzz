@@ -1,4 +1,8 @@
 import type { UserSearchResult } from "@/shared/api/types";
+import {
+  collapseSeparators,
+  WORD_SEPARATORS,
+} from "@/shared/lib/identifierMatch";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ScoreUserCandidateInput = {
@@ -44,16 +48,33 @@ export function scoreUserCandidate({
     const lower = candidateLabel.toLowerCase();
     if (lower.startsWith(normalizedQuery)) return 0;
     if (
-      lower.split(/[\s\-_]+/).some((word) => word.startsWith(normalizedQuery))
+      lower
+        .split(WORD_SEPARATORS)
+        .some((word) => word.startsWith(normalizedQuery))
     ) {
       return 1;
     }
     if (lower.includes(normalizedQuery)) return 2;
   }
 
+  // Labels are identifiers: `janedoe` should find `jane-doe` / `Jane Doe`.
+  // Ranked below all literal label matches so existing ordering is unchanged.
+  const collapsedQuery = collapseSeparators(normalizedQuery);
+  if (collapsedQuery.length > 0) {
+    for (const candidateLabel of labels) {
+      if (
+        collapseSeparators(candidateLabel.toLowerCase()).includes(
+          collapsedQuery,
+        )
+      ) {
+        return 3;
+      }
+    }
+  }
+
   const pubkey = normalizePubkey(user.pubkey);
-  if (pubkey.startsWith(normalizedQuery)) return 3;
-  if (pubkey.includes(normalizedQuery)) return 4;
+  if (pubkey.startsWith(normalizedQuery)) return 4;
+  if (pubkey.includes(normalizedQuery)) return 5;
 
   return null;
 }

@@ -16,8 +16,11 @@
  * Lower score === better match. `null` means "no match".
  */
 
-/** Separators that delimit words in a channel name/description. */
-const WORD_SEPARATORS = /[\s\-_./]+/;
+import {
+  collapseSeparators,
+  isSubsequence,
+  WORD_SEPARATORS,
+} from "@/shared/lib/identifierMatch";
 
 // Score bands. Kept as named steps so the intent (and ordering) is legible.
 const SCORE_EXACT = 0;
@@ -28,27 +31,6 @@ const SCORE_SUBSTRING = 4;
 const SCORE_COLLAPSED_SEPARATORS = 5;
 const SCORE_SUBSEQUENCE = 6;
 const SCORE_DESCRIPTION = 7;
-
-/** Strip separators so `release-notes` and `releasenotes` compare equal. */
-function collapseSeparators(value: string): string {
-  return value.replace(/[\s\-_./]+/g, "");
-}
-
-/**
- * Whether every char of `query` appears in `text` in order (not necessarily
- * contiguously). e.g. `reln` is a subsequence of `release-notes`.
- */
-function isSubsequence(query: string, text: string): boolean {
-  if (query.length === 0) return true;
-  let queryIndex = 0;
-  for (const char of text) {
-    if (char === query[queryIndex]) {
-      queryIndex += 1;
-      if (queryIndex === query.length) return true;
-    }
-  }
-  return false;
-}
 
 /**
  * Score how well `name` matches `lowerQuery`. Returns the best (lowest) band,

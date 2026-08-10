@@ -111,3 +111,33 @@ test("scoreChannelMatch: no match anywhere returns null", () => {
     null,
   );
 });
+
+test("scoreChannelName: 'achannelname' finds 'a-channel-name'", () => {
+  assert.notEqual(scoreChannelName("a-channel-name", "achannelname"), null);
+});
+
+test("scoreChannelName: dashed query still matches 'a-channel-name'", () => {
+  assert.notEqual(scoreChannelName("a-channel-name", "a-channel-name"), null);
+  assert.notEqual(scoreChannelName("a-channel-name", "a-channel"), null);
+});
+
+test("scoreChannelName: 'achannelname' finds snake_case 'a_channel_name'", () => {
+  assert.notEqual(scoreChannelName("a_channel_name", "achannelname"), null);
+});
+
+test("scoreChannelName: 'achannelname' finds unicode-dash 'a\u2013channel\u2013name'", () => {
+  assert.notEqual(
+    scoreChannelName("a\u2013channel\u2013name", "achannelname"),
+    null,
+  );
+});
+
+test("scoreChannelName: dashed exact match ranks above collapsed-only match", () => {
+  const dashed = scoreChannelName("a-channel-name", "a-channel-name");
+  const collapsed = scoreChannelName("a-channel-name", "achannelname");
+  assert.ok(dashed !== null && collapsed !== null && dashed < collapsed);
+});
+
+test("scoreChannelName: separators-only query does not match everything", () => {
+  assert.equal(scoreChannelName("a-channel-name", "---"), null);
+});

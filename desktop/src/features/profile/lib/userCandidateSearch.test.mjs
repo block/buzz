@@ -39,11 +39,11 @@ test("scoreUserCandidate ranks display labels before pubkeys", () => {
   );
   assert.equal(
     scoreUserCandidate({ label: "Alice Johnson", query: "abcd", user }),
-    3,
+    4,
   );
   assert.equal(
     scoreUserCandidate({ label: "Alice Johnson", query: "3456", user }),
-    4,
+    5,
   );
 });
 
@@ -125,6 +125,23 @@ test("getKeyboardSearchSelection ignores stale ranked results", () => {
       rankedQuery: "",
       results: [alice],
     }),
+    null,
+  );
+});
+
+test("scoreUserCandidate matches labels with separators collapsed", () => {
+  const user = makeUser({ displayName: "Jane Doe" });
+  // Collapsed match ranks below all literal label matches, above pubkeys.
+  assert.equal(
+    scoreUserCandidate({ label: "Jane Doe", query: "janedoe", user }),
+    3,
+  );
+  assert.equal(
+    scoreUserCandidate({ label: "jane-doe", query: "janedoe", user }),
+    3,
+  );
+  assert.equal(
+    scoreUserCandidate({ label: "Jane Doe", query: "zzz", user }),
     null,
   );
 });

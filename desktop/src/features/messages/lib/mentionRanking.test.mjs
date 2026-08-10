@@ -139,3 +139,18 @@ test("rankMentionCandidates: owned teams rank with runnable personas", () => {
     ["team", "identity"],
   );
 });
+
+test("rankMentionCandidates matches names with separators collapsed", () => {
+  const candidates = [
+    {
+      displayName: "jane-doe",
+      isAgent: false,
+      isMember: true,
+      kind: "identity",
+      pubkey: "a".repeat(64),
+    },
+  ];
+  const ranked = rankMentionCandidates(candidates, "janedoe");
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].candidate.displayName, "jane-doe");
+});

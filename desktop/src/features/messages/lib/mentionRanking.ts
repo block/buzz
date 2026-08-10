@@ -1,3 +1,7 @@
+import {
+  collapseSeparators,
+  WORD_SEPARATORS,
+} from "@/shared/lib/identifierMatch";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
@@ -44,9 +48,19 @@ function scoreMentionCandidateLabel(
   if (lower === lowerQuery) return 0;
   if (lower.startsWith(lowerQuery)) return 1;
 
-  const words = lower.split(/[\s\-_]+/).filter(Boolean);
+  const words = lower.split(WORD_SEPARATORS).filter(Boolean);
   if (words.some((word) => word === lowerQuery)) return 2;
   if (words.some((word) => word.startsWith(lowerQuery))) return 3;
+
+  // Labels are identifiers: `janedoe` should find `jane-doe` / `Jane Doe`.
+  // Ranked below all literal matches so existing ordering is unchanged.
+  const collapsedQuery = collapseSeparators(lowerQuery);
+  if (
+    collapsedQuery.length > 0 &&
+    collapseSeparators(lower).startsWith(collapsedQuery)
+  ) {
+    return 4;
+  }
 
   return null;
 }
@@ -85,9 +99,9 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
 
       const pubkeyScore = candidate.pubkey
         ? pubkeyLower.startsWith(lowerQuery)
-          ? 4
+          ? 5
           : pubkeyLower.includes(lowerQuery)
-            ? 5
+            ? 6
             : null
         : null;
       const score = labelScore !== null ? labelScore : pubkeyScore;

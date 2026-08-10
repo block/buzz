@@ -4,6 +4,10 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import {
+  scoreChannelMatch,
+  scoreChannelName,
+} from "@/features/channels/lib/channelSearchScore";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import {
   useUserSearchQuery,
@@ -234,36 +238,37 @@ export function useSearchResults({
       return [];
     }
 
-    const normalizedQuery = ftsQuery.toLowerCase();
+    // Channel names are identifiers: match with the same separator-aware
+    // scorer as the channel browser, so `achannelname` finds
+    // `a-channel-name`. A leading `#` is how users type channel names, not
+    // part of the name itself. Message search below stays literal.
+    const normalizedQuery = ftsQuery.toLowerCase().replace(/^#/, "");
 
     return channels
-      .filter(
-        (channel) =>
-          (channel.archivedAt
+      .map((channel) => {
+        if (
+          !(channel.archivedAt
             ? channel.isMember
-            : channel.visibility === "open" || channel.isMember) &&
-          [
-            channel.name,
-            channel.description,
-            channelLabels?.[channel.id] ?? "",
-          ].some((value) => value.toLowerCase().includes(normalizedQuery)),
-      )
-      .sort((a, b) => {
-        const aDisplayName = channelLabels?.[a.id]?.trim() || a.name;
-        const bDisplayName = channelLabels?.[b.id]?.trim() || b.name;
-        const aNameMatches = aDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
-        const bNameMatches = bDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
-
-        if (aNameMatches !== bNameMatches) {
-          return aNameMatches ? -1 : 1;
+            : channel.visibility === "open" || channel.isMember)
+        ) {
+          return null;
         }
-
-        return aDisplayName.localeCompare(bDisplayName);
+        const displayName = channelLabels?.[channel.id]?.trim() || channel.name;
+        const nameScore = Math.min(
+          scoreChannelMatch(channel, normalizedQuery) ?? Infinity,
+          scoreChannelName(displayName, normalizedQuery) ?? Infinity,
+        );
+        if (nameScore === Infinity) {
+          return null;
+        }
+        return { channel, displayName, score: nameScore };
       })
+      .filter((entry) => entry !== null)
+      .sort(
+        (a, b) =>
+          a.score - b.score || a.displayName.localeCompare(b.displayName),
+      )
+      .map((entry) => entry.channel)
       .slice(0, 5);
   }, [channelLabels, channels, ftsQuery]);
   const managedAgentPubkeys = React.useMemo(
