@@ -1189,6 +1189,82 @@ pub fn is_openai_host(base_url: &str) -> bool {
     host == "api.openai.com" || host.ends_with(".openai.com")
 }
 
+/// Return the NIP-AM registered billing-authority token for `base_url` when it
+/// canonically matches one of the official allowlisted endpoints. Returns `None`
+/// for any custom, gateway, or lookalike URL.
+///
+/// Rules (per NIP-AM publisher behavior):
+/// - HTTPS only (no HTTP).
+/// - Exact allowlisted host — lookalike-safe: `api.openai.com.evil.example` is rejected.
+/// - Default port only (no `:8443` etc.).
+/// - No userinfo, query string, or fragment.
+/// - Required API base path present and exact (where applicable — OpenRouter requires `/api/v1`).
+/// - No path prefix lookalikes (`/api/v10` is not `/api/v1`).
+///
+/// The wire token itself is the registered bare-host identifier (e.g.
+/// `"api.anthropic.com"`), not a URL — the path check is publisher-side only.
+///
+/// Allowlist (registered values; set extends only by NIP-AM amendment):
+/// - `https://api.anthropic.com/` → `"api.anthropic.com"`
+/// - `https://api.openai.com/v1` → `"api.openai.com"`  (path `/v1` required)
+/// - `https://openrouter.ai/api/v1` → `"openrouter.ai"` (path `/api/v1` required)
+pub fn pricing_authority(base_url: &str) -> Option<&'static str> {
+    let parsed = url::Url::parse(base_url).ok()?;
+
+    // Require HTTPS only.
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    // Reject userinfo (username or password present).
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    // Reject query strings and fragments.
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    // Require either no port or the default HTTPS port (443). Both forms are
+    // equivalent canonical origins; rejecting explicit :443 would create false
+    // negatives for providers that include the default port in their base URL.
+    if let Some(port) = parsed.port() {
+        if port != 443 {
+            return None;
+        }
+    }
+
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    // Normalise trailing slashes for path comparison.
+    let path = parsed.path().trim_end_matches('/');
+
+    match host.as_str() {
+        "api.anthropic.com" => {
+            // Anthropic: path must be empty or "/" — no required prefix.
+            if path.is_empty() {
+                Some("api.anthropic.com")
+            } else {
+                None
+            }
+        }
+        "api.openai.com" => {
+            // OpenAI: path must be exactly "/v1".
+            if path == "/v1" {
+                Some("api.openai.com")
+            } else {
+                None
+            }
+        }
+        "openrouter.ai" => {
+            // OpenRouter: path must be exactly "/api/v1".
+            if path == "/api/v1" {
+                Some("openrouter.ai")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String>
 where
     T::Err: std::fmt::Display,
@@ -2969,5 +3045,125 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    // ── pricing_authority: canonical URL → bare-host registry token ──────────
+
+    #[test]
+    fn pricing_authority_anthropic_returns_registry_token() {
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/"),
+            Some("api.anthropic.com")
+        );
+        // No trailing slash
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com"),
+            Some("api.anthropic.com")
+        );
+    }
+
+    #[test]
+    fn pricing_authority_openai_requires_v1_path() {
+        assert_eq!(
+            pricing_authority("https://api.openai.com/v1"),
+            Some("api.openai.com")
+        );
+        // With trailing slash
+        assert_eq!(
+            pricing_authority("https://api.openai.com/v1/"),
+            Some("api.openai.com")
+        );
+        // Root-only: no path → must return None
+        assert_eq!(pricing_authority("https://api.openai.com/"), None);
+        assert_eq!(pricing_authority("https://api.openai.com"), None);
+        // Wrong path
+        assert_eq!(pricing_authority("https://api.openai.com/v2"), None);
+    }
+
+    #[test]
+    fn pricing_authority_openrouter_requires_api_v1_path() {
+        assert_eq!(
+            pricing_authority("https://openrouter.ai/api/v1"),
+            Some("openrouter.ai")
+        );
+        assert_eq!(
+            pricing_authority("https://openrouter.ai/api/v1/"),
+            Some("openrouter.ai")
+        );
+        assert_eq!(pricing_authority("https://openrouter.ai/"), None);
+        assert_eq!(pricing_authority("https://openrouter.ai"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_http_scheme() {
+        assert_eq!(pricing_authority("http://api.anthropic.com/"), None);
+        assert_eq!(pricing_authority("http://api.openai.com/v1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_accepts_explicit_default_port() {
+        // Explicit :443 is the default HTTPS port — both omitted and explicit
+        // forms resolve to the same canonical origin and must both be accepted.
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com:443/"),
+            Some("api.anthropic.com"),
+            "explicit :443 must be accepted for Anthropic"
+        );
+        assert_eq!(
+            pricing_authority("https://api.openai.com:443/v1"),
+            Some("api.openai.com"),
+            "explicit :443 must be accepted for OpenAI"
+        );
+        assert_eq!(
+            pricing_authority("https://openrouter.ai:443/api/v1"),
+            Some("openrouter.ai"),
+            "explicit :443 must be accepted for OpenRouter"
+        );
+        // Non-default port must still be rejected.
+        assert_eq!(pricing_authority("https://api.openai.com:8080/v1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_userinfo() {
+        assert_eq!(
+            pricing_authority("https://user:pass@api.anthropic.com/"),
+            None
+        );
+    }
+
+    #[test]
+    fn pricing_authority_rejects_query_and_fragment() {
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/?debug=1"),
+            None
+        );
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com/#section"),
+            None
+        );
+        assert_eq!(pricing_authority("https://api.openai.com/v1?key=1"), None);
+    }
+
+    #[test]
+    fn pricing_authority_rejects_lookalike_hosts() {
+        // Subdomain: must NOT match
+        assert_eq!(
+            pricing_authority("https://subdomain.api.anthropic.com/"),
+            None
+        );
+        // Superset: must NOT match
+        assert_eq!(pricing_authority("https://notapi.anthropic.com/"), None);
+        assert_eq!(
+            pricing_authority("https://api.anthropic.com.evil.com/"),
+            None
+        );
+        // Path-prefix lookalike for OpenAI: /v1extra must not match /v1
+        assert_eq!(pricing_authority("https://api.openai.com/v1extra"), None);
+    }
+
+    #[test]
+    fn pricing_authority_unknown_host_returns_none() {
+        assert_eq!(pricing_authority("https://api.databricks.com/v1"), None);
+        assert_eq!(pricing_authority("https://custom.llm.corp/v1"), None);
     }
 }

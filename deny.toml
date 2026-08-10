@@ -15,6 +15,10 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # nostr-relay-pool 0.44.3 — informational/unmaintained, not a vulnerability.
+    # Transitive via mesh-llm 0.74 → nostr-sdk 0.44.1. Remove after mesh-llm
+    # migrates to nostr-sdk >= 0.45, which absorbed the standalone relay pool.
+    { id = "RUSTSEC-2026-0243", reason = "transitive via mesh-llm; upstream nostr-sdk 0.45 migration requires API changes" },
 ]
 
 [licenses]
