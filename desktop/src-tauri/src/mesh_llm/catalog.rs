@@ -9,8 +9,10 @@ use serde::Serialize;
 
 use mesh_llm_client::models::catalog::{parse_size_gb, MODEL_CATALOG};
 use mesh_llm_node::models::{default_huggingface_cache_dir, scan_installed_models};
-use mesh_llm_system::hardware;
 use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
+
+#[cfg(not(target_os = "windows"))]
+use mesh_llm_system::hardware;
 
 /// Buzz-curated tier picks. These are the models we know survive the agent
 /// harness on shared compute — deliberately non-reasoning instruction models,
@@ -116,14 +118,158 @@ pub struct MeshModelCatalog {
 /// Draft (speculative-decoding) models are excluded — they are not something
 /// a person shares directly.
 pub fn model_catalog() -> MeshModelCatalog {
-    let survey = hardware::survey();
-    let vram_gb = survey.vram_bytes as f64 / 1e9;
+    let hardware = catalog_hardware();
+    let vram_gb = hardware.vram_bytes as f64 / 1e9;
     build_catalog(
-        survey.gpu_name.clone(),
-        survey.vram_bytes,
+        hardware.gpu_name,
+        hardware.vram_bytes,
         vram_gb,
         &installed_names(),
     )
+}
+
+struct CatalogHardware {
+    gpu_name: Option<String>,
+    vram_bytes: u64,
+}
+
+#[cfg(not(target_os = "windows"))]
+fn catalog_hardware() -> CatalogHardware {
+    let survey = hardware::survey();
+    CatalogHardware {
+        gpu_name: survey.gpu_name,
+        vram_bytes: survey.vram_bytes,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn catalog_hardware() -> CatalogHardware {
+    // MeshLLM's Windows survey adds a system-RAM offload budget to discrete
+    // GPU VRAM. That is useful for runtime placement, but misleading in the
+    // picker: a 16 GB card with 32 GB system RAM reads as ~32 GB and receives
+    // too-large recommendations. For the catalog, report and rank against
+    // dedicated GPU memory only. These probes also hide child console windows,
+    // avoiding the visible PowerShell/nvidia-smi flashes from the upstream
+    // survey when Settings → Compute opens.
+    if let Some((names, vram_bytes)) = windows_nvidia_smi_gpus() {
+        return CatalogHardware {
+            gpu_name: summarize_gpu_names(&names),
+            vram_bytes,
+        };
+    }
+    let gpus = windows_video_controllers();
+    let names: Vec<String> = gpus.iter().map(|(name, _)| name.clone()).collect();
+    let vram_bytes = gpus.iter().map(|(_, bytes)| *bytes).sum();
+    CatalogHardware {
+        gpu_name: summarize_gpu_names(&names),
+        vram_bytes,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_command_output(program: &str, args: &[&str]) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_nvidia_smi_gpus() -> Option<(Vec<String>, u64)> {
+    let output = windows_command_output(
+        "nvidia-smi",
+        &[
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+    )?;
+    parse_nvidia_smi_catalog_output(&output)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_nvidia_smi_catalog_output(output: &str) -> Option<(Vec<String>, u64)> {
+    let mut names = Vec::new();
+    let mut total = 0_u64;
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Some((name, mib)) = line.rsplit_once(',') else {
+            continue;
+        };
+        let Ok(mib) = mib.trim().parse::<u64>() else {
+            continue;
+        };
+        if mib == 0 {
+            continue;
+        }
+        names.push(name.trim().to_string());
+        total = total.saturating_add(mib.saturating_mul(1024 * 1024));
+    }
+    (!names.is_empty() && total > 0).then_some((names, total))
+}
+
+#[cfg(target_os = "windows")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct WindowsVideoController {
+    name: Option<String>,
+    adapter_ram: Option<serde_json::Value>,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_video_controllers() -> Vec<(String, u64)> {
+    let Some(output) = windows_command_output(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_windows_video_controller_catalog_json(&output)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_video_controller_catalog_json(output: &str) -> Vec<(String, u64)> {
+    fn ram(value: &serde_json::Value) -> Option<u64> {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+    }
+
+    let parse_one = |controller: WindowsVideoController| {
+        let name = controller.name?.trim().to_string();
+        let bytes = ram(&controller.adapter_ram?)?;
+        (bytes > 0 && !name.is_empty()).then_some((name, bytes))
+    };
+
+    if let Ok(controller) = serde_json::from_str::<WindowsVideoController>(output) {
+        return parse_one(controller).into_iter().collect();
+    }
+    serde_json::from_str::<Vec<WindowsVideoController>>(output)
+        .map(|controllers| controllers.into_iter().filter_map(parse_one).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn summarize_gpu_names(names: &[String]) -> Option<String> {
+    match names {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => Some(format!("{} GPUs", names.len())),
+    }
 }
 
 fn installed_names() -> Vec<(String, String)> {
@@ -283,6 +429,31 @@ mod tests {
         assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
         let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
         assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_catalog_uses_dedicated_gpu_vram_not_system_offload() {
+        let (names, bytes) = parse_nvidia_smi_catalog_output("NVIDIA GeForce RTX 5060 Ti, 16376\n")
+            .expect("nvidia-smi row parses");
+        assert_eq!(names, vec!["NVIDIA GeForce RTX 5060 Ti"]);
+        assert_eq!(bytes, 16_376 * 1024 * 1024);
+        assert_eq!(format_rated_capacity(bytes), "16 GB");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_catalog_parses_cim_video_controller_json() {
+        let controllers = parse_windows_video_controller_catalog_json(
+            r#"[{"Name":"GPU A","AdapterRAM":8589934592},{"Name":"GPU B","AdapterRAM":"4294967296"}]"#,
+        );
+        assert_eq!(
+            controllers,
+            vec![
+                ("GPU A".to_string(), 8_589_934_592),
+                ("GPU B".to_string(), 4_294_967_296)
+            ]
+        );
     }
 
     #[test]
