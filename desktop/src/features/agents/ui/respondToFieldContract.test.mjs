@@ -14,7 +14,11 @@ const respondToFieldSource = await readFile(
  */
 const collapsedSource = respondToFieldSource.replace(/\s+/g, " ");
 
-for (const label of ["Only me (default)", "Selected people", "Anyone"]) {
+for (const label of [
+  "Me and my agents only (default)",
+  "Selected people",
+  "Anyone",
+]) {
   test(`respond-to control uses the plain-language label: ${label}`, () => {
     assert.ok(respondToFieldSource.includes(`label: "${label}"`));
   });
@@ -55,7 +59,7 @@ test("the warning copy comes from the shared helper, not inline text", () => {
   assert.match(collapsedSource, /<p aria-live="polite"[^>]*> \{warningText\}/);
 });
 
-test("the Only me line names the owner's agents, not the owner alone", () => {
+test("the owner-only copy names the owner's agents, not the owner alone", () => {
   // The harness gate admits the owner and every verified same-owner agent
   // (`managed_agents/access_policy.rs`), and the built-in Welcome team depends
   // on that, so a line promising the owner alone would overstate the boundary.
