@@ -62,6 +62,7 @@ const settingsNavGroups: Array<{
       "shortcuts",
       "custom-emoji",
       "local-archive",
+      "documents",
       "channel-templates",
     ],
   },

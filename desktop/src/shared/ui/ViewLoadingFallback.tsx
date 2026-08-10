@@ -7,6 +7,7 @@ import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 type ViewLoadingFallbackKind =
   | "agents"
   | "channel"
+  | "documents"
   | "forum"
   | "projects"
   | "pulse"
@@ -390,6 +391,50 @@ function ForumLoadingBody({ hasHeader = false }: { hasHeader?: boolean }) {
   );
 }
 
+const documentsTreeRows = [
+  { indent: "ml-0", key: "folder-one", width: "w-28" },
+  { indent: "ml-3", key: "note-one", width: "w-32" },
+  { indent: "ml-3", key: "note-two", width: "w-24" },
+  { indent: "ml-0", key: "folder-two", width: "w-24" },
+  { indent: "ml-3", key: "note-three", width: "w-36" },
+  { indent: "ml-0", key: "note-four", width: "w-20" },
+] as const;
+
+function DocumentsLoadingBody() {
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="flex w-64 shrink-0 flex-col gap-2 border-r border-border/60 p-3">
+        <Skeleton className="h-7 w-full rounded-lg" />
+        <div className="mt-1 space-y-2">
+          {documentsTreeRows.map((row) => (
+            <div
+              className={cn("flex items-center gap-2", row.indent)}
+              key={row.key}
+            >
+              <Skeleton className="h-3.5 w-3.5 shrink-0 rounded-sm" />
+              <Skeleton className={cn("h-3.5", row.width)} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-4 p-6">
+        <Skeleton className="h-7 w-64 max-w-full" />
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-full max-w-2xl" />
+          <Skeleton className="h-4 w-11/12 max-w-2xl" />
+          <Skeleton className="h-4 w-4/5 max-w-2xl" />
+        </div>
+        <Skeleton className="h-5 w-40" />
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-full max-w-2xl" />
+          <Skeleton className="h-4 w-3/4 max-w-2xl" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ViewLoadingFallback({
   includeHeader = false,
   kind,
@@ -401,6 +446,7 @@ export function ViewLoadingFallback({
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {shouldShowChannelHeader ? <LoadingHeaderSkeleton /> : null}
       {kind === "agents" ? <AgentsLoadingBody /> : null}
+      {kind === "documents" ? <DocumentsLoadingBody /> : null}
       {kind === "workflows" ? <CardListLoadingBody /> : null}
       {kind === "projects" ? <CardListLoadingBody /> : null}
       {kind === "channel" ? (

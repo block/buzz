@@ -96,7 +96,7 @@ import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
-import { LazySettingsScreen } from "@/app/LazySettingsScreen";
+import { AppShellSettingsPane } from "@/app/AppShellSettingsPane";
 const EMPTY_CHANNELS: Channel[] = [];
 export function AppShell() {
   useWebviewZoomShortcuts();
@@ -138,6 +138,7 @@ export function AppShell() {
     goChannel,
     goHome,
     goNewMessage,
+    goDocuments,
     goProjects,
     goPulse,
     goSettings,
@@ -802,41 +803,14 @@ export function AppShell() {
                   />
                 ) : null}
                 {settingsOpen ? (
-                  <div className="flex min-h-0 flex-1 overflow-hidden">
-                    <React.Suspense fallback={null}>
-                      <LazySettingsScreen
-                        currentPubkey={identityQuery.data?.pubkey}
-                        fallbackDisplayName={identityQuery.data?.displayName}
-                        isUpdatingDesktopNotifications={
-                          notificationSettings.isUpdatingDesktopEnabled
-                        }
-                        notificationErrorMessage={
-                          notificationSettings.errorMessage
-                        }
-                        notificationPermission={notificationSettings.permission}
-                        notificationSettings={notificationSettings.settings}
-                        onClose={handleCloseSettings}
-                        onSectionChange={handleSettingsSectionChange}
-                        onSetDesktopNotificationsEnabled={
-                          notificationSettings.setDesktopEnabled
-                        }
-                        onSetHomeBadgeEnabled={
-                          notificationSettings.setHomeBadgeEnabled
-                        }
-                        onSetSlotAlertsEnabled={
-                          notificationSettings.setSlotAlertsEnabled
-                        }
-                        onSetNotifyWhileViewing={
-                          notificationSettings.setNotifyWhileViewing
-                        }
-                        onSetAllSlotAlertsEnabled={
-                          notificationSettings.setAllSlotAlertsEnabled
-                        }
-                        onSetSoundForSlot={notificationSettings.setSoundForSlot}
-                        section={settingsSection}
-                      />
-                    </React.Suspense>
-                  </div>
+                  <AppShellSettingsPane
+                    currentPubkey={identityQuery.data?.pubkey}
+                    fallbackDisplayName={identityQuery.data?.displayName}
+                    notificationSettings={notificationSettings}
+                    onClose={handleCloseSettings}
+                    onSectionChange={handleSettingsSectionChange}
+                    section={settingsSection}
+                  />
                 ) : (
                   <div className="relative flex min-h-0 flex-1 overflow-visible">
                     {!isHuddleRoom ? (
@@ -899,6 +873,7 @@ export function AppShell() {
                         searchChannels={channels}
                         searchFocusRequest={searchFocusRequest}
                         onSelectHome={() => void goHome()}
+                        onSelectDocuments={() => void goDocuments()}
                         onSelectProjects={() => void goProjects()}
                         onSelectPulse={() => void goPulse()}
                         onSelectSettings={handleOpenSettings}

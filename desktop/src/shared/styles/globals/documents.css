@@ -1,0 +1,254 @@
+/**
+ * Documents editor decorations.
+ *
+ * Only ProseMirror `Decoration` classes need real CSS — a decoration takes a
+ * class name string, not a component, so these cannot be Tailwind utilities on
+ * an element. Everything React renders in Documents uses Tailwind directly.
+ *
+ * Colours come from the existing theme tokens rather than fixed hexes, so the
+ * editor stays legible in both light and dark mode.
+ */
+
+.documents-editor .wikilink {
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.documents-editor .wikilink:hover {
+  text-decoration: underline;
+}
+
+/**
+ * A link whose target does not exist yet. Muted rather than red: an unresolved
+ * wikilink is a normal part of writing, not an error.
+ */
+.documents-editor .wikilink-broken {
+  color: var(--color-muted-foreground);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* `==highlight==` */
+.documents-editor .obsidian-highlight {
+  background-color: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  border-radius: 0.125rem;
+  padding: 0 0.125rem;
+}
+
+/* `%%comment%%` — Obsidian hides these when rendering, so mute them heavily. */
+.documents-editor .obsidian-comment {
+  color: var(--color-muted-foreground);
+  opacity: 0.6;
+}
+
+/**
+ * Tags are highlighted but deliberately *not* styled as clickable: there is no
+ * vault search for a click to lead to yet, and a pointer cursor promising an
+ * action that never happens is worse than plain coloured text. The extension
+ * keeps an `onTagClick` seam for when search lands — restore the cursor and
+ * hover underline at the same time.
+ */
+.documents-editor .obsidian-tag {
+  color: var(--color-primary);
+}
+
+/**
+ * Callouts. The accent is driven by a custom property so each type sets one
+ * value rather than repeating the whole rule, and all of them resolve through
+ * theme tokens so light mode stays readable — Onyx hardcodes hex colours that
+ * only work on a dark background.
+ */
+.documents-editor .callout {
+  --callout-accent: var(--color-muted-foreground);
+  background-color: color-mix(in oklab, var(--callout-accent) 10%, transparent);
+  border-left: 3px solid var(--callout-accent);
+  border-radius: 0.25rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.documents-editor .callout-info,
+.documents-editor .callout-note,
+.documents-editor .callout-todo {
+  --callout-accent: var(--color-primary);
+}
+
+.documents-editor .callout-tip,
+.documents-editor .callout-success {
+  --callout-accent: var(--color-success, oklch(0.72 0.16 155));
+}
+
+.documents-editor .callout-warning,
+.documents-editor .callout-question {
+  --callout-accent: oklch(0.75 0.15 75);
+}
+
+.documents-editor .callout-danger,
+.documents-editor .callout-failure,
+.documents-editor .callout-bug {
+  --callout-accent: var(--color-destructive);
+}
+
+.documents-editor .callout-quote,
+.documents-editor .callout-summary,
+.documents-editor .callout-example {
+  --callout-accent: var(--color-muted-foreground);
+}
+
+.documents-editor .obsidian-task {
+  cursor: pointer;
+}
+
+/* `^block-id` anchors — present for reference, not meant to draw the eye. */
+.documents-editor .obsidian-block-id {
+  color: var(--color-muted-foreground);
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+/**
+ * Editor typography.
+ *
+ * The project has no `@tailwindcss/typography`, so `prose` classes are inert
+ * and ProseMirror's output would otherwise render with no block spacing at
+ * all. Sizes are in `rem`/`em` so Cmd +/- zoom scales them — the px-text gate
+ * enforces this, and hardcoded px would freeze the editor against zoom.
+ */
+.documents-editor {
+  line-height: 1.65;
+}
+
+.documents-editor > * + * {
+  margin-top: 0.85em;
+}
+
+.documents-editor h1,
+.documents-editor h2,
+.documents-editor h3,
+.documents-editor h4,
+.documents-editor h5,
+.documents-editor h6 {
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Headings need more space above than below, so they group with their body. */
+.documents-editor > :is(h1, h2, h3, h4, h5, h6) + * {
+  margin-top: 0.4em;
+}
+
+.documents-editor > * + :is(h1, h2, h3, h4, h5, h6) {
+  margin-top: 1.6em;
+}
+
+.documents-editor h1 {
+  font-size: 1.75em;
+}
+.documents-editor h2 {
+  font-size: 1.4em;
+}
+.documents-editor h3 {
+  font-size: 1.2em;
+}
+.documents-editor h4 {
+  font-size: 1.05em;
+}
+.documents-editor h5,
+.documents-editor h6 {
+  font-size: 1em;
+  color: var(--color-muted-foreground);
+}
+
+.documents-editor ul,
+.documents-editor ol {
+  padding-left: 1.5em;
+}
+
+.documents-editor ul {
+  list-style: disc;
+}
+
+.documents-editor ol {
+  list-style: decimal;
+}
+
+.documents-editor li + li {
+  margin-top: 0.25em;
+}
+
+/* Nested lists hug their parent rather than inheriting the block gap. */
+.documents-editor li > ul,
+.documents-editor li > ol {
+  margin-top: 0.25em;
+}
+
+.documents-editor li > p {
+  margin-top: 0;
+}
+
+.documents-editor blockquote {
+  border-left: 3px solid var(--color-border);
+  color: var(--color-muted-foreground);
+  padding-left: 1em;
+}
+
+.documents-editor pre {
+  background-color: var(--color-muted);
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  padding: 0.75em 1em;
+}
+
+.documents-editor :not(pre) > code {
+  background-color: var(--color-muted);
+  border-radius: 0.25rem;
+  font-size: 0.9em;
+  padding: 0.125em 0.3em;
+}
+
+.documents-editor hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin-block: 1.5em;
+}
+
+.documents-editor a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The caret needs somewhere to go on an empty trailing line. */
+.documents-editor p:empty::after {
+  content: "";
+  display: inline-block;
+}
+
+/* Tables. The editor represents these now, so they need real styling. */
+.documents-editor table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  width: max-content;
+  max-width: 100%;
+}
+
+.documents-editor :is(th, td) {
+  border: 1px solid var(--color-border);
+  padding: 0.375em 0.625em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.documents-editor th {
+  background-color: var(--color-muted);
+  font-weight: 600;
+}
+
+.documents-editor .selectedCell::after {
+  background-color: color-mix(in oklab, var(--color-primary) 18%, transparent);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}

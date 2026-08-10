@@ -1,5 +1,13 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  NotebookText,
+  Zap,
+} from "lucide-react";
 
+import type { AppView } from "@/app/AppShell.helpers";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
 import type { Channel, SearchHit } from "@/shared/api/types";
@@ -11,15 +19,6 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
-
-type SidebarSelectedView =
-  | "home"
-  | "channel"
-  | "messages"
-  | "agents"
-  | "workflows"
-  | "pulse"
-  | "projects";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -38,11 +37,12 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectDocuments: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
-  selectedView: SidebarSelectedView;
+  selectedView: AppView;
 };
 
 export function AppSidebarPinnedHeader({
@@ -83,6 +83,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectDocuments,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -149,6 +150,20 @@ export function AppSidebarPrimaryMenu({
             >
               <FolderGit2 className="h-4 w-4" />
               <SidebarMenuLabel>Projects</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
+        <FeatureGate feature="documents">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-documents-view"
+              isActive={selectedView === "documents"}
+              onClick={onSelectDocuments}
+              tooltip="Documents"
+              type="button"
+            >
+              <NotebookText className="h-4 w-4" />
+              <SidebarMenuLabel>Documents</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </FeatureGate>

@@ -45,6 +45,9 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 # connection is dropped, which the plugin does immediately. Default features
 # keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
 notify-rust = "4"
+# Filesystem watching for the Documents vault (distinct from notify-rust,
+# which is desktop notifications).
+notify = "8"
 # Enable getUserMedia in the WebKitGTK webview (see src/linux_media.rs). Pinned
 # to the exact version wry links so both resolve to one webkit2gtk-sys and we
 # don't get duplicate symbols; bump in lockstep with wry.

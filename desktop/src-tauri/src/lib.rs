@@ -307,6 +307,8 @@ pub fn run() {
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
+        .manage(commands::vault_path::VaultState::default())
+        .manage(commands::VaultWatcherState::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -577,29 +579,10 @@ pub fn run() {
 
             // Drain events the retention store flagged `pending_sync` (UI
             // create/edit, delete tombstones, launch reconcile) to the relay.
-            // One loop is the sole publisher for persona, team, and managed-
-            // agent writers; a relay-unreachable tick leaves rows pending for
-            // the next sweep.
             // Skipped in recovery mode — flushing under an ephemeral key would
             // publish events attributed to an identity the user doesn't own.
             if !recovery_mode {
-                let flush_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    use std::time::Duration;
-                    use tauri::Manager;
-                    loop {
-                        let state = flush_handle.state::<AppState>();
-                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
-                            &flush_handle,
-                            &state,
-                        )
-                        .await
-                        {
-                            eprintln!("buzz-desktop: event-flush: {e}");
-                        }
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                });
+                managed_agents::persona_events::spawn_flush_loop(app.handle().clone());
             }
             Ok(())
         })
@@ -644,6 +627,21 @@ pub fn run() {
             get_users_batch,
             get_user_notes,
             get_git_identity,
+            pick_vault_folder,
+            set_active_vault,
+            clear_active_vault,
+            get_active_vault,
+            list_vault_files,
+            read_vault_file,
+            read_vault_files,
+            vault_entry_exists,
+            write_vault_file,
+            create_vault_file,
+            create_vault_folder,
+            rename_vault_entry,
+            delete_vault_entry,
+            start_vault_watch,
+            stop_vault_watch,
             get_project_repo_snapshot,
             get_project_repo_diff,
             get_project_local_repo_diff,
