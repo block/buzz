@@ -29,8 +29,24 @@ const PERSONA_SYNC_KINDS = [
 // event that already landed is a no-op.
 const DEFAULT_BACKFILL_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Poll cancellation during backoff sleeps: an identity/community switch during
+// a 60s wait must short-circuit the retry loop instead of running one more
+// full backfill for the torn-down subscription.
+const CANCEL_POLL_MS = 250;
+
+async function sleepCancellable(
+  ms: number,
+  onCancelled: () => boolean,
+): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    if (onCancelled()) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(CANCEL_POLL_MS, remaining)),
+    );
+  }
 }
 
 // Start the persona/team/agent/deletion sync for `pubkey` on `relayUrl`:
@@ -108,7 +124,8 @@ export function startPersonaSync(
           `[usePersonaSync] backfill attempt ${attempt + 1} failed, retrying in ${delay}ms:`,
           error,
         );
-        await sleep(delay);
+        await sleepCancellable(delay, onCancelled);
+        if (onCancelled()) return;
       }
     }
   })();

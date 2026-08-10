@@ -254,3 +254,31 @@ test("startPersonaSync stops retrying once cancelled", async () => {
 
   mock.reset();
 });
+
+// Cancellation must short-circuit a backoff sleep too: an identity/community
+// switch during a 60s wait should stop the loop within one poll interval, not
+// after the full sleep plus another fetch.
+test("startPersonaSync aborts promptly when cancelled during a backoff sleep", async () => {
+  let fetches = 0;
+  mock.method(relayClient, "fetchEvents", () => {
+    fetches += 1;
+    return Promise.reject(new Error("relay unreachable"));
+  });
+  mock.method(relayClient, "subscribeLive", () =>
+    Promise.resolve(() => Promise.resolve()),
+  );
+
+  let cancelled = false;
+  startPersonaSync("owner-pubkey", "wss://relay.example", () => cancelled, {
+    backfillRetryDelaysMs: [60_000],
+  });
+
+  assert.ok(await waitFor(() => fetches === 1), "first attempt must run");
+  cancelled = true;
+  // Well under the 60s backoff: the loop must notice cancellation within a
+  // few poll intervals and never fetch again.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(fetches, 1, "cancel during sleep must prevent the retry fetch");
+
+  mock.reset();
+});
