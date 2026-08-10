@@ -1920,6 +1920,53 @@ pub async fn ingest_event(
     result
 }
 
+/// Map a durable restriction state to the write-block error it implies, or
+/// `None` if the actor may write. Banned actors are refused `blocked:`, actors
+/// with an unexpired timeout `restricted:`; an expired timeout does not block.
+fn restriction_block(r: &buzz_db::moderation::RestrictionState) -> Option<IngestError> {
+    if r.banned {
+        return Some(IngestError::AuthFailed(
+            "blocked: you are banned from this community".to_string(),
+        ));
+    }
+    if let Some(until) = r.muted_until {
+        if until > chrono::Utc::now() {
+            return Some(IngestError::AuthFailed(format!(
+                "restricted: you are timed out until {}",
+                until.timestamp()
+            )));
+        }
+    }
+    None
+}
+
+/// Enforce the durable community ban/timeout write-block for `pubkey`.
+///
+/// The lookup fails closed: a restriction-state DB error is surfaced as
+/// `error:` (500) rather than admitting the write, so a Postgres blip can never
+/// let a banned or timed-out actor through. This is the durable backstop the
+/// live ban fan-out's best-effort delivery relies on; callers decide which
+/// kinds are exempt.
+async fn enforce_moderation_restriction(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    pubkey: &[u8],
+) -> Result<(), IngestError> {
+    match state
+        .db
+        .moderation_restriction_state(tenant.community(), pubkey)
+        .await
+    {
+        Ok(r) => match restriction_block(&r) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        },
+        Err(e) => Err(IngestError::Internal(format!(
+            "error: internal error checking restriction state: {e}"
+        ))),
+    }
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -2027,7 +2074,17 @@ async fn ingest_event_inner(
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
+    //
+    // They route straight to the executor, which performs no restriction check
+    // of its own, so the durable ban/timeout write-block is enforced here
+    // before routing — a banned or timed-out member must not open DMs, define
+    // or trigger workflows, or grant/deny approvals. Unlike the moderation and
+    // relay-admin exemptions below, command kinds are ordinary writes, not
+    // administrative capability, so they get the full gate including timeouts.
+    // Scope matches the ordinary-write gate below: the authoring pubkey only,
+    // with no NIP-OA owner→agent cascade.
     if buzz_core::kind::is_command_kind(kind_u32) {
+        enforce_moderation_restriction(state, tenant, auth.pubkey().as_bytes()).await?;
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
@@ -2110,34 +2167,7 @@ async fn ingest_event_inner(
     // the restriction-state cache (see should-fix), which can fold in owner
     // resolution without a per-write DB round-trip.
     if !buzz_core::kind::is_moderation_command_kind(kind_u32) && !is_relay_admin_kind(kind_u32) {
-        match state
-            .db
-            .moderation_restriction_state(tenant.community(), auth.pubkey().as_bytes())
-            .await
-        {
-            Ok(r) => {
-                if r.banned {
-                    return Err(IngestError::AuthFailed(
-                        "blocked: you are banned from this community".to_string(),
-                    ));
-                }
-                if let Some(until) = r.muted_until {
-                    if until > chrono::Utc::now() {
-                        return Err(IngestError::AuthFailed(format!(
-                            "restricted: you are timed out until {}",
-                            until.timestamp()
-                        )));
-                    }
-                }
-            }
-            Err(e) => {
-                // Fail closed: a DB error must not let a banned/timed-out actor
-                // write.
-                return Err(IngestError::Internal(format!(
-                    "error: internal error checking restriction state: {e}"
-                )));
-            }
-        }
+        enforce_moderation_restriction(state, tenant, auth.pubkey().as_bytes()).await?;
     }
 
     let mut channel_id = if kind_u32 == KIND_REACTION {
@@ -3164,6 +3194,61 @@ mod tests {
                 panic!("restriction DB failure must map to Internal (HTTP 500), got {other:?}")
             }
         }
+    }
+
+    /// A banned actor is refused with the durable `blocked:` write-block —
+    /// the error every restricted write path (including command kinds, which
+    /// route to `handle_command` and have no ban check of their own) shares.
+    #[test]
+    fn restriction_block_banned_is_blocked() {
+        let banned = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+        match restriction_block(&banned) {
+            Some(IngestError::AuthFailed(msg)) => {
+                assert_eq!(msg, "blocked: you are banned from this community");
+            }
+            other => panic!("banned actor must be blocked, got {other:?}"),
+        }
+    }
+
+    /// An unexpired timeout blocks writes with `restricted:` — command kinds
+    /// are ordinary writes, so a timeout blocks them just like any post.
+    #[test]
+    fn restriction_block_active_timeout_is_restricted() {
+        let timed_out = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        };
+        match restriction_block(&timed_out) {
+            Some(IngestError::AuthFailed(msg)) => {
+                assert!(
+                    msg.starts_with("restricted: you are timed out until"),
+                    "unexpected timeout message: {msg:?}"
+                );
+            }
+            other => panic!("active timeout must be restricted, got {other:?}"),
+        }
+    }
+
+    /// An expired timeout is not a write-block — the row lingers but the
+    /// `muted_until` guard clears once it is in the past.
+    #[test]
+    fn restriction_block_expired_timeout_does_not_block() {
+        let expired = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+        };
+        assert!(
+            restriction_block(&expired).is_none(),
+            "an expired timeout must not block writes"
+        );
+    }
+
+    #[test]
+    fn restriction_block_unrestricted_is_none() {
+        assert!(restriction_block(&buzz_db::moderation::RestrictionState::default()).is_none());
     }
 
     #[derive(Debug, Default)]
