@@ -883,7 +883,7 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
@@ -892,12 +892,7 @@ pub fn spawn_agent_child(
     })?;
     let mut isolation_run = isolation_run;
     if let Some(run) = isolation_run.as_mut() {
-        if let Err(error) = run.bind_pid(child.id()) {
-            let _ = terminate_process(child.id());
-            return Err(format!(
-                "failed to bind filesystem isolation to the tracked process: {error}"
-            ));
-        }
+        super::bind_isolation_process(run, &mut child)?;
     }
 
     // Stamp the adapter availability for runtimes with a version gate (codex

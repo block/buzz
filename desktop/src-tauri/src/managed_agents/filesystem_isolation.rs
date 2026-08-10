@@ -75,6 +75,39 @@ impl FilesystemIsolationRun {
     }
 }
 
+/// Durably bind a spawned outer harness to its isolation receipt.
+///
+/// A bind failure must never return a still-running, untracked harness. Stop
+/// the process group and reap the exact child before the run guard can be
+/// dropped and its root removed.
+pub(crate) fn bind_isolation_process(
+    run: &mut FilesystemIsolationRun,
+    child: &mut std::process::Child,
+) -> Result<(), String> {
+    let Err(bind_error) = run.bind_pid(child.id()) else {
+        return Ok(());
+    };
+
+    let terminate_error = super::terminate_process(child.id()).err();
+    if terminate_error.is_some() {
+        // The group-aware path is authoritative. `Child::kill` is a final
+        // same-process fallback so we can still reap the exact spawned child.
+        let _ = child.kill();
+    }
+    let wait_result = child.wait();
+    match (terminate_error, wait_result) {
+        (None, Ok(_)) => Err(format!(
+            "failed to bind filesystem isolation to the tracked process: {bind_error}"
+        )),
+        (Some(terminate_error), Ok(_)) => Err(format!(
+            "failed to bind filesystem isolation to the tracked process: {bind_error}; group termination required fallback: {terminate_error}"
+        )),
+        (terminate_error, Err(wait_error)) => Err(format!(
+            "failed to bind filesystem isolation to the tracked process: {bind_error}; termination={terminate_error:?}; failed to confirm child exit: {wait_error}"
+        )),
+    }
+}
+
 impl Drop for FilesystemIsolationRun {
     fn drop(&mut self) {
         self.control.shutdown();
@@ -722,10 +755,11 @@ fn seatbelt_profile(attestation: &FilesystemIsolationAttestation) -> Result<Stri
     Ok(profile)
 }
 
-/// Remove only crash residue whose durable receipt proves the exact run root
-/// and whose Desktop owner and outer harness are both no longer live. Live or
-/// ambiguous receipts are preserved so concurrent app instances cannot lose a
-/// workspace underneath them.
+/// Remove only crash residue whose durable receipt proves the exact run root,
+/// has a durably bound outer harness PID, and whose Desktop owner and harness
+/// are both no longer live. An unbound receipt is an ambiguous spawn window,
+/// never proof of abandonment. Live or ambiguous receipts are preserved so a
+/// concurrent app instance cannot lose a workspace underneath it.
 pub fn recover_abandoned_isolation_runs() -> Result<Vec<PathBuf>, String> {
     let temp = std::env::temp_dir()
         .canonicalize()
@@ -787,8 +821,13 @@ fn recover_abandoned_isolation_runs_in(
         {
             continue;
         }
+        let Some(agent_pid) = receipt.agent_pid else {
+            // Desktop may have crashed after spawn but before the exact child
+            // PID was fsynced. Preserve this ambiguous root fail-closed.
+            continue;
+        };
         let owner_live = is_live(receipt.desktop_pid);
-        let agent_live = receipt.agent_pid.is_some_and(&is_live);
+        let agent_live = is_live(agent_pid);
         if owner_live || agent_live {
             continue;
         }
@@ -981,8 +1020,49 @@ printf '%s %s %s %s %s %s' "$inside_status" "$outside_status" "$inside_write_sta
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn startup_recovery_removes_only_proven_abandoned_roots() {
+    fn bind_failure_terminates_and_reaps_spawned_harness_before_cleanup() {
+        use std::os::unix::process::CommandExt;
+
+        let profile = FilesystemIsolationProfile::Ephemeral {
+            read_only_roots: Vec::new(),
+        };
+        let (mut command, mut run) = isolated_agent_command(
+            &profile,
+            &"ab".repeat(32),
+            "test",
+            Path::new("/bin/sh"),
+        )
+        .unwrap();
+        let root = run.root().to_path_buf();
+        command
+            .arg("-c")
+            .arg("while :; do :; done")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+
+        // Pre-register the same run to force the post-fsync control-registry
+        // collision path inside bind_pid.
+        run.control.bind_pid(pid).unwrap();
+        let error = bind_isolation_process(&mut run, &mut child).unwrap_err();
+        assert!(error.contains("failed to bind filesystem isolation"));
+        assert!(!process_is_live(pid), "bind failure left child {pid} live");
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "bind failure did not reap child {pid}"
+        );
+
+        drop(run);
+        assert!(!root.exists(), "normal run cleanup left residue");
+    }
+
+    #[test]
+    fn startup_recovery_preserves_spawn_window_and_live_runs() {
         let operator = tempfile::tempdir().unwrap();
         let base = operator.path().join(RUNS_DIR);
         create_private_dir(&base).unwrap();
@@ -1011,13 +1091,19 @@ printf '%s %s %s %s %s %s' "$inside_status" "$outside_status" "$inside_write_sta
         };
 
         let abandoned = make_run(&"a".repeat(32), 10, Some(11));
-        let live_desktop = make_run(&"b".repeat(32), 20, None);
-        let live_agent = make_run(&"c".repeat(32), 10, Some(30));
+        let unbound_spawn_window = make_run(&"b".repeat(32), 10, None);
+        let live_desktop = make_run(&"c".repeat(32), 20, Some(21));
+        let live_agent = make_run(&"d".repeat(32), 10, Some(30));
         let removed = recover_abandoned_isolation_runs_in(&base, |pid| pid == 20 || pid == 30)
             .unwrap();
 
         assert_eq!(removed, vec![abandoned.clone()]);
         assert!(!abandoned.exists());
+        assert!(unbound_spawn_window.exists());
+        assert!(
+            receipts.join(format!("{}.json", "b".repeat(32))).exists(),
+            "ambiguous crash-between-spawn-and-bind receipt was removed"
+        );
         assert!(live_desktop.exists());
         assert!(live_agent.exists());
     }
