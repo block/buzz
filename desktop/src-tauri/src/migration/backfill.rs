@@ -67,17 +67,24 @@ fn runtime_matches(definition: &AgentDefinition, record: &ManagedAgentRecord) ->
         .map(str::trim)
         .filter(|command| !command.is_empty())
     {
-        // Snapshot application only clears a known override when the
-        // definition names a different known runtime. A matching known pin,
-        // a custom command, or a definition without a catalog runtime remains
-        // authoritative and keeps the effective harness unchanged.
-        if let (Some(definition_runtime), Some(override_runtime)) = (
-            definition_runtime.and_then(crate::managed_agents::known_acp_runtime_exact),
-            crate::managed_agents::known_acp_runtime(override_command),
+        // Snapshot application cannot clear an override when the definition
+        // has no catalog runtime, so the pin stays authoritative unchanged.
+        let Some(definition_runtime) = definition_runtime else {
+            return true;
+        };
+        // Use the same three-tier resolvers as `apply_persona_snapshot`
+        // (builtins, static presets, and the loaded custom registry). If either
+        // identity cannot be resolved, fail closed instead of adopting a
+        // definition that may change which harness the next snapshot runs.
+        return match (
+            crate::managed_agents::command_for_runtime_id(definition_runtime),
+            crate::managed_agents::canonical_harness_command(override_command),
         ) {
-            return definition_runtime.id == override_runtime.id;
-        }
-        return true;
+            (Some(definition_command), Some(override_command)) => {
+                definition_command == override_command
+            }
+            _ => false,
+        };
     }
 
     // Pre-unified standalone records have neither `runtime` nor an override;
@@ -92,17 +99,17 @@ fn runtime_matches(definition: &AgentDefinition, record: &ManagedAgentRecord) ->
         } else {
             crate::managed_agents::record_agent_command(record, &[])
         };
-    let default_command = crate::managed_agents::default_agent_command();
-    let after_command = definition_runtime
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
-        .and_then(|runtime| runtime.commands.first().copied())
-        .unwrap_or(default_command.as_str());
+    let after_command = match definition_runtime {
+        Some(runtime) => crate::managed_agents::command_for_runtime_id(runtime),
+        None => Some(crate::managed_agents::default_agent_command()),
+    };
     match (
-        crate::managed_agents::known_acp_runtime(&before_command),
-        crate::managed_agents::known_acp_runtime(after_command),
+        crate::managed_agents::canonical_harness_command(&before_command),
+        after_command
+            .and_then(|command| crate::managed_agents::canonical_harness_command(command.as_str())),
     ) {
-        (Some(before), Some(after)) => before.id == after.id,
-        _ => before_command == after_command,
+        (Some(before), Some(after)) => before == after,
+        _ => false,
     }
 }
 

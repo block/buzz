@@ -313,6 +313,70 @@ fn backfill_does_not_adopt_definition_with_divergent_known_runtime_override() {
 }
 
 #[test]
+fn backfill_preserves_goose_spawn_snapshot_against_openclaw_preset() {
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = "9".repeat(64);
+    let folded_slug = "openclaw-persona";
+    let mut folded = folded_definition_json(folded_slug, "Solo", "You are Solo.", "openai");
+    folded["runtime"] = serde_json::json!("openclaw");
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            folded,
+            standalone_with_legacy_defaults("Solo", &pubkey, "You are Solo."),
+        ]),
+    );
+
+    let before = load_typed(dir.path());
+    let before_instance = before
+        .iter()
+        .find(|record| !record.pubkey.is_empty())
+        .unwrap();
+    let before_definitions: Vec<AgentDefinition> = before
+        .iter()
+        .filter_map(ManagedAgentRecord::to_definition_view)
+        .collect();
+    let snapshot_before = prospective_spawn_config_snapshot(
+        before_instance,
+        &before_definitions,
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+    );
+    assert_eq!(snapshot_before.canonical()["command"], "goose");
+
+    assert_eq!(
+        backfill_standalone_agents_in_dir(&base(dir.path())).unwrap(),
+        1
+    );
+    let records = load_typed(dir.path());
+    let instance = records
+        .iter()
+        .find(|record| !record.pubkey.is_empty())
+        .unwrap();
+    let after_definitions: Vec<AgentDefinition> = records
+        .iter()
+        .filter_map(ManagedAgentRecord::to_definition_view)
+        .collect();
+    let snapshot_after = prospective_spawn_config_snapshot(
+        instance,
+        &after_definitions,
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+    );
+
+    assert_eq!(
+        snapshot_before.canonical(),
+        snapshot_after.canonical(),
+        "a preset mismatch must manufacture a matching definition instead of changing the harness"
+    );
+    assert_eq!(records.len(), 3);
+    assert_eq!(instance.persona_id.as_deref(), Some(pubkey.as_str()));
+    assert_eq!(instance.agent_command_override.as_deref(), Some("goose"));
+}
+
+#[test]
 fn backfill_uses_same_runtime_override_before_stale_legacy_command() {
     let dir = tempfile::tempdir().unwrap();
     let pubkey = "e".repeat(64);
