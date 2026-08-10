@@ -65,17 +65,31 @@ export function readChannelStarsStore(pubkey: string): ChannelStarStore {
   }
 }
 
-export function boundStarStore(store: ChannelStarStore): ChannelStarStore {
-  const entries = Object.entries(store.channels);
-  if (entries.length <= MAX_CHANNEL_STAR_ENTRIES) return store;
+export function boundStarStore(
+  store: ChannelStarStore,
+  preservedKey?: string,
+): ChannelStarStore {
+  const preservedEntry =
+    preservedKey === undefined ? undefined : store.channels[preservedKey];
+  const entries = Object.entries(store.channels).filter(
+    ([channelId]) => channelId !== preservedKey,
+  );
+  if (entries.length + (preservedEntry ? 1 : 0) <= MAX_CHANNEL_STAR_ENTRIES)
+    return store;
   entries.sort(([leftId, left], [rightId, right]) => {
     if (left.updatedAt !== right.updatedAt)
       return left.updatedAt - right.updatedAt;
     return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
   });
+  const retainedEntries = entries.slice(
+    -(MAX_CHANNEL_STAR_ENTRIES - (preservedEntry ? 1 : 0)),
+  );
+  if (preservedEntry && preservedKey !== undefined) {
+    retainedEntries.push([preservedKey, preservedEntry]);
+  }
   return {
     ...store,
-    channels: Object.fromEntries(entries.slice(-MAX_CHANNEL_STAR_ENTRIES)),
+    channels: Object.fromEntries(retainedEntries),
   };
 }
 

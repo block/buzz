@@ -164,10 +164,13 @@ export function useChannelMutes(
         updatedAt: Math.floor(Date.now() / 1000),
       };
       setStore((prev) => {
-        const next = boundMuteStore({
-          version: 1,
-          channels: { ...prev.channels, [channelId]: entry },
-        });
+        const next = boundMuteStore(
+          {
+            version: 1,
+            channels: { ...prev.channels, [channelId]: entry },
+          },
+          channelId,
+        );
         if (!writeChannelMutesStore(pubkey, next)) return prev;
         managerRef.current?.publishMutes(next);
         return next;

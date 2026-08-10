@@ -266,6 +266,44 @@ test("boundStarStore: uses channel ID as an updatedAt tie-breaker", () => {
   });
 });
 
+test("boundStarStore: preserves a same-second star mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { starred: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { starred: true, updatedAt: 1 };
+
+  const result = boundStarStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_STAR_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    starred: true,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
+test("boundStarStore: preserves a same-second unstar mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { starred: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { starred: false, updatedAt: 1 };
+
+  const result = boundStarStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_STAR_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    starred: false,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
 test("mergeStores: a fresh at-capacity unstar defeats an older remote star", () => {
   const channels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_STAR_ENTRIES }, (_, index) => [

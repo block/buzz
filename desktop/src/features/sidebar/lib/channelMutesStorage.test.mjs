@@ -249,6 +249,44 @@ test("boundMuteStore: uses channel ID as an updatedAt tie-breaker", () => {
   });
 });
 
+test("boundMuteStore: preserves a same-second mute mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { muted: true, updatedAt: 1 };
+
+  const result = boundMuteStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    muted: true,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
+test("boundMuteStore: preserves a same-second unmute mutation by key", () => {
+  const channels = Object.fromEntries(
+    Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [
+      `z-channel-${String(index).padStart(3, "0")}`,
+      { muted: true, updatedAt: 1 },
+    ]),
+  );
+  channels["a-target"] = { muted: false, updatedAt: 1 };
+
+  const result = boundMuteStore({ version: 1, channels }, "a-target");
+
+  assert.equal(Object.keys(result.channels).length, MAX_CHANNEL_MUTE_ENTRIES);
+  assert.deepEqual(result.channels["a-target"], {
+    muted: false,
+    updatedAt: 1,
+  });
+  assert.equal(result.channels["z-channel-000"], undefined);
+});
+
 test("mergeStores: a fresh at-capacity unmute defeats an older remote mute", () => {
   const channels = Object.fromEntries(
     Array.from({ length: MAX_CHANNEL_MUTE_ENTRIES }, (_, index) => [

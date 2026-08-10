@@ -164,10 +164,13 @@ export function useChannelStars(
         updatedAt: Math.floor(Date.now() / 1000),
       };
       setStore((prev) => {
-        const next = boundStarStore({
-          version: 1,
-          channels: { ...prev.channels, [channelId]: entry },
-        });
+        const next = boundStarStore(
+          {
+            version: 1,
+            channels: { ...prev.channels, [channelId]: entry },
+          },
+          channelId,
+        );
         if (!writeChannelStarsStore(pubkey, next)) return prev;
         managerRef.current?.publishStars(next);
         return next;

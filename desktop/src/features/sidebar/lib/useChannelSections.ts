@@ -302,9 +302,12 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
+        const assignments = { ...prev.assignments };
+        delete assignments[channelId];
+        assignments[channelId] = sectionId;
         const next = boundChannelSectionsStore({
           ...prev,
-          assignments: { ...prev.assignments, [channelId]: sectionId },
+          assignments,
         });
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
