@@ -2,6 +2,7 @@ use std::{io::Cursor, net::IpAddr, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use image::ImageDecoder;
+use percent_encoding::percent_decode_str;
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -204,14 +205,22 @@ fn youtube_oembed_url(video_url: &Url) -> Result<Url, String> {
     ) {
         let mut segments = video_url.path_segments();
         if segments.as_mut().and_then(|segments| segments.next()) == Some("embed") {
-            let video_id = segments
+            let encoded_video_id = segments
                 .and_then(|mut segments| segments.next())
                 .ok_or_else(|| "YouTube embed URL has no video ID".to_string())?;
+            let video_id = percent_decode_str(encoded_video_id)
+                .decode_utf8()
+                .map_err(|_| "YouTube embed URL has an invalid video ID".to_string())?;
+            if !video_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }) {
+                return Err("YouTube embed URL has an invalid video ID".to_string());
+            }
             canonical_video_url.set_path("/watch");
             canonical_video_url.set_query(None);
             canonical_video_url
                 .query_pairs_mut()
-                .append_pair("v", video_id);
+                .append_pair("v", &video_id);
             canonical_video_url.set_fragment(None);
         }
     }
@@ -852,21 +861,50 @@ mod tests {
 
     #[test]
     fn canonicalizes_youtube_embed_url_for_oembed() {
-        let oembed_url = youtube_oembed_url(
-            &Url::parse("https://www.youtube.com/embed/dQw4w9WgXcQ?start=10#player").unwrap(),
-        )
-        .unwrap();
-        let params = oembed_url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(
-            params.get("format").map(|value| value.as_ref()),
-            Some("json")
-        );
-        assert_eq!(
-            params.get("url").map(|value| value.as_ref()),
-            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        );
+        for (video_url, expected_video_id) in [
+            (
+                "https://www.youtube.com/embed/dQw4w9WgXcQ?start=10#player",
+                "dQw4w9WgXcQ",
+            ),
+            ("https://www.youtube.com/embed/%64Qw4w9WgXcQ", "dQw4w9WgXcQ"),
+            ("https://www.youtube.com/embed/dQw4w9WgX%63Q", "dQw4w9WgXcQ"),
+        ] {
+            let oembed_url = youtube_oembed_url(&Url::parse(video_url).unwrap()).unwrap();
+            let params = oembed_url
+                .query_pairs()
+                .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(
+                params.get("format").map(|value| value.as_ref()),
+                Some("json")
+            );
+            let provider_video_url =
+                Url::parse(params.get("url").expect("oEmbed URL parameter")).unwrap();
+            assert_eq!(provider_video_url.path(), "/watch");
+            assert_eq!(
+                provider_video_url
+                    .query_pairs()
+                    .find(|(key, _)| key == "v")
+                    .map(|(_, value)| value.into_owned()),
+                Some(expected_video_id.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_encoded_youtube_embed_video_ids() {
+        for href in [
+            "https://www.youtube.com/embed/video%2Fid",
+            "https://www.youtube.com/embed/video%5Cid",
+            "https://www.youtube.com/embed/video%00id",
+            "https://www.youtube.com/embed/video%25id",
+            "https://www.youtube.com/embed/video%252Fid",
+            "https://www.youtube.com/embed/video%FFid",
+        ] {
+            assert!(
+                youtube_oembed_url(&Url::parse(href).unwrap()).is_err(),
+                "{href}"
+            );
+        }
     }
 
     #[tokio::test]
