@@ -543,6 +543,9 @@ pub struct PromptContext {
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    /// Publish a successful channel turn's final ACP response as an
+    /// authenticated reply to the triggering Buzz event.
+    pub publish_final_response: bool,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Agent identity — used to derive the NIP-AE conversation key at
@@ -2143,6 +2146,59 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            let final_response = agent.acp.take_agent_message();
+            if ctx.publish_final_response {
+                if let (PromptSource::Channel(channel_id), Some(channel_batch)) =
+                    (&source, batch.as_ref())
+                {
+                    match post_final_agent_response(
+                        &ctx.rest_client,
+                        channel_batch,
+                        &final_response,
+                    )
+                    .await
+                    {
+                        Ok(event_id) => tracing::info!(
+                            target: "pool::prompt",
+                            channel = %channel_id,
+                            event_id = %event_id,
+                            "published authenticated final agent response"
+                        ),
+                        Err(error) => {
+                            tracing::error!(
+                                target: "pool::prompt",
+                                channel = %channel_id,
+                                "failed to publish authenticated final agent response: {error}"
+                            );
+                            let usage = agent.acp.take_turn_usage();
+                            publish_agent_turn_metric(
+                                &ctx,
+                                usage,
+                                observer_channel_id,
+                                &session_id,
+                                &turn_id,
+                                Some(buzz_core::agent_turn_metric::StopReason::Error),
+                            )
+                            .await;
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(AcpError::AgentError {
+                                    code: -32000,
+                                    message: format!(
+                                        "authenticated final-response publish failed: {error}"
+                                    ),
+                                }),
+                                None,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3911,6 +3967,90 @@ pub(crate) async fn post_failure_notice(
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+/// Publish an ACP adapter's final message as the authenticated agent's reply
+/// to the event that triggered the turn.
+///
+/// The signed event is constructed once and `RestClient` retries that exact
+/// body, so an ambiguous HTTP retry cannot create a second Nostr event ID.
+/// A relay rejection is only treated as success when querying the same event
+/// ID confirms that the first attempt was already persisted.
+async fn post_final_agent_response(
+    rest: &crate::relay::RestClient,
+    batch: &FlushBatch,
+    content: &str,
+) -> Result<nostr::EventId, String> {
+    const MAX_FINAL_RESPONSE_BYTES: usize = 20_000;
+
+    if content.trim().is_empty() {
+        return Err("agent returned an empty final response".to_string());
+    }
+    if content.len() > MAX_FINAL_RESPONSE_BYTES {
+        return Err(format!(
+            "agent final response is {} bytes; maximum is {MAX_FINAL_RESPONSE_BYTES}",
+            content.len()
+        ));
+    }
+
+    let trigger = batch
+        .events
+        .last()
+        .ok_or_else(|| "channel turn has no triggering event".to_string())?;
+    let trigger_id = trigger.event.id;
+    let thread_tags = crate::queue::parse_thread_tags(&trigger.event);
+    let root_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|value| nostr::EventId::from_hex(value).ok())
+        .unwrap_or(trigger_id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: trigger_id,
+    };
+    let event = buzz_sdk::build_message(
+        batch.channel_id,
+        content,
+        Some(&thread_ref),
+        &[],
+        false,
+        &[],
+    )
+    .map_err(|error| format!("build failed: {error}"))?
+    .sign_with_keys(&rest.keys)
+    .map_err(|error| format!("sign failed: {error}"))?;
+    let event_id = event.id;
+
+    let response = tokio::time::timeout(Duration::from_secs(15), rest.submit_event(&event))
+        .await
+        .map_err(|_| "publish timed out".to_string())?
+        .map_err(|error| format!("publish failed: {error}"))?;
+    if response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(event_id);
+    }
+
+    let persisted = tokio::time::timeout(
+        Duration::from_secs(5),
+        rest.query(&[nostr::Filter::new().id(event_id)]),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .and_then(|value| value.as_array().map(|events| !events.is_empty()))
+    .unwrap_or(false);
+    if persisted {
+        Ok(event_id)
+    } else {
+        let message = response
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("relay rejected event");
+        Err(format!("relay rejected final response: {message}"))
     }
 }
 
@@ -6560,6 +6700,7 @@ mod tests {
             ),
             context_message_limit: 0,
             max_turns_per_session: 0,
+            publish_final_response: false,
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
@@ -6924,6 +7065,117 @@ mod tests {
             requests,
             server,
         )
+    }
+
+    #[tokio::test]
+    async fn final_agent_response_is_signed_and_replies_to_trigger() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (event_tx, event_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buf).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        let body = &request[header_end + 4..header_end + 4 + content_length];
+                        let event: nostr::Event =
+                            serde_json::from_slice(body).expect("signed event JSON");
+                        let _ = event_tx.send(event);
+                        break;
+                    }
+                }
+            }
+            let body = r#"{"accepted":true,"message":"saved"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        let agent_keys = nostr::Keys::generate();
+        let author_keys = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "@Hermes draft this")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["p", &agent_keys.public_key().to_hex()]).expect("p tag"),
+            ])
+            .sign_with_keys(&author_keys)
+            .expect("sign trigger");
+        let trigger_id = trigger.id;
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: trigger,
+                prompt_tag: "test".to_string(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let rest = crate::relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: agent_keys.clone(),
+            auth_tag_json: None,
+        };
+
+        let published_id = post_final_agent_response(
+            &rest,
+            &batch,
+            "BUZZ_REENGAGEMENT_DRAFT_READY\nDRAFT_START\nHi John\nDRAFT_END",
+        )
+        .await
+        .expect("publish final response");
+        let published = event_rx.await.expect("captured event");
+        server.await.expect("server task");
+
+        assert_eq!(published.id, published_id);
+        assert_eq!(published.pubkey, agent_keys.public_key());
+        assert!(published.verify().is_ok());
+        assert_eq!(
+            published.content,
+            "BUZZ_REENGAGEMENT_DRAFT_READY\nDRAFT_START\nHi John\nDRAFT_END"
+        );
+        let tags: Vec<Vec<String>> = published
+            .tags
+            .iter()
+            .map(|tag| tag.clone().to_vec())
+            .collect();
+        assert!(tags
+            .iter()
+            .any(|tag| tag == &["h", &channel_id.to_string()]));
+        assert!(
+            tags.iter()
+                .any(|tag| tag == &["e", &trigger_id.to_hex(), "", "reply"]),
+            "tags: {tags:?}"
+        );
     }
 
     fn channel_metadata_response(id: Uuid, tags: &[[&str; 2]]) -> serde_json::Value {

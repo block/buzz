@@ -381,6 +381,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
     pub no_typing: bool,
 
+    /// Publish the final ACP agent message as a signed reply to the triggering
+    /// Buzz event. Intended for managed agents whose only output surface is
+    /// their authenticated harness.
+    #[arg(long, env = "BUZZ_ACP_PUBLISH_FINAL_RESPONSE", default_value_t = false)]
+    pub publish_final_response: bool,
+
     /// Enable NIP-AE agent core memory injection.
     ///
     /// Memory injection is on by default. When enabled, the harness
@@ -526,6 +532,9 @@ pub struct Config {
     pub max_turns_per_session: u32,
     pub presence_enabled: bool,
     pub typing_enabled: bool,
+    /// Whether successful channel turns publish their final ACP response as a
+    /// signed reply to the triggering event.
+    pub publish_final_response: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
     /// `[Agent Memory — core]` section. On by default; disabled via the
@@ -1092,6 +1101,7 @@ impl Config {
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
+            publish_final_response: args.publish_final_response,
             memory_enabled: args.memory && !args.no_memory,
             model,
             session_title: args
@@ -1466,6 +1476,7 @@ mod tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            publish_final_response: false,
             memory_enabled: true,
             model: None,
             session_title: None,

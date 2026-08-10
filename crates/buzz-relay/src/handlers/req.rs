@@ -856,17 +856,17 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
-        }
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let values = filter.generic_tags.get(&h_tag)?;
+    if values.len() != 1 {
+        // Values inside one NIP-01 tag filter are OR-ed. Picking one value here
+        // would turn `#h: [a, b]` into the exact SQL predicate `channel_id = a`
+        // before the Rust matcher gets a chance to accept b. Keep multi-channel
+        // filters global at this layer; apply_access_scope_to_query adds the
+        // caller's authorised channel set as the safe SQL candidate scope.
+        return None;
     }
-    None
+    values.iter().next()?.parse::<uuid::Uuid>().ok()
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1436,6 +1436,34 @@ mod tests {
             SingleLetterTag::lowercase(Alphabet::H),
             channel_id.to_string(),
         )
+    }
+
+    #[test]
+    fn single_filter_channel_pushes_an_exact_channel_predicate() {
+        let channel = uuid::Uuid::new_v4();
+        let filter = filter_with_channel(channel);
+
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel));
+    }
+
+    #[test]
+    fn multi_channel_filter_keeps_every_authorised_channel_in_scope() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let filter =
+            Filter::new().custom_tags(h_tag, [channel_a.to_string(), channel_b.to_string()]);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        let exact_channel = extract_channel_id_from_filter(&filter);
+        let mut query = filter_to_query_params(&filter, exact_channel, community);
+        apply_access_scope_to_query(&mut query, exact_channel, &[channel_a, channel_b]);
+
+        assert!(query.channel_id.is_none());
+        assert_eq!(
+            query.channel_ids.as_deref(),
+            Some([channel_a, channel_b].as_slice())
+        );
     }
 
     /// NIP-11 `limitation.max_limit` as this relay actually advertises it.

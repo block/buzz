@@ -1070,7 +1070,7 @@ async fn handle_approval_grant(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1081,7 +1081,11 @@ async fn handle_approval_grant(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 5. Execute: update approval status to granted
+    // 5. Execute: update approval status to granted — INSIDE the same
+    //    transaction as the command event. An approval that reads `granted`
+    //    with no kind:46030 event on record is an unattributable decision on a
+    //    gate whose entire purpose is attribution, so the two commit together
+    //    or not at all.
     let note = if event.content.is_empty() {
         None
     } else {
@@ -1090,7 +1094,8 @@ async fn handle_approval_grant(
 
     let updated = state
         .db
-        .update_approval_by_stored_hash(
+        .update_approval_by_stored_hash_tx(
+            &mut tx,
             tenant.community(),
             &token_hash,
             ApprovalStatus::Granted,
@@ -1101,12 +1106,14 @@ async fn handle_approval_grant(
         .map_err(|e| IngestError::Internal(format!("error: db update_approval: {e}")))?;
 
     if !updated {
+        // Rolls back the event insert too — a decision that did not apply must
+        // not leave a command event implying it did.
         return Err(IngestError::Rejected(
             "invalid: approval already acted on (race)".into(),
         ));
     }
 
-    // Commit: event + approval update succeeded atomically.
+    // Commit: event + approval update land atomically.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -1133,6 +1140,7 @@ async fn handle_approval_grant(
             serde_json::json!({
                 "status": "granted",
                 "run_id": run_id.to_string(),
+                "workflow_id": workflow_id.to_string(),
             })
         ),
     })
@@ -1181,7 +1189,7 @@ async fn handle_approval_deny(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let mut tx = match persist_command_event(state, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1192,7 +1200,8 @@ async fn handle_approval_deny(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 5. Execute: update approval status to denied
+    // 5. Execute: update approval status to denied — same transaction as the
+    //    command event. See handle_approval_grant for why.
     let note = if event.content.is_empty() {
         None
     } else {
@@ -1201,7 +1210,8 @@ async fn handle_approval_deny(
 
     let updated = state
         .db
-        .update_approval_by_stored_hash(
+        .update_approval_by_stored_hash_tx(
+            &mut tx,
             tenant.community(),
             &token_hash,
             ApprovalStatus::Denied,
@@ -1217,7 +1227,7 @@ async fn handle_approval_deny(
         ));
     }
 
-    // Commit: event + approval denial succeeded atomically.
+    // Commit: event + approval denial land atomically.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -1270,6 +1280,7 @@ async fn handle_approval_deny(
             serde_json::json!({
                 "status": "denied",
                 "run_id": run_id.to_string(),
+                "workflow_id": approval.workflow_id.to_string(),
             })
         ),
     })
@@ -1284,6 +1295,30 @@ async fn resume_workflow_after_approval(
     workflow_id: Uuid,
     resume_index: usize,
 ) {
+    // Atomically claim the run before reading it. Resumption has two
+    // independent triggers (the task spawned on grant, and the recovery sweep),
+    // plus one per extra pod. A read-then-act status check is TOCTOU: two
+    // callers can both observe `waiting_approval` and both execute every
+    // post-gate step. For a `send_message` step that means two distinct signed
+    // events and therefore two external send instructions.
+    //
+    // The compare-and-set below returns true for exactly one caller; everyone
+    // else returns here having done nothing.
+    match db.claim_run_for_resume(community_id, run_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                run_id = %run_id,
+                "resume_workflow: run not in waiting_approval (already claimed or resolved) — skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!("resume_workflow: claim failed for run {run_id}: {e}");
+            return;
+        }
+    }
+
     let run = match db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -1291,15 +1326,6 @@ async fn resume_workflow_after_approval(
             return;
         }
     };
-
-    // Guard: only resume runs that are actually waiting for approval
-    if run.status != RunStatus::WaitingApproval {
-        tracing::warn!(
-            "resume_workflow: run {run_id} has status '{}', expected 'waiting_approval'",
-            run.status
-        );
-        return;
-    }
 
     let workflow = match db.get_workflow(community_id, workflow_id).await {
         Ok(w) => w,
@@ -1367,4 +1393,114 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+/// Resume any run left parked against an already-granted approval.
+///
+/// The crash window this closes: `handle_approval_grant` commits the decision,
+/// then spawns resumption. If the process dies in between, the decision is
+/// durable but the resumption is not. Without this sweep the run waits forever
+/// and the approver has no way to tell — the gate reads `granted`, so a repeat
+/// grant is rejected as "already acted on".
+///
+/// Safe to run repeatedly and concurrently with a live resumption: the atomic
+/// claim inside `resume_workflow_after_approval` admits exactly one caller.
+/// Expired and denied gates are not selected at all, so this can never
+/// resurrect a fail-closed run.
+///
+/// A process that dies after claiming still leaves the run in `running`, which
+/// this query deliberately does not select. Send-message steps now have a
+/// durable per-step journal, but other action types do not, so blindly taking
+/// over stale running rows could still duplicate a webhook or another side
+/// effect. Recovery therefore remains conservative and fail-closed.
+pub async fn recover_granted_waiting_runs(state: &Arc<AppState>) {
+    let stranded = match state.db.list_granted_but_waiting_runs().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("approval recovery: list failed: {e}");
+            return;
+        }
+    };
+
+    for row in stranded {
+        tracing::warn!(
+            run_id = %row.run_id,
+            "Approval recovery: resuming run granted but never resumed"
+        );
+        resume_workflow_after_approval(
+            Arc::clone(&state.workflow_engine),
+            state.db.clone(),
+            row.community_id,
+            row.run_id,
+            row.workflow_id,
+            row.step_index as usize + 1,
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    const CHARLIE: &str = "1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90";
+    const AGENT: &str = "212b212c906f32e9922f3d8c6fd0a691439766699b45dcf048b9ce94cb4ed637";
+
+    #[test]
+    fn designated_pubkey_may_approve() {
+        assert!(check_approver_spec(CHARLIE, CHARLIE).is_ok());
+    }
+
+    #[test]
+    fn spec_match_is_case_insensitive_both_ways() {
+        assert!(check_approver_spec(&CHARLIE.to_uppercase(), CHARLIE).is_ok());
+        assert!(check_approver_spec(CHARLIE, &CHARLIE.to_uppercase()).is_ok());
+    }
+
+    #[test]
+    fn other_pubkey_may_not_approve() {
+        // The security property that makes a pubkey spec worth using: reading
+        // the gate (and its token) is not the same as being able to pass it.
+        let err =
+            check_approver_spec(CHARLIE, AGENT).expect_err("a non-designated key must be refused");
+        assert!(
+            format!("{err:?}").contains("not the designated approver"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn any_spec_admits_any_authenticated_key() {
+        assert!(check_approver_spec("any", AGENT).is_ok());
+        assert!(check_approver_spec("", AGENT).is_ok());
+        assert!(check_approver_spec("  ", AGENT).is_ok());
+    }
+
+    #[test]
+    fn mention_and_role_specs_fail_closed() {
+        // Guards the regression this whole change exists to remove: a gate
+        // saved with `from: "@charlie"` is unapprovable by anyone, including
+        // Charlie. Validation now blocks the save, and this is the backstop
+        // for definitions stored before that check landed.
+        for spec in [
+            "@charlie",
+            "@release-manager",
+            "owner",
+            "admin",
+            "role:owner",
+        ] {
+            let err =
+                check_approver_spec(spec, CHARLIE).expect_err("unsupported spec must fail closed");
+            assert!(
+                format!("{err:?}").contains("not yet supported"),
+                "spec '{spec}' gave unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_hex_specs_fail_closed() {
+        assert!(check_approver_spec("1a99c7e0", CHARLIE).is_err());
+        assert!(check_approver_spec(&"z".repeat(64), CHARLIE).is_err());
+    }
 }

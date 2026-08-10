@@ -57,6 +57,7 @@ type RawWorkflowApproval = {
   status: WorkflowApproval["status"];
   approver_pubkey: string | null;
   note: string | null;
+  request_message: string | null;
   expires_at: string;
   created_at: number;
 };
@@ -132,6 +133,7 @@ export function fromRawApproval(raw: RawWorkflowApproval): WorkflowApproval {
     status: raw.status,
     approverPubkey: raw.approver_pubkey,
     note: raw.note,
+    requestMessage: raw.request_message ?? null,
     expiresAt: raw.expires_at,
     createdAt: raw.created_at,
   };

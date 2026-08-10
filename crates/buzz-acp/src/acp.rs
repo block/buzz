@@ -211,6 +211,16 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Text emitted in `agent_message_chunk` updates for the current assistant
+    /// message.
+    ///
+    /// The buffer is reset immediately before every `session/prompt` and when
+    /// a tool call starts. ACP agents may emit narration before each tool call;
+    /// clearing at that boundary ensures the authenticated publisher returns
+    /// only the last assistant answer, not every narration fragment from the
+    /// entire tool loop. Keeping the buffer in the ACP client means adapters do
+    /// not need a separate reporting tool merely to return their final answer.
+    agent_message: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,7 +560,13 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            agent_message: String::new(),
         })
+    }
+
+    /// Consume the text emitted by the agent during the most recent prompt.
+    pub(crate) fn take_agent_message(&mut self) -> String {
+        std::mem::take(&mut self.agent_message)
     }
 
     /// Attach a local observer feed to this ACP client.
@@ -768,6 +784,10 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // Each prompt owns exactly one response buffer. This also prevents a
+        // new-session `initial_message` response from leaking into the first
+        // real channel turn.
+        self.agent_message.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1742,10 +1762,15 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.agent_message.push_str(text);
                 }
                 false
             }
             "tool_call" => {
+                // Text before a tool call is intermediate narration. A final
+                // answer can only be the assistant text emitted after the last
+                // tool call in the turn, so discard the earlier fragment.
+                self.agent_message.clear();
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -3562,6 +3587,74 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_are_collected_and_consumed() {
+        let mut client = spawn_inert_client().await;
+        for text in ["BUZZ_REENGAGEMENT_", "DRAFT_READY"] {
+            let update = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "test-session",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": text}
+                    }
+                }
+            });
+            let _ = client.handle_session_update(&update);
+        }
+
+        assert_eq!(client.take_agent_message(), "BUZZ_REENGAGEMENT_DRAFT_READY");
+        assert!(client.take_agent_message().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_message_buffer_keeps_only_text_after_last_tool_call() {
+        let mut client = spawn_inert_client().await;
+        let narration = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": "I will research this now."}
+                }
+            }
+        });
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tool-1",
+                    "title": "Read CRM",
+                    "kind": "read"
+                }
+            }
+        });
+        let final_answer = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"text": "BUZZ_REENGAGEMENT_DRAFT_READY"}
+                }
+            }
+        });
+
+        let _ = client.handle_session_update(&narration);
+        let _ = client.handle_session_update(&tool_call);
+        let _ = client.handle_session_update(&final_answer);
+
+        assert_eq!(client.take_agent_message(), "BUZZ_REENGAGEMENT_DRAFT_READY");
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

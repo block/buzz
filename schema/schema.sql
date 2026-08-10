@@ -401,6 +401,13 @@ CREATE TABLE workflow_runs (
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
 CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
+CREATE UNIQUE INDEX uq_workflow_runs_reply_parent
+    ON workflow_runs (
+        community_id,
+        workflow_id,
+        ((trigger_context ->> 'reply_to_message_id'))
+    )
+    WHERE NULLIF(trigger_context ->> 'reply_to_message_id', '') IS NOT NULL;
 
 -- ── Workflow approvals ────────────────────────────────────────────────────────
 -- token-hash lookup scoped: approval token grants cannot act on another
@@ -417,6 +424,7 @@ CREATE TABLE workflow_approvals (
     status          approval_status NOT NULL DEFAULT 'pending',
     approver_pubkey BYTEA,
     note            TEXT,
+    request_message TEXT,
     granted_at      TIMESTAMPTZ,
     denied_at       TIMESTAMPTZ,
     expires_at      TIMESTAMPTZ NOT NULL,
@@ -431,6 +439,21 @@ CREATE TABLE workflow_approvals (
 CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id, workflow_id);
 CREATE INDEX idx_workflow_approvals_run ON workflow_approvals (community_id, run_id);
 CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, status);
+
+-- At-most-once claim for a workflow step's side effect. See migration 0029.
+CREATE TABLE workflow_step_dispatches (
+    community_id UUID        NOT NULL REFERENCES communities(id),
+    run_id       UUID        NOT NULL,
+    step_id      VARCHAR(64) NOT NULL,
+    event_id     BYTEA,
+    claimed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    PRIMARY KEY (community_id, run_id, step_id),
+    FOREIGN KEY (community_id, run_id)
+        REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_workflow_step_dispatches_run ON workflow_step_dispatches (community_id, run_id);
 
 -- ── Scheduled workflow fires (cron claim) ─────────────────────────────────────
 -- Plan §5: the at-most-once cron fire claim. UNIQUE (community_id, workflow_id,

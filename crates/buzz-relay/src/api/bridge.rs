@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
 use buzz_core::TenantContext;
+use uuid::Uuid;
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
@@ -2126,6 +2127,176 @@ fn clamp_limit(requested: Option<i64>) -> i64 {
         .filter(|n| *n > 0)
         .map(|n| n.min(MODERATION_READ_LIMIT))
         .unwrap_or(MODERATION_READ_LIMIT)
+}
+
+/// Optional `?limit=` for workflow run reads.
+#[derive(serde::Deserialize, Default)]
+pub struct WorkflowRunsQuery {
+    limit: Option<i64>,
+}
+
+/// Authorize a workflow read: NIP-98, then membership of the workflow's channel.
+///
+/// Runs and approvals are not Nostr events, so they carry no `h` tag for the
+/// normal channel-scoped read path to key off. Membership of the owning channel
+/// is the equivalent boundary: if you can read the room, you can read what the
+/// room's workflows did. A workflow with no channel is refused rather than
+/// treated as public.
+async fn authorize_workflow_read(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    path: &str,
+    raw_query: Option<&str>,
+    workflow_id: Uuid,
+) -> Result<TenantContext, (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+        })?;
+
+    let path_with_query = match raw_query {
+        Some(q) if !q.is_empty() => format!("{path}?{q}"),
+        _ => path.to_string(),
+    };
+    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let (pubkey, event_id_bytes) =
+        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), workflow_id)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow not found"))?;
+
+    let channel_id = workflow.channel_id.ok_or_else(|| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: workflow is not bound to a channel",
+        )
+    })?;
+
+    let is_member = state
+        .is_member_cached(tenant.community(), channel_id, &pubkey_bytes)
+        .await
+        .map_err(|e| internal_error(&format!("membership check: {e}")))?;
+
+    if !is_member {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: not a member of the workflow's channel",
+        ));
+    }
+
+    Ok(tenant)
+}
+
+fn run_json(r: &buzz_db::workflow::WorkflowRunRecord) -> Value {
+    serde_json::json!({
+        "id": r.id,
+        "workflow_id": r.workflow_id,
+        "status": r.status.to_string(),
+        "current_step": r.current_step,
+        "execution_trace": r.execution_trace,
+        "started_at": r.started_at.map(|t| t.timestamp()),
+        "completed_at": r.completed_at.map(|t| t.timestamp()),
+        "error_message": r.error_message,
+        "created_at": r.created_at.timestamp(),
+    })
+}
+
+/// Serialize an approval for the desktop.
+///
+/// `token` is the **hashed** token, hex-encoded — deliberately not the raw
+/// value. It is exactly what a kind:46030/46031 grant puts in its `d` tag, so
+/// the client can act on the gate without ever holding the bearer token.
+fn approval_json(a: &buzz_db::workflow::ApprovalRecord) -> Value {
+    serde_json::json!({
+        "token": hex::encode(&a.token),
+        "workflow_id": a.workflow_id,
+        "run_id": a.run_id,
+        "step_id": a.step_id,
+        "step_index": a.step_index,
+        "approver_spec": a.approver_spec,
+        "status": a.status.to_string(),
+        "approver_pubkey": a.approver_pubkey.as_ref().map(hex::encode),
+        "note": a.note,
+        // What the approver is being asked to approve. Null for gates created
+        // before migration 0027 — the client must show that as "not recorded"
+        // rather than an empty package.
+        "request_message": a.request_message,
+        "expires_at": a.expires_at.to_rfc3339(),
+        "created_at": a.created_at.timestamp(),
+    })
+}
+
+/// `GET /workflows/{workflow_id}/runs` — run history (NIP-98 + channel member).
+pub async fn workflow_runs(
+    State(state): State<Arc<AppState>>,
+    Path(workflow_id): Path<String>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<WorkflowRunsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let wf_uuid = Uuid::parse_str(&workflow_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid workflow id"))?;
+
+    let tenant = authorize_workflow_read(
+        &state,
+        &headers,
+        &format!("/workflows/{workflow_id}/runs"),
+        raw_query.as_deref(),
+        wf_uuid,
+    )
+    .await?;
+
+    let limit = q.limit.filter(|n| *n > 0).unwrap_or(50).min(200);
+    let rows = state
+        .db
+        .list_workflow_runs(tenant.community(), wf_uuid, limit)
+        .await
+        .map_err(|e| internal_error(&format!("list runs: {e}")))?;
+
+    Ok(Json(Value::Array(rows.iter().map(run_json).collect())))
+}
+
+/// `GET /workflows/{workflow_id}/runs/{run_id}/approvals` — gates for one run.
+pub async fn workflow_run_approvals(
+    State(state): State<Arc<AppState>>,
+    Path((workflow_id, run_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let wf_uuid = Uuid::parse_str(&workflow_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid workflow id"))?;
+    let run_uuid = Uuid::parse_str(&run_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid run id"))?;
+
+    let tenant = authorize_workflow_read(
+        &state,
+        &headers,
+        &format!("/workflows/{workflow_id}/runs/{run_id}/approvals"),
+        raw_query.as_deref(),
+        wf_uuid,
+    )
+    .await?;
+
+    let rows = state
+        .db
+        .get_run_approvals(tenant.community(), wf_uuid, run_uuid)
+        .await
+        .map_err(|e| internal_error(&format!("list approvals: {e}")))?;
+
+    Ok(Json(Value::Array(rows.iter().map(approval_json).collect())))
 }
 
 /// `GET /moderation/reports` — the moderation queue (NIP-98 + mod-authz).

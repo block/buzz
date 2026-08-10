@@ -207,3 +207,124 @@ fn runs_and_approvals_serialize_to_bare_empty_array() {
         "[]"
     );
 }
+
+#[cfg(test)]
+mod approval_contract_tests {
+    use crate::commands::workflows::approval_action_response;
+    use crate::events::{build_approval_deny, build_approval_grant};
+    use nostr::Keys;
+
+    const HASH: &str = "3b1f8c2a9d4e5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f";
+
+    fn tag_pairs(builder: nostr::EventBuilder) -> Vec<(String, String)> {
+        let event = builder.sign_with_keys(&Keys::generate()).expect("sign");
+        event
+            .tags
+            .iter()
+            .map(|t| {
+                (
+                    t.kind().to_string(),
+                    t.content().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grant_emits_d_tag_with_the_hashed_token() {
+        // The relay resolves a gate via extract_d_tag(..).or_else(extract_e_tag)
+        // and looks it up with get_approval_by_stored_hash. A `t` tag — which is
+        // what this used to emit — is simply not read, so every desktop grant
+        // was rejected as "missing approval reference".
+        let tags = tag_pairs(build_approval_grant(HASH, None).expect("build"));
+        assert!(
+            tags.iter().any(|(k, v)| k == "d" && v == HASH),
+            "grant must carry d=<hash>: {tags:?}"
+        );
+        assert!(
+            !tags.iter().any(|(k, _)| k == "t"),
+            "a `t` tag is never read by the relay: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn deny_emits_d_tag_with_the_hashed_token() {
+        let tags = tag_pairs(build_approval_deny(HASH, None).expect("build"));
+        assert!(tags.iter().any(|(k, v)| k == "d" && v == HASH));
+        assert!(!tags.iter().any(|(k, _)| k == "t"));
+    }
+
+    #[test]
+    fn grant_and_deny_carry_the_value_verbatim_never_rehashed() {
+        // The desktop is handed the already-hashed token by get_run_approvals.
+        // Hashing it again here would produce a value matching no stored row.
+        for builder in [
+            build_approval_grant(HASH, None).expect("grant"),
+            build_approval_deny(HASH, None).expect("deny"),
+        ] {
+            let tags = tag_pairs(builder);
+            let d = tags.iter().find(|(k, _)| k == "d").expect("d tag").1.clone();
+            assert_eq!(d, HASH, "value must pass through untouched");
+            assert_eq!(d.len(), 64);
+            assert!(d.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn grant_and_deny_use_distinct_kinds() {
+        let g = build_approval_grant(HASH, None)
+            .expect("g")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let d = build_approval_deny(HASH, None)
+            .expect("d")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        assert_eq!(g.kind.as_u16(), 46030);
+        assert_eq!(d.kind.as_u16(), 46031);
+    }
+
+    #[test]
+    fn note_becomes_the_event_content() {
+        let e = build_approval_grant(HASH, Some("looks right"))
+            .expect("build")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        assert_eq!(e.content, "looks right");
+    }
+
+    #[test]
+    fn approval_response_parses_status_run_and_workflow_ids() {
+        // The relay's OK message shape. Previously this command returned
+        // {event_id}, so every field the frontend converter read was undefined
+        // and the card rendered a successful-looking action with no run bound.
+        let msg = r#"response:{"status":"granted","run_id":"adc3ad0d-d487-4bed-acd7-31e676b50ce5","workflow_id":"5eb69e19-3e13-45e1-ac27-8858bb1f2a36"}"#;
+        let v = approval_action_response(HASH, "granted", msg);
+        assert_eq!(v["token"], HASH);
+        assert_eq!(v["status"], "granted");
+        assert_eq!(v["run_id"], "adc3ad0d-d487-4bed-acd7-31e676b50ce5");
+        assert_eq!(v["workflow_id"], "5eb69e19-3e13-45e1-ac27-8858bb1f2a36");
+        // No field may be absent — that is what produced `undefined` in the UI.
+        for k in ["token", "status", "run_id", "workflow_id"] {
+            assert!(v.get(k).is_some(), "missing key {k}");
+        }
+    }
+
+    #[test]
+    fn approval_response_parses_denied() {
+        let msg = r#"response:{"status":"denied","run_id":"r1","workflow_id":"w1"}"#;
+        let v = approval_action_response(HASH, "denied", msg);
+        assert_eq!(v["status"], "denied");
+        assert_eq!(v["run_id"], "r1");
+    }
+
+    #[test]
+    fn unparseable_message_falls_back_without_inventing_ids() {
+        // The duplicate-event short-circuit carries no JSON body. The status
+        // falls back, but ids stay empty rather than being fabricated.
+        let v = approval_action_response(HASH, "granted", "duplicate: already processed");
+        assert_eq!(v["status"], "granted");
+        assert_eq!(v["run_id"], "");
+        assert_eq!(v["workflow_id"], "");
+    }
+}

@@ -258,8 +258,12 @@ pub struct ApprovalRecord {
     pub status: ApprovalStatus,
     /// Compressed public key bytes of the user who acted on this approval.
     pub approver_pubkey: Option<Vec<u8>>,
-    /// Optional note left by the approver.
+    /// Optional note left by the approver. Distinct from `request_message`:
+    /// this travels back from the approver, that is what they were shown.
     pub note: Option<String>,
+    /// The prompt the approver was shown. `None` for rows created before
+    /// migration 0027 — render that as "not recorded", never as empty.
+    pub request_message: Option<String>,
     /// When this approval request expires.
     pub expires_at: DateTime<Utc>,
     /// When the approval record was created.
@@ -937,6 +941,10 @@ pub struct CreateApprovalParams<'a> {
     pub step_index: i32,
     /// Who may approve (user mention or role spec).
     pub approver_spec: &'a str,
+    /// The rendered prompt shown to the approver — what is actually being
+    /// approved. Persisted so the approval card can display it; without it a
+    /// grant is a decision made blind.
+    pub request_message: &'a str,
     /// When this approval request expires.
     pub expires_at: DateTime<Utc>,
 }
@@ -954,6 +962,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
         step_id,
         step_index,
         approver_spec,
+        request_message,
         expires_at,
     } = params;
     let token_hash = hash_approval_token(token);
@@ -961,8 +970,8 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals
-            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, request_message, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
         "#,
     )
     .bind(community_id.as_uuid())
@@ -972,6 +981,7 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     .bind(step_id)
     .bind(step_index)
     .bind(approver_spec)
+    .bind(request_message)
     .bind(expires_at)
     .execute(pool)
     .await?;
@@ -1008,7 +1018,8 @@ pub async fn get_approval_by_stored_hash(
     let row = sqlx::query(
         r#"
         SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
-               status::text AS status, approver_pubkey, note, expires_at, created_at
+               status::text AS status, approver_pubkey, note, request_message,
+               expires_at, created_at
         FROM workflow_approvals
         WHERE community_id = $1 AND token = $2
         "#,
@@ -1022,6 +1033,50 @@ pub async fn get_approval_by_stored_hash(
     row_to_approval_record(row)
 }
 
+/// An expired approval gate awaiting the fail-closed sweep.
+#[derive(Debug, Clone)]
+pub struct ExpiredApproval {
+    /// Community owning the approval — the sweep is cross-tenant, so every
+    /// follow-up write must be scoped back to this value.
+    pub community_id: CommunityId,
+    /// Stored (hashed) token, ready for `update_approval_by_stored_hash`.
+    pub token_hash: Vec<u8>,
+    /// The run to fail closed.
+    pub run_id: Uuid,
+}
+
+/// List pending approvals whose deadline has passed, across all communities.
+///
+/// Deliberately cross-tenant: the cron loop that calls this is global, matching
+/// `list_all_enabled_workflows`. Each row carries its own `community_id` so the
+/// caller never has to infer a tenant.
+///
+/// Bounded to keep one slow tick from stalling the loop; anything left over is
+/// picked up on the next pass.
+pub async fn list_expired_pending_approvals(pool: &PgPool) -> Result<Vec<ExpiredApproval>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT community_id, token, run_id
+        FROM workflow_approvals
+        WHERE status = 'pending' AND expires_at < NOW()
+        ORDER BY expires_at
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ExpiredApproval {
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                token_hash: row.try_get("token")?,
+                run_id: row.try_get("run_id")?,
+            })
+        })
+        .collect()
+}
+
 /// Fetch all approval records for a given workflow run.
 pub async fn get_run_approvals(
     pool: &PgPool,
@@ -1032,7 +1087,8 @@ pub async fn get_run_approvals(
     let rows = sqlx::query(
         r#"
         SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
-               status::text AS status, approver_pubkey, note, expires_at, created_at
+               status::text AS status, approver_pubkey, note, request_message,
+               expires_at, created_at
         FROM workflow_approvals
         WHERE community_id = $1 AND run_id = $2 AND workflow_id = $3
         ORDER BY step_index, created_at
@@ -1120,6 +1176,261 @@ pub async fn update_approval_by_stored_hash(
     Ok(affected > 0)
 }
 
+/// Transaction-scoped variant of [`update_approval_by_stored_hash`].
+///
+/// The approval decision and the command event that authorised it must land in
+/// the same transaction. Running the decision on the pool while the event sits
+/// in an uncommitted transaction leaves a crash window where an approval reads
+/// `granted` with no corresponding kind:46030 event on record — an unattributable
+/// state change on a gate whose whole purpose is attribution.
+///
+/// The `status = 'pending'` guard is what makes this idempotent: a replayed or
+/// concurrent decision affects zero rows and the caller treats that as "already
+/// acted on" rather than applying a second decision.
+pub async fn update_approval_by_stored_hash_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    token_hash: &[u8],
+    status: ApprovalStatus,
+    approver_pubkey: Option<&[u8]>,
+    note: Option<&str>,
+) -> Result<bool> {
+    let status_str = status.to_string();
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_approvals
+        SET status          = $1::approval_status,
+            approver_pubkey = $2,
+            note            = $3,
+            granted_at      = CASE WHEN $4 = 'granted' THEN NOW() ELSE granted_at END,
+            denied_at       = CASE WHEN $5 = 'denied'  THEN NOW() ELSE denied_at  END
+        WHERE community_id = $6 AND token = $7 AND status = 'pending'
+        "#,
+    )
+    .bind(&status_str)
+    .bind(approver_pubkey)
+    .bind(note)
+    .bind(&status_str)
+    .bind(&status_str)
+    .bind(community_id.as_uuid())
+    .bind(token_hash)
+    .execute(tx.as_mut())
+    .await?
+    .rows_affected();
+
+    Ok(affected > 0)
+}
+
+/// Outcome of claiming a step for dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepDispatchClaim {
+    /// This caller won the claim and must perform the side effect.
+    Claimed,
+    /// Already dispatched by an earlier attempt; the recorded event id is
+    /// returned so the caller can reuse it instead of emitting a second event.
+    AlreadyDispatched(Vec<u8>),
+    /// Claimed by an attempt that never completed — a process died between
+    /// claiming and recording the event. Deliberately NOT re-claimable: we
+    /// cannot tell whether the external side effect happened, and re-running it
+    /// is the one outcome that must never occur silently.
+    InFlight,
+}
+
+/// Claim `(community_id, run_id, step_id)` for at-most-once dispatch.
+///
+/// The claim is decided by Postgres via `INSERT ... ON CONFLICT DO NOTHING` on
+/// the primary key, not by a read — so it is safe across concurrent resumers,
+/// process restarts and multiple pods.
+///
+/// This is what the run-level CAS cannot provide. The CAS makes resumption
+/// start once; this makes each individual step's side effect happen once, which
+/// matters because a re-executed `send_message` produces a new signed event and
+/// therefore a second external instruction.
+pub async fn claim_step_dispatch(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+) -> Result<StepDispatchClaim> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO workflow_step_dispatches (community_id, run_id, step_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (community_id, run_id, step_id) DO NOTHING
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if inserted > 0 {
+        return Ok(StepDispatchClaim::Claimed);
+    }
+
+    let row = sqlx::query(
+        "SELECT event_id FROM workflow_step_dispatches \
+         WHERE community_id = $1 AND run_id = $2 AND step_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => {
+            let event_id: Option<Vec<u8>> = r.try_get("event_id")?;
+            Ok(match event_id {
+                Some(id) => StepDispatchClaim::AlreadyDispatched(id),
+                None => StepDispatchClaim::InFlight,
+            })
+        }
+        // The claim row disappeared, normally because the parent run was
+        // deleted concurrently. Sending without a durable journal entry would
+        // remove the replay protection this function exists to provide, so
+        // fail closed rather than treating an unrecorded claim as permission.
+        None => Err(DbError::NotFound(format!(
+            "workflow step dispatch claim {run_id}/{step_id}"
+        ))),
+    }
+}
+
+/// Record the event a claimed step produced, completing the claim.
+pub async fn complete_step_dispatch(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+    event_id: &[u8],
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE workflow_step_dispatches \
+         SET event_id = $4, completed_at = NOW() \
+         WHERE community_id = $1 AND run_id = $2 AND step_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .bind(event_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Release a claim whose side effect provably did not happen.
+///
+/// Only safe when the dispatch failed *before* anything left the relay. Used on
+/// an error return from the sink, so a transient failure does not permanently
+/// wedge the step.
+pub async fn release_step_dispatch(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM workflow_step_dispatches \
+         WHERE community_id = $1 AND run_id = $2 AND step_id = $3 AND event_id IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Atomically claim a `waiting_approval` run for resumption.
+///
+/// Returns `true` for exactly one caller. This is a compare-and-set, not a
+/// read-then-act check: the single `UPDATE ... WHERE status = 'waiting_approval'`
+/// takes a row lock, so a concurrent claimer either blocks and then matches zero
+/// rows, or matches zero rows immediately.
+///
+/// This is required because resumption has two independent triggers — the task
+/// spawned by `handle_approval_grant` and the recovery sweep — and a third if
+/// more than one relay pod is running. Two claimers both observing
+/// `waiting_approval` and both proceeding would execute every post-gate step
+/// twice, which for a `send_message` step means a second, differently-signed
+/// event and therefore a second external send instruction.
+///
+/// NOTE: this makes resumption *start* at most once. It does not by itself make
+/// each action at-most-once across a crash **mid-execution** — a process that
+/// dies after emitting a step's event but before its trace is persisted will,
+/// once the run is recovered, re-emit that step. Closing that gap needs a
+/// durable per-step action journal keyed by `(community_id, run_id, step_id)`.
+pub async fn claim_run_for_resume(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'running'
+        WHERE community_id = $1 AND id = $2 AND status = 'waiting_approval'
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(affected > 0)
+}
+
+/// Runs that were granted but never resumed — the crash-window recovery set.
+///
+/// A grant commits the decision, then resumption is spawned separately. If the
+/// process dies in between, the run sits in `waiting_approval` forever against a
+/// `granted` approval. This query is the durable backstop: it is derived purely
+/// from committed state, so recovery does not depend on any in-memory task
+/// having survived.
+pub async fn list_granted_but_waiting_runs(pool: &PgPool) -> Result<Vec<GrantedWaitingRun>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT a.community_id, a.run_id, a.workflow_id, a.step_index
+        FROM workflow_approvals a
+        JOIN workflow_runs r
+          ON r.community_id = a.community_id AND r.id = a.run_id
+        WHERE a.status = 'granted'
+          AND r.status = 'waiting_approval'
+        ORDER BY a.granted_at
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(GrantedWaitingRun {
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                run_id: row.try_get("run_id")?,
+                workflow_id: row.try_get("workflow_id")?,
+                step_index: row.try_get("step_index")?,
+            })
+        })
+        .collect()
+}
+
+/// A granted approval whose run never resumed. See [`list_granted_but_waiting_runs`].
+#[derive(Debug, Clone)]
+pub struct GrantedWaitingRun {
+    /// Community owning the run.
+    pub community_id: CommunityId,
+    /// The run to resume.
+    pub run_id: Uuid,
+    /// The workflow definition to resume against.
+    pub workflow_id: Uuid,
+    /// Index of the gate step; resumption starts at `step_index + 1`.
+    pub step_index: i32,
+}
+
 // -- Row mappers --------------------------------------------------------------
 
 fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> {
@@ -1189,6 +1500,7 @@ fn row_to_approval_record(row: sqlx::postgres::PgRow) -> Result<ApprovalRecord> 
         status,
         approver_pubkey: row.try_get("approver_pubkey")?,
         note: row.try_get("note")?,
+        request_message: row.try_get("request_message")?,
         expires_at: row.try_get("expires_at")?,
         created_at: row.try_get("created_at")?,
     })
@@ -1605,6 +1917,7 @@ mod tests {
             status: ApprovalStatus::Pending,
             approver_pubkey: None,
             note: None,
+            request_message: Some("Review the outreach package".to_owned()),
             expires_at,
             created_at: now,
         };
@@ -1635,6 +1948,7 @@ mod tests {
             status: ApprovalStatus::Granted,
             approver_pubkey: Some(approver_pubkey.clone()),
             note: Some("Looks good, approved.".to_owned()),
+            request_message: Some("Review the outreach package".to_owned()),
             expires_at: now,
             created_at: now,
         };
@@ -1658,6 +1972,7 @@ mod tests {
             status: ApprovalStatus::Denied,
             approver_pubkey: Some(vec![0xbb; 32]),
             note: Some("Not ready for production.".to_owned()),
+            request_message: Some("Review the outreach package".to_owned()),
             expires_at: now,
             created_at: now,
         };
@@ -1679,6 +1994,7 @@ mod tests {
             status: ApprovalStatus::Pending,
             approver_pubkey: None,
             note: None,
+            request_message: None,
             expires_at: now,
             created_at: now,
         };
@@ -2244,6 +2560,7 @@ mod tests {
                 step_id: "gate",
                 step_index: 0,
                 approver_spec: "@anyone",
+                request_message: "Review A",
                 expires_at: expires,
             },
         )
@@ -2259,6 +2576,7 @@ mod tests {
                 step_id: "gate",
                 step_index: 0,
                 approver_spec: "@anyone",
+                request_message: "Review B",
                 expires_at: expires,
             },
         )

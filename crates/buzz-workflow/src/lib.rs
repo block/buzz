@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, ApprovalRequest};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -226,30 +226,42 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
+                if let Some(approval) = result.pending_approval {
+                    // WF-08: persist the gate, park the run, then tell the
+                    // approver. Any failure along the way fails the run closed —
+                    // a run left in `running` with no approval row is a run that
+                    // silently never resumes.
                     if let Err(e) = self
-                        .db
-                        .update_workflow_run(
+                        .suspend_run_for_approval(
                             community_id,
                             run_id,
-                            RunStatus::Failed,
                             step_count,
                             &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
+                            &approval,
                         )
                         .await
                     {
                         tracing::error!(
                             run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
+                            "Failed to open approval gate, failing run closed: {e}"
                         );
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(&format!("approval gate could not be opened: {e}")),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "Failed to update run to Failed (approval gate): {db_err}"
+                            );
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -295,6 +307,179 @@ impl WorkflowEngine {
                     );
                 }
             }
+        }
+    }
+
+    /// Open an approval gate: persist the request, park the run, notify.
+    ///
+    /// Ordering is deliberate. The `workflow_approvals` row and the
+    /// `waiting_approval` status are both committed *before* the kind:46010
+    /// event exists, because that event is the first moment anyone can learn
+    /// the token. A grant racing in against a half-applied state would hit
+    /// `resume_workflow_after_approval`'s status guard and bail, stranding the
+    /// run — so the visible artefact goes last.
+    async fn suspend_run_for_approval(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        step_count: i32,
+        trace_json: &serde_json::Value,
+        approval: &executor::PendingApproval,
+    ) -> Result<(), WorkflowError> {
+        use sha2::{Digest, Sha256};
+
+        let run = self
+            .db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .map_err(|e| WorkflowError::InvalidDefinition(format!("run lookup failed: {e}")))?;
+
+        let workflow = self
+            .db
+            .get_workflow(community_id, run.workflow_id)
+            .await
+            .map_err(|e| {
+                WorkflowError::InvalidDefinition(format!("workflow lookup failed: {e}"))
+            })?;
+
+        let channel_id = workflow.channel_id.ok_or_else(|| {
+            WorkflowError::InvalidDefinition(
+                "approval gate requires a channel-bound workflow: nowhere to post the request"
+                    .into(),
+            )
+        })?;
+
+        // 1. Persist the gate. `create_approval` hashes the raw token itself.
+        self.db
+            .create_approval(buzz_db::workflow::CreateApprovalParams {
+                community_id,
+                token: &approval.token,
+                workflow_id: run.workflow_id,
+                run_id,
+                step_id: &approval.step_id,
+                step_index: approval.step_index as i32,
+                approver_spec: &approval.approver_spec,
+                // The fully template-resolved prompt, so the approval card can
+                // show the exact package the decision applies to.
+                request_message: &approval.message,
+                expires_at: approval.expires_at,
+            })
+            .await
+            .map_err(|e| WorkflowError::InvalidDefinition(format!("create_approval: {e}")))?;
+
+        // 2. Park the run so the resume guard passes and the cron expiry sweep
+        //    can find it.
+        self.db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::WaitingApproval,
+                step_count,
+                trace_json,
+                None,
+            )
+            .await
+            .map_err(|e| WorkflowError::InvalidDefinition(format!("park run: {e}")))?;
+
+        // 3. Publish the request so the approver has a token to quote back.
+        let token_hash_hex = hex::encode(Sha256::digest(approval.token.as_bytes()));
+        self.action_sink()?
+            .emit_approval_request(
+                community_id,
+                &channel_id.to_string(),
+                ApprovalRequest {
+                    token: &approval.token,
+                    token_hash_hex: &token_hash_hex,
+                    run_id,
+                    workflow_id: run.workflow_id,
+                    step_id: &approval.step_id,
+                    approver_spec: &approval.approver_spec,
+                    message: &approval.message,
+                    expires_at: approval.expires_at,
+                },
+            )
+            .await?;
+
+        tracing::info!(
+            run_id = %run_id,
+            step = %approval.step_id,
+            expires_at = %approval.expires_at,
+            "Approval gate opened — run parked in waiting_approval"
+        );
+
+        Ok(())
+    }
+
+    /// Fail closed every approval gate whose deadline has passed.
+    ///
+    /// Called once per cron tick. Marks the approval `expired` and the run
+    /// `failed`. A gate that times out must never behave like a grant: steps
+    /// after it stay unexecuted.
+    async fn expire_stale_approvals(&self) {
+        let stale = match self.db.list_expired_pending_approvals().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("Approval expiry sweep: failed to list: {e}");
+                return;
+            }
+        };
+
+        for row in stale {
+            let marked = self
+                .db
+                .update_approval_by_stored_hash(
+                    row.community_id,
+                    &row.token_hash,
+                    buzz_db::workflow::ApprovalStatus::Expired,
+                    None,
+                    None,
+                )
+                .await;
+
+            match marked {
+                // `false` means another actor (a grant or deny landing in the
+                // same instant) already moved it out of pending — leave the run
+                // alone, that path owns it.
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::error!(run_id = %row.run_id, "Approval expiry: mark failed: {e}");
+                    continue;
+                }
+                Ok(true) => {}
+            }
+
+            let run = match self.db.get_workflow_run(row.community_id, row.run_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(run_id = %row.run_id, "Approval expiry: run lookup: {e}");
+                    continue;
+                }
+            };
+
+            if run.status != RunStatus::WaitingApproval {
+                continue;
+            }
+
+            if let Err(e) = self
+                .db
+                .update_workflow_run(
+                    row.community_id,
+                    row.run_id,
+                    RunStatus::Failed,
+                    run.current_step,
+                    &run.execution_trace,
+                    Some("approval gate expired without a decision"),
+                )
+                .await
+            {
+                tracing::error!(run_id = %row.run_id, "Approval expiry: fail run: {e}");
+                continue;
+            }
+
+            tracing::warn!(
+                run_id = %row.run_id,
+                "Approval gate expired — run failed closed, later steps not executed"
+            );
         }
     }
 
@@ -351,7 +536,44 @@ impl WorkflowEngine {
             return Ok(());
         }
 
-        let trigger_ctx = build_trigger_context(event);
+        let mut trigger_ctx = build_trigger_context(event);
+
+        // Resolve direct-reply provenance from relay-owned thread metadata and
+        // the persisted parent event. Child events cannot spoof these fields by
+        // copying text or tags, which lets workflow filters distinguish an
+        // agent response to one workflow step from a response to another.
+        // Any lookup failure leaves the fields empty, so provenance-sensitive
+        // filters fail closed while ordinary top-level workflows still run.
+        match self
+            .db
+            .get_thread_metadata_by_event(community_id, event.event.id.as_bytes())
+            .await
+        {
+            Ok(Some(metadata)) => {
+                if let Some(parent_id) = metadata.parent_event_id {
+                    match self.db.get_event_by_id(community_id, &parent_id).await {
+                        Ok(Some(parent)) => {
+                            trigger_ctx.reply_to_text = parent.event.content.clone();
+                            trigger_ctx.reply_to_author = parent.event.pubkey.to_hex();
+                            trigger_ctx.reply_to_message_id = parent.event.id.to_hex();
+                        }
+                        Ok(None) => tracing::debug!(
+                            event_id = %event.event.id.to_hex(),
+                            "Workflow reply parent was missing or deleted"
+                        ),
+                        Err(error) => tracing::warn!(
+                            event_id = %event.event.id.to_hex(),
+                            "Workflow reply parent lookup failed closed: {error}"
+                        ),
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                event_id = %event.event.id.to_hex(),
+                "Workflow thread metadata lookup failed closed: {error}"
+            ),
+        }
 
         let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
             Ok(v) => v,
@@ -487,6 +709,11 @@ impl WorkflowEngine {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
             let now = Utc::now();
+
+            // Fail closed on gates whose deadline has passed, before firing
+            // anything new. Runs the same tick as cron so there is no second
+            // background task to reason about.
+            self.expire_stale_approvals().await;
 
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,
@@ -1010,6 +1237,9 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         timestamp: event.event.created_at.as_secs().to_string(),
         emoji,
         message_id,
+        reply_to_text: String::new(),
+        reply_to_author: String::new(),
+        reply_to_message_id: String::new(),
         webhook_fields: HashMap::new(),
     }
 }
@@ -1899,6 +2129,484 @@ steps:
             owner_runs.len(),
             1,
             "channel owner's call_webhook workflow fires"
+        );
+    }
+
+    // ── WF-08: true execution, concurrency and replay ───────────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex as StdMutex;
+
+    /// An ActionSink that records every side effect instead of performing one.
+    ///
+    /// This is what makes these tests *execution* tests rather than structural
+    /// ones: the assertion is on what the executor actually dispatched.
+    #[derive(Default)]
+    struct RecordingSink {
+        sent: StdMutex<Vec<(String, String)>>,
+        approvals: StdMutex<Vec<String>>,
+        counter: AtomicUsize,
+    }
+
+    impl RecordingSink {
+        fn sent_texts(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, t)| t.clone())
+                .collect()
+        }
+        fn approval_count(&self) -> usize {
+            self.approvals.lock().unwrap().len()
+        }
+    }
+
+    impl crate::ActionSink for RecordingSink {
+        fn send_message(
+            &self,
+            _community_id: CommunityId,
+            channel_id: &str,
+            text: &str,
+            _author_pubkey: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<String, crate::ActionSinkError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let channel_id = channel_id.to_owned();
+            let text = text.to_owned();
+            Box::pin(async move {
+                self.sent.lock().unwrap().push((channel_id, text));
+                // Distinct id per call, mirroring the real sink where each
+                // dispatch is a freshly-signed event.
+                let n = self.counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(format!("{:064x}", n + 1))
+            })
+        }
+
+        fn emit_approval_request(
+            &self,
+            _community_id: CommunityId,
+            _channel_id: &str,
+            req: crate::ApprovalRequest<'_>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<String, crate::ActionSinkError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let msg = req.message.to_owned();
+            Box::pin(async move {
+                self.approvals.lock().unwrap().push(msg);
+                Ok("a".repeat(64))
+            })
+        }
+    }
+
+    const APPROVER: &str = "1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90";
+
+    /// draft -> gate -> send. The third step is the one that must never run
+    /// before an approval.
+    fn gated_definition_with_timeout(timeout: &str) -> String {
+        serde_json::json!({
+            "name": "gated",
+            "trigger": {"on": "message_posted"},
+            "enabled": true,
+            "steps": [
+                {"id": "draft", "action": "send_message", "text": "DRAFT_PACKAGE"},
+                {"id": "gate", "action": "request_approval", "from": APPROVER,
+                 "timeout": timeout, "message": "approve DRAFT_PACKAGE?"},
+                {"id": "send", "action": "send_message", "text": "EXTERNAL_SEND"},
+            ],
+        })
+        .to_string()
+    }
+
+    async fn run_to_gate() -> (
+        buzz_db::Db,
+        CommunityId,
+        Uuid,
+        Arc<RecordingSink>,
+        Arc<WorkflowEngine>,
+    ) {
+        run_to_gate_with_timeout("48h").await
+    }
+
+    async fn run_to_gate_with_timeout(
+        timeout: &str,
+    ) -> (
+        buzz_db::Db,
+        CommunityId,
+        Uuid,
+        Arc<RecordingSink>,
+        Arc<WorkflowEngine>,
+    ) {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &member,
+                "gated",
+                &gated_definition_with_timeout(timeout),
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        let sink = Arc::new(RecordingSink::default());
+        engine.set_action_sink(sink.clone());
+
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event");
+
+        // on_event spawns execution; wait for the run to settle.
+        let mut run_id = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let runs = db
+                .list_workflow_runs(community, workflow_id, 10)
+                .await
+                .expect("runs");
+            if let Some(r) = runs.first() {
+                if r.status != buzz_db::workflow::RunStatus::Running
+                    && r.status != buzz_db::workflow::RunStatus::Pending
+                {
+                    run_id = Some(r.id);
+                    break;
+                }
+            }
+        }
+        let run_id = run_id.expect("run should reach a terminal-or-waiting state");
+        (db, community, run_id, sink, engine)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_gate_stops_execution_before_the_sending_step() {
+        let (db, community, run_id, sink, _engine) = run_to_gate().await;
+
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        assert_eq!(
+            run.status,
+            buzz_db::workflow::RunStatus::WaitingApproval,
+            "run must park at the gate, not fail or complete"
+        );
+
+        let sent = sink.sent_texts();
+        assert!(
+            sent.iter().any(|t| t.contains("DRAFT_PACKAGE")),
+            "the pre-gate step must have run: {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|t| t.contains("EXTERNAL_SEND")),
+            "THE post-gate side effect must NOT have run before approval: {sent:?}"
+        );
+        assert_eq!(
+            sink.approval_count(),
+            1,
+            "exactly one approval request emitted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn gate_persists_the_exact_request_package() {
+        let (db, community, run_id, _sink, _engine) = run_to_gate().await;
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        let approvals = db
+            .get_run_approvals(community, run.workflow_id, run_id)
+            .await
+            .expect("approvals");
+
+        assert_eq!(approvals.len(), 1);
+        let a = &approvals[0];
+        assert_eq!(a.status, buzz_db::workflow::ApprovalStatus::Pending);
+        assert_eq!(a.approver_spec, APPROVER);
+        assert_eq!(
+            a.request_message.as_deref(),
+            Some("approve DRAFT_PACKAGE?"),
+            "the approval card has nothing to show without this"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn only_one_concurrent_resumer_claims_the_run() {
+        let (db, community, run_id, _sink, _engine) = run_to_gate().await;
+
+        // Two resumers race: the task spawned on grant, and the recovery sweep.
+        let (a, b) = tokio::join!(
+            db.claim_run_for_resume(community, run_id),
+            db.claim_run_for_resume(community, run_id)
+        );
+        let wins = [a.expect("claim a"), b.expect("claim b")]
+            .iter()
+            .filter(|w| **w)
+            .count();
+        assert_eq!(
+            wins, 1,
+            "exactly one resumer may proceed; a read guard would allow two"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn step_dispatch_is_claimed_at_most_once() {
+        use buzz_db::workflow::StepDispatchClaim;
+        let (db, community, run_id, _sink, _engine) = run_to_gate().await;
+
+        let (a, b) = tokio::join!(
+            db.claim_step_dispatch(community, run_id, "send"),
+            db.claim_step_dispatch(community, run_id, "send")
+        );
+        let a = a.expect("claim a");
+        let b = b.expect("claim b");
+        let claimed = [&a, &b]
+            .iter()
+            .filter(|c| ***c == StepDispatchClaim::Claimed)
+            .count();
+        assert_eq!(claimed, 1, "only one caller may perform the external send");
+        // The loser must not be told to go ahead.
+        let loser = if a == StepDispatchClaim::Claimed {
+            b
+        } else {
+            a
+        };
+        assert_ne!(loser, StepDispatchClaim::Claimed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replay_after_dispatch_reuses_the_original_event() {
+        use buzz_db::workflow::StepDispatchClaim;
+        let (db, community, run_id, _sink, _engine) = run_to_gate().await;
+
+        assert_eq!(
+            db.claim_step_dispatch(community, run_id, "send")
+                .await
+                .expect("claim"),
+            StepDispatchClaim::Claimed
+        );
+        let original = vec![0xABu8; 32];
+        db.complete_step_dispatch(community, run_id, "send", &original)
+            .await
+            .expect("complete");
+
+        // Crash recovery replays the step.
+        match db
+            .claim_step_dispatch(community, run_id, "send")
+            .await
+            .expect("replay")
+        {
+            StepDispatchClaim::AlreadyDispatched(id) => assert_eq!(
+                id, original,
+                "replay must reuse the original event, never mint a second send"
+            ),
+            other => panic!("replay must not re-claim: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn interrupted_dispatch_refuses_to_resend() {
+        use buzz_db::workflow::StepDispatchClaim;
+        let (db, community, run_id, _sink, _engine) = run_to_gate().await;
+
+        // Claimed, then the process died before recording the event.
+        assert_eq!(
+            db.claim_step_dispatch(community, run_id, "send")
+                .await
+                .expect("claim"),
+            StepDispatchClaim::Claimed
+        );
+        assert_eq!(
+            db.claim_step_dispatch(community, run_id, "send")
+                .await
+                .expect("replay"),
+            StepDispatchClaim::InFlight,
+            "an unresolved dispatch must fail closed, not optimistically re-send"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn denial_leaves_the_sending_step_unexecuted() {
+        let (db, community, run_id, sink, _engine) = run_to_gate().await;
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        let approvals = db
+            .get_run_approvals(community, run.workflow_id, run_id)
+            .await
+            .expect("approvals");
+        let token_hash = approvals[0].token.clone();
+
+        let denier = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        assert!(db
+            .update_approval_by_stored_hash(
+                community,
+                &token_hash,
+                buzz_db::workflow::ApprovalStatus::Denied,
+                Some(&denier),
+                Some("no")
+            )
+            .await
+            .expect("deny"));
+
+        // A denied gate must not be selected by recovery.
+        let stranded = db.list_granted_but_waiting_runs().await.expect("stranded");
+        assert!(
+            !stranded.iter().any(|r| r.run_id == run_id),
+            "a denied run must never be picked up for resumption"
+        );
+        assert!(
+            !sink
+                .sent_texts()
+                .iter()
+                .any(|t| t.contains("EXTERNAL_SEND")),
+            "denial must never dispatch the post-gate step"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expiry_fails_closed_and_never_runs_later_steps() {
+        // A real 1s deadline, waited out. No production helper exists to move an
+        // approval's expiry, and adding one would put a method that mutates
+        // approval deadlines into the shipped API for the sake of one test.
+        let (db, community, run_id, sink, engine) = run_to_gate_with_timeout("1s").await;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        engine.expire_stale_approvals().await;
+
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        assert_eq!(
+            run.status,
+            buzz_db::workflow::RunStatus::Failed,
+            "an expired gate must fail the run closed"
+        );
+        assert!(
+            !sink
+                .sent_texts()
+                .iter()
+                .any(|t| t.contains("EXTERNAL_SEND")),
+            "expiry must never dispatch the post-gate step"
+        );
+        let after = db
+            .get_run_approvals(community, run.workflow_id, run_id)
+            .await
+            .expect("approvals");
+        assert_eq!(after[0].status, buzz_db::workflow::ApprovalStatus::Expired);
+    }
+
+    /// The end-to-end grant path: an authorised decision resumes the run at
+    /// gate+1, dispatches the external step exactly once, and a subsequent
+    /// recovery attempt adds nothing.
+    ///
+    /// The CAS and journal unit tests prove the primitives in isolation; only
+    /// this proves the resume *index* and the executor wiring are right — an
+    /// off-by-one here would either re-run the gate forever or skip the send.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn authorised_grant_resumes_at_gate_plus_one_and_sends_once() {
+        let (db, community, run_id, sink, engine) = run_to_gate().await;
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        let workflow_id = run.workflow_id;
+        let approvals = db
+            .get_run_approvals(community, workflow_id, run_id)
+            .await
+            .expect("approvals");
+        let approval = approvals[0].clone();
+        assert_eq!(approval.step_index, 1, "the gate is step index 1");
+
+        // Mark granted through the same guarded update the relay's grant
+        // handler uses (status='pending' predicate included).
+        let approver = hex::decode(APPROVER).expect("hex");
+        assert!(db
+            .update_approval_by_stored_hash(
+                community,
+                &approval.token,
+                buzz_db::workflow::ApprovalStatus::Granted,
+                Some(&approver),
+                None,
+            )
+            .await
+            .expect("grant"));
+
+        // Resume exactly as the relay does: claim, then execute from gate+1.
+        let resume_index = approval.step_index as usize + 1;
+        assert!(db
+            .claim_run_for_resume(community, run_id)
+            .await
+            .expect("claim"));
+
+        let workflow = db.get_workflow(community, workflow_id).await.expect("wf");
+        let def: crate::schema::WorkflowDef =
+            serde_json::from_value(workflow.definition.clone()).expect("def");
+        let trigger_ctx = crate::executor::TriggerContext::default();
+        let result = crate::executor::execute_from_step(
+            &engine,
+            community,
+            run_id,
+            &def,
+            &trigger_ctx,
+            resume_index,
+            None,
+        )
+        .await;
+        engine.finalize_run(community, run_id, result, None).await;
+
+        let sent = sink.sent_texts();
+        let sends = sent.iter().filter(|t| t.contains("EXTERNAL_SEND")).count();
+        assert_eq!(
+            sends, 1,
+            "the approved step must dispatch exactly once: {sent:?}"
+        );
+        let drafts = sent.iter().filter(|t| t.contains("DRAFT_PACKAGE")).count();
+        assert_eq!(
+            drafts, 1,
+            "resume must start after the gate, not replay the draft"
+        );
+
+        let run = db.get_workflow_run(community, run_id).await.expect("run");
+        assert_eq!(run.status, buzz_db::workflow::RunStatus::Completed);
+
+        // Now the crash-recovery path runs again over the same run. The step
+        // journal must suppress a second external send.
+        let stranded = db.list_granted_but_waiting_runs().await.expect("stranded");
+        assert!(
+            !stranded.iter().any(|r| r.run_id == run_id),
+            "a completed run must not be selected for recovery"
+        );
+        let second = crate::executor::execute_from_step(
+            &engine,
+            community,
+            run_id,
+            &def,
+            &trigger_ctx,
+            resume_index,
+            None,
+        )
+        .await;
+        let _ = second;
+        let sends_after = sink
+            .sent_texts()
+            .iter()
+            .filter(|t| t.contains("EXTERNAL_SEND"))
+            .count();
+        assert_eq!(
+            sends_after, 1,
+            "a replayed resume must not issue a second external send"
         );
     }
 }

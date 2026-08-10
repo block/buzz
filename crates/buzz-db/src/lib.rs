@@ -3843,6 +3843,77 @@ impl Db {
         workflow::get_approval_by_stored_hash(&self.pool, community_id, token_hash).await
     }
 
+    /// List pending approvals past their deadline, across all communities.
+    pub async fn list_expired_pending_approvals(&self) -> Result<Vec<workflow::ExpiredApproval>> {
+        workflow::list_expired_pending_approvals(&self.pool).await
+    }
+
+    /// Update an approval's status inside an existing transaction.
+    pub async fn update_approval_by_stored_hash_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        token_hash: &[u8],
+        status: workflow::ApprovalStatus,
+        approver_pubkey: Option<&[u8]>,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        workflow::update_approval_by_stored_hash_tx(
+            tx,
+            community_id,
+            token_hash,
+            status,
+            approver_pubkey,
+            note,
+        )
+        .await
+    }
+
+    /// Claim a step for at-most-once dispatch.
+    pub async fn claim_step_dispatch(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        step_id: &str,
+    ) -> Result<workflow::StepDispatchClaim> {
+        workflow::claim_step_dispatch(&self.pool, community_id, run_id, step_id).await
+    }
+
+    /// Record the event a claimed step produced.
+    pub async fn complete_step_dispatch(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        step_id: &str,
+        event_id: &[u8],
+    ) -> Result<()> {
+        workflow::complete_step_dispatch(&self.pool, community_id, run_id, step_id, event_id).await
+    }
+
+    /// Release a claim whose side effect provably did not happen.
+    pub async fn release_step_dispatch(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        step_id: &str,
+    ) -> Result<()> {
+        workflow::release_step_dispatch(&self.pool, community_id, run_id, step_id).await
+    }
+
+    /// Atomically claim a waiting run for resumption. True for exactly one caller.
+    pub async fn claim_run_for_resume(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+    ) -> Result<bool> {
+        workflow::claim_run_for_resume(&self.pool, community_id, run_id).await
+    }
+
+    /// Granted approvals whose run never resumed (crash-window recovery).
+    pub async fn list_granted_but_waiting_runs(&self) -> Result<Vec<workflow::GrantedWaitingRun>> {
+        workflow::list_granted_but_waiting_runs(&self.pool).await
+    }
+
     /// Fetch all approvals for a workflow run.
     pub async fn get_run_approvals(
         &self,

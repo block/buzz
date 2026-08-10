@@ -238,6 +238,27 @@ impl WorkflowDef {
             }
         }
 
+        // Reject approval gates nobody could ever satisfy. The relay enforces
+        // the same rule on an inbound grant, so an unsupported spec here would
+        // produce a run that suspends and then expires 24h later having done
+        // nothing — the failure mode WF-08 exists to remove.
+        for step in &self.steps {
+            if let ActionDef::RequestApproval { from, timeout, .. } = &step.action {
+                crate::executor::normalize_approver_spec(from).map_err(|e| {
+                    WorkflowError::InvalidDefinition(format!("step '{}': {e}", step.id))
+                })?;
+
+                if let Some(t) = timeout {
+                    crate::executor::parse_duration_secs(t).map_err(|_| {
+                        WorkflowError::InvalidDefinition(format!(
+                            "step '{}': invalid approval timeout '{t}': expected a duration like '30m', '24h'",
+                            step.id
+                        ))
+                    })?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -357,7 +378,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: '1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
@@ -393,7 +414,7 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            "  - id: request\n    action: request_approval\n    from: '1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90'\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",
@@ -887,5 +908,59 @@ mod tests {
             trigger,
             TriggerDef::DiffPosted { filter: Some(_) }
         ));
+    }
+
+    // ── WF-08: approval gate definition validation ───────────────────────────
+
+    const HEX64: &str = "1a99c7e0596b98299393c384a3b1959374e483c6658772ce3337ea0474e74b90";
+
+    fn approval_yaml(from: &str, timeout: &str) -> String {
+        format!(
+            "name: Gated\ntrigger:\n  on: message_posted\nsteps:\n  - id: draft\n    action: send_message\n    text: 'draft'\n  - id: gate\n    action: request_approval\n    from: '{from}'\n    timeout: '{timeout}'\n    message: 'ok?'\n  - id: send\n    action: send_message\n    text: 'sent'\n"
+        )
+    }
+
+    #[test]
+    fn approval_gate_accepts_hex_pubkey_spec() {
+        let (def, _) = parse_yaml(&approval_yaml(HEX64, "48h")).expect("should parse");
+        assert_eq!(def.steps.len(), 3);
+    }
+
+    #[test]
+    fn approval_gate_accepts_any_spec() {
+        parse_yaml(&approval_yaml("any", "1h")).expect("\"any\" is a supported spec");
+    }
+
+    #[test]
+    fn approval_gate_rejects_mention_spec() {
+        // The exact shape that shipped in the #pipeline workflow. The relay's
+        // check_approver_spec fails closed on it, so a gate built this way
+        // suspends and can never be approved. Reject it at save time instead.
+        let err =
+            parse_yaml(&approval_yaml("@charlie", "48h")).expect_err("@charlie must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("gate"), "error should name the step: {msg}");
+        assert!(
+            msg.contains("64-character hex pubkey"),
+            "error should say what is accepted: {msg}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_rejects_role_spec() {
+        parse_yaml(&approval_yaml("@release-manager", "24h"))
+            .expect_err("role specs are not implemented relay-side");
+    }
+
+    #[test]
+    fn approval_gate_rejects_short_hex_spec() {
+        parse_yaml(&approval_yaml("1a99c7e0", "24h"))
+            .expect_err("a truncated pubkey must not pass");
+    }
+
+    #[test]
+    fn approval_gate_rejects_invalid_timeout() {
+        parse_yaml(&approval_yaml(HEX64, "soon"))
+            .expect_err("unparseable timeout must be rejected at save time");
     }
 }

@@ -117,6 +117,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/moderation/restricted",
             get(api::bridge::moderation_restricted),
         )
+        // Workflow run/approval reads (NIP-98 auth + channel-membership gate).
+        // Runs and approvals are DB rows, not Nostr events, so they cannot be
+        // served over /query — these are the read path the desktop approval
+        // card needs to select a waiting run and act on its gate.
+        .route(
+            "/workflows/{workflow_id}/runs",
+            get(api::bridge::workflow_runs),
+        )
+        .route(
+            "/workflows/{workflow_id}/runs/{run_id}/approvals",
+            get(api::bridge::workflow_run_approvals),
+        )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
         // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and

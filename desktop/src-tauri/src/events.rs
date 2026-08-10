@@ -831,15 +831,15 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
     Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
 }
 
-/// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46030: grant using `d=<hex SHA-256(raw token)>` with an optional note.
+pub fn build_approval_grant(token_hash_hex: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    let tags = vec![tag(vec!["d", token_hash_hex])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46031: deny using the same hashed `d`-tag contract.
+pub fn build_approval_deny(token_hash_hex: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    let tags = vec![tag(vec!["d", token_hash_hex])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 

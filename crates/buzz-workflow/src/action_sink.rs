@@ -66,4 +66,44 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Publish the kind:46010 approval-requested event for a suspended run.
+    ///
+    /// Without this the run would wait on a token nobody has ever seen. The
+    /// event carries the raw token so the approver can quote it back via
+    /// `buzz workflows approve --token`.
+    ///
+    /// Note on the raw token in channel-visible content: the token identifies
+    /// *which* gate is being answered, it is not the authorisation. The relay
+    /// checks the grant's signing key against `approver_spec` independently, so
+    /// reading the token does not let a non-approver pass the gate — unless the
+    /// spec is `"any"`, in which case the token is the only barrier. Prefer a
+    /// pubkey spec for anything with an external side effect.
+    fn emit_approval_request(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        req: ApprovalRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+}
+
+/// Parameters for [`ActionSink::emit_approval_request`].
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest<'a> {
+    /// Raw approval token (UUID) the approver quotes back.
+    pub token: &'a str,
+    /// Hex-encoded SHA-256 of the token — the `d` tag an inbound grant carries.
+    pub token_hash_hex: &'a str,
+    /// The run awaiting approval.
+    pub run_id: uuid::Uuid,
+    /// The workflow the run belongs to.
+    pub workflow_id: uuid::Uuid,
+    /// Step id of the gate.
+    pub step_id: &'a str,
+    /// Approver spec: `"any"` or a 64-char hex pubkey.
+    pub approver_spec: &'a str,
+    /// Prompt shown to the approver.
+    pub message: &'a str,
+    /// Absolute expiry of the gate.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
