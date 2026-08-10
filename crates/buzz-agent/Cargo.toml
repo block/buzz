@@ -25,6 +25,7 @@ name = "fake-mcp"
 path = "tests/bin/fake_mcp.rs"
 
 [dependencies]
+buzz-core = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

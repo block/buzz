@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use buzz_core::reasoning::ThinkingEffort;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
@@ -34,7 +35,7 @@ use crate::acp::{
     resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
     StopReason, SystemPromptTransport,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{claude_thinking_options, compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
@@ -566,6 +567,8 @@ pub struct PromptContext {
     /// Sanitized title for each new ACP session, sent as `_meta.sessionTitle`
     /// on `session/new`. Never part of the prompt.
     pub session_title: Option<String>,
+    /// Shared effort selector translated per ACP harness.
+    pub thinking_effort: Option<ThinkingEffort>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
@@ -995,6 +998,15 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
+    let claude_options = if agent.agent_name == CLAUDE_AGENT_ACP_NAME {
+        agent
+            .desired_model
+            .as_deref()
+            .zip(ctx.thinking_effort)
+            .and_then(|(model, effort)| claude_thinking_options(model, effort))
+    } else {
+        None
+    };
     let resp = agent
         .acp
         .session_new_full(
@@ -1007,6 +1019,7 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            claude_options.as_ref(),
         )
         .await?;
 
@@ -5505,7 +5518,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, None)
             .await
             .expect("spawn lifecycle ACP script");
         let mut agent = OwnedAgent {
@@ -5598,7 +5611,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, None)
             .await
             .expect("spawn channel lifecycle ACP script");
         let channel_id = Uuid::new_v4();
@@ -5771,7 +5784,7 @@ while IFS= read -r line; do
   count=$((count + 1))
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false, None)
             .await
             .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
@@ -5920,7 +5933,7 @@ done"#
 printf '%s\n' "$line" > '{quoted_capture}'
 printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false, None)
             .await
             .expect("spawn wire-capture ACP");
         let mut agent = OwnedAgent {
@@ -6906,6 +6919,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            None,
         )
         .await
         .expect("failed to spawn test agent");
@@ -6964,6 +6978,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            None,
         )
         .await
         .expect("failed to spawn test agent");
@@ -7435,6 +7450,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
+            thinking_effort: None,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,

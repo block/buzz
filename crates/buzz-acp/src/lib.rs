@@ -1818,6 +1818,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        thinking_effort: config.thinking_effort,
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -2059,10 +2060,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let thinking_effort = config.thinking_effort;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        thinking_effort,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -3873,12 +3884,14 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let thinking_effort = config.thinking_effort;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, has_codex, thinking_effort, i, observer).await;
         guard.send(result);
     });
 }
@@ -4068,6 +4081,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let thinking_effort = config.thinking_effort;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4079,7 +4093,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            thinking_effort,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4124,6 +4147,7 @@ struct PoolStartup {
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
+    thinking_effort: Option<buzz_core::reasoning::ThinkingEffort>,
     observer: Option<observer::ObserverHandle>,
 }
 
@@ -4136,6 +4160,7 @@ impl PoolStartup {
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
+            thinking_effort: config.thinking_effort,
             observer,
         }
     }
@@ -4154,6 +4179,10 @@ async fn initialize_agent_pool(
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            crate::config::codex_reasoning_effort_for_command(
+                &startup.command,
+                startup.thinking_effort,
+            ),
         )
         .await;
         match spawn_result {
@@ -4254,12 +4283,19 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    thinking_effort: Option<buzz_core::reasoning::ThinkingEffort>,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        crate::config::codex_reasoning_effort_for_command(command, thinking_effort),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -4288,7 +4324,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false, None).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -4418,7 +4454,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
     let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false, None).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: failed to spawn agent: {e}");
@@ -4430,7 +4466,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None, None).await?;
+        let session = client
+            .session_new_full(&cwd, vec![], None, None, None)
+            .await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -6239,6 +6277,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            thinking_effort: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -6461,6 +6500,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            thinking_effort: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -6499,7 +6539,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], false, None)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),

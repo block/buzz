@@ -119,6 +119,20 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Reasoning effort
+
+`BUZZ_AGENT_THINKING_EFFORT` (or `--thinking-effort`) uses the shared reasoning
+axis `none|minimal|low|medium|high|xhigh|max`. Unset or empty preserves the
+harness default; an invalid value stops startup. The same variable controls the
+native `buzz-agent` and external ACP harnesses.
+
+| Harness | Translation |
+|---------|-------------|
+| `claude-agent-acp` | Sends `_meta.claudeCode.options` on `session/new`. Adaptive models receive `thinking.type=adaptive` plus distinct `effort` values (`high`, `xhigh`, and `max` remain distinct); legacy Claude 3 / Opus 4.5 models receive `thinking.type=enabled` with `budgetTokens`. Unknown models omit both fields. Claude rejects `none` and `minimal`. `_meta` is used instead of `MAX_THINKING_TOKENS` because the token-budget variable collapses `high`, `xhigh`, and `max` to the same 32,768-token budget. |
+| `codex-acp` | Deep-merges `model_reasoning_effort` into existing `CODEX_CONFIG` JSON, preserving persona/operator keys. Codex lacks endpoint values `none` and `max`, so they saturate to `minimal` and `xhigh`, respectively. |
+| `buzz-agent` | Inherits the variable unchanged; its native provider translation remains authoritative. |
+| `opencode` | Not supported. `OPENCODE_CONFIG` is a path, not inline JSON; when effort is configured, startup fails rather than silently ignoring it or creating/modifying a user config file. Configure `agent.build.variant` in the existing opencode config instead. |
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |

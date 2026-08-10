@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u32 = 2;
-
 /// Reasoning/thinking effort level for providers that support it.
 ///
 /// Set via `BUZZ_AGENT_THINKING_EFFORT` (`none|minimal|low|medium|high|xhigh|max`).
@@ -15,60 +13,10 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// - **OpenAI Responses / Chat Completions**: effort support is model-dependent and normalized at
 ///   request time; `max` is valid for documented max-supporting families such as GPT-5.6.
 /// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ThinkingEffort {
-    None,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    Max,
-}
+pub use buzz_core::reasoning::ThinkingEffort;
+use buzz_core::reasoning::{resolve_anthropic_thinking, AnthropicThinking};
 
-impl ThinkingEffort {
-    /// Map level to an Anthropic `budget_tokens` value for legacy Claude 3.x / Opus 4.5 models.
-    /// `XHigh` and `Max` clamp to the high budget value; the answer-room reserve of 1024 tokens
-    /// is applied separately in `anthropic_thinking_config`.
-    pub fn anthropic_budget_tokens(self) -> u32 {
-        match self {
-            ThinkingEffort::Low => 1_024,
-            ThinkingEffort::Medium => 8_192,
-            ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max => 32_768,
-            // None/Minimal are not valid for Anthropic (rejected at startup); treat as zero
-            // defensively so a misconfigured call doesn't accidentally enable thinking.
-            ThinkingEffort::None | ThinkingEffort::Minimal => 0,
-        }
-    }
-
-    /// Map level to an OpenAI `reasoning.effort` / `reasoning_effort` string.
-    pub fn openai_effort_str(self) -> &'static str {
-        match self {
-            ThinkingEffort::None => "none",
-            ThinkingEffort::Minimal => "minimal",
-            ThinkingEffort::Low => "low",
-            ThinkingEffort::Medium => "medium",
-            ThinkingEffort::High => "high",
-            ThinkingEffort::XHigh => "xhigh",
-            ThinkingEffort::Max => "max",
-        }
-    }
-
-    /// Map level to an Anthropic `output_config.effort` string.
-    /// Returns the level string if supported, or the highest supported level for the model.
-    /// Caller must apply model-level clamping via `clamp_for_anthropic_adaptive`.
-    pub fn anthropic_effort_str(self) -> &'static str {
-        match self {
-            ThinkingEffort::Low => "low",
-            ThinkingEffort::Medium => "medium",
-            ThinkingEffort::High => "high",
-            ThinkingEffort::XHigh => "xhigh",
-            ThinkingEffort::Max => "max",
-            // None/Minimal are rejected at startup for Anthropic; defensive fallback.
-            ThinkingEffort::None | ThinkingEffort::Minimal => "low",
-        }
-    }
-}
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Strip any endpoint-naming prefix from a model name so the family classifiers
 /// (`is_manual_budget_model`, `is_adaptive_thinking_model`, etc.) can match on the canonical
@@ -142,64 +90,63 @@ pub fn anthropic_thinking_config(
     //       "team-x-claude-opus-4-7"      → "claude-opus-4-7").
     let model = strip_catalog_prefix(effective_model);
 
-    if is_manual_budget_model(model) {
-        // Manual-budget shape: budget_tokens must be strictly < max_tokens AND must leave
-        // at least MIN_ANSWER_TOKENS (1024) for the visible answer. The Anthropic API
-        // requires budget_tokens < max_tokens AND budget_tokens >= 1024.
-        //
-        // Clamp: budget = min(level_budget, max_output_tokens - MIN_ANSWER_TOKENS).
-        // If result < MIN_ANSWER_TOKENS, thinking would starve the answer — omit thinking
-        // entirely and warn instead of emitting an invalid or answer-starving budget.
-        const MIN_ANSWER_TOKENS: u32 = 1024;
-        let level_budget = effort.anthropic_budget_tokens();
-        let headroom = max_output_tokens.saturating_sub(MIN_ANSWER_TOKENS);
-        let budget = level_budget.min(headroom);
-        if budget < MIN_ANSWER_TOKENS {
-            tracing::warn!(
+    match resolve_anthropic_thinking(model, effort) {
+        Some(AnthropicThinking::ManualBudget {
+            budget_tokens: level_budget,
+        }) => {
+            // Manual-budget shape: budget_tokens must be strictly < max_tokens AND must leave
+            // at least MIN_ANSWER_TOKENS (1024) for the visible answer. The Anthropic API
+            // requires budget_tokens < max_tokens AND budget_tokens >= 1024.
+            //
+            // Clamp: budget = min(level_budget, max_output_tokens - MIN_ANSWER_TOKENS).
+            // If result < MIN_ANSWER_TOKENS, thinking would starve the answer — omit thinking
+            // entirely and warn instead of emitting an invalid or answer-starving budget.
+            const MIN_ANSWER_TOKENS: u32 = 1024;
+            let headroom = max_output_tokens.saturating_sub(MIN_ANSWER_TOKENS);
+            let budget = level_budget.min(headroom);
+            if budget < MIN_ANSWER_TOKENS {
+                tracing::warn!(
                 max_output_tokens,
                 level_budget,
                 headroom,
                 "BUZZ_AGENT_THINKING_EFFORT: max_output_tokens too small to fit thinking budget + answer headroom; omitting thinking fields"
             );
-            return (None, None);
+                return (None, None);
+            }
+            (
+                Some(
+                    json!({ "type": "enabled", "budget_tokens": budget, "display": "summarized" }),
+                ),
+                None,
+            )
         }
-        (
-            Some(json!({ "type": "enabled", "budget_tokens": budget, "display": "summarized" })),
-            None,
-        )
-    } else if is_adaptive_thinking_model(model) {
-        // Adaptive families: we always send type:"adaptive" to activate output_config.effort.
-        // Sub-bucket A (Off: Opus 4.6/4.7/4.8, Sonnet 4.6): this field is required to enable
-        // thinking at all. Sub-bucket B (On: Opus 5/Sonnet 5) and sub-bucket C (Always on:
-        // Fable 5/Mythos 5/Mythos Preview): thinking is already on; we send the field so
-        // output_config.effort is honoured, not to enable thinking.
-        // Apply per-model effort clamping: if the requested level exceeds the model's
-        // doc-verified maximum, clamp down to the highest supported level with a warning.
-        let clamped = clamp_adaptive_effort(model, effort);
-        (
-            Some(json!({ "type": "adaptive", "display": "summarized" })),
-            Some(json!({ "effort": clamped.anthropic_effort_str() })),
-        )
-    } else {
-        // Unrecognised or unverified model name — omit both fields rather than guess.
-        // This includes unknown future claude-* names not yet in the support table.
-        (None, None)
+        Some(AnthropicThinking::Adaptive { effort: clamped }) => {
+            // Adaptive families: we always send type:"adaptive" to activate output_config.effort.
+            // Sub-bucket A (Off: Opus 4.6/4.7/4.8, Sonnet 4.6): this field is required to enable
+            // thinking at all. Sub-bucket B (On: Opus 5/Sonnet 5) and sub-bucket C (Always on:
+            // Fable 5/Mythos 5/Mythos Preview): thinking is already on; we send the field so
+            // output_config.effort is honoured, not to enable thinking.
+            // Apply per-model effort clamping: if the requested level exceeds the model's
+            // doc-verified maximum, clamp down to the highest supported level with a warning.
+            if clamped != effort {
+                tracing::warn!(
+                model,
+                requested = effort.openai_effort_str(),
+                clamped = clamped.openai_effort_str(),
+                "BUZZ_AGENT_THINKING_EFFORT is not available for this model; clamping to highest supported level"
+            );
+            }
+            (
+                Some(json!({ "type": "adaptive", "display": "summarized" })),
+                Some(json!({ "effort": clamped.anthropic_effort_str() })),
+            )
+        }
+        None => {
+            // Unrecognised or unverified model name — omit both fields rather than guess.
+            // This includes unknown future claude-* names not yet in the support table.
+            (None, None)
+        }
     }
-}
-
-/// Returns true for adaptive Anthropic models that support the `xhigh` effort level.
-///
-/// Used by both `clamp_adaptive_effort` (request-time) and `anthropic_efforts_for_model`
-/// (UI capability table) to keep xhigh-support classification in a single place.
-///
-/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
-fn anthropic_model_supports_xhigh(model: &str) -> bool {
-    model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-opus-5")
-        || model.starts_with("claude-sonnet-5")
-        || model.starts_with("claude-fable-5")
-        || model.starts_with("claude-mythos-5")
 }
 
 /// Clamp the requested effort level to the highest doc-verified level for the given adaptive model.
@@ -216,17 +163,7 @@ fn anthropic_model_supports_xhigh(model: &str) -> bool {
 ///
 /// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEffort {
-    // Models that support all levels including xhigh (and max).
-    let supports_xhigh = anthropic_model_supports_xhigh(model);
-
-    let clamped = if supports_xhigh {
-        effort // all levels pass through
-    } else if effort == ThinkingEffort::XHigh {
-        // xhigh not available for this model; clamp to high (the highest supported below xhigh).
-        ThinkingEffort::High
-    } else {
-        effort // low/medium/high/max all pass through for the other adaptive families
-    };
+    let clamped = buzz_core::reasoning::clamp_adaptive_effort(model, effort);
 
     if clamped != effort {
         tracing::warn!(
@@ -413,10 +350,8 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
 
 /// Returns the effort capability set for a given Anthropic model.
 ///
-/// This is the single production source of truth for Anthropic family routing.
-/// Both `anthropic_thinking_config` (request-time) and the effort-table UI
-/// (`valid_effort_values_for_provider_model`, via its Anthropic branch) must
-/// derive their behaviour from this helper so the two stay in sync.
+/// Family routing comes from `buzz_core::reasoning`, shared with external ACP
+/// harness translation. This helper only presents that table in the UI shape.
 ///
 /// Returns `(valid_values, default)` where:
 /// - `valid_values` is the static slice of `ThinkingEffort` values accepted
@@ -447,13 +382,13 @@ pub fn anthropic_efforts_for_model(
         ThinkingEffort::Max,
     ];
 
-    if is_manual_budget_model(model) {
+    if buzz_core::reasoning::is_manual_budget_model(model) {
         return (MANUAL, None);
     }
-    if is_adaptive_thinking_model(model) {
+    if buzz_core::reasoning::is_adaptive_thinking_model(model) {
         // Reuse `anthropic_model_supports_xhigh` (the single source of truth
         // shared with `clamp_adaptive_effort`) — no side-effects, no duplication.
-        if anthropic_model_supports_xhigh(model) {
+        if buzz_core::reasoning::anthropic_model_supports_xhigh(model) {
             return (ADAPTIVE_XHIGH, Some(ThinkingEffort::High));
         } else {
             return (ADAPTIVE_NO_XHIGH, Some(ThinkingEffort::High));
@@ -588,59 +523,6 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
     }
 }
 
-/// Returns true for Claude model families that use manual thinking budgets (doc-verified, July 2025).
-///
-/// Source: https://platform.claude.com/docs/en/build-with-claude/extended-thinking (support table)
-/// - claude-3*: legacy manual budget (all Claude 3.x variants).
-/// - claude-opus-4-5: effort page states "uses manual thinking, where effort works alongside
-///   the thinking token budget" — manual bucket, not adaptive.
-///
-/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
-fn is_manual_budget_model(model: &str) -> bool {
-    model.starts_with("claude-3") || model == "claude-opus-4-5"
-}
-
-/// Returns true for Claude model families that use adaptive thinking (doc-verified against
-/// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting#supported-models).
-///
-/// **Sub-bucket A — status Off (thinking OFF until `thinking:{type:"adaptive"}` is sent)**:
-///   Opus 4.6, Opus 4.7, Opus 4.8, Sonnet 4.6.
-///
-/// **Sub-bucket B — status On (thinking on by default; can be disabled)**:
-///   Opus 5, Sonnet 5.
-///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
-///
-/// **Sub-bucket C — status Always on (thinking cannot be disabled)**:
-///   Fable 5, Mythos 5, Mythos Preview.
-///   We still send `thinking:{type:"adaptive"}` so `output_config.effort` is honoured.
-///
-/// All three sub-buckets accept the same request shape. The distinction matters only when
-/// thinking effort is NOT configured: sub-bucket B/C models still produce thinking even
-/// without us sending the field; sub-bucket A models do not.
-///
-/// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
-/// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
-///
-/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
-fn is_adaptive_thinking_model(model: &str) -> bool {
-    // Exact version strings for Opus 4.x adaptive models (4.6, 4.7, 4.8).
-    // Opus 4.5 is excluded — manual budget only.
-    model.starts_with("claude-opus-4-6")
-        || model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-opus-5")
-        // Sonnet 5.x (any patch/date suffix after "claude-sonnet-5").
-        || model.starts_with("claude-sonnet-5")
-        // Sonnet 4.6 exactly (not Sonnet 4.5 or earlier — not in the adaptive table).
-        || model.starts_with("claude-sonnet-4-6")
-        // Fable 5 and Mythos 5 (Always on — thinking cannot be disabled, July 2025).
-        || model.starts_with("claude-fable-5")
-        || model.starts_with("claude-mythos-5")
-        // Mythos Preview (Always on — thinking cannot be disabled, July 2025).
-        // Note: xhigh is NOT available on Mythos Preview — clamp_adaptive_effort handles this.
-        || model.starts_with("claude-mythos-preview")
-}
-
 /// Reasoning summary mode for the OpenAI Responses API route.
 ///
 /// Controls the `reasoning.summary` field sent alongside `reasoning.effort` in
@@ -695,19 +577,12 @@ pub fn parse_thinking_summary(raw: Option<&str>) -> Result<ThinkingSummary, Stri
 
 /// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
 pub fn parse_thinking_effort(raw: Option<&str>) -> Result<Option<ThinkingEffort>, String> {
-    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") => Ok(None),
-        Some("none") => Ok(Some(ThinkingEffort::None)),
-        Some("minimal") => Ok(Some(ThinkingEffort::Minimal)),
-        Some("low") => Ok(Some(ThinkingEffort::Low)),
-        Some("medium") => Ok(Some(ThinkingEffort::Medium)),
-        Some("high") => Ok(Some(ThinkingEffort::High)),
-        Some("xhigh") => Ok(Some(ThinkingEffort::XHigh)),
-        Some("max") => Ok(Some(ThinkingEffort::Max)),
-        Some(other) => Err(format!(
-            "config: BUZZ_AGENT_THINKING_EFFORT={other} not supported (use none|minimal|low|medium|high|xhigh|max)"
-        )),
-    }
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    raw.parse()
+        .map(Some)
+        .map_err(|error| format!("config: {error}"))
 }
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
