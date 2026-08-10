@@ -2,10 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getHomeFeed } from "@/shared/api/tauri";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
 export function useHomeFeedQuery() {
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
+  const refetchInterval = useFocusedRefetchInterval(connected ? 30_000 : false);
 
   return useQuery({
     queryKey: ["home-feed"],
@@ -19,6 +21,7 @@ export function useHomeFeedQuery() {
     // Pause background polling on degraded/stalled/disconnected connections.
     // The relay can't serve the request anyway, and the spurious failures
     // consume quota that the recovery path needs.
-    refetchInterval: connected ? 30_000 : false,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }

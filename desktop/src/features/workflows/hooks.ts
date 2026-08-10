@@ -2,6 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { WorkflowRun, WorkflowRunStatus } from "@/shared/api/types";
 import {
+  useAppFocused,
+  useFocusedRefetchInterval,
+} from "@/shared/lib/useDocumentVisible";
+import {
   createWorkflow,
   deleteWorkflow,
   denyApproval,
@@ -65,6 +69,7 @@ export function useWorkflowQuery(workflowId: string | null) {
 }
 
 export function useWorkflowRunsQuery(workflowId: string | null) {
+  const appFocused = useAppFocused();
   return useQuery({
     queryKey: workflowRunsQueryKey(workflowId ?? ""),
     queryFn: ({ queryKey: [, resolvedWorkflowId] }) =>
@@ -72,11 +77,13 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
     enabled: workflowId !== null,
     staleTime: 10_000,
     refetchInterval: (query) => {
+      if (!appFocused) return false;
       const runs = query.state.data as WorkflowRun[] | undefined;
       return runs?.some((run) => isActiveWorkflowRunStatus(run.status))
         ? 1_000
         : false;
     },
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -84,13 +91,16 @@ export function useRunApprovalsQuery(
   workflowId: string | null,
   runId: string | null,
 ) {
+  const refetchInterval = useFocusedRefetchInterval(10_000);
+
   return useQuery({
     queryKey: runApprovalsQueryKey(workflowId ?? "", runId ?? ""),
     queryFn: ({ queryKey: [, resolvedWorkflowId, resolvedRunId] }) =>
       getRunApprovals(resolvedWorkflowId, resolvedRunId),
     enabled: workflowId !== null && runId !== null,
     staleTime: 10_000,
-    refetchInterval: 10_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

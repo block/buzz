@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
+
 import {
   createChannelTemplate,
   deleteChannelTemplate,
@@ -16,11 +18,14 @@ import type {
 export const channelTemplatesQueryKey = ["channel-templates"] as const;
 
 export function useChannelTemplatesQuery() {
+  const refetchInterval = useFocusedRefetchInterval(30_000);
+
   return useQuery({
     queryKey: channelTemplatesQueryKey,
     queryFn: listChannelTemplates,
     staleTime: 30_000,
-    refetchInterval: 30_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
