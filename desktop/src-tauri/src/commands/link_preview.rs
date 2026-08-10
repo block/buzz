@@ -176,23 +176,9 @@ fn is_youtube_video_url(url: &Url) -> bool {
 async fn fetch_youtube_oembed_metadata(
     video_url: &Url,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    let mut oembed_url = Url::parse(YOUTUBE_OEMBED_ENDPOINT)
-        .map_err(|error| format!("invalid YouTube oEmbed endpoint: {error}"))?;
-    oembed_url
-        .query_pairs_mut()
-        .append_pair("format", "json")
-        .append_pair("url", video_url.as_str());
-
+    let oembed_url = youtube_oembed_url(video_url)?;
     let response = send_pinned_request(&oembed_url, "application/json").await?;
-    if !response.status().is_success() || !is_json_response(&response) {
-        return Ok(None);
-    }
-    let body = read_limited_bytes(response, MAX_OEMBED_FETCH_BYTES).await?;
-    let response: YouTubeOEmbedResponse = match serde_json::from_slice(&body) {
-        Ok(response) => response,
-        Err(_) => return Ok(None),
-    };
-    let Some((mut metadata, thumbnail_url)) = youtube_oembed_metadata(response) else {
+    let Some((mut metadata, thumbnail_url)) = parse_youtube_oembed_response(response).await? else {
         return Ok(None);
     };
     let image_result = match thumbnail_url {
@@ -208,6 +194,49 @@ async fn fetch_youtube_oembed_metadata(
     };
     apply_image_result(&mut metadata, image_result);
     Ok(Some(metadata))
+}
+
+fn youtube_oembed_url(video_url: &Url) -> Result<Url, String> {
+    let mut canonical_video_url = video_url.clone();
+    if matches!(
+        video_url.host_str(),
+        Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com")
+    ) {
+        let mut segments = video_url.path_segments();
+        if segments.as_mut().and_then(|segments| segments.next()) == Some("embed") {
+            let video_id = segments
+                .and_then(|mut segments| segments.next())
+                .ok_or_else(|| "YouTube embed URL has no video ID".to_string())?;
+            canonical_video_url.set_path("/watch");
+            canonical_video_url.set_query(None);
+            canonical_video_url
+                .query_pairs_mut()
+                .append_pair("v", video_id);
+            canonical_video_url.set_fragment(None);
+        }
+    }
+
+    let mut oembed_url = Url::parse(YOUTUBE_OEMBED_ENDPOINT)
+        .map_err(|error| format!("invalid YouTube oEmbed endpoint: {error}"))?;
+    oembed_url
+        .query_pairs_mut()
+        .append_pair("format", "json")
+        .append_pair("url", canonical_video_url.as_str());
+    Ok(oembed_url)
+}
+
+async fn parse_youtube_oembed_response(
+    response: reqwest::Response,
+) -> Result<Option<(LinkPreviewMetadata, Option<Url>)>, String> {
+    if !response.status().is_success() || !is_json_response(&response) {
+        return Ok(None);
+    }
+    let body = read_limited_bytes(response, MAX_OEMBED_FETCH_BYTES).await?;
+    let response: YouTubeOEmbedResponse = match serde_json::from_slice(&body) {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+    Ok(youtube_oembed_metadata(response))
 }
 
 fn youtube_oembed_metadata(
@@ -771,10 +800,11 @@ mod tests {
     use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
     use super::{
         apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-        extract_link_preview_metadata, is_html_response, is_youtube_video_url, read_bytes_prefix,
-        retry_after_duration, sanitize_image, youtube_oembed_metadata, ImageFetchError,
-        LinkPreviewImageFetchState, LinkPreviewMetadata, YouTubeOEmbedResponse,
-        MAX_METADATA_DESCRIPTION_CHARS,
+        extract_link_preview_metadata, is_html_response, is_youtube_video_url,
+        parse_youtube_oembed_response, read_bytes_prefix, retry_after_duration, sanitize_image,
+        youtube_oembed_metadata, youtube_oembed_url, ImageFetchError, LinkPreviewImageFetchState,
+        LinkPreviewMetadata, YouTubeOEmbedResponse, MAX_METADATA_DESCRIPTION_CHARS,
+        MAX_OEMBED_FETCH_BYTES,
     };
     use axum::{body::Body, http::Response, routing::get, Router};
     use base64::Engine as _;
@@ -818,6 +848,100 @@ mod tests {
         ] {
             assert!(!is_youtube_video_url(&Url::parse(href).unwrap()), "{href}");
         }
+    }
+
+    #[test]
+    fn canonicalizes_youtube_embed_url_for_oembed() {
+        let oembed_url = youtube_oembed_url(
+            &Url::parse("https://www.youtube.com/embed/dQw4w9WgXcQ?start=10#player").unwrap(),
+        )
+        .unwrap();
+        let params = oembed_url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            params.get("format").map(|value| value.as_ref()),
+            Some("json")
+        );
+        assert_eq!(
+            params.get("url").map(|value| value.as_ref()),
+            Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        );
+    }
+
+    #[tokio::test]
+    async fn youtube_oembed_response_requires_successful_bounded_json() {
+        let valid_json =
+            r#"{"title":"Video title","author_name":"Creator","provider_name":"YouTube"}"#;
+        let response = test_response(
+            Router::new().route(
+                "/valid",
+                get(move || async move {
+                    Response::builder()
+                        .header("content-type", "application/json; charset=UTF-8")
+                        .body(Body::from(valid_json))
+                        .unwrap()
+                }),
+            ),
+            "/valid",
+        )
+        .await;
+        let (metadata, _) = parse_youtube_oembed_response(response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.title, "Video title");
+
+        for response in [
+            test_response(
+                Router::new().route(
+                    "/not-found",
+                    get(|| async {
+                        Response::builder()
+                            .status(404)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap()
+                    }),
+                ),
+                "/not-found",
+            )
+            .await,
+            test_response(
+                Router::new().route(
+                    "/html",
+                    get(|| async {
+                        Response::builder()
+                            .header("content-type", "text/html")
+                            .body(Body::from("<title>Not JSON</title>"))
+                            .unwrap()
+                    }),
+                ),
+                "/html",
+            )
+            .await,
+        ] {
+            assert_eq!(parse_youtube_oembed_response(response).await.unwrap(), None);
+        }
+
+        let oversized = vec![b' '; MAX_OEMBED_FETCH_BYTES + 1];
+        let response = test_response(
+            Router::new().route(
+                "/oversized",
+                get(move || {
+                    let oversized = oversized.clone();
+                    async move {
+                        Response::builder()
+                            .header("content-type", "application/json")
+                            .body(Body::from(oversized))
+                            .unwrap()
+                    }
+                }),
+            ),
+            "/oversized",
+        )
+        .await;
+        assert!(parse_youtube_oembed_response(response).await.is_err());
     }
 
     #[test]
