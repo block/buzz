@@ -613,6 +613,43 @@ fn claude_spawn_uses_the_probed_cli_executable() {
 }
 
 #[test]
+fn claude_spawn_preserves_explicit_cli_executable_override() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cli = temp
+        .path()
+        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
+    let launcher = temp
+        .path()
+        .join(format!("claude-launcher{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&cli, "").expect("write fake cli");
+    std::fs::write(&launcher, "").expect("write fake launcher");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake cli executable");
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake launcher executable");
+    }
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    command.env("CLAUDE_CODE_EXECUTABLE", &launcher);
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    assert!(command.get_envs().any(|(key, value)| {
+        key == "CLAUDE_CODE_EXECUTABLE" && value == Some(launcher.as_os_str())
+    }));
+}
+
+#[test]
 fn codex_spawn_does_not_set_a_claude_executable() {
     let mut command = std::process::Command::new("buzz-acp");
     super::configure_runtime_cli(&mut command, super::known_acp_runtime("codex-acp"));
