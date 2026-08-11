@@ -47,6 +47,15 @@ function report(error: unknown) {
   console.error("terminal session failed", error);
 }
 
+function isSameTerminalContext(left: TerminalContext, right: TerminalContext) {
+  return (
+    left.channelId === right.channelId &&
+    left.threadId === right.threadId &&
+    left.npub === right.npub &&
+    left.relayUrl === right.relayUrl
+  );
+}
+
 export function TerminalBootstrap({
   channelId,
   channelName,
@@ -79,8 +88,8 @@ export function TerminalBootstrap({
     new WeakMap<TerminalConnection, TerminalViewportSize>(),
   );
   const closedSessionKeysRef = React.useRef(new Set<string>());
-  const failedAttachRef = React.useRef(false);
-  const attachRetryRequestedRef = React.useRef(false);
+  const failedAttachContextRef = React.useRef<TerminalContext | null>(null);
+  const attachRetryContextRef = React.useRef<TerminalContext | null>(null);
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   const [available, setAvailable] = React.useState(() => isTauri());
@@ -178,8 +187,10 @@ export function TerminalBootstrap({
 
   const retry = React.useCallback(() => {
     const nextAvailable = isTauri();
-    attachRetryRequestedRef.current = nextAvailable && failedAttachRef.current;
-    failedAttachRef.current = false;
+    attachRetryContextRef.current = nextAvailable
+      ? failedAttachContextRef.current
+      : null;
+    failedAttachContextRef.current = null;
     setAttachError(null);
     setAvailable(nextAvailable);
   }, []);
@@ -270,7 +281,7 @@ export function TerminalBootstrap({
       })
       .catch((error) => {
         if (closedSessionKeysRef.current.delete(key)) return;
-        failedAttachRef.current = true;
+        failedAttachContextRef.current = spawnContext;
         removeSession(key);
         fail(error);
       });
@@ -295,8 +306,9 @@ export function TerminalBootstrap({
 
   React.useEffect(() => {
     if (panel.mode === "closed" || !available || !context) return;
-    if (attachRetryRequestedRef.current) {
-      attachRetryRequestedRef.current = false;
+    const retryContext = attachRetryContextRef.current;
+    if (retryContext && isSameTerminalContext(retryContext, context)) {
+      attachRetryContextRef.current = null;
       createSession();
     } else if (channelSessions.length === 0) createSession();
     else if (!channelSessions.some((session) => session.key === activeKey))

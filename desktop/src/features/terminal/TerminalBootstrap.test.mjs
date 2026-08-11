@@ -762,3 +762,60 @@ test("retry reattaches a failed new tab while another session remains", async ()
   );
   view.unmount();
 });
+
+test("retry waits for the channel whose attachment failed", async () => {
+  const { createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const tree = (channelId, channelName) =>
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId,
+        channelName,
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    );
+  const attachCount = (channelId) =>
+    calls.filter(
+      ({ command, args }) =>
+        command === "terminal_attach" && args.request.channelId === channelId,
+    ).length;
+
+  const view = render(tree("channel-a", "alpha"));
+  await waitFor(() => assert.equal(attachCount("channel-a"), 1));
+
+  attachRejection = "channel-b conpty spawn failed";
+  view.rerender(tree("channel-b", "beta"));
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  assert.equal(attachCount("channel-b"), 1);
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+
+  view.rerender(tree("channel-a", "alpha"));
+  attachRejection = null;
+  await act(async () => {
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+  });
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
+
+  assert.equal(attachCount("channel-a"), 1);
+  assert.equal(
+    calls.filter(({ command }) => command === "terminal_attach").length,
+    failedAttachCount,
+  );
+
+  view.rerender(tree("channel-b", "beta"));
+  await waitFor(() => assert.equal(attachCount("channel-b"), 2));
+  view.unmount();
+});
