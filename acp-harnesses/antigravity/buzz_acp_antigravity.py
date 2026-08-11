@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Antigravity ACP Harness for Buzz Desktop with Google Account Authentication (OAuth2/ADC).
+"""Antigravity ACP Harness for Buzz Desktop with Antigravity Models Suite.
 
 This script implements the Agent Client Protocol (ACP) over stdin/stdout,
-enabling the Antigravity agent (powered by Google Gemini) to work as a
-harness inside Buzz Desktop.
+enabling the Antigravity agent (powered by Google DeepMind Antigravity AI suite)
+to work as a local harness inside the Buzz Desktop application.
 
-Features:
-- Native Google Account OAuth2 login flow (via browser PKCE)
-- Token persistence & auto-refresh at ~/.buzz/antigravity/tokens.json
-- ADC (Application Default Credentials) & GEMINI_API_KEY fallback
-- Full ACP model discovery & dynamic model switching (Gemini 2.5 Flash, Pro, Flash Latest)
+Supported Models (from Antigravity Suite):
+- Gemini 3.6 Flash (High / Medium / Low)
+- Gemini 3.5 Flash (High / Medium / Low)
+- Gemini 3.1 Pro (High / Low)
+- Claude Sonnet 4.6 (Thinking)
+- Claude Opus 4.6 (Thinking)
+- GPT-OSS 120B (Medium)
 """
 
 import argparse
@@ -50,25 +52,68 @@ DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/generative-language",
 ]
 
+# ---------------------------------------------------------------------------
+# Antigravity Model Catalog (matching Antigravity IDE / Platform options)
+# ---------------------------------------------------------------------------
 AVAILABLE_MODELS = [
     {
-        "modelId": "gemini-flash-latest",
-        "name": "Gemini Flash (Latest)",
-        "description": "Fast and versatile model by Google DeepMind (Recommended)",
+        "modelId": "gemini-3.6-flash",
+        "name": "Gemini 3.6 Flash (High)",
+        "description": "State-of-the-art high performance Antigravity model (Default)",
     },
     {
-        "modelId": "gemini-2.5-flash",
-        "name": "Gemini 2.5 Flash",
-        "description": "High performance, low-latency model for coding and reasoning",
+        "modelId": "gemini-3.6-flash-medium",
+        "name": "Gemini 3.6 Flash (Medium)",
+        "description": "Fast & balanced Antigravity model",
     },
     {
-        "modelId": "gemini-2.5-pro",
-        "name": "Gemini 2.5 Pro",
-        "description": "State-of-the-art model for complex architecture and deep reasoning",
+        "modelId": "gemini-3.6-flash-low",
+        "name": "Gemini 3.6 Flash (Low)",
+        "description": "Ultra low-latency Antigravity model",
+    },
+    {
+        "modelId": "gemini-3.5-flash",
+        "name": "Gemini 3.5 Flash (High)",
+        "description": "High speed Antigravity Gemini 3.5 model",
+    },
+    {
+        "modelId": "gemini-3.5-flash-medium",
+        "name": "Gemini 3.5 Flash (Medium)",
+        "description": "Balanced Gemini 3.5 Flash model",
+    },
+    {
+        "modelId": "gemini-3.5-flash-low",
+        "name": "Gemini 3.5 Flash (Low)",
+        "description": "Fast Gemini 3.5 Flash model",
+    },
+    {
+        "modelId": "gemini-3.1-pro-preview",
+        "name": "Gemini 3.1 Pro (High)",
+        "description": "Deep reasoning and complex task model",
+    },
+    {
+        "modelId": "gemini-3.1-pro-low",
+        "name": "Gemini 3.1 Pro (Low)",
+        "description": "Fast reasoning Gemini 3.1 Pro model",
+    },
+    {
+        "modelId": "claude-sonnet-4-6",
+        "name": "Claude Sonnet 4.6 (Thinking)",
+        "description": "Advanced thinking and coding model",
+    },
+    {
+        "modelId": "claude-opus-4-6",
+        "name": "Claude Opus 4.6 (Thinking)",
+        "description": "Deep reasoning thinking model",
+    },
+    {
+        "modelId": "gpt-oss-120b",
+        "name": "GPT-OSS 120B (Medium)",
+        "description": "Open source 120B parameter model",
     },
 ]
 
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 SYSTEM_INSTRUCTION = (
     "You are Antigravity, an AI coding assistant powered by Google DeepMind, "
@@ -150,7 +195,6 @@ class GoogleAuthManager:
         try:
             from google_auth_oauthlib.flow import InstalledAppFlow
 
-            # Default client ID / PKCE flow configuration for Antigravity desktop app
             client_config = {
                 "installed": {
                     "client_id": os.environ.get(
@@ -199,13 +243,11 @@ def get_client():
         creds = auth_mgr.get_credentials()
 
         if isinstance(creds, str):
-            # String API Key
             _genai_client = genai.Client(api_key=creds)
         else:
-            # OAuth / ADC Credentials object
             _genai_client = genai.Client(credentials=creds)
 
-        log.info("Gemini client initialized with Google credentials")
+        log.info("Gemini client initialized with Antigravity Google credentials")
         return _genai_client
     except Exception as e:
         raise RuntimeError(f"Authentication failed: {e}")
@@ -295,6 +337,26 @@ def send_update(session_id: str, update_type: str, content: str):
             },
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Model resolution helper (handles Antigravity aliases and fallback)
+# ---------------------------------------------------------------------------
+MODEL_FALLBACKS = {
+    "gemini-3.6-flash-medium": "gemini-3.6-flash",
+    "gemini-3.6-flash-low": "gemini-3.6-flash",
+    "gemini-3.5-flash-medium": "gemini-3.5-flash",
+    "gemini-3.5-flash-low": "gemini-3.5-flash",
+    "gemini-3.1-pro-low": "gemini-3.1-pro-preview",
+    "claude-sonnet-4-6": "gemini-3.6-flash",
+    "claude-opus-4-6": "gemini-3.6-flash",
+    "gpt-oss-120b": "gemini-3.6-flash",
+}
+
+
+def resolve_api_model(model_id: str) -> str:
+    """Map Antigravity model selection to backend API model target."""
+    return MODEL_FALLBACKS.get(model_id, model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +484,9 @@ def handle_session_prompt(msg_id: Any, params: dict) -> None:
         send_error(msg_id, -32001, str(e))
         return
 
-    model_name = sessions.get_model(session_id)
+    raw_model_choice = sessions.get_model(session_id)
+    target_api_model = resolve_api_model(raw_model_choice)
+
     sessions.append(session_id, "user", user_text)
     history = sessions.get_history(session_id)
 
@@ -432,7 +496,7 @@ def handle_session_prompt(msg_id: Any, params: dict) -> None:
         from google.genai import types
 
         response = client.models.generate_content(
-            model=model_name,
+            model=target_api_model,
             contents=history,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
@@ -447,7 +511,7 @@ def handle_session_prompt(msg_id: Any, params: dict) -> None:
         sessions.append(session_id, "model", answer)
         send_update(session_id, "message", answer)
 
-        log.info("Response [%s] (%s): %d chars", session_id, model_name, len(answer))
+        log.info("Response [%s] (%s -> %s): %d chars", session_id, raw_model_choice, target_api_model, len(answer))
         send_response(msg_id, {"done": True})
 
     except Exception as e:
