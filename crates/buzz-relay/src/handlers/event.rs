@@ -525,7 +525,8 @@ async fn dispatch_persistent_event_inner(
             .iter()
             .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow"));
 
-    if !buzz_core::kind::is_workflow_execution_kind(kind_u32)
+    if !state.config.profile.is_single_node()
+        && !buzz_core::kind::is_workflow_execution_kind(kind_u32)
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
@@ -2003,44 +2004,14 @@ mod tests {
         }
 
         pub(super) async fn test_state_with_redis_url(redis_url: &str) -> Arc<AppState> {
-            let mut config = test_config();
-            config.redis_url = redis_url.to_string();
-            let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-            let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
-            let pubsub = Arc::new(
-                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                    .await
-                    .expect("pubsub manager"),
-            );
-            let audit = buzz_audit::AuditService::new(pool.clone());
-            let auth = buzz_auth::AuthService::new(config.auth.clone());
-            let search = buzz_search::SearchService::new(pool.clone());
-            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-                db.clone(),
-                buzz_workflow::WorkflowConfig::default(),
-            ));
-            let media_storage =
-                buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (state, _audit_shutdown) = AppState::new(
-                config,
-                db,
-                redis_pool,
-                audit,
-                pubsub,
-                auth,
-                search,
-                workflow_engine,
-                Keys::generate(),
-                media_storage,
-            );
-            Arc::new(state)
+            crate::test_support::test_state_with_config(|config| {
+                config.redis_url = redis_url.to_string();
+            })
+            .await
         }
 
         pub(super) async fn test_state() -> Arc<AppState> {
-            test_state_with_redis_url("redis://127.0.0.1:1").await
+            crate::test_support::test_state().await
         }
 
         /// Real-PG, real-Redis state that hands back the audit shutdown handle so

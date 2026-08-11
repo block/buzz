@@ -1192,8 +1192,10 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// ┌─────────────────────────────────────────────────────────┐
 /// │  Listener 1: TCP BUZZ_BIND_ADDR:3000  (app router)   │
 /// │  Listener 2: UDS BUZZ_UDS_PATH        (app, optional)│
-/// │  Listener 3: TCP 0.0.0.0:8080           (health only)  │
-/// │  Listener 4: TCP 0.0.0.0:9102           (metrics, via  │
+/// │  Listener 3: TCP loopback:8080 (single-node health)    │
+/// │              or 0.0.0.0:8080 (production health)       │
+/// │  Listener 4: TCP loopback:9102 (single-node metrics)   │
+/// │              or 0.0.0.0:9102 (production metrics, via  │
 /// │              PrometheusBuilder — already bound)         │
 /// │                                                         │
 /// │  SIGTERM → shutting_down=true → readiness 503           │

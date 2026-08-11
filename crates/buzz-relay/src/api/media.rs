@@ -937,47 +937,18 @@ mod tests {
     }
 
     async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
-        config.require_relay_membership = false;
-        config.redis_url = "redis://127.0.0.1:1".to_string();
-        config.media_uploads_per_minute = 1;
-        config.media_max_concurrent_uploads = 2;
-        config.media_max_concurrent_uploads_per_pubkey = 1;
-
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        let db = buzz_db::Db::from_pool(pool.clone());
-        db.ensure_configured_community("relay.example")
+        let state = crate::test_support::test_state_with_config(|config| {
+            config.media_uploads_per_minute = 1;
+            config.media_max_concurrent_uploads = 2;
+            config.media_max_concurrent_uploads_per_pubkey = 1;
+        })
+        .await;
+        state
+            .db
+            .ensure_configured_community("relay.example")
             .await
             .expect("seed relay.example community for host-bound media tests");
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
-        let pubsub = Arc::new(
-            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
-                .await
-                .expect("pubsub manager"),
-        );
-        let audit = buzz_audit::AuditService::new(pool.clone());
-        let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(pool.clone());
-        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
-            db.clone(),
-            buzz_workflow::WorkflowConfig::default(),
-        ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            nostr::Keys::generate(),
-            media_storage,
-        );
-        Arc::new(state)
+        state
     }
 
     async fn media_get_auth_router() -> axum::Router {

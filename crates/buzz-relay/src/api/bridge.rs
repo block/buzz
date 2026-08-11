@@ -1732,7 +1732,13 @@ async fn handle_bridge_search(
             .search
             .search(&search_query)
             .await
-            .map_err(|e| internal_error(&format!("search error: {e}")))?;
+            .map_err(|e| match e {
+                buzz_search::SearchError::Unsupported => api_error(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "unsupported_feature: search is unavailable in this runtime profile",
+                ),
+                other => internal_error(&format!("search error: {other}")),
+            })?;
 
         // Fetch full events from DB by ID. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.

@@ -702,6 +702,16 @@ jobs:
           done
           cat /tmp/buzz-relay.log
           exit 1
+      - name: SQLite relay handler conformance
+        # Keep every supported relay API, handler, and workflow-sink test on the
+        # embedded backend. PostgreSQL-only cases remain explicitly ignored with
+        # reasoned `SQLite skip:` annotations and run in the PostgreSQL gates below.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and (test(/api::/) or test(/handlers::/) or test(/workflow_sink::/))'
+        env:
+          BUZZ_TEST_BACKEND: sqlite
       - name: Invite security tests
         run: |
           cargo nextest run \

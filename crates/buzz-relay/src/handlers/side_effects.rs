@@ -809,6 +809,9 @@ pub fn emit_live_thread_summary(
     channel_id: Uuid,
     root_id: Vec<u8>,
 ) {
+    if state.config.profile.is_single_node() {
+        return;
+    }
     let tenant = tenant.clone();
     let state = Arc::clone(state);
     tokio::spawn(async move {
@@ -2932,6 +2935,12 @@ pub async fn publish_nip43_membership_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
+    // The production implementation relies on a PostgreSQL advisory lock for
+    // snapshot serialization. Single-node still emits the durable per-member
+    // delta above, but deliberately omits this denormalized list snapshot.
+    if state.config.profile.is_single_node() {
+        return Ok(());
+    }
     let started_at = std::time::Instant::now();
     metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
         .increment(1);
@@ -2990,6 +2999,11 @@ async fn publish_nip43_delta(
     target_pubkey_hex: &str,
     label: &str,
 ) -> anyhow::Result<()> {
+    // These are globally scoped events. Keep local relay membership private to
+    // the loopback process rather than exposing deltas to every subscriber.
+    if state.config.profile.is_single_node() {
+        return Ok(());
+    }
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
 
     let tags = vec![
