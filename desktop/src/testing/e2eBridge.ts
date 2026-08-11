@@ -5703,7 +5703,12 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
   const identity = getIdentity(config);
   if (!identity) {
-    return listMockChannels(config);
+    // Return the mock payload shape: always full channels, no last_messages.
+    return {
+      hash: "mock-hash",
+      channels: listMockChannels(config),
+      last_messages: {},
+    };
   }
 
   // Pure Nostr: query kind:39002 (membership) for our pubkey, extract channel
@@ -5749,7 +5754,7 @@ async function handleGetChannels(config: E2eConfig | undefined) {
   );
 
   // Convert kind:39000 events to the RawChannel shape the frontend expects.
-  return metaEvents
+  const channels = metaEvents
     .map((ev) => {
       const tags = (ev.tags ?? []) as string[][];
       const getTag = (name: string) =>
@@ -5792,6 +5797,8 @@ async function handleGetChannels(config: E2eConfig | undefined) {
       };
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
+
+  return { hash: "mock-hash", channels, last_messages: {} };
 }
 
 async function handleGetProfile(config: E2eConfig | undefined) {
