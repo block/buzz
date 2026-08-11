@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod directory;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -1797,6 +1798,24 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Advertise this agent in the kind:10100 directory so other members'
+    // clients can offer it in @-mention autocomplete. Published after channel
+    // subscriptions so the advertised channel set matches what we listen on.
+    let directory_publisher = directory::DirectoryPublisher {
+        rest: relay.rest_client(),
+        keys: config.keys.clone(),
+        respond_to: config.respond_to.clone(),
+        respond_to_allowlist: config.respond_to_allowlist.iter().cloned().collect(),
+        agent_type: config::normalize_agent_command_identity(&config.agent_command),
+        name: config.session_title.clone(),
+    };
+    let mut directory_task: Option<tokio::task::JoinHandle<()>> =
+        Some(directory_publisher.spawn_publish(
+            subscribed_channel_ids.iter().copied().collect(),
+            "online",
+            Duration::ZERO,
+        ));
+
     if config.lazy_pool {
         emit_runtime_lifecycle(
             observer.as_ref(),
@@ -2262,6 +2281,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 membership_newest_ts.insert(ch, ts);
 
+                                let mut subscribed_set_changed = false;
                                 if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
@@ -2275,12 +2295,13 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            subscribed_set_changed = true;
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
-                                    subscribed_channel_ids.remove(&ch);
+                                    subscribed_set_changed = subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -2322,6 +2343,18 @@ async fn tokio_main() -> Result<()> {
                                             "cleaned up after membership removal"
                                         );
                                     }
+                                }
+                                if subscribed_set_changed {
+                                    // Re-advertise the updated channel set,
+                                    // debounced to absorb membership churn.
+                                    if let Some(handle) = directory_task.take() {
+                                        handle.abort();
+                                    }
+                                    directory_task = Some(directory_publisher.spawn_publish(
+                                        subscribed_channel_ids.iter().copied().collect(),
+                                        "online",
+                                        directory::DIRECTORY_DEBOUNCE,
+                                    ));
                                 }
                                 continue;
                             }
@@ -3050,6 +3083,23 @@ async fn tokio_main() -> Result<()> {
             Ok(Err(e)) => tracing::warn!("failed to set offline presence: {e}"),
             Err(_) => tracing::warn!("offline presence timed out"),
         }
+    }
+
+    // Best-effort: flip the kind:10100 directory record to offline. Status is
+    // cosmetic to mention eligibility (presence stays the liveness signal), so
+    // a crash that leaves "online" behind is acceptable.
+    if let Some(handle) = directory_task.take() {
+        handle.abort();
+    }
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        directory_publisher
+            .publish_once(subscribed_channel_ids.iter().copied().collect(), "offline"),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("offline directory update timed out");
     }
 
     if let Some(handle) = relay_observer_publisher_task.take() {
