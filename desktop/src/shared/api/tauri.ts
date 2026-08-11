@@ -818,7 +818,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,
-        heartbeatPreflight: input.heartbeatPreflight,
       },
     },
   );

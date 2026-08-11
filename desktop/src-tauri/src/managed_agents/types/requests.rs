@@ -6,9 +6,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_heartbeat_preflight_configuration,
-    validate_respond_to_allowlist, AgentDefinition, BackendKind, CatalogSource,
-    HeartbeatPreflightDesignation, RelayMeshConfig, RespondTo, DEFAULT_ACP_COMMAND,
+    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
+    CatalogSource, HeartbeatPreflightDesignation, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -195,19 +194,14 @@ pub struct CreateManagedAgentRequest {
 }
 
 impl CreateManagedAgentRequest {
-    pub(crate) fn validate_heartbeat_preflight(&self, agent_pubkey: &str) -> Result<(), String> {
-        let acp_command = self
-            .acp_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_ACP_COMMAND);
-        validate_heartbeat_preflight_configuration(
-            self.heartbeat_preflight.as_ref(),
-            &self.backend,
-            acp_command,
-            agent_pubkey,
-        )
+    pub(crate) fn reject_create_heartbeat_preflight(&self) -> Result<(), String> {
+        if self.heartbeat_preflight.is_some() {
+            return Err(
+                "heartbeat preflight must be designated after agent creation using the returned pubkey"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 

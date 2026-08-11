@@ -288,7 +288,7 @@ fn relay_mesh_config_round_trips_snake_case() {
 }
 
 #[test]
-fn create_request_deserializes_camel_case_heartbeat_designation() {
+fn create_request_rejects_heartbeat_designation_until_pubkey_exists() {
     let request: CreateManagedAgentRequest = serde_json::from_value(serde_json::json!({
         "name": "kj",
         "heartbeatPreflight": {
@@ -305,6 +305,12 @@ fn create_request_deserializes_camel_case_heartbeat_designation() {
             policy_sha256: "a".repeat(64),
             heartbeat_interval_seconds: 3_600,
         })
+    );
+    assert_eq!(
+        request
+            .reject_create_heartbeat_preflight()
+            .expect_err("create-time designation cannot bind an unknown pubkey"),
+        "heartbeat preflight must be designated after agent creation using the returned pubkey"
     );
 }
 

@@ -368,7 +368,6 @@ export type CreateManagedAgentInput = {
    */
   respondToAllowlist?: string[];
   relayMesh?: RelayMeshConfig;
-  heartbeatPreflight?: HeartbeatPreflightDesignation;
 };
 
 export type CreateManagedAgentResponse = {

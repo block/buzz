@@ -404,58 +404,58 @@ fn validate_path_and_hash_with_ownership(
 
 #[cfg(target_os = "macos")]
 fn reject_macos_extended_acl(path: &Path) -> Result<(), String> {
-    use std::ffi::{c_char, c_int, c_void, CString};
     use std::os::unix::ffi::OsStrExt;
 
-    type Acl = *mut c_void;
-    unsafe extern "C" {
-        fn acl_get_link_np(path: *const c_char, acl_type: c_int) -> Acl;
-        fn acl_get_entry(acl: Acl, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
-        fn acl_free(value: *mut c_void) -> c_int;
-    }
-
-    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
-    const ACL_FIRST_ENTRY: c_int = 0;
-
-    let path_bytes = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| format!("heartbeat harness path {} contains NUL", path.display()))?;
-    // SAFETY: the CString is NUL-terminated and remains alive for the call.
-    let acl = unsafe { acl_get_link_np(path_bytes.as_ptr(), ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let error = std::io::Error::last_os_error();
-        // macOS reports ENOENT when an existing object has no extended ACL.
-        // The caller has already lstat'd this exact component; later identity
-        // and open checks still reject an actual removal/replacement race.
-        if error.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(());
-        }
+    if path
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'\n' | b'\r'))
+    {
         return Err(format!(
-            "cannot inspect extended ACL for heartbeat harness path {}: {}",
-            path.display(),
-            error
-        ));
-    }
-    let mut entry = std::ptr::null_mut();
-    // SAFETY: acl is owned by this function and entry points to writable storage.
-    let result = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
-    let error = std::io::Error::last_os_error();
-    // SAFETY: acl_get_link_np returned this allocation and it has not been freed.
-    let free_result = unsafe { acl_free(acl) };
-    if free_result != 0 {
-        return Err(format!(
-            "cannot release extended ACL for heartbeat harness path {}",
+            "heartbeat harness path {} cannot be inspected safely for extended ACLs",
             path.display()
         ));
     }
-    if result == 0 {
+    let output = Command::new("/bin/ls")
+        .args(["-lde"])
+        .arg(path)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot inspect extended ACL for heartbeat harness path {}: {error}",
+                path.display()
+            )
+        })?;
+    if !output.status.success() || !output.stderr.is_empty() || output.stdout.len() > 65_536 {
+        return Err(format!(
+            "cannot inspect extended ACL for heartbeat harness path {}",
+            path.display()
+        ));
+    }
+    let report = std::str::from_utf8(&output.stdout).map_err(|error| {
+        format!(
+            "cannot decode extended ACL report for heartbeat harness path {}: {error}",
+            path.display()
+        )
+    })?;
+    let mut lines = report.lines();
+    let summary = lines.next().ok_or_else(|| {
+        format!(
+            "extended ACL report for heartbeat harness path {} is empty",
+            path.display()
+        )
+    })?;
+    let acl_marker = summary
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|permissions| permissions.ends_with('+'));
+    if acl_marker || lines.next().is_some() {
         return Err(format!(
             "heartbeat harness path component {} has an extended ACL",
-            path.display()
-        ));
-    }
-    if error.raw_os_error() != Some(libc::EINVAL) {
-        return Err(format!(
-            "cannot enumerate extended ACL for heartbeat harness path {}: {error}",
             path.display()
         ));
     }

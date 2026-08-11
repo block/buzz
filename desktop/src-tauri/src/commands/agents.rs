@@ -570,6 +570,7 @@ pub async fn create_managed_agent(
     if name.is_empty() {
         return Err("agent name is required".to_string());
     }
+    input.reject_create_heartbeat_preflight()?;
     let requested_persona_id = input
         .persona_id
         .as_deref()
@@ -650,7 +651,6 @@ pub async fn create_managed_agent(
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
-    input.validate_heartbeat_preflight(&pubkey)?;
     if let BackendKind::Provider { ref config, ref id } = input.backend {
         validate_provider_config(config)?;
         // Validate via discovered candidates — not raw resolve_command.
@@ -911,7 +911,7 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
-            heartbeat_preflight: input.heartbeat_preflight.clone(),
+            heartbeat_preflight: None,
         };
 
         records.push(record);
