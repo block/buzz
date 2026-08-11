@@ -45,6 +45,9 @@ export const MODEL_NOT_FOUND_COPY =
 export const CLI_ACP_INTERNAL_ERROR_COPY =
   "The agent's harness reported an internal error. For Codex agents this can mean the configured model isn't supported by your installed codex-acp — check the model in `~/.codex/config.toml` or upgrade the adapter (`brew upgrade codex-acp`).";
 
+export const CODEX_TASK_LOAD_FAILED_COPY =
+  "The Codex task did not load before the 60-second timeout. It may be busy in Codex Desktop, or the shared app-server may be unresponsive. Wait for the task to become idle, then retry.";
+
 const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
 /** Bare form of the standard JSON-RPC -32603 message (after stripping the ACP wrapper prefix). */
 const BARE_INTERNAL_ERROR = "Internal error";
@@ -81,6 +84,8 @@ export function friendlyAgentLastError(
         return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
+      case -32004:
+        return { severity: "generic", copy: CODEX_TASK_LOAD_FAILED_COPY };
       case -32603: {
         // Standard JSON-RPC "Internal error" — emitted by external harnesses
         // (e.g. codex-acp) when the configured model is unsupported. Only

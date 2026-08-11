@@ -2,12 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CODEX_TASK_LOAD_FAILED_COPY,
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
   CLI_ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
+
+test("maps Codex task load timeouts to actionable retry guidance", () => {
+  assert.deepEqual(
+    friendlyAgentLastError(
+      "Codex task load failed: Request timeout — agent did not respond within 60s",
+      -32004,
+    ),
+    {
+      severity: "generic",
+      copy: CODEX_TASK_LOAD_FAILED_COPY,
+    },
+  );
+});
 
 test("null lastError → null", () => {
   assert.equal(friendlyAgentLastError(null), null);

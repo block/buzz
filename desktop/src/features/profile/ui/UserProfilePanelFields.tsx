@@ -12,6 +12,7 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
+import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -432,9 +433,12 @@ export function buildOwnerFields({
   }
 
   if (managedAgent?.lastError) {
+    const displayError =
+      friendlyAgentLastError(managedAgent.lastError, managedAgent.lastErrorCode)
+        ?.copy ?? managedAgent.lastError;
     fields.push({
       copyValue: managedAgent.lastError,
-      displayValue: managedAgent.lastError,
+      displayValue: displayError,
       icon: Activity,
       label: "Last error",
       testId: "user-profile-last-error",

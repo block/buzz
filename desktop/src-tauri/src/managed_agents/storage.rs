@@ -910,6 +910,13 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
                 code: Some(-32002),
             });
         }
+        if let Some(detail) = line.strip_prefix("Error: failed to load identity-bound Codex task:")
+        {
+            return Some(AgentLogError {
+                message: format!("Codex task load failed: {}", detail.trim()),
+                code: Some(-32004),
+            });
+        }
         None
     })
 }

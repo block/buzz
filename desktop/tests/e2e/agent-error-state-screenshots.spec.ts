@@ -38,6 +38,15 @@ const GENERIC_ERROR_AGENT = {
   lastErrorCode: null,
 };
 
+const CODEX_TASK_LOAD_ERROR_AGENT = {
+  pubkey: TEST_IDENTITIES.charlie.pubkey,
+  name: "Busy Codex Task",
+  status: "stopped" as const,
+  lastError:
+    "Codex task load failed: request timed out after 60 seconds while loading task",
+  lastErrorCode: -32004,
+};
+
 async function gotoAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
@@ -136,5 +145,35 @@ test.describe("agent error state screenshots", () => {
     await section.screenshot({
       path: `${SHOTS}/03-agents-section-both-errors.png`,
     });
+  });
+
+  test("04-codex-task-load-failure-profile", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [CODEX_TASK_LOAD_ERROR_AGENT],
+    });
+
+    await gotoAgentsView(page);
+    await page
+      .getByTestId(`agent-runtime-error-${CODEX_TASK_LOAD_ERROR_AGENT.pubkey}`)
+      .click();
+
+    const failure = page.getByTestId("user-profile-agent-failure");
+    await expect(failure).toBeVisible({ timeout: 10_000 });
+    await expect(failure).toContainText("Agent stopped unexpectedly");
+    await expect(failure).toContainText(
+      "The Codex task did not load before the 60-second timeout",
+    );
+    const retry = page.getByRole("button", {
+      name: `Retry ${CODEX_TASK_LOAD_ERROR_AGENT.name}`,
+    });
+    await expect(retry).toBeVisible();
+    await waitForAnimations(page);
+
+    await failure.screenshot({
+      path: `${SHOTS}/04-codex-task-load-failure-profile.png`,
+    });
+
+    await retry.click();
+    await expect(failure).toBeHidden();
   });
 });

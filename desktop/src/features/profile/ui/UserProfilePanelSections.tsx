@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  RefreshCw,
   UserPlus,
 } from "lucide-react";
 
@@ -51,6 +52,7 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -272,6 +274,11 @@ export function ProfileSummaryView({
     diagnosticsError: diagnosticsErrorField !== undefined,
     managedAgent,
   });
+  const stoppedWithError =
+    managedAgent?.status === "stopped" && diagnosticsErrorField !== undefined;
+  const stoppedAt = managedAgent?.lastStoppedAt
+    ? new Date(managedAgent.lastStoppedAt)
+    : null;
 
   const tabs = React.useMemo(() => {
     const items: Array<{
@@ -385,6 +392,42 @@ export function ProfileSummaryView({
           pubkey={pubkey}
           unfollowMutation={unfollowMutation}
         />
+      ) : null}
+
+      {stoppedWithError ? (
+        <Alert
+          className="mx-auto w-full max-w-xl"
+          data-testid="user-profile-agent-failure"
+          variant="destructive"
+        >
+          <CircleAlert className="h-4 w-4" />
+          <div className="min-w-0 flex-1">
+            <AlertTitle>Agent stopped unexpectedly</AlertTitle>
+            <AlertDescription className="wrap-break-word">
+              {diagnosticsErrorField.displayValue}
+            </AlertDescription>
+            {stoppedAt && !Number.isNaN(stoppedAt.getTime()) ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Last attempt:{" "}
+                <time dateTime={managedAgent.lastStoppedAt ?? ""}>
+                  {stoppedAt.toLocaleString()}
+                </time>
+              </p>
+            ) : null}
+          </div>
+          <Button
+            aria-label={`Retry ${managedAgent.name}`}
+            className="shrink-0"
+            disabled={isAgentActionPending}
+            onClick={handleAgentPrimaryAction}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Retry
+          </Button>
+        </Alert>
       ) : null}
 
       {/* Tab-independent restart badge — visible on every tab so the user

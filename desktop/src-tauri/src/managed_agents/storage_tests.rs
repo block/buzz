@@ -388,6 +388,19 @@ fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
 }
 
 #[test]
+fn meaningful_agent_error_from_log_promotes_codex_task_load_timeout() {
+    let file = write_log(
+        "noise\nError: failed to load identity-bound Codex task: Request timeout — agent did not respond within 60s\n",
+    );
+    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
+    assert_eq!(
+        result.message,
+        "Codex task load failed: Request timeout — agent did not respond within 60s"
+    );
+    assert_eq!(result.code, Some(-32004));
+}
+
+#[test]
 fn strips_ansi_from_typical_tracing_line() {
     let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m starting";
     assert_eq!(
