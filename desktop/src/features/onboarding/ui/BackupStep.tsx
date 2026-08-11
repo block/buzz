@@ -1,4 +1,13 @@
-import { Check, Copy, Eye, EyeOff, Info, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  Info,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import * as React from "react";
 
@@ -9,6 +18,7 @@ import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { Button } from "@/shared/ui/button";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { Card } from "@/shared/ui/card";
+import { Checkbox } from "@/shared/ui/checkbox";
 import { Spinner } from "@/shared/ui/spinner";
 import {
   ONBOARDING_PRIMARY_CTA_CLASS,
@@ -19,7 +29,10 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
-import { ONBOARDING_KEY_TEXT_CLASS } from "./NsecMaskedDisplay";
+import {
+  NsecMaskedDisplay,
+  ONBOARDING_KEY_TEXT_CLASS,
+} from "./NsecMaskedDisplay";
 
 /**
  * How long the "Creating your identity key" loader holds the stage before the
@@ -418,5 +431,189 @@ export function BackupStep({
         </Button>
       </OnboardingFooter>
     </OnboardingSlideTransition>
+  );
+}
+
+type IdentityReplacementBackupStepProps = {
+  onCancel: () => void;
+  onContinue: () => void;
+};
+
+export function identityReplacementBackupCanContinue({
+  hasConfirmedBackup,
+  hasInteractedWithKey,
+  isLoading,
+  loadFailed,
+}: {
+  hasConfirmedBackup: boolean;
+  hasInteractedWithKey: boolean;
+  isLoading: boolean;
+  loadFailed: boolean;
+}): boolean {
+  return (
+    hasConfirmedBackup && hasInteractedWithKey && !isLoading && !loadFailed
+  );
+}
+
+/**
+ * Backup gate used before a bound handoff replaces the active local identity.
+ * The user must reveal or copy the displaced key before confirming the backup.
+ */
+export function IdentityReplacementBackupStep({
+  onCancel,
+  onContinue,
+}: IdentityReplacementBackupStepProps) {
+  const [nsec, setNsec] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [hasInteractedWithKey, setHasInteractedWithKey] = React.useState(false);
+  const [hasConfirmedBackup, setHasConfirmedBackup] = React.useState(false);
+  const cancelledRef = React.useRef(false);
+  const headingRef = React.useRef<HTMLHeadingElement>(null);
+
+  React.useLayoutEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
+  const loadNsec = React.useCallback(() => {
+    setIsLoading(true);
+    setLoadError(null);
+    setNsec(null);
+    setHasInteractedWithKey(false);
+    setHasConfirmedBackup(false);
+    return getNsec()
+      .then((value) => {
+        if (!cancelledRef.current) setNsec(value);
+      })
+      .catch(() => {
+        if (!cancelledRef.current) {
+          setLoadError("unavailable");
+        }
+      })
+      .finally(() => {
+        if (!cancelledRef.current) setIsLoading(false);
+      });
+  }, []);
+
+  React.useEffect(() => {
+    cancelledRef.current = false;
+    void loadNsec();
+    return () => {
+      cancelledRef.current = true;
+      setNsec(null);
+    };
+  }, [loadNsec]);
+
+  const canContinue = identityReplacementBackupCanContinue({
+    hasConfirmedBackup,
+    hasInteractedWithKey,
+    isLoading,
+    loadFailed: loadError !== null,
+  });
+
+  return (
+    <div
+      className="flex w-full flex-col items-center"
+      data-testid="identity-handoff-mismatch"
+    >
+      <div aria-live="assertive" className="max-w-[500px] text-center">
+        <AlertTriangle
+          aria-hidden="true"
+          className="mx-auto h-10 w-10 text-destructive"
+        />
+        <h1
+          className="mt-5 text-title font-normal outline-none"
+          ref={headingRef}
+          tabIndex={-1}
+        >
+          This invite belongs to your saved identity
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-foreground/80">
+          Buzz is using a different identity on this device. Importing the key
+          you saved from Impel will replace this device’s current identity.
+        </p>
+      </div>
+
+      <Card className="mt-8 w-full px-8 py-6" variant="textured">
+        <p className="mb-4 text-left text-sm font-medium text-foreground">
+          Back up this device’s current key first
+        </p>
+        {isLoading ? (
+          <div className="flex items-center justify-center gap-2 py-6 text-sm text-foreground/70">
+            <Spinner className="h-4 w-4 border-2" />
+            Loading your current private key…
+          </div>
+        ) : loadError ? (
+          <div className="space-y-3 text-left">
+            <p
+              className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+              data-testid="identity-handoff-backup-error"
+            >
+              Buzz couldn’t load this device’s private key. Nothing was
+              replaced. Try loading it again before you continue.
+            </p>
+            <Button
+              className="h-8 gap-1.5 text-sm"
+              data-testid="identity-handoff-backup-retry"
+              onClick={() => void loadNsec()}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+              Try again
+            </Button>
+          </div>
+        ) : nsec ? (
+          <NsecMaskedDisplay
+            nsec={nsec}
+            onKeyInteraction={() => setHasInteractedWithKey(true)}
+            variant="bare"
+          />
+        ) : null}
+      </Card>
+
+      <label
+        className="mt-5 flex cursor-pointer items-start gap-2.5 text-left text-sm has-[button:disabled]:cursor-not-allowed has-[button:disabled]:opacity-60"
+        htmlFor="identity-handoff-backup-confirm"
+      >
+        <Checkbox
+          checked={hasConfirmedBackup}
+          className="mt-0.5"
+          data-testid="identity-handoff-backup-confirm"
+          disabled={!hasInteractedWithKey || loadError !== null || isLoading}
+          id="identity-handoff-backup-confirm"
+          onCheckedChange={(checked) => setHasConfirmedBackup(checked === true)}
+        />
+        <span>
+          I have saved this device’s private key somewhere safe.
+          {!hasInteractedWithKey && loadError === null ? (
+            <span className="block text-xs text-muted-foreground">
+              Reveal or copy the key above first.
+            </span>
+          ) : null}
+        </span>
+      </label>
+
+      <div className="mt-7 flex justify-center gap-3">
+        <Button
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
+          data-testid="identity-handoff-continue-import"
+          disabled={!canContinue}
+          onClick={onContinue}
+          type="button"
+        >
+          Import saved identity
+        </Button>
+        <Button
+          className="rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+          onClick={onCancel}
+          type="button"
+          variant="ghost"
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }

@@ -291,10 +291,12 @@ function AppReady({
 
 function CommunityApp({
   currentPubkey,
+  onIdentityImported,
   onBackToMachineConfig,
   sharedIdentity,
 }: {
   currentPubkey: string | null;
+  onIdentityImported: (pubkey: string) => void;
   onBackToMachineConfig: () => void;
   sharedIdentity: boolean;
 }) {
@@ -594,6 +596,7 @@ function CommunityApp({
           <CommunityOnboardingFlow
             onCancel={handleCommunityOnboardingCancel}
             onConnect={handleCommunityOnboardingConnect}
+            onIdentityImported={onIdentityImported}
           />
         </div>
       ) : null}
@@ -633,6 +636,13 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       setPostOnboardingNav(nav);
     },
     [],
+  );
+  const continueWithImportedIdentity = useCallback(
+    (pubkey: string) => {
+      machine.continueWithIdentity(pubkey);
+      machine.complete(pubkey);
+    },
+    [machine.complete, machine.continueWithIdentity],
   );
 
   // Execute the pending navigation once the RouterProvider is mounted (i.e.
@@ -686,6 +696,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return (
       <CommunityApp
         currentPubkey={machine.currentPubkey}
+        key={machine.currentPubkey ?? "anonymous"}
+        onIdentityImported={continueWithImportedIdentity}
         onBackToMachineConfig={reopenMachineConfig}
         sharedIdentity={sharedIdentity}
       />

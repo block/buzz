@@ -7,11 +7,16 @@ import {
   loadCommunityOnboardingTransaction,
   markCommunityOnboardingComplete,
   resolveProfileCheckAction,
+  saveCommunityOnboardingTransaction,
   shouldSkipCommunityOnboarding,
   startCommunityOnboarding,
   updateCommunityOnboardingTransaction,
   updateCurrentCommunityOnboardingTransaction,
 } from "./communityOnboarding.tsx";
+import {
+  clearIdentityHandoffVault,
+  getIdentityHandoff,
+} from "./identityHandoffVault.ts";
 
 function createMemoryStorage(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -26,6 +31,8 @@ function createMemoryStorage(initial = {}) {
     },
   };
 }
+
+test.beforeEach(() => clearIdentityHandoffVault());
 
 test("invite onboarding starts at claim and normalizes its relay", () => {
   const storage = createMemoryStorage();
@@ -45,6 +52,182 @@ test("invite onboarding starts at claim and normalizes its relay", () => {
   assert.equal(persisted?.id, transaction.id);
   assert.equal(persisted?.stage, transaction.stage);
   assert.equal(persisted?.relayUrl, transaction.relayUrl);
+});
+
+test("v3 onboarding checks policy and ignores any deep-link receipt", () => {
+  const storage = createMemoryStorage();
+  const code = `v3.${"a".repeat(64)}`;
+  const transaction = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: code,
+      policyReceipt: "policy-receipt",
+    },
+    storage,
+    new Date("2026-08-11T00:00:00Z"),
+  );
+
+  assert.equal(transaction.stage, "policy-checking");
+  assert.equal(transaction.inviteProtocol, "identity-handoff-v3");
+  assert.equal(transaction.inviteCode, undefined);
+  assert.equal(transaction.policyReceipt, undefined);
+  assert.deepEqual(getIdentityHandoff(transaction.id), {
+    code,
+  });
+
+  const persisted = storage.getItem("buzz-community-onboarding-transaction.v1");
+  assert.equal(persisted.includes(code), false);
+  assert.equal(persisted.includes("policy-receipt"), false);
+});
+
+test("v3 persistence is redacted by construction", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: `v3.${"a".repeat(64)}`,
+    },
+    storage,
+  );
+  transaction.inviteCode = "must-not-persist";
+  transaction.policyReceipt = "must-not-persist";
+  saveCommunityOnboardingTransaction(transaction, storage);
+
+  const persisted = storage.getItem("buzz-community-onboarding-transaction.v1");
+  assert.equal(persisted.includes("must-not-persist"), false);
+});
+
+test("reserved malformed v3 inputs are rejected before persistence", () => {
+  const storage = createMemoryStorage();
+  assert.throws(
+    () =>
+      startCommunityOnboarding(
+        {
+          source: "deep-link-join",
+          relayUrl: "wss://relay.example",
+          inviteCode: `v3.${"A".repeat(64)}`,
+        },
+        storage,
+      ),
+    /Invalid identity handoff link/,
+  );
+  assert.equal(storage.length, 0);
+});
+
+for (const stage of [
+  "policy-checking",
+  "policy-consent",
+  "claiming",
+  "identity-mismatch",
+]) {
+  test(`v3 restart from ${stage} becomes terminal instead of resuming a credential`, () => {
+    const storage = createMemoryStorage();
+    const transaction = startCommunityOnboarding(
+      {
+        source: "deep-link-join",
+        relayUrl: "wss://relay.example",
+        inviteCode: `v3.${"a".repeat(64)}`,
+      },
+      storage,
+    );
+    saveCommunityOnboardingTransaction({ ...transaction, stage }, storage);
+
+    clearIdentityHandoffVault();
+    const restarted = loadCommunityOnboardingTransaction(storage);
+    assert.equal(restarted?.id, transaction.id);
+    assert.equal(restarted?.stage, "handoff-terminal");
+    assert.equal(restarted?.handoffTerminalReason, "restart");
+  });
+}
+
+test("v3 success and cancel destroy the in-memory credential", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: `v3.${"a".repeat(64)}`,
+    },
+    storage,
+  );
+
+  updateCommunityOnboardingTransaction(
+    transaction,
+    { stage: "connecting" },
+    storage,
+  );
+  assert.equal(getIdentityHandoff(transaction.id), null);
+
+  const replacement = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://other.example",
+      inviteCode: `v3.${"b".repeat(64)}`,
+    },
+    storage,
+  );
+  clearCommunityOnboardingTransaction(storage);
+  assert.equal(getIdentityHandoff(replacement.id), null);
+});
+
+test("a fresh same-relay v3 link replaces the transaction and fences stale work", () => {
+  const storage = createMemoryStorage();
+  const first = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: `v3.${"a".repeat(64)}`,
+    },
+    storage,
+  );
+  const secondCode = `v3.${"b".repeat(64)}`;
+  const second = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: secondCode,
+    },
+    storage,
+  );
+
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.stage, "policy-checking");
+  assert.equal(getIdentityHandoff(first.id), null);
+  assert.deepEqual(getIdentityHandoff(second.id), { code: secondCode });
+});
+
+test("a generic same-relay invite replaces v3 state without changing its wire format", () => {
+  const storage = createMemoryStorage();
+  const handoff = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: `v3.${"a".repeat(64)}`,
+    },
+    storage,
+  );
+  const generic = startCommunityOnboarding(
+    {
+      source: "deep-link-join",
+      relayUrl: "wss://relay.example",
+      inviteCode: "generic-code",
+      policyReceipt: "generic-receipt",
+    },
+    storage,
+  );
+
+  assert.equal(generic.id, handoff.id);
+  assert.equal(generic.stage, "claiming");
+  assert.equal(generic.inviteProtocol, undefined);
+  assert.equal(generic.inviteCode, "generic-code");
+  assert.equal(generic.policyReceipt, "generic-receipt");
+  assert.equal(getIdentityHandoff(handoff.id), null);
+  assert.equal(
+    storage.getItem("buzz-community-onboarding-transaction.v1"),
+    JSON.stringify(generic),
+  );
 });
 
 test("non-invite onboarding starts at connection", () => {

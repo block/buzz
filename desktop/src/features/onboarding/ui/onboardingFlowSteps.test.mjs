@@ -6,7 +6,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { backupNextDisabled } from "./BackupStep.tsx";
+import {
+  backupNextDisabled,
+  identityReplacementBackupCanContinue,
+} from "./BackupStep.tsx";
 
 // Mirrors the activeSteps array in OnboardingFlow.tsx. The relay-scoped flow
 // owns only the community profile: profile → avatar. key-import is normalised
@@ -58,6 +61,39 @@ test("currentStep_falls_back_to_1_for_pages_outside_the_step_list", () => {
 
 test("backup_next_is_always_enabled", () => {
   assert.equal(backupNextDisabled(), false);
+});
+
+test("identity replacement stays blocked when backup retrieval fails", () => {
+  assert.equal(
+    identityReplacementBackupCanContinue({
+      hasConfirmedBackup: true,
+      hasInteractedWithKey: false,
+      isLoading: false,
+      loadFailed: true,
+    }),
+    false,
+  );
+});
+
+test("identity replacement requires key interaction and explicit confirmation", () => {
+  assert.equal(
+    identityReplacementBackupCanContinue({
+      hasConfirmedBackup: true,
+      hasInteractedWithKey: true,
+      isLoading: false,
+      loadFailed: false,
+    }),
+    true,
+  );
+  assert.equal(
+    identityReplacementBackupCanContinue({
+      hasConfirmedBackup: false,
+      hasInteractedWithKey: true,
+      isLoading: false,
+      loadFailed: false,
+    }),
+    false,
+  );
 });
 
 // ---------------------------------------------------------------------------

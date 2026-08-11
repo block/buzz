@@ -155,12 +155,24 @@ fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
         }
     }
     let code = code?;
+    if code.starts_with("v3.") && !is_valid_identity_handoff_code(&code) {
+        return None;
+    }
     let relay_url = parse_websocket_relay_param(url)?;
     Some(serde_json::json!({
         "relayUrl": relay_url,
         "code": code,
         "policyReceipt": policy_receipt,
     }))
+}
+
+fn is_valid_identity_handoff_code(code: &str) -> bool {
+    code.strip_prefix("v3.").is_some_and(|secret| {
+        secret.len() == 64
+            && secret
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -324,7 +336,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             // the relay's /invite/<code> landing page. The frontend claims the
             // invite against the relay's HTTP API, then adds the workspace.
             let Some(payload) = parse_join_deep_link(&url) else {
-                eprintln!("buzz-desktop: join deep link missing/invalid relay or code: {url_str}");
+                eprintln!("buzz-desktop: join deep link missing/invalid relay or code");
                 return;
             };
             activate_main_window(app);
@@ -544,6 +556,24 @@ mod tests {
         .unwrap();
         let payload = parse_join_deep_link(&url).expect("required params present");
         assert_eq!(payload["policyReceipt"], "receipt.value");
+    }
+
+    #[test]
+    fn parse_join_deep_link_accepts_only_canonical_v3_codes() {
+        let canonical = format!(
+            "buzz://join?relay=wss%3A%2F%2Frelay.example&code=v3.{}",
+            "a".repeat(64)
+        );
+        assert!(parse_join_deep_link(&Url::parse(&canonical).unwrap()).is_some());
+
+        for code in [
+            format!("v3.{}", "A".repeat(64)),
+            format!("v3.{}", "a".repeat(63)),
+            format!("v3.{}", "g".repeat(64)),
+        ] {
+            let raw = format!("buzz://join?relay=wss%3A%2F%2Frelay.example&code={code}");
+            assert!(parse_join_deep_link(&Url::parse(&raw).unwrap()).is_none());
+        }
     }
 
     #[test]

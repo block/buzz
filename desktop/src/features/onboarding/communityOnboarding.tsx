@@ -4,6 +4,16 @@ import {
 } from "@/features/communities/communityStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import type { Profile } from "@/shared/api/types";
+import {
+  destroyIdentityHandoff,
+  getIdentityHandoff,
+  storeIdentityHandoff,
+} from "@/features/onboarding/identityHandoffVault";
+import {
+  IDENTITY_HANDOFF_PROTOCOL,
+  isIdentityHandoffCode,
+  type IdentityHandoffTerminalReason,
+} from "@/shared/api/inviteHelpers";
 
 const STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 
@@ -15,7 +25,11 @@ export type CommunityOnboardingSource =
   | "deep-link-join";
 
 export type CommunityOnboardingStage =
+  | "policy-checking"
+  | "policy-consent"
   | "claiming"
+  | "identity-mismatch"
+  | "handoff-terminal"
   | "connecting"
   | "profile"
   | "team-intro"
@@ -46,6 +60,9 @@ export type CommunityOnboardingTransaction = {
    * join policy admit the claim.
    */
   policyReceipt?: string;
+  /** Non-secret marker; the v3 code and receipt remain in process memory. */
+  inviteProtocol?: typeof IDENTITY_HANDOFF_PROTOCOL;
+  handoffTerminalReason?: IdentityHandoffTerminalReason | "restart";
   communityId?: string;
   previousCommunityId?: string;
   addedCommunity?: boolean;
@@ -68,6 +85,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "communityName"
     | "error"
     | "acknowledged"
+    | "handoffTerminalReason"
   >
 >;
 
@@ -106,14 +124,55 @@ function isTransaction(
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
     [
+      "policy-checking",
+      "policy-consent",
       "claiming",
+      "identity-mismatch",
+      "handoff-terminal",
       "connecting",
       "profile",
       "team-intro",
       "finalizing",
       "entering",
-    ].includes(transaction.stage ?? "")
+    ].includes(transaction.stage ?? "") &&
+    (transaction.inviteProtocol === undefined ||
+      transaction.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL) &&
+    !(
+      transaction.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL &&
+      (transaction.inviteCode !== undefined ||
+        transaction.policyReceipt !== undefined)
+    )
   );
+}
+
+function serializeCommunityOnboardingTransaction(
+  transaction: CommunityOnboardingTransaction,
+): string {
+  if (transaction.inviteProtocol !== IDENTITY_HANDOFF_PROTOCOL) {
+    return JSON.stringify(transaction);
+  }
+
+  // Construct the durable v3 projection field-by-field. Credential fields
+  // are intentionally absent rather than copied and deleted afterward.
+  return JSON.stringify({
+    id: transaction.id,
+    source: transaction.source,
+    firstCommunityPage: transaction.firstCommunityPage,
+    stage: transaction.stage,
+    relayUrl: transaction.relayUrl,
+    communityName: transaction.communityName,
+    token: transaction.token,
+    reposDir: transaction.reposDir,
+    inviteProtocol: transaction.inviteProtocol,
+    handoffTerminalReason: transaction.handoffTerminalReason,
+    communityId: transaction.communityId,
+    previousCommunityId: transaction.previousCommunityId,
+    addedCommunity: transaction.addedCommunity,
+    createdAt: transaction.createdAt,
+    updatedAt: transaction.updatedAt,
+    error: transaction.error,
+    acknowledged: transaction.acknowledged,
+  });
 }
 
 export function loadCommunityOnboardingTransaction(
@@ -123,7 +182,25 @@ export function loadCommunityOnboardingTransaction(
     const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    return isTransaction(parsed) ? parsed : null;
+    if (!isTransaction(parsed)) return null;
+    if (
+      parsed.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL &&
+      [
+        "policy-checking",
+        "policy-consent",
+        "claiming",
+        "identity-mismatch",
+      ].includes(parsed.stage) &&
+      !getIdentityHandoff(parsed.id)
+    ) {
+      return {
+        ...parsed,
+        stage: "handoff-terminal",
+        handoffTerminalReason: "restart",
+        error: undefined,
+      };
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -133,16 +210,19 @@ export function saveCommunityOnboardingTransaction(
   transaction: CommunityOnboardingTransaction,
   storage: Storage = localStorage,
 ): void {
+  const serialized = serializeCommunityOnboardingTransaction(transaction);
   if (typeof localStorage !== "undefined" && storage === localStorage) {
-    setLocalStorageItemWithRecovery(STORAGE_KEY, JSON.stringify(transaction));
+    setLocalStorageItemWithRecovery(STORAGE_KEY, serialized);
   } else {
-    storage.setItem(STORAGE_KEY, JSON.stringify(transaction));
+    storage.setItem(STORAGE_KEY, serialized);
   }
 }
 
 export function clearCommunityOnboardingTransaction(
   storage: Storage = localStorage,
 ): void {
+  const transaction = loadCommunityOnboardingTransaction(storage);
+  if (transaction) destroyIdentityHandoff(transaction.id);
   storage.removeItem(STORAGE_KEY);
 }
 
@@ -153,12 +233,33 @@ export function startCommunityOnboarding(
 ): CommunityOnboardingTransaction {
   const relayUrl = canonicalRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
-  if (existing?.relayUrl === relayUrl) {
+  const inviteCode = input.inviteCode?.trim();
+  if (inviteCode?.startsWith("v3.") && !isIdentityHandoffCode(inviteCode)) {
+    throw new Error("Invalid identity handoff link.");
+  }
+  const isIdentityHandoff = Boolean(
+    inviteCode && isIdentityHandoffCode(inviteCode),
+  );
+  if (existing?.relayUrl === relayUrl && !isIdentityHandoff) {
+    const replacingIdentityHandoff =
+      existing.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL;
+    if (replacingIdentityHandoff) destroyIdentityHandoff(existing.id);
     const updated = {
       ...existing,
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,
+      inviteProtocol: replacingIdentityHandoff
+        ? undefined
+        : existing.inviteProtocol,
+      handoffTerminalReason: replacingIdentityHandoff
+        ? undefined
+        : existing.handoffTerminalReason,
+      stage: replacingIdentityHandoff
+        ? inviteCode
+          ? ("claiming" as const)
+          : ("connecting" as const)
+        : existing.stage,
       communityName: input.communityName?.trim() || existing.communityName,
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
@@ -173,18 +274,28 @@ export function startCommunityOnboarding(
     return updated;
   }
 
+  if (existing) destroyIdentityHandoff(existing.id);
   const timestamp = now.toISOString();
+  const id = crypto.randomUUID();
+  if (isIdentityHandoff && inviteCode) {
+    storeIdentityHandoff(id, { code: inviteCode });
+  }
   const transaction: CommunityOnboardingTransaction = {
-    id: crypto.randomUUID(),
+    id,
     source: input.source,
     firstCommunityPage: input.firstCommunityPage,
-    stage: input.inviteCode?.trim() ? "claiming" : "connecting",
+    stage: isIdentityHandoff
+      ? "policy-checking"
+      : inviteCode
+        ? "claiming"
+        : "connecting",
     relayUrl,
-    inviteCode: input.inviteCode?.trim() || undefined,
+    inviteCode: isIdentityHandoff ? undefined : inviteCode || undefined,
+    inviteProtocol: isIdentityHandoff ? IDENTITY_HANDOFF_PROTOCOL : undefined,
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
-    policyReceipt: input.policyReceipt,
+    policyReceipt: isIdentityHandoff ? undefined : input.policyReceipt,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -199,6 +310,12 @@ export function updateCommunityOnboardingTransaction(
   now = new Date(),
 ): CommunityOnboardingTransaction {
   const updated = { ...transaction, ...patch, updatedAt: now.toISOString() };
+  if (
+    transaction.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL &&
+    (updated.stage === "connecting" || updated.stage === "handoff-terminal")
+  ) {
+    destroyIdentityHandoff(transaction.id);
+  }
   saveCommunityOnboardingTransaction(updated, storage);
   return updated;
 }

@@ -197,6 +197,8 @@ type E2eConfig = {
       age_attestation_required: boolean;
       version: string;
     } | null;
+    /** Sequenced native discovery failures; null entries allow the configured policy through. */
+    joinPolicyErrors?: (string | null)[];
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
@@ -7649,6 +7651,7 @@ let mockGlobalAgentConfig: {
 let nsecCallCount = 0;
 let backupVerificationCallCount = 0;
 let backupSaveCallCount = 0;
+let joinPolicyCallCount = 0;
 
 const MOCK_NCRYPTSEC =
   "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
@@ -11232,8 +11235,16 @@ export function maybeInstallE2eTauriMocks() {
         // seeded empty/default path as valid so Add Community can continue to
         // relay-policy discovery.
         return;
-      case "fetch_join_policy":
+      case "fetch_join_policy": {
+        const errorSequence = activeConfig?.mock?.joinPolicyErrors;
+        if (errorSequence && errorSequence.length > 0) {
+          const idx = Math.min(joinPolicyCallCount, errorSequence.length - 1);
+          joinPolicyCallCount++;
+          const entry = errorSequence[idx];
+          if (entry !== null) throw new Error(entry);
+        }
         return activeConfig?.mock?.joinPolicy ?? null;
+      }
       case "fetch_link_preview_metadata": {
         const startBlockMs =
           activeConfig?.mock?.linkPreviewMetadataStartBlockMs ?? 0;

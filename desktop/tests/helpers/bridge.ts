@@ -169,6 +169,8 @@ type MockBridgeOptions = {
     age_attestation_required: boolean;
     version: string;
   } | null;
+  /** Sequenced native discovery failures; null entries allow the configured policy through. */
+  joinPolicyErrors?: (string | null)[];
   /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
   builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
   /** Communities owned by the mocked Builderlab account. */

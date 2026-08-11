@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Plus, Users } from "lucide-react";
+import { KeyRound, Plus, Users } from "lucide-react";
 
 import {
   markCommunityOnboardingComplete,
@@ -9,6 +9,7 @@ import {
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
+import { resetCommunityState } from "@/features/communities/useCommunityInit";
 import {
   takePendingWelcomeChannelForDirectEntry,
   WELCOME_SURFACE_READY_EVENT,
@@ -24,6 +25,7 @@ import {
 import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
+import { IDENTITY_HANDOFF_PROTOCOL } from "@/shared/api/inviteHelpers";
 import { relayClient } from "@/shared/api/relayClient";
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -38,6 +40,9 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+import { IdentityReplacementBackupStep } from "./BackupStep";
+import { IdentityHandoffPolicyStep } from "./IdentityHandoffPolicyStep";
+import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -148,9 +153,11 @@ function LoadingDots({ label }: { label: string }) {
 export function CommunityOnboardingFlow({
   onCancel,
   onConnect,
+  onIdentityImported,
 }: {
   onCancel: () => void;
   onConnect: () => void;
+  onIdentityImported: (pubkey: string) => void;
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
   const queryClient = useQueryClient();
@@ -185,6 +192,9 @@ export function CommunityOnboardingFlow({
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
     React.useState(false);
   const [isCurtainFading, setIsCurtainFading] = React.useState(false);
+  const [identityRecoveryPage, setIdentityRecoveryPage] = React.useState<
+    "backup" | "import"
+  >("backup");
   const nameInputRef = React.useRef<HTMLInputElement | null>(null);
   const avatarTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const avatarEditorContentRef = React.useRef<HTMLDivElement | null>(null);
@@ -217,6 +227,12 @@ export function CommunityOnboardingFlow({
   }, [isTeamIntroVisible]);
 
   useClaimInvite();
+
+  React.useEffect(() => {
+    if (transaction?.stage === "identity-mismatch") {
+      setIdentityRecoveryPage("backup");
+    }
+  }, [transaction?.stage]);
 
   React.useEffect(() => {
     if (transaction?.stage === "connecting") onConnect();
@@ -252,7 +268,11 @@ export function CommunityOnboardingFlow({
 
   const retry = () =>
     update({
-      stage: transaction?.inviteCode ? "claiming" : "connecting",
+      stage:
+        transaction?.inviteCode ||
+        transaction?.inviteProtocol === IDENTITY_HANDOFF_PROTOCOL
+          ? "claiming"
+          : "connecting",
       error: undefined,
     });
   const relayUrl = transaction?.relayUrl;
@@ -417,6 +437,17 @@ export function CommunityOnboardingFlow({
     );
   }
 
+  const importSavedIdentity = async (nsec: string) => {
+    const identity = await importIdentity(nsec);
+    resetCommunityState({ resetAvatarState: true });
+    // No community-scoped query may survive an identity replacement. Keep the
+    // new identity authoritative while the same in-memory invite retries.
+    queryClient.clear();
+    onIdentityImported(identity.pubkey);
+    queryClient.setQueryData(["identity"], identity);
+    update({ stage: "claiming", error: undefined }, transaction.id);
+  };
+
   const saveProfile = async () => {
     if (!displayName.trim()) return;
     setIsPending(true);
@@ -522,14 +553,76 @@ export function CommunityOnboardingFlow({
             )}
             data-testid="community-onboarding-body"
           >
-            {transaction.stage === "claiming" ||
-            transaction.stage === "connecting" ? (
+            {transaction.stage === "policy-checking" ||
+            transaction.stage === "policy-consent" ? (
+              <IdentityHandoffPolicyStep onCancel={onCancel} />
+            ) : transaction.stage === "identity-mismatch" ? (
+              identityRecoveryPage === "backup" ? (
+                <IdentityReplacementBackupStep
+                  onCancel={onCancel}
+                  onContinue={() => setIdentityRecoveryPage("import")}
+                />
+              ) : (
+                <div
+                  aria-live="polite"
+                  className="flex w-full flex-col items-center"
+                  data-testid="identity-handoff-import"
+                >
+                  <KeyRound aria-hidden="true" className="h-10 w-10" />
+                  <h1 className="mt-5 text-title font-normal">
+                    Import your saved identity
+                  </h1>
+                  <p className="mt-3 max-w-[460px] text-sm leading-6 text-foreground/80">
+                    Enter the private key you saved when you linked Impel. Buzz
+                    will replace the local identity, reset community state, and
+                    retry this same invite automatically.
+                  </p>
+                  <NostrKeyImportForm
+                    backLabel="Back to backup"
+                    onBack={() => setIdentityRecoveryPage("backup")}
+                    onImport={importSavedIdentity}
+                    variant="spotlight"
+                  />
+                </div>
+              )
+            ) : transaction.stage === "handoff-terminal" ? (
+              <div
+                aria-live="assertive"
+                data-testid="identity-handoff-terminal"
+              >
+                <Users aria-hidden="true" className="mx-auto h-10 w-10" />
+                <h1 className="mt-5 text-title font-normal">
+                  This identity invite is no longer available
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  {transaction.handoffTerminalReason === "upgrade-required"
+                    ? "Update Buzz, then return to the Impel dashboard and request a fresh invite link."
+                    : transaction.handoffTerminalReason === "already-claimed"
+                      ? "This invite was already claimed. Return to the Impel dashboard to confirm its status."
+                      : transaction.handoffTerminalReason === "restart"
+                        ? "Buzz restarted before the handoff finished. Return to the Impel dashboard and request a fresh invite link."
+                        : "The invite expired, was replaced, or was revoked. Return to the Impel dashboard and request a fresh link."}
+                </p>
+                <Button
+                  className="mt-7 rounded-full px-6"
+                  data-testid="identity-handoff-back-dashboard"
+                  onClick={onCancel}
+                  type="button"
+                >
+                  Back to dashboard
+                </Button>
+              </div>
+            ) : transaction.stage === "claiming" ||
+              transaction.stage === "connecting" ? (
               <>
                 <Users className="mx-auto h-10 w-10" />
                 <h1 className="mt-5 text-title font-normal">
                   Joining {transaction.communityName}
                 </h1>
-                <p className="mt-3 text-sm text-foreground/80">
+                <p
+                  aria-live="polite"
+                  className="mt-3 text-sm text-foreground/80"
+                >
                   {transaction.error ??
                     (transaction.stage === "claiming"
                       ? "Accepting your invite…"

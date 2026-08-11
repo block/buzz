@@ -1,4 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { seedActiveIdentity } from "../helpers/onboarding";
@@ -11,6 +13,31 @@ const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const COMMUNITY_ONBOARDING_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
 const TRANSACTION_STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 const COMMUNITY_RELAY_URL = "wss://hive.example.com";
+const IDENTITY_HANDOFF_CODE = `v3.${"a".repeat(64)}`;
+const JOIN_POLICY = {
+  terms_markdown: "# Community terms",
+  privacy_markdown: "# Community privacy",
+  age_attestation_required: true,
+  version: "policy-v1",
+};
+
+function pendingIdentityHandoff(id: string) {
+  return {
+    id,
+    kind: "join" as const,
+    relayUrl: COMMUNITY_RELAY_URL,
+    code: IDENTITY_HANDOFF_CODE,
+  };
+}
+
+async function expectNoHandoffCredentialInStorage(page: Page) {
+  const persisted = await page.evaluate(
+    (key) => window.localStorage.getItem(key),
+    TRANSACTION_STORAGE_KEY,
+  );
+  expect(persisted ?? "").not.toContain(IDENTITY_HANDOFF_CODE);
+  expect(persisted ?? "").not.toContain("policy-receipt");
+}
 
 const PENDING_JOIN_LINK = {
   id: "dl-join-1",
@@ -412,4 +439,465 @@ test("persisted deep-link invite hands off to Joining after machine onboarding",
 
   // The claim was attempted and its failure surfaced with a Retry.
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+});
+
+test("bound identity accepts the current policy before claim", async ({
+  page,
+}) => {
+  const acceptBodies: Array<Record<string, unknown>> = [];
+  const claimBodies: Array<Record<string, unknown>> = [];
+  let acceptAttempts = 0;
+  await page.route("**/api/invites/accept-policy", async (route) => {
+    acceptAttempts++;
+    acceptBodies.push(
+      route.request().postDataJSON() as Record<string, unknown>,
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      status: acceptAttempts === 1 ? 503 : 200,
+      body: JSON.stringify(
+        acceptAttempts === 1 ? {} : { receipt: "fresh-policy-receipt" },
+      ),
+    });
+  });
+  await page.route("**/api/invites/claim", async (route) => {
+    claimBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      contentType: "application/json",
+      status: 200,
+      body: JSON.stringify({
+        status: "already_member",
+        community_id: "hive-community",
+        host: "hive.example.com",
+        role: "member",
+      }),
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      joinPolicy: JOIN_POLICY,
+      pendingCommunityDeepLinks: [pendingIdentityHandoff("dl-v3-policy")],
+    },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Review community requirements" }),
+  ).toBeVisible();
+  expect(claimBodies).toHaveLength(0);
+  await page.getByLabel("I am 18 years of age or older.").click();
+  await page.getByLabel(/I agree to the Buzz/).click();
+  await page.getByRole("button", { name: "Accept and continue" }).click();
+
+  await expect(page.getByTestId("identity-handoff-policy-error")).toContainText(
+    "couldn’t confirm",
+  );
+  expect(claimBodies).toHaveLength(0);
+  await page.getByRole("button", { name: "Accept and continue" }).click();
+
+  await expect.poll(() => claimBodies.length).toBe(1);
+  expect(acceptBodies).toEqual([
+    {
+      code: IDENTITY_HANDOFF_CODE,
+      policy_version: "policy-v1",
+      age_confirmed: true,
+    },
+    {
+      code: IDENTITY_HANDOFF_CODE,
+      policy_version: "policy-v1",
+      age_confirmed: true,
+    },
+  ]);
+  expect(claimBodies[0]).toEqual({
+    code: IDENTITY_HANDOFF_CODE,
+    policy_receipt: "fresh-policy-receipt",
+    protocol: "identity-handoff-v3",
+  });
+  await expectNoHandoffCredentialInStorage(page);
+});
+
+test("a policy version change resets consent before acceptance", async ({
+  page,
+}) => {
+  const acceptBodies: Array<Record<string, unknown>> = [];
+  const claimBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/invites/accept-policy", async (route) => {
+    acceptBodies.push(
+      route.request().postDataJSON() as Record<string, unknown>,
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      status: 200,
+      body: JSON.stringify({ receipt: "policy-v2-receipt" }),
+    });
+  });
+  await page.route("**/api/invites/claim", async (route) => {
+    claimBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      contentType: "application/json",
+      status: 200,
+      body: JSON.stringify({
+        status: "already_member",
+        community_id: "hive-community",
+        host: "hive.example.com",
+        role: "member",
+      }),
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      joinPolicy: JOIN_POLICY,
+      pendingCommunityDeepLinks: [
+        pendingIdentityHandoff("dl-v3-policy-version"),
+      ],
+    },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  const ageCheckbox = page.getByLabel("I am 18 years of age or older.");
+  const agreementCheckbox = page.getByLabel(/I agree to the Buzz/);
+  await ageCheckbox.click();
+  await agreementCheckbox.click();
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: {
+        mock?: {
+          joinPolicy?: {
+            terms_markdown?: string;
+            privacy_markdown?: string;
+            age_attestation_required: boolean;
+            version: string;
+          } | null;
+        };
+      };
+    };
+    if (testWindow.__BUZZ_E2E__?.mock) {
+      testWindow.__BUZZ_E2E__.mock.joinPolicy = {
+        terms_markdown: "# Updated terms",
+        privacy_markdown: "# Updated privacy",
+        age_attestation_required: true,
+        version: "policy-v2",
+      };
+    }
+  });
+  await page.getByRole("button", { name: "Accept and continue" }).click();
+
+  await expect(page.getByTestId("identity-handoff-policy-error")).toContainText(
+    "changed",
+  );
+  await expect(ageCheckbox).not.toBeChecked();
+  await expect(agreementCheckbox).not.toBeChecked();
+  expect(acceptBodies).toHaveLength(0);
+  expect(claimBodies).toHaveLength(0);
+
+  await ageCheckbox.click();
+  await agreementCheckbox.click();
+  await page.getByRole("button", { name: "Accept and continue" }).click();
+  await expect.poll(() => claimBodies.length).toBe(1);
+  expect(acceptBodies[0]).toEqual({
+    code: IDENTITY_HANDOFF_CODE,
+    policy_version: "policy-v2",
+    age_confirmed: true,
+  });
+});
+
+test("policy discovery failure stays retryable and never claims", async ({
+  page,
+}) => {
+  let claimCalls = 0;
+  await page.route("**/api/invites/claim", async (route) => {
+    claimCalls++;
+    await route.abort();
+  });
+  await installMockBridge(
+    page,
+    {
+      joinPolicy: null,
+      joinPolicyErrors: ["credential-shaped relay detail", null],
+      pendingCommunityDeepLinks: [pendingIdentityHandoff("dl-v3-policy-retry")],
+    },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  const policyError = page.getByTestId("identity-handoff-policy-discovery");
+  await expect(policyError).toContainText("couldn’t check");
+  await expect(policyError).not.toContainText("credential-shaped");
+  expect(claimCalls).toBe(0);
+
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => claimCalls).toBe(1);
+});
+
+test("bound identity mismatch requires backup, imports the saved key, and retries the same in-memory invite", async ({
+  page,
+}) => {
+  const claimBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/invites/accept-policy", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      status: 200,
+      body: JSON.stringify({ receipt: "recovery-policy-receipt" }),
+    });
+  });
+  await page.route("**/api/invites/claim", async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    claimBodies.push(body);
+    await route.fulfill({
+      contentType: "application/json",
+      status: claimBodies.length === 1 ? 409 : 200,
+      body: JSON.stringify(
+        claimBodies.length === 1
+          ? { error: "invite_identity_mismatch" }
+          : {
+              status: "joined",
+              community_id: "hive-community",
+              host: "hive.example.com",
+              role: "member",
+            },
+      ),
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      joinPolicy: JOIN_POLICY,
+      pendingCommunityDeepLinks: [pendingIdentityHandoff("dl-v3-mismatch")],
+    },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  await page.getByLabel("I am 18 years of age or older.").click();
+  await page.getByLabel(/I agree to the Buzz/).click();
+  await page.getByRole("button", { name: "Accept and continue" }).click();
+
+  const mismatchHeading = page.getByRole("heading", {
+    name: "This invite belongs to your saved identity",
+  });
+  await expect(mismatchHeading).toBeVisible();
+  await expect(mismatchHeading).toBeFocused();
+  await expect(page.getByTestId("identity-handoff-mismatch")).not.toContainText(
+    TEST_IDENTITIES.alice.pubkey,
+  );
+  await expectNoHandoffCredentialInStorage(page);
+
+  const backupConfirm = page.getByTestId("identity-handoff-backup-confirm");
+  const continueImport = page.getByTestId("identity-handoff-continue-import");
+  await expect(backupConfirm).toBeDisabled();
+  await expect(continueImport).toBeDisabled();
+
+  const reveal = page.getByRole("button", { name: "Reveal private key" });
+  await reveal.focus();
+  await page.keyboard.press("Enter");
+  await backupConfirm.focus();
+  await page.keyboard.press("Space");
+  await continueImport.focus();
+  await page.keyboard.press("Enter");
+
+  const keyInput = page.getByTestId("nostr-import-nsec-input");
+  await expect(keyInput).toBeFocused();
+  await keyInput.fill("not-a-private-key");
+  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
+    "Waiting for a valid nsec1 key",
+  );
+  expect(claimBodies).toHaveLength(1);
+  await expectNoHandoffCredentialInStorage(page);
+
+  const savedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await keyInput.fill(savedNsec);
+  await keyInput.press("Enter");
+
+  await expect.poll(() => claimBodies.length).toBe(2);
+  expect(claimBodies).toEqual([
+    {
+      code: IDENTITY_HANDOFF_CODE,
+      policy_receipt: "recovery-policy-receipt",
+      protocol: "identity-handoff-v3",
+    },
+    {
+      code: IDENTITY_HANDOFF_CODE,
+      policy_receipt: "recovery-policy-receipt",
+      protocol: "identity-handoff-v3",
+    },
+  ]);
+  await expect(page.getByTestId("identity-handoff-mismatch")).toHaveCount(0);
+  await expectNoHandoffCredentialInStorage(page);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMANDS__?.filter(
+            (command) => command === "import_identity",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
+});
+
+test("matching current identity claims a bound invite without import recovery", async ({
+  page,
+}) => {
+  const claimBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/invites/claim", async (route) => {
+    claimBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.fulfill({
+      contentType: "application/json",
+      status: 200,
+      body: JSON.stringify({
+        status: "already_member",
+        community_id: "hive-community",
+        host: "hive.example.com",
+        role: "member",
+      }),
+    });
+  });
+  await installMockBridge(
+    page,
+    { pendingCommunityDeepLinks: [pendingIdentityHandoff("dl-v3-match")] },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  await expect.poll(() => claimBodies.length).toBe(1);
+  expect(claimBodies[0]).toEqual({
+    code: IDENTITY_HANDOFF_CODE,
+    protocol: "identity-handoff-v3",
+  });
+  expect(
+    await page.evaluate(
+      () =>
+        window.__BUZZ_E2E_COMMANDS__?.filter(
+          (command) => command === "fetch_join_policy",
+        ).length ?? 0,
+    ),
+  ).toBe(1);
+  await expect(page.getByTestId("identity-handoff-mismatch")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => window.__BUZZ_E2E_COMMANDS__?.includes("import_identity") ?? false,
+    ),
+  ).toBe(false);
+});
+
+for (const terminal of [
+  "invite_expired",
+  "invite_superseded",
+  "invite_invalidated",
+] as const) {
+  test(`bound identity ${terminal} directs the user to mint a fresh link`, async ({
+    page,
+  }) => {
+    await page.route("**/api/invites/claim", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        status: terminal === "invite_superseded" ? 409 : 403,
+        body: JSON.stringify({ error: terminal }),
+      });
+    });
+    await installMockBridge(
+      page,
+      {
+        pendingCommunityDeepLinks: [
+          pendingIdentityHandoff(`dl-v3-${terminal}`),
+        ],
+      },
+      { relayWsUrl: COMMUNITY_RELAY_URL },
+    );
+    await page.goto("/");
+
+    const terminalSummary = page.getByTestId("identity-handoff-terminal");
+    await expect(terminalSummary).toBeVisible();
+    await expect(terminalSummary).toHaveAttribute("aria-live", "assertive");
+    await expect(terminalSummary).toContainText("request a fresh link");
+    await expectNoHandoffCredentialInStorage(page);
+    await page.getByTestId("identity-handoff-back-dashboard").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (key) => window.localStorage.getItem(key),
+          TRANSACTION_STORAGE_KEY,
+        ),
+      )
+      .toBeNull();
+  });
+}
+
+test("restart abandons persisted v3 metadata and requires a fresh dashboard link", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ storageKey, relayUrl }) => {
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          id: "txn-v3-restart",
+          source: "deep-link-join",
+          stage: "claiming",
+          relayUrl,
+          communityName: "hive",
+          inviteProtocol: "identity-handoff-v3",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    { storageKey: TRANSACTION_STORAGE_KEY, relayUrl: COMMUNITY_RELAY_URL },
+  );
+  await installMockBridge(page, undefined, {
+    relayWsUrl: COMMUNITY_RELAY_URL,
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("identity-handoff-terminal")).toContainText(
+    "Buzz restarted before the handoff finished",
+  );
+  await expectNoHandoffCredentialInStorage(page);
+});
+
+test("backup retrieval failure blocks replacement until a successful retry", async ({
+  page,
+}) => {
+  await page.route("**/api/invites/claim", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      status: 409,
+      body: JSON.stringify({ error: "invite_identity_mismatch" }),
+    });
+  });
+  await installMockBridge(
+    page,
+    {
+      nsecErrors: ["keyring unavailable", null],
+      pendingCommunityDeepLinks: [pendingIdentityHandoff("dl-v3-backup")],
+    },
+    { relayWsUrl: COMMUNITY_RELAY_URL },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("identity-handoff-backup-error")).toContainText(
+    "Nothing was replaced",
+  );
+  await expect(
+    page.getByTestId("identity-handoff-backup-error"),
+  ).not.toContainText("keyring unavailable");
+  await expect(
+    page.getByTestId("identity-handoff-backup-confirm"),
+  ).toBeDisabled();
+  await expect(
+    page.getByTestId("identity-handoff-continue-import"),
+  ).toBeDisabled();
+
+  await page.getByTestId("identity-handoff-backup-retry").click();
+  await expect(
+    page.getByRole("button", { name: "Reveal private key" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("identity-handoff-backup-confirm"),
+  ).toBeDisabled();
 });

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getJoinPolicy, mintInvite } from "./invites.ts";
+import {
+  acceptJoinPolicy,
+  claimInvite,
+  getJoinPolicy,
+  mintInvite,
+} from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
@@ -79,6 +84,50 @@ test("getJoinPolicy maps the native command response", async () => {
     });
   } finally {
     globalThis.window = previousWindow;
+  }
+});
+
+test("acceptJoinPolicy binds the exact code, version, and age confirmation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://relay.example/api/invites/accept-policy");
+    assert.deepEqual(JSON.parse(init.body), {
+      code: "invite-code",
+      policy_version: "policy-v1",
+      age_confirmed: true,
+    });
+    return new Response(JSON.stringify({ receipt: "fresh-receipt" }));
+  };
+  try {
+    assert.equal(
+      await acceptJoinPolicy(
+        "wss://relay.example",
+        "invite-code",
+        "policy-v1",
+        true,
+      ),
+      "fresh-receipt",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("acceptJoinPolicy rejects a malformed receipt before claim", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({}));
+  try {
+    await assert.rejects(
+      acceptJoinPolicy(
+        "wss://relay.example",
+        "invite-code",
+        "policy-v1",
+        false,
+      ),
+      /invalid_policy_receipt/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -206,6 +255,73 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
       globalThis.fetch = originalFetch;
     }
   } finally {
+    teardownTauriStubs();
+  }
+});
+
+test("claimInvite marks exact v3 payloads and signs every attempt with a fresh nonce", async () => {
+  const tauri = setupTauriStubs("https://relay.example");
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push({
+      body: JSON.parse(init.body),
+      authorization: init.headers.Authorization,
+    });
+    return new Response(
+      JSON.stringify({
+        status: "joined",
+        community_id: "community-id",
+        host: "relay.example",
+        role: "member",
+      }),
+    );
+  };
+
+  try {
+    const code = `v3.${"a".repeat(64)}`;
+    await claimInvite("wss://relay.example", code, "policy-receipt");
+    await claimInvite("wss://relay.example", code, "policy-receipt");
+
+    assert.equal(requests[0].body.protocol, "identity-handoff-v3");
+    assert.equal(requests[0].body.code, code);
+    assert.equal(requests[0].body.policy_receipt, "policy-receipt");
+
+    const nonces = tauri.invokeArgs
+      .filter(({ command }) => command === "sign_event")
+      .map(({ args }) => args.tags.find(([name]) => name === "nonce")?.[1]);
+    assert.match(nonces[0], /^[0-9a-f-]{36}$/);
+    assert.notEqual(nonces[0], nonces[1]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    teardownTauriStubs();
+  }
+});
+
+test("claimInvite keeps generic payload serialization byte-compatible", async () => {
+  setupTauriStubs("https://relay.example");
+  const originalFetch = globalThis.fetch;
+  let body;
+  globalThis.fetch = async (_url, init) => {
+    body = init.body;
+    return new Response(
+      JSON.stringify({
+        status: "already_member",
+        community_id: "community-id",
+        host: "relay.example",
+        role: "member",
+      }),
+    );
+  };
+
+  try {
+    await claimInvite("wss://relay.example", "generic-code", "receipt");
+    assert.equal(
+      body,
+      JSON.stringify({ code: "generic-code", policy_receipt: "receipt" }),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     teardownTauriStubs();
   }
 });

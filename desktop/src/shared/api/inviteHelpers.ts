@@ -1,5 +1,21 @@
 export const INVITE_EXPIRED_ERROR = "invite_expired";
 export const INVITE_EXHAUSTED_ERROR = "invite_exhausted";
+export const IDENTITY_HANDOFF_PROTOCOL = "identity-handoff-v3";
+
+const IDENTITY_HANDOFF_CODE = /^v3\.[0-9a-f]{64}$/;
+
+export type IdentityHandoffTerminalReason =
+  | "expired"
+  | "superseded"
+  | "invalidated"
+  | "upgrade-required"
+  | "invalid"
+  | "already-claimed";
+
+/** Exact, downgrade-safe recognition of the fixed-length v3 handoff format. */
+export function isIdentityHandoffCode(code: string): boolean {
+  return IDENTITY_HANDOFF_CODE.test(code);
+}
 
 /**
  * Parsed invite — either a full (relay + code) or bare-code form.
@@ -93,4 +109,29 @@ export function isInviteExpiredError(error: unknown): boolean {
 
 export function isInviteExhaustedError(error: unknown): boolean {
   return inviteErrorMessage(error) === INVITE_EXHAUSTED_ERROR;
+}
+
+export function isIdentityHandoffMismatchError(error: unknown): boolean {
+  return inviteErrorMessage(error) === "invite_identity_mismatch";
+}
+
+export function identityHandoffTerminalReason(
+  error: unknown,
+): IdentityHandoffTerminalReason | null {
+  switch (inviteErrorMessage(error)) {
+    case INVITE_EXPIRED_ERROR:
+      return "expired";
+    case "invite_superseded":
+      return "superseded";
+    case "invite_invalidated":
+      return "invalidated";
+    case "invite_client_upgrade_required":
+      return "upgrade-required";
+    case "invite_invalid":
+      return "invalid";
+    case "invite_already_claimed":
+      return "already-claimed";
+    default:
+      return null;
+  }
 }

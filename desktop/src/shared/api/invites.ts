@@ -1,4 +1,8 @@
-import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
+import {
+  IDENTITY_HANDOFF_PROTOCOL,
+  isIdentityHandoffCode,
+  relayHttpFromWs,
+} from "@/shared/api/inviteHelpers";
 import {
   getRelayHttpUrl,
   invokeTauri,
@@ -187,7 +191,15 @@ export async function acceptJoinPolicy(
     },
   );
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return ((await response.json()) as { receipt: string }).receipt;
+  const raw: unknown = await response.json();
+  const receipt =
+    raw && typeof raw === "object" && "receipt" in raw
+      ? (raw as { receipt?: unknown }).receipt
+      : undefined;
+  if (typeof receipt !== "string" || receipt.length === 0) {
+    throw new Error("invalid_policy_receipt");
+  }
+  return receipt;
 }
 
 /** Mint an invite code on the active community's relay (owner/admin only). */
@@ -226,7 +238,13 @@ export async function claimInvite(
   policyReceipt?: string,
 ): Promise<ClaimResult> {
   const base = relayHttpFromWs(relayWsUrl);
-  const body = JSON.stringify({ code, policy_receipt: policyReceipt });
+  const body = JSON.stringify({
+    code,
+    policy_receipt: policyReceipt,
+    ...(isIdentityHandoffCode(code)
+      ? { protocol: IDENTITY_HANDOFF_PROTOCOL }
+      : {}),
+  });
   const raw = await invitePost<{
     status: "joined" | "already_member";
     community_id: string;
