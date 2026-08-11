@@ -1,0 +1,26 @@
+{
+  "productName": "Buzz Codex Lab",
+  "identifier": "xyz.chemyibinjiang.buzz.codexlab",
+  "build": {
+    "beforeBuildCommand": "corepack pnpm build"
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["buzz-codex-lab"]
+      }
+    },
+    "updater": {
+      "endpoints": []
+    }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

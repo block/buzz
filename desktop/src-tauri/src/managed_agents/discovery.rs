@@ -218,6 +218,7 @@ pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
     KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
 }
 
+#[cfg(debug_assertions)]
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -494,7 +495,7 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
 }
 
 fn command_search_dirs_for(
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
     current_dir: Option<&Path>,
     executable_parent: Option<&Path>,
     prefer_workspace_profiles: bool,
@@ -504,7 +505,9 @@ fn command_search_dirs_for(
         dirs.extend(executable_parent.map(Path::to_path_buf));
     }
 
-    dirs.extend(profile_target_dirs(workspace_root));
+    if let Some(workspace_root) = workspace_root {
+        dirs.extend(profile_target_dirs(workspace_root));
+    }
     if let Some(current_dir) = current_dir {
         dirs.extend(profile_target_dirs(current_dir));
     }
@@ -527,8 +530,13 @@ fn command_search_dirs() -> Vec<PathBuf> {
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
 
+    #[cfg(debug_assertions)]
+    let workspace_root = Some(workspace_root_dir());
+    #[cfg(not(debug_assertions))]
+    let workspace_root: Option<PathBuf> = None;
+
     command_search_dirs_for(
-        &workspace_root_dir(),
+        workspace_root.as_deref(),
         current_dir.as_deref(),
         executable_parent.as_deref(),
         cfg!(debug_assertions),

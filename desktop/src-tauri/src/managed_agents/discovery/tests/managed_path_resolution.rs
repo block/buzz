@@ -9,7 +9,7 @@ fn release_command_search_prefers_installed_sidecars() {
     let executable_parent = Path::new("installed");
 
     let dirs = super::super::command_search_dirs_for(
-        workspace,
+        Some(workspace),
         Some(current_dir),
         Some(executable_parent),
         false,
