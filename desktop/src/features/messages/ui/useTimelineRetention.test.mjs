@@ -11,6 +11,8 @@ import { useTimelineRetention } from "./useTimelineRetention.ts";
 const originalDocument = globalThis.document;
 const originalWindow = globalThis.window;
 const originalActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
 
 afterEach(() => {
   if (originalDocument === undefined) delete globalThis.document;
@@ -20,15 +22,29 @@ afterEach(() => {
   if (originalActEnvironment === undefined)
     delete globalThis.IS_REACT_ACT_ENVIRONMENT;
   else globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment;
+  if (originalRequestAnimationFrame === undefined)
+    delete globalThis.requestAnimationFrame;
+  else globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  if (originalCancelAnimationFrame === undefined)
+    delete globalThis.cancelAnimationFrame;
+  else globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
 });
 
 it("does not keep the full timeline mounted before the viewport is measured", async () => {
   const dom = new JSDOM(
     "<!doctype html><html><body><div id='root'></div></body></html>",
   );
+  let initialRefresh;
   Object.assign(globalThis, {
+    cancelAnimationFrame() {
+      initialRefresh = undefined;
+    },
     document: dom.window.document,
     IS_REACT_ACT_ENVIRONMENT: true,
+    requestAnimationFrame(callback) {
+      initialRefresh = callback;
+      return 1;
+    },
     window: dom.window,
   });
 
@@ -51,7 +67,15 @@ it("does not keep the full timeline mounted before the viewport is measured", as
   const root = createRoot(document.getElementById("root"));
   await act(async () => root.render(React.createElement(Harness)));
 
-  assert.deepEqual(retention.retainedIndices, []);
+  assert.equal(retention.retainedIndices.length, 100);
+  assert.equal(retention.retainedIndices[0], 9_900);
+  assert.equal(retention.retainedIndices.at(-1), 9_999);
+
+  await act(async () => initialRefresh());
+  assert.ok(retention.retainedIndices.length > 0);
+  assert.ok(retention.retainedIndices.length < 500);
+  assert.ok(retention.retainedIndices.includes(5_000));
+  assert.ok(retention.retainedIndices.includes(9_999));
 
   await act(async () => retention.onScrollEnd());
   assert.ok(retention.retainedIndices.length > 0);
