@@ -1,6 +1,6 @@
 # buzz-acp
 
-ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
+ACP harness that connects AI agents to Buzz. The harness listens for @mentions and one-to-one direct messages with the agent on the relay, prompts your agent, and the agent replies using the Buzz CLI.
 
 ```
 Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
@@ -62,7 +62,7 @@ export GOOSE_MODE=auto
 buzz-acp
 ```
 
-That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
+That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent in a channel—or sends any message in a one-to-one DM with the agent—goose receives the message and can reply using the Buzz CLI that the harness configures automatically. Group DMs still require an explicit @mention.
 
 ## Running with Codex
 
@@ -246,20 +246,20 @@ Forum event kinds:
 - **45002** — Vote on a post or comment
 - **45003** — Comment reply on a forum post
 
-> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
+> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible. The only exception is a verified one-to-one DM containing the agent; group DMs still require a mention.
 
 ## How It Works
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
+3. **Event loop** — Listens for @mention events plus all messages in verified one-to-one DMs containing the agent. Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 
-> **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
+> **Note:** On startup, the harness replays all unprocessed @mentions and one-to-one agent-DM messages since the last run. Expect a burst of activity if there are stale events in a channel.
 
 ## Bring Your Own Harness (BYOH)
 
