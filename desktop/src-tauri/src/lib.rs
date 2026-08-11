@@ -34,6 +34,7 @@ mod ptt_shortcut;
 mod relay;
 mod relay_admission;
 mod reset;
+mod close_to_tray;
 mod secret_store;
 mod shutdown;
 mod templates;
@@ -46,6 +47,7 @@ mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
+use close_to_tray::CloseToTrayBehavior;
 use builderlab::*;
 use commands::*;
 use deep_link::{
@@ -414,6 +416,13 @@ pub fn run() {
             if let Ok(mut guard) = state.huddle_audio.tts_load_error.lock() {
                 *guard = tts_settings_load_error;
             }
+            // Resolve the persisted close-to-tray behavior (#4024) once during
+            // startup so the macOS close handler has a stable value.
+            let __close_to_tray = close_to_tray::load_for_app(&app_handle);
+            *state
+                .close_to_tray_behavior
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()) = __close_to_tray;
             if let Ok(mut huddle) = state.huddle_state.lock() {
                 huddle.tts_enabled = tts_settings.agent_text_to_speech;
             }
@@ -863,6 +872,8 @@ pub fn run() {
             huddle::agent_voice::ensure_huddle_agent_voice_settings,
             huddle::agent_voice::set_huddle_agent_tts_enabled,
             huddle::agent_voice::set_huddle_agent_voice,
+            close_to_tray::get_close_to_tray_behavior,
+            close_to_tray::set_close_to_tray_behavior,
             speak_agent_message,
             interrupt_huddle_speech,
             add_agent_to_huddle,
@@ -933,11 +944,35 @@ pub fn run() {
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } if label == "main" => {
-            // Keep the webview alive so Buzz can be reopened from its tray menu.
-            api.prevent_close();
-            if let Some(window) = app_handle.get_webview_window("main") {
-                if let Err(error) = window.hide() {
-                    eprintln!("buzz-desktop: failed to hide main window: {error}");
+            // Resolve the user's close behavior. `KeepRunning` preserves the
+            // previous unconditional behavior; `QuitWhenClosed` and
+            // `MinimizeToTray` are opt-outs for users who do not want a
+            // windowless background process (#4024).
+            let behavior = {
+                let state = app_handle.state::<AppState>();
+                let stored = state.close_to_tray_behavior.lock().unwrap_or_else(|lock_error| lock_error.into_inner());
+                *stored
+            };
+            match behavior {
+                CloseToTrayBehavior::KeepRunning => {
+                    // Keep the webview alive so Buzz can be reopened from its tray menu.
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Err(error) = window.hide() {
+                            eprintln!("buzz-desktop: failed to hide main window: {error}");
+                        }
+                    }
+                }
+                CloseToTrayBehavior::MinimizeToTray => {
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Err(error) = window.minimize() {
+                            eprintln!("buzz-desktop: failed to minimize main window: {error}");
+                        }
+                    }
+                }
+                CloseToTrayBehavior::QuitWhenClosed => {
+                    // Do not call api.prevent_close(): Buzz will quit.
                 }
             }
         }

@@ -54,6 +54,9 @@ pub struct AppState {
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
+    /// macOS-only close-to-tray behavior (#4024). Resolved during setup
+    /// from `close_to_tray::load_for_app`; persisted in close-to-tray.json.
+    pub close_to_tray_behavior: Mutex<crate::close_to_tray::CloseToTrayBehavior>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
     /// through every call site.
@@ -218,6 +221,7 @@ pub fn build_app_state() -> AppState {
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
+        close_to_tray_behavior: Mutex::new(crate::close_to_tray::CloseToTrayBehavior::default()),
         app_handle: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
