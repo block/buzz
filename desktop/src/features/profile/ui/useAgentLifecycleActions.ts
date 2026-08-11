@@ -46,11 +46,13 @@ export function useAgentLifecycleActions({
         startManagedAgent,
       });
       toast.success(
-        managedAgent.codexTaskBinding
-          ? `Buzz now owns ${managedAgent.codexTaskBinding.threadName}. Return it to Codex before opening the task in Codex Desktop.`
-          : managedAgent.backend.type === "provider"
-            ? `Deploying ${managedAgent.name}.`
-            : `Started ${managedAgent.name}.`,
+        managedAgent.codexTaskBinding?.appServerUrl
+          ? `Connected Buzz to ${managedAgent.codexTaskBinding.threadName} through its shared app-server.`
+          : managedAgent.codexTaskBinding
+            ? `Buzz now owns ${managedAgent.codexTaskBinding.threadName}. Return it to Codex before opening the task in Codex Desktop.`
+            : managedAgent.backend.type === "provider"
+              ? `Deploying ${managedAgent.name}.`
+              : `Started ${managedAgent.name}.`,
       );
     } catch (error) {
       toast.error(

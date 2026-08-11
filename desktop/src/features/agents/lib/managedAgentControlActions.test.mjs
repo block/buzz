@@ -105,6 +105,23 @@ test("Codex task agents describe ownership handoff actions", () => {
     ),
     "Return to Codex",
   );
+
+  const sharedBinding = {
+    ...binding,
+    appServerUrl: "ws://127.0.0.1:51919",
+  };
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({ codexTaskBinding: sharedBinding, status: "stopped" }),
+    ),
+    "Connect Buzz",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({ codexTaskBinding: sharedBinding, status: "running" }),
+    ),
+    "Disconnect Buzz",
+  );
 });
 
 test("returning a Codex task preserves its identity and binding", async () => {
@@ -133,6 +150,33 @@ test("returning a Codex task preserves its identity and binding", async () => {
   assert.equal(stoppedPubkey, taskAgent.pubkey);
   assert.match(result.noticeMessage, /Returned Inspect DoE dataset results/);
   assert.match(result.noticeMessage, /binding are preserved/);
+});
+
+test("disconnecting shared mode leaves task ownership with the app-server", async () => {
+  const taskAgent = agent({
+    codexTaskBinding: {
+      taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
+      threadName: "Inspect DoE dataset results",
+      workspace: "C:\\repo",
+      updatedAt: new Date(0).toISOString(),
+      model: "gpt-5.4-mini[xhigh]",
+      appServerUrl: "ws://127.0.0.1:51919",
+    },
+    status: "running",
+  });
+
+  const result = await stopManagedAgentWithRules({
+    agent: taskAgent,
+    channels: [],
+    relayAgents: [],
+    stopManagedAgent: async () => {},
+  });
+
+  assert.match(result.noticeMessage, /Disconnected Buzz/);
+  assert.match(
+    result.noticeMessage,
+    /shared app-server remains the task owner/,
+  );
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------
