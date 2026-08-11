@@ -381,6 +381,7 @@ export class ReadStateManager {
     unixTimestamp: number,
     options: { publishable: boolean },
   ): void {
+    if (this.destroyed) return;
     const current = this.effectiveState.get(contextId) ?? 0;
     if (unixTimestamp <= current) {
       if (!options.publishable || this.publishableContextIds.has(contextId)) {
@@ -486,6 +487,7 @@ export class ReadStateManager {
   }
 
   private async mergeEvents(events: RelayEvent[]): Promise<void> {
+    if (this.destroyed) return;
     // Collect all own blobs (keyed by slot d-tag) to union them all.
     // NIP-RS: multiple own-slot blobs must be max-merged, not winner-takes-all.
     const ownBlobsBySlot = new Map<
@@ -495,6 +497,7 @@ export class ReadStateManager {
 
     for (const event of events) {
       const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (this.destroyed) return;
       if (!parsed) continue;
 
       this.maxFetchedCreatedAt = Math.max(
@@ -531,6 +534,7 @@ export class ReadStateManager {
     // d-tag coordinate. If so, rotate our slotId to avoid clobbering.
     for (const event of events) {
       const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (this.destroyed) return;
       if (!parsed || parsed.dTag !== `read-state:${this.slotId}`) continue;
       if (parsed.blob.client_id !== this.clientId) {
         this.slotId = generateHex(16);
@@ -583,14 +587,13 @@ export class ReadStateManager {
   }
 
   private async handleIncomingEvent(event: RelayEvent): Promise<void> {
-    if (event.pubkey !== this.pubkey) return;
-    if (this.destroyed) return;
+    if (this.destroyed || event.pubkey !== this.pubkey) return;
     console.debug(
       `[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.created_at}`,
     );
 
     const parsed = await parseReadStateEvent(event, this.pubkey);
-    if (!parsed) return;
+    if (!parsed || this.destroyed) return;
 
     this.maxFetchedCreatedAt = Math.max(
       this.maxFetchedCreatedAt,
@@ -633,6 +636,7 @@ export class ReadStateManager {
   }
 
   private schedulePublish(): void {
+    if (this.destroyed) return;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
     }
@@ -645,6 +649,7 @@ export class ReadStateManager {
   private async publish(): Promise<void> {
     console.debug(`[ReadStateManager] publish starting slotId=${this.slotId}`);
     await this.fetchOwnBlobBeforePublish();
+    if (this.destroyed) return;
     this.flushLocalState();
 
     // Build blob from contexts this client is allowed to publish.
@@ -943,7 +948,7 @@ export class ReadStateManager {
   }
 
   private persistLocalState(): void {
-    if (this.localPersistTimer !== null) return;
+    if (this.destroyed || this.localPersistTimer !== null) return;
 
     this.localPersistTimer = window.setTimeout(() => {
       this.localPersistTimer = null;

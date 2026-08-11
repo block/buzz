@@ -268,6 +268,54 @@ test("publish flushes pending local state first", async () => {
   }
 });
 
+test("destroyed manager cannot persist after an in-flight fetch resolves", async () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const pubkey = "6".repeat(64);
+  let resolveFetch;
+  const fetchPending = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  const staleManager = new ReadStateManager(pubkey, {
+    ...makeFakeRelay(),
+    fetchEvents: () => fetchPending,
+  });
+
+  try {
+    const initialization = staleManager.initialize();
+    staleManager.seedContextRead("channel-1", 100);
+    staleManager.destroy();
+
+    const replacementManager = new ReadStateManager(pubkey, makeFakeRelay());
+    replacementManager.seedContextRead("channel-1", 200);
+    timers.advanceBy(1_000);
+    const writesAfterReplacement = storage.writes.length;
+
+    resolveFetch([]);
+    await initialization;
+    timers.runAll();
+
+    assert.equal(
+      storage.writes.length,
+      writesAfterReplacement,
+      "the stale manager must not schedule persistence after destruction",
+    );
+    const contexts = JSON.parse(
+      storage.getItem(`buzz.channel-read-state.v2:${pubkey}`),
+    );
+    assert.equal(
+      contexts["channel-1"],
+      new Date(200_000).toISOString(),
+      "the stale manager must not overwrite the replacement manager",
+    );
+    replacementManager.destroy();
+  } finally {
+    staleManager.destroy();
+    restore();
+  }
+});
+
 test("resolveEffectiveTimestamp returns own value when context has no parent", () => {
   const effectiveState = new Map([[channelKey, 200]]);
   const result = resolveEffectiveTimestamp({
