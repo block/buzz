@@ -28,6 +28,7 @@ import {
   structuredEnvKeys,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
+import type { FilesystemIsolationFieldProps } from "./filesystemIsolation";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -35,6 +36,7 @@ export function EditAgentAdvancedFields({
   autoRestartOnConfigChange,
   disabled,
   envVars,
+  filesystemIsolation,
   fileSatisfiedEnvKeys,
   hiddenEnvKeys = [],
   focusKey,
@@ -62,6 +64,7 @@ export function EditAgentAdvancedFields({
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
+  filesystemIsolation: FilesystemIsolationFieldProps;
   fileSatisfiedEnvKeys: readonly string[];
   hiddenEnvKeys?: readonly string[];
   /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
@@ -193,6 +196,113 @@ export function EditAgentAdvancedFields({
             ? "Restarts this agent automatically when its configuration changes, once it is idle and connected."
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
+      </div>
+
+      {/* Instance-local, inherited process-tree boundary. macOS is the first
+          enforcement backend; unsupported hosts must not advertise a cosmetic setting. */}
+      <div className="space-y-1.5">
+        <label
+          className="flex items-center gap-2 text-sm font-medium"
+          htmlFor="edit-agent-filesystem-isolation"
+        >
+          <input
+            checked={filesystemIsolation.enabled}
+            disabled={disabled || !filesystemIsolation.available}
+            id="edit-agent-filesystem-isolation"
+            onChange={(event) =>
+              filesystemIsolation.onEnabledChange(event.target.checked)
+            }
+            type="checkbox"
+          />
+          Isolate filesystem for each run
+        </label>
+        <p className="text-xs text-muted-foreground">
+          {!filesystemIsolation.available
+            ? "Available for local managed agents on macOS."
+            : filesystemIsolation.enabled
+              ? "Creates a fresh writable run root and applies one inherited boundary to the harness, runtime, tools, and child processes. Shared Buzz data stays denied."
+              : "This agent keeps normal host filesystem access."}
+        </p>
+        {filesystemIsolation.enabled ? (
+          <div className="space-y-1.5 pt-1">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="edit-agent-filesystem-read-roots"
+            >
+              Additional read-only directories
+              <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+            </label>
+            <div className={PERSONA_FIELD_SHELL_CLASS}>
+              <Textarea
+                autoCorrect="off"
+                className={cn(
+                  "min-h-20 resize-y px-3 py-3 font-mono text-xs leading-5",
+                  PERSONA_FIELD_CONTROL_CLASS,
+                )}
+                disabled={disabled || !filesystemIsolation.available}
+                id="edit-agent-filesystem-read-roots"
+                onChange={(event) =>
+                  filesystemIsolation.onReadOnlyRootsChange(event.target.value)
+                }
+                placeholder="One existing absolute directory per line"
+                value={filesystemIsolation.readOnlyRoots}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              `/`, your home directory, and protected Buzz data are always
+              rejected. Restart the agent after saving to apply this boundary.
+            </p>
+            <div className="space-y-2 rounded-md border border-border/70 p-3">
+              <p className="text-xs text-muted-foreground">
+                Prepare creates the fresh root without starting the agent. Add
+                and verify preflight markers there, then use Start to consume
+                this exact root once.
+              </p>
+              {filesystemIsolation.prepared ? (
+                <div className="space-y-1">
+                  <p className="break-all font-mono text-xs">
+                    {filesystemIsolation.prepared.runRoot}
+                  </p>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    Run {filesystemIsolation.prepared.runId}
+                  </p>
+                </div>
+              ) : null}
+              <button
+                className="rounded-md border border-input px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={
+                  disabled ||
+                  filesystemIsolation.preparePending ||
+                  (!filesystemIsolation.prepared &&
+                    !filesystemIsolation.canPrepare)
+                }
+                onClick={() =>
+                  void (filesystemIsolation.prepared
+                    ? filesystemIsolation.onAbort()
+                    : filesystemIsolation.onPrepare())
+                }
+                type="button"
+              >
+                {filesystemIsolation.preparePending
+                  ? "Working…"
+                  : filesystemIsolation.prepared
+                    ? "Abort prepared run"
+                    : "Prepare isolated run"}
+              </button>
+              {!filesystemIsolation.canPrepare &&
+              !filesystemIsolation.prepared ? (
+                <p className="text-xs text-muted-foreground">
+                  Save the enabled isolation profile before preparing a run.
+                </p>
+              ) : null}
+              {filesystemIsolation.prepareError ? (
+                <p className="text-xs text-destructive">
+                  {filesystemIsolation.prepareError}
+                </p>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* Agent runtime args */}

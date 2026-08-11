@@ -1465,9 +1465,8 @@ mod tests {
 
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // A record whose env_vars explicitly set provider/model must win over
-        // any baked defaults. In OSS test builds the baked map is empty, so
-        // this test validates the user-env layer is present in the output.
+        // Explicit provider/model env vars must win over baked defaults. The OSS
+        // baked map is empty, so this validates that the user-env layer is present.
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
         env_vars.insert(
@@ -1498,6 +1497,7 @@ mod tests {
             provider: None,
             persona_source_version: None,
             env_vars,
+            filesystem_isolation: None,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,

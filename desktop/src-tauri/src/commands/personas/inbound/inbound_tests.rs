@@ -180,6 +180,7 @@ fn local_agent() -> ManagedAgentRecord {
         provider: Some("local-provider".to_string()),
         persona_source_version: Some("local-hash".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
+        filesystem_isolation: None,
         start_on_app_launch: true,
         auto_restart_on_config_change: true,
         runtime_pid: Some(1234),

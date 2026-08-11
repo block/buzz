@@ -222,8 +222,7 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
+/// Minimal record for `record_agent_command`; only its resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -250,6 +249,7 @@ fn record_with(
         model: None,
         provider: None,
         persona_source_version: None,
+        filesystem_isolation: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
         runtime_pid: None,

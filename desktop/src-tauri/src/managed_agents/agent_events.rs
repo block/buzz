@@ -179,6 +179,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             persona_source_version: Some("abc123".to_string()),
             env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
+            filesystem_isolation: None,
             start_on_app_launch: true,
             auto_restart_on_config_change: true,
             runtime_pid: Some(4242),

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    CatalogSource, FilesystemIsolationProfile, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -170,6 +170,9 @@ pub struct CreateManagedAgentRequest {
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+    /// Optional local process-tree boundary. Provider-backed agents reject it.
+    #[serde(default)]
+    pub filesystem_isolation: Option<FilesystemIsolationProfile>,
     #[serde(default)]
     pub spawn_after_create: bool,
     #[serde(default = "default_start_on_app_launch")]
@@ -188,6 +191,19 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+}
+
+impl CreateManagedAgentRequest {
+    pub fn validate_filesystem_isolation(&self) -> Result<(), String> {
+        let Some(profile) = &self.filesystem_isolation else {
+            return Ok(());
+        };
+        crate::managed_agents::validate_filesystem_isolation_profile(profile)?;
+        if self.backend != BackendKind::Local {
+            return Err("filesystem isolation is available only for local managed agents".into());
+        }
+        Ok(())
+    }
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -211,6 +227,9 @@ pub struct UpdateManagedAgentRequest {
     /// Absent = don't touch. Present = replace the env_vars map entirely.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
+    /// Absent = don't touch, null = disable, object = replace profile.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub filesystem_isolation: Option<Option<FilesystemIsolationProfile>>,
     #[serde(default)]
     pub parallelism: Option<u32>,
     /// Accepted for wire compatibility; not applied to the stored record.

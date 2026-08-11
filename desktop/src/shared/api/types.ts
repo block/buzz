@@ -1,3 +1,17 @@
+import type {
+  FilesystemIsolationProfile,
+  ManagedAgentBackend,
+  RespondToMode,
+} from "./managedAgentTypes";
+export type {
+  FilesystemIsolationProfile,
+  PreparedFilesystemIsolation,
+  ManagedAgentBackend,
+  ManagedAgentRuntimeLifecycle,
+  ManagedAgentRuntimeStatus,
+  RespondToMode,
+} from "./managedAgentTypes";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -279,31 +293,6 @@ export type RelayAgent = {
   respondToAllowlist: string[];
 };
 
-export type ManagedAgentRuntimeLifecycle =
-  | "starting"
-  | "listening"
-  | "waking"
-  | "ready"
-  | "failed"
-  | "stopped";
-
-export type ManagedAgentRuntimeStatus = {
-  pubkey: string;
-  /** Exact submitted descriptor, present only on startup reconcile results. */
-  requestedRelayUrl?: string;
-  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
-  relayUrl: string;
-  localSetup: boolean;
-  lifecycle: ManagedAgentRuntimeLifecycle;
-  pid: number | null;
-  error: string | null;
-  logPath: string | null;
-};
-
-export type ManagedAgentBackend =
-  | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
-
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
@@ -363,6 +352,8 @@ export type ManagedAgent = {
   restartDiff: RestartDiffEntry[];
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
+  /** Fresh-run process-tree filesystem boundary. `null` preserves host access. */
+  filesystemIsolation: FilesystemIsolationProfile | null;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   createdAt: string;
@@ -385,9 +376,6 @@ export type ManagedAgent = {
    */
   respondToAllowlist: string[];
 };
-
-/** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
-export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {
   id: string;
@@ -432,6 +420,7 @@ export type CreateManagedAgentInput = {
   model?: string;
   provider?: string;
   envVars?: Record<string, string>;
+  filesystemIsolation?: FilesystemIsolationProfile;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
@@ -685,6 +674,8 @@ export type UpdateManagedAgentInput = {
   systemPrompt?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
+  /** Absent = don't touch. null = disable. object = replace the profile. */
+  filesystemIsolation?: FilesystemIsolationProfile | null;
   parallelism?: number;
   turnTimeoutSeconds?: number;
   relayUrl?: string;

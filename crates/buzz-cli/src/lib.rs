@@ -296,6 +296,12 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Print the effective filesystem boundary inherited by this agent run
+    IsolationExplain {
+        /// Require the receipt to be bound to this exact agent pubkey
+        #[arg(long)]
+        pubkey: Option<String>,
+    },
     /// Submit a NIP-IA archive request for an identity (kind 9035)
     #[command(
         after_help = "Auth flow: when target != signer, the CLI fetches the target's kind:0 and \
@@ -2175,6 +2181,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "isolation-explain",
                 "unarchive"
             ]
         );
@@ -2313,7 +2320,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

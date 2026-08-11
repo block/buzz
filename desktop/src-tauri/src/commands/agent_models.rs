@@ -813,7 +813,7 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
-
+        record.apply_filesystem_isolation_update(input.filesystem_isolation)?;
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for
         // non-native providers.

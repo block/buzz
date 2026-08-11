@@ -31,7 +31,9 @@ pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
-pub(crate) use sweep::sweep_untracked_bundle_harnesses;
+pub(crate) use sweep::{
+    collect_untracked_bundle_harnesses_checked, sweep_untracked_bundle_harnesses,
+};
 
 mod process;
 #[cfg(test)]
@@ -48,8 +50,8 @@ mod orphan_sweep;
 #[cfg(target_os = "macos")]
 use orphan_sweep::proc_pidinfo;
 pub(crate) use orphan_sweep::{
-    sweep_orphaned_agent_processes, sweep_system_agent_processes,
-    sweep_system_agent_processes_with_grace,
+    collect_same_instance_orphans_checked, sweep_orphaned_agent_processes,
+    sweep_system_agent_processes, sweep_system_agent_processes_with_grace,
 };
 #[cfg(target_os = "macos")]
 use orphan_sweep::{BSDInfo, PROC_PIDTBSDINFO};
@@ -322,6 +324,7 @@ pub fn build_managed_agent_summary(
         needs_restart,
         restart_diff,
         env_vars: record.env_vars.clone(),
+        filesystem_isolation: record.filesystem_isolation.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
         status,
@@ -458,21 +461,6 @@ pub fn spawn_agent_child(
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
-    let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
-    append_log_marker(
-        &log_path,
-        &format!(
-            "\n=== starting {} ({}) at {} ===",
-            record.name,
-            record.pubkey,
-            now_iso()
-        ),
-    )?;
-
-    let stdout = open_log_file(&log_path)?;
-    let stderr = stdout
-        .try_clone()
-        .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
@@ -517,10 +505,27 @@ pub fn spawn_agent_child(
         nvm_bin,
     );
 
-    let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    // The boundary wraps the outer buzz-acp process, not the inner runtime.
+    // That is the only shared spawn seam inherited by the harness, ACP
+    // runtime, MCP/tool servers, shells, and background descendants.
+    let (mut command, isolation_run) =
+        super::managed_agent_command(app, record, &resolved_acp_command)?;
+    // Consume the prepared root before the first spawn-side mutation. A start
+    // without an exact lease must not even append a log marker.
+    let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
+    append_log_marker(
+        &log_path,
+        &format!(
+            "\n=== starting {} ({}) at {} ===",
+            record.name,
+            record.pubkey,
+            now_iso()
+        ),
+    )?;
+    let stdout = open_log_file(&log_path)?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|error| format!("failed to clone log handle: {error}"))?;
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -864,13 +869,17 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
+    let mut isolation_run = isolation_run;
+    if let Some(run) = isolation_run.as_mut() {
+        super::bind_isolation_process(run, &mut child)?;
+    }
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
@@ -898,6 +907,7 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        isolation_run,
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -908,6 +918,7 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        isolation_run,
     })
 }
 

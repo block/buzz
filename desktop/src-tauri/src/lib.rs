@@ -66,10 +66,11 @@ use huddle::{
 };
 use initial_window::*;
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    abort_managed_agent_isolation, backfill_persona_snapshots, ensure_nest,
+    get_prepared_managed_agent_isolation, list_managed_agent_runtimes,
+    prepare_managed_agent_isolation, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, start_managed_agent_runtime,
+    stop_managed_agent_runtime, try_regenerate_nest,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -503,6 +504,10 @@ pub fn run() {
                 }
             }
 
+            if let Err(error) = managed_agents::recover_abandoned_isolation_runs() {
+                eprintln!("buzz-desktop: filesystem-isolation recovery failed closed: {error}");
+            }
+
             try_regenerate_nest(&app_handle);
 
             if let Some(mgr) = huddle::models::global_model_manager() {
@@ -758,6 +763,9 @@ pub fn run() {
             list_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
+            prepare_managed_agent_isolation,
+            get_prepared_managed_agent_isolation,
+            abort_managed_agent_isolation,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,
@@ -978,7 +986,6 @@ pub fn run() {
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);
             }
-
             // AppKit terminates through libc exit(), which runs C++ static
             // destructors. The embedded ggml/Metal runtime currently aborts in
             // that destructor phase even after its node has stopped cleanly.

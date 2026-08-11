@@ -728,6 +728,7 @@ fn summary_fixture(
         needs_restart: !restart_diff.is_empty(),
         restart_diff,
         env_vars: Default::default(),
+        filesystem_isolation: None,
         backend: super::BackendKind::Local,
         backend_agent_id: None,
         status: "running".into(),
