@@ -22,6 +22,12 @@ export const PULSE_REACTIONS_REFETCH_INTERVAL_MS = 60_000;
  * Polls every 30s while focused — the focus refetch would duplicate that work. */
 export const PULSE_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
+/** Focus-refetch policy shared by all pulse queries; consumed by focusRefetchPolicy.test.mjs. */
+export const pulseFocusRefetchPolicy = {
+  staleTime: PULSE_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 // ── Query keys ──────────────────────────────────────────────────────────────
 
 export const pulseQueryKeys = {
@@ -50,10 +56,9 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
       // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getLikedNotes(pubkey!, 50)),
     enabled: enabled && !!pubkey,
-    staleTime: PULSE_FOCUS_STALE_TIME_MS,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -68,10 +73,9 @@ export function useMyNotesQuery(pubkey?: string) {
       // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getUserNotes(pubkey!, { limit: 50 })),
     enabled: !!pubkey,
-    staleTime: PULSE_FOCUS_STALE_TIME_MS,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -87,10 +91,9 @@ export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
     queryFn: async () =>
       withoutProjectComments(await getNotesTimeline(contactPubkeys, 10)),
     enabled: enabled && contactPubkeys.length > 0,
-    staleTime: PULSE_FOCUS_STALE_TIME_MS,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -126,10 +129,9 @@ export function usePulseReactionsQuery(
       return result;
     },
     enabled: noteIds.length > 0,
-    staleTime: PULSE_FOCUS_STALE_TIME_MS,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -153,10 +155,9 @@ export function useGlobalNotesQuery(enabled: boolean) {
     queryFn: async () =>
       withoutProjectComments(await getGlobalNotes({ limit: 50 })),
     enabled,
-    staleTime: PULSE_FOCUS_STALE_TIME_MS,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 

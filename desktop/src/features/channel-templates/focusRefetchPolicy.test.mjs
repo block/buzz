@@ -7,20 +7,20 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import { CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS } from "./hooks.ts";
+import { channelTemplatesFocusRefetchPolicy } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
 });
 
-async function focusRefetchCount({ ageMs, staleTime }) {
+async function focusRefetchCount({ ageMs, policy }) {
   focusManager.setFocused(false);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClient.mount();
 
-  const queryKey = ["focus-refetch-policy", staleTime, ageMs];
+  const queryKey = ["focus-refetch-policy", policy.staleTime, ageMs];
   queryClient.setQueryData(queryKey, "cached", {
     updatedAt: Date.now() - ageMs,
   });
@@ -32,8 +32,7 @@ async function focusRefetchCount({ ageMs, staleTime }) {
       return "refetched";
     },
     refetchOnMount: false,
-    refetchOnWindowFocus: true,
-    staleTime,
+    ...policy,
   });
   const unsubscribe = observer.subscribe(() => {});
 
@@ -48,8 +47,8 @@ async function focusRefetchCount({ ageMs, staleTime }) {
 test("channel-templates: skips fresh focus refetch", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS - 1_000,
-      staleTime: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS,
+      ageMs: channelTemplatesFocusRefetchPolicy.staleTime - 1_000,
+      policy: channelTemplatesFocusRefetchPolicy,
     }),
     0,
   );
@@ -58,8 +57,8 @@ test("channel-templates: skips fresh focus refetch", async () => {
 test("channel-templates: refetches genuinely stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS + 1,
-      staleTime: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS,
+      ageMs: channelTemplatesFocusRefetchPolicy.staleTime + 1,
+      policy: channelTemplatesFocusRefetchPolicy,
     }),
     1,
   );

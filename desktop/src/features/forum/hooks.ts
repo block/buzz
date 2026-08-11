@@ -19,6 +19,12 @@ export const FORUM_THREAD_REFETCH_INTERVAL_MS = 10_000;
  * Both families poll while focused and have push-invalidation from mutations. */
 export const FORUM_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
+/** Focus-refetch policy shared by forum-posts and forum-thread queries; consumed by focusRefetchPolicy.test.mjs. */
+export const forumFocusRefetchPolicy = {
+  staleTime: FORUM_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export function forumPostsQueryKey(channelId: string) {
   return ["forum-posts", channelId] as const;
 }
@@ -40,9 +46,8 @@ export function useForumPostsQuery(channel: Channel | null) {
     enabled,
     queryKey: [...forumPostsQueryKey(channelId), relaySelfPubkey ?? null],
     queryFn: () => getForumPosts(channelId, 50, undefined, relaySelfPubkey),
-    staleTime: FORUM_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...forumFocusRefetchPolicy,
   });
 }
 
@@ -71,9 +76,8 @@ export function useForumThreadQuery(
         undefined,
         relaySelfPubkey,
       ),
-    staleTime: FORUM_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...forumFocusRefetchPolicy,
   });
 }
 

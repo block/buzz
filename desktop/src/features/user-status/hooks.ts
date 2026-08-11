@@ -44,6 +44,12 @@ export const USER_STATUS_REFETCH_INTERVAL_MS = 120_000;
  * The live subscription (setQueriesData) is the primary freshness path. */
 export const USER_STATUS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
+/** Focus-refetch policy for the user-status query; consumed by focusRefetchPolicy.test.mjs. */
+export const userStatusFocusRefetchPolicy = {
+  staleTime: USER_STATUS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export function useUserStatusQuery(pubkeys: string[]) {
   const refetchInterval = useFocusedRefetchInterval(
     USER_STATUS_REFETCH_INTERVAL_MS,
@@ -84,9 +90,8 @@ export function useUserStatusQuery(pubkeys: string[]) {
 
       return lookup;
     },
-    staleTime: USER_STATUS_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...userStatusFocusRefetchPolicy,
   });
 }
 

@@ -7,20 +7,20 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import { PERSONA_CATALOG_FOCUS_STALE_TIME_MS } from "./usePersonaCatalogRelay.ts";
+import { personaCatalogFocusRefetchPolicy } from "./usePersonaCatalogRelay.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
 });
 
-async function focusRefetchCount({ ageMs, staleTime }) {
+async function focusRefetchCount({ ageMs, policy }) {
   focusManager.setFocused(false);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClient.mount();
 
-  const queryKey = ["focus-refetch-policy", staleTime, ageMs];
+  const queryKey = ["focus-refetch-policy", policy.staleTime, ageMs];
   queryClient.setQueryData(queryKey, "cached", {
     updatedAt: Date.now() - ageMs,
   });
@@ -32,8 +32,7 @@ async function focusRefetchCount({ ageMs, staleTime }) {
       return "refetched";
     },
     refetchOnMount: false,
-    refetchOnWindowFocus: true,
-    staleTime,
+    ...policy,
   });
   const unsubscribe = observer.subscribe(() => {});
 
@@ -48,8 +47,8 @@ async function focusRefetchCount({ ageMs, staleTime }) {
 test("persona-catalog: skips fresh focus refetch", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: PERSONA_CATALOG_FOCUS_STALE_TIME_MS - 1_000,
-      staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
+      ageMs: personaCatalogFocusRefetchPolicy.staleTime - 1_000,
+      policy: personaCatalogFocusRefetchPolicy,
     }),
     0,
   );
@@ -58,8 +57,8 @@ test("persona-catalog: skips fresh focus refetch", async () => {
 test("persona-catalog: refetches genuinely stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: PERSONA_CATALOG_FOCUS_STALE_TIME_MS + 1,
-      staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
+      ageMs: personaCatalogFocusRefetchPolicy.staleTime + 1,
+      policy: personaCatalogFocusRefetchPolicy,
     }),
     1,
   );

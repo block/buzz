@@ -8,22 +8,22 @@ import {
 } from "@tanstack/react-query";
 
 import {
-  AGENTS_FOCUS_STALE_TIME_MS,
-  MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+  agentsFocusRefetchPolicy,
+  managedAgentLogFocusRefetchPolicy,
 } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
 });
 
-async function focusRefetchCount({ ageMs, staleTime }) {
+async function focusRefetchCount({ ageMs, policy }) {
   focusManager.setFocused(false);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClient.mount();
 
-  const queryKey = ["focus-refetch-policy", staleTime, ageMs];
+  const queryKey = ["focus-refetch-policy", policy.staleTime, ageMs];
   queryClient.setQueryData(queryKey, "cached", {
     updatedAt: Date.now() - ageMs,
   });
@@ -35,8 +35,7 @@ async function focusRefetchCount({ ageMs, staleTime }) {
       return "refetched";
     },
     refetchOnMount: false,
-    refetchOnWindowFocus: true,
-    staleTime,
+    ...policy,
   });
   const unsubscribe = observer.subscribe(() => {});
 
@@ -51,8 +50,8 @@ async function focusRefetchCount({ ageMs, staleTime }) {
 test("agents: skips fresh focus refetch", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: AGENTS_FOCUS_STALE_TIME_MS - 1_000,
-      staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+      ageMs: agentsFocusRefetchPolicy.staleTime - 1_000,
+      policy: agentsFocusRefetchPolicy,
     }),
     0,
   );
@@ -61,8 +60,8 @@ test("agents: skips fresh focus refetch", async () => {
 test("agents: refetches genuinely stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: AGENTS_FOCUS_STALE_TIME_MS + 1,
-      staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+      ageMs: agentsFocusRefetchPolicy.staleTime + 1,
+      policy: agentsFocusRefetchPolicy,
     }),
     1,
   );
@@ -71,8 +70,8 @@ test("agents: refetches genuinely stale data on focus", async () => {
 test("managed-agent-log: skips focus refetch when data is fresher than one poll tick", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS - 1_000,
-      staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+      ageMs: managedAgentLogFocusRefetchPolicy.staleTime - 1_000,
+      policy: managedAgentLogFocusRefetchPolicy,
     }),
     0,
   );
@@ -81,8 +80,8 @@ test("managed-agent-log: skips focus refetch when data is fresher than one poll 
 test("managed-agent-log: refetches on focus when data is older than one poll tick", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS + 1,
-      staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+      ageMs: managedAgentLogFocusRefetchPolicy.staleTime + 1,
+      policy: managedAgentLogFocusRefetchPolicy,
     }),
     1,
   );

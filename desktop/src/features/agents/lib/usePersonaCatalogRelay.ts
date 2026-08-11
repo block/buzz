@@ -21,6 +21,12 @@ export const PERSONA_CATALOG_REFETCH_INTERVAL_MS = 120_000;
  * The live subscription (invalidateQueries) is the primary freshness path. */
 export const PERSONA_CATALOG_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
+/** Focus-refetch policy for the persona catalog query; consumed by focusRefetchPolicy.test.mjs. */
+export const personaCatalogFocusRefetchPolicy = {
+  staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export function personaCatalogQueryKey(communityId: string | null) {
   return ["persona-catalog", communityId] as const;
 }
@@ -33,9 +39,8 @@ export function usePersonaCatalogQuery(communityId: string | null) {
     enabled: communityId !== null,
     queryKey: personaCatalogQueryKey(communityId),
     queryFn: fetchPersonaCatalogPublications,
-    staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...personaCatalogFocusRefetchPolicy,
   });
 }
 

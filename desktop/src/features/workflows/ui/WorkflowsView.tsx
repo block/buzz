@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   allWorkflowsQueryKey,
-  WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
+  workflowListFocusRefetchPolicy,
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
@@ -104,8 +104,7 @@ export function WorkflowsView({
       return results;
     },
     enabled: memberChannels.length > 0,
-    staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
-    refetchOnWindowFocus: true,
+    ...workflowListFocusRefetchPolicy,
   });
 
   const allWorkflows = allWorkflowsQuery.data ?? [];

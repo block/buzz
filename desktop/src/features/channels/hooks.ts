@@ -46,6 +46,12 @@ export const channelsQueryKey = ["channels"] as const;
 export const CHANNELS_REFETCH_INTERVAL_MS = 60_000;
 /** Suppresses the expensive focus refetch until the channel list is old. */
 export const CHANNELS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the channels query; consumed by focusRefetchPolicy.test.mjs. */
+export const channelsFocusRefetchPolicy = {
+  staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
 /**
  * Query-cache key for the channels payload hash. Stored alongside the channel
  * list so its lifecycle is tied to the channel cache — a community switch that
@@ -281,9 +287,8 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         }
       : undefined,
     initialDataUpdatedAt: 0,
-    staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...channelsFocusRefetchPolicy,
   });
 }
 

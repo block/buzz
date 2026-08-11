@@ -41,6 +41,24 @@ export const WORKFLOW_RUNS_FOCUS_STALE_TIME_MS = 10_000;
  * this data fresh; a focus return within 5 minutes adds no new information. */
 export const RUN_APPROVALS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
+/** Focus-refetch policy for workflow list queries; consumed by focusRefetchPolicy.test.mjs. */
+export const workflowListFocusRefetchPolicy = {
+  staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
+/** Focus-refetch policy for the workflow-runs query; consumed by focusRefetchPolicy.test.mjs. */
+export const workflowRunsFocusRefetchPolicy = {
+  staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
+/** Focus-refetch policy for the run-approvals query; consumed by focusRefetchPolicy.test.mjs. */
+export const runApprovalsFocusRefetchPolicy = {
+  staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export const allWorkflowsQueryKey = (channelIdKey: string) =>
   ["workflows-all", channelIdKey] as const;
 export const workflowsQueryKey = (channelId: string) =>
@@ -76,8 +94,7 @@ export function useChannelWorkflowsQuery(channelId: string | null) {
     queryFn: ({ queryKey: [, resolvedChannelId] }) =>
       getChannelWorkflows(resolvedChannelId),
     enabled: channelId !== null,
-    staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
-    refetchOnWindowFocus: true,
+    ...workflowListFocusRefetchPolicy,
   });
 }
 
@@ -98,7 +115,6 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
     queryFn: ({ queryKey: [, resolvedWorkflowId] }) =>
       getWorkflowRuns(resolvedWorkflowId),
     enabled: workflowId !== null,
-    staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
     refetchInterval: (query) => {
       if (!appFocused) return false;
       const runs = query.state.data as WorkflowRun[] | undefined;
@@ -106,7 +122,7 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
         ? 1_000
         : false;
     },
-    refetchOnWindowFocus: true,
+    ...workflowRunsFocusRefetchPolicy,
   });
 }
 
@@ -123,9 +139,8 @@ export function useRunApprovalsQuery(
     queryFn: ({ queryKey: [, resolvedWorkflowId, resolvedRunId] }) =>
       getRunApprovals(resolvedWorkflowId, resolvedRunId),
     enabled: workflowId !== null && runId !== null,
-    staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...runApprovalsFocusRefetchPolicy,
   });
 }
 

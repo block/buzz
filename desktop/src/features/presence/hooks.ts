@@ -25,6 +25,12 @@ export const PRESENCE_REFETCH_INTERVAL_MS = 60_000;
  * The live subscription (setQueriesData) and reconnect invalidation are the
  * primary freshness paths; the 60s poll is the backstop. */
 export const PRESENCE_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the presence query; consumed by focusRefetchPolicy.test.mjs. */
+export const presenceFocusRefetchPolicy = {
+  staleTime: PRESENCE_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
 const PRESENCE_ACTIVITY_THROTTLE_MS = 1_000;
 const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
@@ -98,12 +104,11 @@ export function usePresenceQuery(
     enabled,
     queryKey: presenceQueryKey(normalizedPubkeys),
     queryFn: () => getPresence(normalizedPubkeys),
-    staleTime: PRESENCE_FOCUS_STALE_TIME_MS,
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
     // (crashed clients). WS events handle the fast path. Pause on degraded
     // connections — HTTP presence calls fail anyway and consume relay quota.
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...presenceFocusRefetchPolicy,
   });
 }
 

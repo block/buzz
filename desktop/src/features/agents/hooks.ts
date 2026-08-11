@@ -108,6 +108,18 @@ export const AGENTS_FOCUS_STALE_TIME_MS = 5 * 60_000;
  */
 export const MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS = 30_000;
 
+/** Focus-refetch policy for relay-agent and managed-agent queries; consumed by focusRefetchPolicy.test.mjs. */
+export const agentsFocusRefetchPolicy = {
+  staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
+/** Focus-refetch policy for the managed-agent-log query; consumed by focusRefetchPolicy.test.mjs. */
+export const managedAgentLogFocusRefetchPolicy = {
+  staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
@@ -329,7 +341,6 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     // Relay agent profiles (kind:10100) are near-static and the backing
     // `list_relay_agents` command is an unfiltered relay query for the whole
     // profile set — mounted on ~13 always-live surfaces (channel screen,
@@ -339,8 +350,8 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
     // keep polling but at a relaxed cadence and pause it while backgrounded.
     refetchInterval,
-    refetchOnWindowFocus: true,
     enabled: options?.enabled,
+    ...agentsFocusRefetchPolicy,
   });
 }
 
@@ -350,7 +361,6 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
     enabled: options?.enabled ?? true,
     queryKey: managedAgentsQueryKey,
     queryFn: listManagedAgents,
-    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     refetchInterval: (query) => {
       if (!appFocused) return false;
       const agents = query.state.data as ManagedAgent[] | undefined;
@@ -363,7 +373,7 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         ? 5_000
         : false;
     },
-    refetchOnWindowFocus: true,
+    ...agentsFocusRefetchPolicy,
   });
 }
 
@@ -828,9 +838,8 @@ export function useManagedAgentLogQuery(
     queryFn: () => getManagedAgentLog(pubkey as string, lineCount),
     enabled: pubkey !== null,
     retry: false,
-    staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...managedAgentLogFocusRefetchPolicy,
   });
 }
 
@@ -843,9 +852,8 @@ export function useAgentConfigSurface(pubkey: string | null) {
     queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
     queryFn: () => getAgentConfigSurface(pubkey ?? ""),
     enabled: !!pubkey,
-    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...agentsFocusRefetchPolicy,
   });
 }
 
