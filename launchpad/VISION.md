@@ -181,8 +181,9 @@ worktrees, branches, tmux panes, and workmux state, read-only."
 the handbook as "Agent observability tooling", carrying the `[supporting]` origin prefix.
 
 [#43](https://github.com/launchpad-26/buzz/issues/43) records the asymmetry that matters
-most between the two projects: "rhizomorph is deliberately read-only; agents deployed to
-assist its development are not, and that delta is exactly what needs containing."
+most between the two projects: "Sibling project `launchpad-26/rhizomorph` is deliberately
+read-only; agents deployed to assist its development are not, and that delta is exactly
+what needs containing".
 
 | Concern | Owner | Status |
 |---|---|---|
