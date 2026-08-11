@@ -12,8 +12,12 @@ import {
   beginRelayOriginFetch,
   getCachedRelayOrigin,
 } from "@/shared/lib/mediaUrl";
-import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
-import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
+import {
+  isBuzzEntityPreview,
+  type ResolvedLinkPreview,
+  useResolvedLinkPreviews,
+  withEntityFallbacks,
+} from "@/shared/lib/useResolvedLinkPreviews";
 import {
   Attachment,
   AttachmentContent,
@@ -77,11 +81,11 @@ function ComposerLinkPreviewCard({
   );
   const showImage = Boolean(imageSrc && failedImageSrc !== imageSrc);
   const hostname = previewHostname(preview.href);
-  // The card only claims "done" once the sendable snapshot tag exists: metadata
-  // resolution alone does not survive Send (the snapshot media still has to
-  // finish uploading to the relay). `buzz://` entity links never snapshot, so
-  // `snapshotReady` stays false for them and they never falsely claim "done".
-  const sendReady = Boolean(preview.snapshotReady && tagReady);
+  // External cards are send-ready only once their snapshot tag exists. Buzz
+  // entities never snapshot; recipients resolve them from the relay, so they
+  // are complete as soon as the recognized entity card exists.
+  const snapshotTagReady = Boolean(preview.snapshotReady && tagReady);
+  const done = snapshotTagReady || isBuzzEntityPreview(preview);
   let path = "";
   try {
     const url = new URL(preview.href);
@@ -94,8 +98,8 @@ function ComposerLinkPreviewCard({
       data-image-state={preview.imageState}
       data-link-preview={preview.kind}
       data-link-preview-composer-card=""
-      data-snapshot-tag-ready={sendReady ? "true" : "false"}
-      state={sendReady ? "done" : "processing"}
+      data-snapshot-tag-ready={snapshotTagReady ? "true" : "false"}
+      state={done ? "done" : "processing"}
     >
       <AttachmentMedia
         className="h-[55px] w-[55px] rounded-none rounded-l-2xl bg-muted"
@@ -126,10 +130,10 @@ function ComposerLinkPreviewCard({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle className="line-clamp-1" data-link-preview-hostname="">
-          {preview.snapshotReady ? preview.title : hostname}
+          {done ? preview.title : hostname}
         </AttachmentTitle>
         <AttachmentDescription>
-          {preview.snapshotReady
+          {done
             ? preview.provider || hostname
             : path && path !== "/"
               ? path
@@ -230,7 +234,15 @@ export function useComposerLinkPreviews(content: string, enabled = true) {
   liveCandidatesRef.current = extractCandidates(content).map(
     (preview) => preview.href,
   );
-  const previews = useResolvedLinkPreviews(suppressed ? [] : candidates);
+  const resolvedPreviews = useResolvedLinkPreviews(
+    suppressed ? [] : candidates,
+  );
+  // Entity links resolve to null metadata when the relay lookup has nothing
+  // for them; keep their safe fallback cards rather than dropping them.
+  const previews = React.useMemo(
+    () => withEntityFallbacks(suppressed ? [] : candidates, resolvedPreviews),
+    [suppressed, candidates, resolvedPreviews],
+  );
   // Clear a "hide previews" suppression as soon as the LIVE draft has no
   // supported candidates — not the debounced set, whose lag would otherwise let
   // a clear-then-retype race keep suppression stuck on after the draft changed.
