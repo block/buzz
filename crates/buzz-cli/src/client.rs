@@ -34,6 +34,10 @@ pub struct BlobDescriptor {
     /// Duration in seconds for video/audio (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Original filename captured client-side. The content-addressed relay
+    /// does not retain it, but generic file cards need a stable display label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
@@ -57,20 +61,55 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(ref filename) = d.filename {
+        tag.push(format!("filename {filename}"));
+    }
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
+/// MIME types blocked from upload. Mirrors Desktop and the relay's generic-file
+/// deny-list: active-content XSS carriers and native executables are rejected,
+/// while documents, archives, audio, text, data, images, and video are allowed.
+const BLOCKED_MIMES: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
 ];
 
-/// Maximum file size for image uploads (50 MB).
-const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+fn validate_upload_mime(mime: &str) -> Result<(), CliError> {
+    if BLOCKED_MIMES.contains(&mime) {
+        return Err(CliError::Usage(format!("unsupported file type: {mime}")));
+    }
+    Ok(())
+}
+
+fn sanitize_filename(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path).trim();
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .filter(|value| !value.is_control())
+        .take(255)
+        .collect();
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Maximum file size for non-video uploads (50 MB).
+const MAX_NON_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
@@ -1113,15 +1152,14 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
+        validate_upload_mime(&mime)?;
+        let filename = sanitize_filename(file_path);
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
         } else {
-            MAX_IMAGE_BYTES
+            MAX_NON_VIDEO_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -1183,7 +1221,10 @@ impl BuzzClient {
         // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
-            Ok(desc) => return Ok(desc),
+            Ok(mut desc) => {
+                desc.filename = Some(filename.clone());
+                return Ok(desc);
+            }
             Err(CliError::Relay { status: s, body: _ })
                 if should_retry_legacy_upload(
                     reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
@@ -1195,34 +1236,38 @@ impl BuzzClient {
         }
 
         let legacy_url = format!("{}/media/upload", self.relay_url);
-        self.with_retry_body(|| {
-            let upload_body = upload_body.clone();
-            let legacy_url = legacy_url.clone();
-            let mime = mime.clone();
-            let sha256 = sha256.clone();
-            async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
-                        self.http
-                            .put(&legacy_url)
-                            .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
-                            .header("Content-Type", &mime)
-                            .header("X-SHA-256", &sha256)
-                            .body(upload_body),
-                    )
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+        let mut descriptor = self
+            .with_retry_body(|| {
+                let upload_body = upload_body.clone();
+                let legacy_url = legacy_url.clone();
+                let mime = mime.clone();
+                let sha256 = sha256.clone();
+                async move {
+                    let auth_header =
+                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
+                    let resp = self
+                        .with_auth_tag(
+                            self.http
+                                .put(&legacy_url)
+                                .timeout(upload_timeout)
+                                .header("Authorization", auth_header)
+                                .header("Content-Type", &mime)
+                                .header("X-SHA-256", &sha256)
+                                .body(upload_body),
+                        )
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        let status = resp.status().as_u16();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(CliError::Relay { status, body });
+                    }
+                    resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
-                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
-            }
-        })
-        .await
+            })
+            .await?;
+        descriptor.filename = Some(filename);
+        Ok(descriptor)
     }
 
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
@@ -2303,10 +2348,44 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
+        advance_query_cursor, build_imeta_tag, create_response_with_id_if_accepted,
+        extract_relay_response_field, sanitize_filename, validate_upload_mime, BlobDescriptor,
         BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn generic_documents_are_allowed_but_active_content_is_blocked() {
+        assert!(validate_upload_mime(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        .is_ok());
+        assert!(validate_upload_mime("application/pdf").is_ok());
+        assert!(validate_upload_mime("application/octet-stream").is_ok());
+        assert!(validate_upload_mime("text/html").is_ok());
+        assert!(validate_upload_mime("application/xhtml+xml").is_err());
+        assert!(validate_upload_mime("image/svg+xml").is_err());
+        assert!(validate_upload_mime("application/x-executable").is_err());
+    }
+
+    #[test]
+    fn generic_file_imeta_preserves_a_sanitized_filename() {
+        let descriptor = BlobDescriptor {
+            url: "https://relay.test/media/report".to_string(),
+            sha256: "a".repeat(64),
+            size: 42,
+            mime_type: "application/pdf".to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: Some(sanitize_filename("../../report.pdf")),
+        };
+        let tag = build_imeta_tag(&descriptor);
+        assert!(tag.contains(&"filename report.pdf".to_string()));
+        assert_eq!(sanitize_filename(r"C:\\Users\\Alice\\report.pdf"), "report.pdf");
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
