@@ -1,7 +1,7 @@
 # Security posture
 
-What protects the launchpad-26 cohort's Buzz environment today, which risks have been
-accepted with a reason, and the one gap that nothing currently owns.
+Where the launchpad-26 cohort's security controls actually stand today, which risks have
+been accepted with a reason, and the one gap that nothing currently owns.
 
 This document records posture. It applies no control, and it does not settle anything an
 open decision owns — where a choice is open it says so and links the issue.
@@ -54,8 +54,10 @@ link to evidence.
 Two repository-level facts were checked against the live repository on 2026-08-11 rather
 than taken from an issue body. Dependabot alerts are disabled on this fork
 (`gh api repos/launchpad-26/buzz/dependabot/alerts` returns
-`Dependabot alerts are disabled for this repository.`, HTTP 403) — `IMPLEMENTED` as a
-statement of fact, tracked for change by
+`Dependabot alerts are disabled for this repository.`, HTTP 403). That measurement carries
+no status marker, and deliberately so: none of the four fits a measured *absence*, and
+marking it `IMPLEMENTED` would say a control exists when what exists is the hole where one
+would go. The control itself is `OPEN` —
 [#71](https://github.com/launchpad-26/buzz/issues/71). Whether secret scanning and push
 protection are enabled cannot be answered from a non-admin account at all, which
 [#62](https://github.com/launchpad-26/buzz/issues/62) records as part of the problem:
@@ -64,9 +66,10 @@ should not require privilege to answer." Making that answer visible is
 [#70](https://github.com/launchpad-26/buzz/issues/70); obtaining it is
 [#72](https://github.com/launchpad-26/buzz/issues/72).
 
-Nothing in this section is a control protecting a running system. A reader who finishes
-it believing otherwise has misread it, and this document has failed at the only job it
-has.
+One row above is a control that runs: `cargo-deny check`, which guards this repository's
+Rust dependency surface in CI and nothing beyond it. Nothing above protects a running
+system, because the cohort is not running one. A reader who finishes this section
+believing otherwise has misread it, and this document has failed at the only job it has.
 
 ---
 
@@ -75,14 +78,18 @@ has.
 Each row is a risk the cohort carries deliberately, with the reason written down and a
 source that can be read. Nothing is listed here without one.
 
+A marker in this table describes the standing of the *acceptance*, never of a control:
+`DECIDED` means the acceptance is agreed and recorded, which is what makes a risk accepted
+rather than merely present. No row here protects anything.
+
 | Risk | Status | Why accepted | Source |
 |---|---|---|---|
-| This repository is public, so a written architecture is a map for an attacker as much as for a contributor | `IMPLEMENTED` | An undocumented architecture hides gaps — including the one below — from the people who could fix them | [#42](https://github.com/launchpad-26/buzz/issues/42) security implications; [`AGENTS.md` §8](AGENTS.md) |
+| This repository is public, so a written architecture is a map for an attacker as much as for a contributor | `DECIDED` | An undocumented architecture hides gaps — including the one below — from the people who could fix them | [#42](https://github.com/launchpad-26/buzz/issues/42) security implications; [`AGENTS.md` §8](AGENTS.md) |
 | An initial privileged bootstrap step survives: the deployment's declared input is a bare Ubuntu host with root SSH | `DECIDED` | Something must establish the first identities. Ruling 6 confines root to bootstrap authority rather than an operational identity, and Ruling 7 keeps it from being handed round as a deployment mechanism | [#5](https://github.com/launchpad-26/buzz/issues/5) non-goals: "No requirement to eliminate the initial privileged bootstrap step" |
 | Host hardening does not make the application itself invulnerable | `DECIDED` | The objective is "a **reproducible, defensible internet-facing cohort server**, not a complete enterprise security platform"; product defects go upstream under [`AGENTS.md` §1](AGENTS.md) | [#5](https://github.com/launchpad-26/buzz/issues/5) non-goals: "No claim that host hardening makes the application itself invulnerable" |
 | No SOC, SIEM or enterprise security operations platform | `DECIDED` | Ruling 13 draws the line where the cohort can still diagnose a failure: "A larger observability or SIEM platform is outside scope; establishing enough evidence to diagnose access and security failures is not." | [#5](https://github.com/launchpad-26/buzz/issues/5) non-goals and Ruling 13 |
 | Zero trust is applied proportionately to one cohort server, not as enterprise zero-trust infrastructure | `DECIDED` | Ruling 4 requires the principle — explicit identity, least privilege, no permission granted by location — without requiring the infrastructure | [#5](https://github.com/launchpad-26/buzz/issues/5) Ruling 4 |
-| Every repository-level control the cohort can build without admin detects rather than prevents, and on a public repository detection happens after disclosure | `IMPLEMENTED` | Push protection "can only be *enabled* by a repository admin", so detection is deliberately scoped to need none — "closing it is a separate, human, privileged act", requested under [#72](https://github.com/launchpad-26/buzz/issues/72) | [#62](https://github.com/launchpad-26/buzz/issues/62) security implications |
+| Every repository-level control the cohort can build without admin will detect rather than prevent, and on a public repository detection lands after disclosure. None of that detection runs yet — it is `OPEN` in [What is true today](#what-is-true-today); what is accepted here is its shape | `DECIDED` | Push protection "can only be *enabled* by a repository admin", so detection is deliberately scoped to need none — "closing it is a separate, human, privileged act", requested under [#72](https://github.com/launchpad-26/buzz/issues/72) | [#62](https://github.com/launchpad-26/buzz/issues/62) security implications |
 | Secret-shaped material already in git history is not removed by the hygiene work | `DECIDED` | "remediation is a separate decision with its own blast radius — this PRD delivers the finding, not the force-push" | [#62](https://github.com/launchpad-26/buzz/issues/62) non-goals |
 
 The markers above cover only the rows present when this section was written. A risk added
@@ -147,6 +154,13 @@ under [#5](https://github.com/launchpad-26/buzz/issues/5).
 [#43](https://github.com/launchpad-26/buzz/issues/43) is filed standalone — no PRD raised
 it — which is why it appears here and in
 [ARCHITECTURE.md § Open decisions](ARCHITECTURE.md#open-decisions) without a parent.
+
+Most of the rows above also appear in
+[ARCHITECTURE.md § Open decisions](ARCHITECTURE.md#open-decisions), which lists every
+decision the target architecture depends on rather than only the security ones. Both
+documents carry the shared rows on purpose, so a reader arriving at either sees a complete
+list — the cost is that an accepted ADR has to be struck from both, and updating one alone
+leaves the other asserting a decision that is closed.
 
 Those markers cover only the rows present when this section was written, all confirmed
 `OPEN` against the live issues on 2026-08-11 with `gh issue view`. A decision added later
