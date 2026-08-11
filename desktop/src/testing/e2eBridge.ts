@@ -365,6 +365,13 @@ type E2eConfig = {
     linkPreviewMetadataDelayMs?: number;
     /** Simulates native cold-cache startup work before the async response. */
     linkPreviewMetadataStartBlockMs?: number;
+    /** Delays link-preview snapshot media uploads so specs can exercise the
+     *  composer's settle-gated disabled state before the snapshot tag is ready. */
+    linkPreviewUploadDelayMs?: number;
+    /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
+     *  call should reject, so specs can drive a per-media snapshot upload failure
+     *  (e.g. `["link-preview-image"]` fails only the thumbnail, favicon survives). */
+    linkPreviewUploadErrorFilenames?: string[];
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -8930,6 +8937,16 @@ async function resolveMockUploadDescriptorForBytes(
   args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
+  const uploadDelayMs = config?.mock?.linkPreviewUploadDelayMs ?? 0;
+  if (args.filename?.startsWith("link-preview-")) {
+    if (uploadDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+    }
+    const errorFilenames = config?.mock?.linkPreviewUploadErrorFilenames;
+    if (errorFilenames?.some((needle) => args.filename?.includes(needle))) {
+      throw new Error(`mock upload failed for ${args.filename}`);
+    }
+  }
   const configured = config?.mock?.uploadDescriptors;
   if (configured !== undefined) {
     const descriptors = await resolveMockUploadDescriptors(config);
