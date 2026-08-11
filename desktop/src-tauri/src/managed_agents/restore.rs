@@ -24,15 +24,36 @@ pub struct ManagedAgentRestoreScope {
 /// flag set so a later authoritative bootstrap can retry.
 struct PendingRestoreAttempt<'a> {
     pending: &'a AtomicBool,
+    failed_agents: HashSet<String>,
 }
 
 impl<'a> PendingRestoreAttempt<'a> {
     fn begin(pending: &'a AtomicBool) -> Option<Self> {
-        pending.load(Ordering::Acquire).then_some(Self { pending })
+        pending.load(Ordering::Acquire).then_some(Self {
+            pending,
+            failed_agents: HashSet::new(),
+        })
     }
 
-    fn complete(self) {
-        self.pending.store(false, Ordering::Release);
+    fn record_failure(&mut self, pubkey: &str) {
+        self.failed_agents.insert(pubkey.to_string());
+    }
+
+    fn finish(self) -> Result<(), String> {
+        if self.failed_agents.is_empty() {
+            self.pending.store(false, Ordering::Release);
+            Ok(())
+        } else {
+            let agent_label = if self.failed_agents.len() == 1 {
+                "agent"
+            } else {
+                "agents"
+            };
+            Err(format!(
+                "managed-agent restore incomplete for {} {agent_label}; reconnect to retry",
+                self.failed_agents.len(),
+            ))
+        }
     }
 }
 
@@ -344,7 +365,7 @@ pub async fn restore_managed_agents_on_launch(
     let owner_hex = Some(expected_scope.owner_pubkey.clone());
 
     #[cfg(feature = "mesh-llm")]
-    let agents_to_start = {
+    let (agents_to_start, mesh_preflight_failures) = {
         // Preflight against the same resolution spawn uses — `resolve_effective_config`
         // (definition → global fallback). A linked instance's own `provider`/`model`/
         // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
@@ -370,11 +391,16 @@ pub async fn restore_managed_agents_on_launch(
                 mesh_preflight_failures.insert(record.pubkey.clone());
             }
         }
-        agents_to_start
-            .into_iter()
-            .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
-            .collect::<Vec<_>>()
+        (
+            agents_to_start
+                .into_iter()
+                .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
+                .collect::<Vec<_>>(),
+            mesh_preflight_failures,
+        )
     };
+    #[cfg(not(feature = "mesh-llm"))]
+    let mesh_preflight_failures = HashSet::<String>::new();
     // Serialize spawning and runtime registration with shutdown cleanup. The
     // same lock also serializes workspace mutation. Revalidate the captured
     // scope after taking it: whichever transition wins determines whether this
@@ -397,13 +423,16 @@ pub async fn restore_managed_agents_on_launch(
     // Another completion may have waited on this transition while the first
     // completed. Recheck inside the serialized boundary so it cannot launch a
     // duplicate restore.
-    let Some(restore_attempt) = PendingRestoreAttempt::begin(&state.managed_agent_restore_pending)
+    let Some(mut restore_attempt) =
+        PendingRestoreAttempt::begin(&state.managed_agent_restore_pending)
     else {
         return Ok(());
     };
+    for pubkey in mesh_preflight_failures {
+        restore_attempt.record_failure(&pubkey);
+    }
     if agents_to_start.is_empty() {
-        restore_attempt.complete();
-        return Ok(());
+        return restore_attempt.finish();
     }
 
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
@@ -476,8 +505,7 @@ pub async fn restore_managed_agents_on_launch(
     });
 
     if spawn_results.is_empty() {
-        restore_attempt.complete();
-        return Ok(());
+        return restore_attempt.finish();
     }
 
     // ── Phase C (re-acquire lock): write back PIDs and status to records ──
@@ -513,6 +541,7 @@ pub async fn restore_managed_agents_on_launch(
                     started_at: now.clone(),
                 };
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
+                    restore_attempt.record_failure(&pubkey);
                     record.updated_at = now;
                     record.last_error = Some(error);
                     continue;
@@ -530,6 +559,7 @@ pub async fn restore_managed_agents_on_launch(
                 successfully_spawned.push(pubkey);
             }
             SpawnOutcome::Failed(error) => {
+                restore_attempt.record_failure(&pubkey);
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
@@ -571,10 +601,10 @@ pub async fn restore_managed_agents_on_launch(
             .collect();
 
     save_managed_agents(app, &records)?;
-    // A restore request is consumed only after its configuration has crossed
-    // the spawn/persistence boundary successfully. Any error above leaves it
-    // pending so the next bootstrap completion can retry.
-    restore_attempt.complete();
+    // A restore request is consumed only when every requested agent crossed the
+    // spawn, receipt, adoption, and persistence boundary. Successful agents are
+    // already tracked, so a retry skips them and retries only the failed agents.
+    let restore_result = restore_attempt.finish();
     drop(runtimes);
     drop(_store_guard);
     drop(restore_transition);
@@ -595,7 +625,7 @@ pub async fn restore_managed_agents_on_launch(
         });
     }
 
-    Ok(())
+    restore_result
 }
 
 #[cfg(feature = "mesh-llm")]
@@ -635,9 +665,32 @@ mod tests {
         }
         assert!(pending.load(Ordering::Acquire));
 
-        PendingRestoreAttempt::begin(&pending).unwrap().complete();
+        PendingRestoreAttempt::begin(&pending)
+            .unwrap()
+            .finish()
+            .unwrap();
         assert!(!pending.load(Ordering::Acquire));
         assert!(PendingRestoreAttempt::begin(&pending).is_none());
+    }
+
+    #[test]
+    fn partial_restore_failure_stays_pending_until_retry_succeeds() {
+        let pending = AtomicBool::new(true);
+        let mut first_attempt = PendingRestoreAttempt::begin(&pending).unwrap();
+
+        // One agent crossed the production boundary; another did not. Only
+        // failures are recorded, so successful agents remain live and Phase A
+        // will skip them when the pending attempt is retried.
+        first_attempt.record_failure(&"bb".repeat(32));
+        let error = first_attempt.finish().unwrap_err();
+        assert!(error.contains("1 agent"));
+        assert!(pending.load(Ordering::Acquire));
+
+        PendingRestoreAttempt::begin(&pending)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(!pending.load(Ordering::Acquire));
     }
 
     #[test]
