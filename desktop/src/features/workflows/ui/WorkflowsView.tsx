@@ -2,7 +2,10 @@ import { Plus, RefreshCw, Zap } from "lucide-react";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { allWorkflowsQueryKey } from "@/features/workflows/hooks";
+import {
+  allWorkflowsQueryKey,
+  WORKFLOWS_FOCUS_STALE_TIME_MS,
+} from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
 import { WorkflowDetailPanel } from "@/features/workflows/ui/WorkflowDetailPanel";
@@ -101,7 +104,7 @@ export function WorkflowsView({
       return results;
     },
     enabled: memberChannels.length > 0,
-    staleTime: 30_000,
+    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
     refetchOnWindowFocus: true,
   });
 

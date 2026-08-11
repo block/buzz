@@ -109,6 +109,8 @@ export type {
   ProvisionChannelManagedAgentResult,
 } from "@/features/agents/channelAgents";
 
+export const AGENTS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
@@ -330,7 +332,7 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    staleTime: 30_000,
+    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     // Relay agent profiles (kind:10100) are near-static and the backing
     // `list_relay_agents` command is an unfiltered relay query for the whole
     // profile set — mounted on ~13 always-live surfaces (channel screen,
@@ -351,7 +353,7 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
     enabled: options?.enabled ?? true,
     queryKey: managedAgentsQueryKey,
     queryFn: listManagedAgents,
-    staleTime: 5_000,
+    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     refetchInterval: (query) => {
       if (!appFocused) return false;
       const agents = query.state.data as ManagedAgent[] | undefined;
@@ -909,7 +911,7 @@ export function useManagedAgentLogQuery(
     queryFn: () => getManagedAgentLog(pubkey as string, lineCount),
     enabled: pubkey !== null,
     retry: false,
-    staleTime: 3_000,
+    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });
@@ -924,7 +926,7 @@ export function useAgentConfigSurface(pubkey: string | null) {
     queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
     queryFn: () => getAgentConfigSurface(pubkey ?? ""),
     enabled: !!pubkey,
-    staleTime: 10_000,
+    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });

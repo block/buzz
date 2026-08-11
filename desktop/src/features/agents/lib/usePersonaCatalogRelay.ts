@@ -15,17 +15,25 @@ import {
 import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
 
+/** Keeps focused polling at the established 2-minute backstop cadence. */
+export const PERSONA_CATALOG_REFETCH_INTERVAL_MS = 120_000;
+/** Suppresses the focus refetch until persona catalog data is genuinely stale.
+ * The live subscription (invalidateQueries) is the primary freshness path. */
+export const PERSONA_CATALOG_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
 export function personaCatalogQueryKey(communityId: string | null) {
   return ["persona-catalog", communityId] as const;
 }
 
 export function usePersonaCatalogQuery(communityId: string | null) {
-  const refetchInterval = useFocusedRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PERSONA_CATALOG_REFETCH_INTERVAL_MS,
+  );
   return useQuery<PersonaCatalogPublication[]>({
     enabled: communityId !== null,
     queryKey: personaCatalogQueryKey(communityId),
     queryFn: fetchPersonaCatalogPublications,
-    staleTime: 30_000,
+    staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });

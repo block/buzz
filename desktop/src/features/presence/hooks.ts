@@ -19,6 +19,12 @@ import {
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
+/** Keeps focused polling for presence at the established 60-second backstop cadence. */
+export const PRESENCE_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the focus refetch until presence data is genuinely stale.
+ * The live subscription (setQueriesData) and reconnect invalidation are the
+ * primary freshness paths; the 60s poll is the backstop. */
+export const PRESENCE_FOCUS_STALE_TIME_MS = 5 * 60_000;
 const PRESENCE_ACTIVITY_THROTTLE_MS = 1_000;
 const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
@@ -84,13 +90,15 @@ export function usePresenceQuery(
   const enabled = (options?.enabled ?? true) && normalizedPubkeys.length > 0;
   const connectionState = useRelayConnection();
   const connected = connectionState === "connected";
-  const refetchInterval = useFocusedRefetchInterval(connected ? 60_000 : false);
+  const refetchInterval = useFocusedRefetchInterval(
+    connected ? PRESENCE_REFETCH_INTERVAL_MS : false,
+  );
 
   return useQuery<PresenceLookup>({
     enabled,
     queryKey: presenceQueryKey(normalizedPubkeys),
     queryFn: () => getPresence(normalizedPubkeys),
-    staleTime: 30_000,
+    staleTime: PRESENCE_FOCUS_STALE_TIME_MS,
     // Backstop poll: catches REST-only writers (ACP agents) and TTL expiry
     // (crashed clients). WS events handle the fast path. Pause on degraded
     // connections — HTTP presence calls fail anyway and consume relay quota.

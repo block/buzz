@@ -38,8 +38,16 @@ export function parseUserStatusEvent(event: RelayEvent): {
   };
 }
 
+/** Keeps focused polling at the established 2-minute backstop cadence. */
+export const USER_STATUS_REFETCH_INTERVAL_MS = 120_000;
+/** Suppresses the focus refetch until user-status data is genuinely stale.
+ * The live subscription (setQueriesData) is the primary freshness path. */
+export const USER_STATUS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
 export function useUserStatusQuery(pubkeys: string[]) {
-  const refetchInterval = useFocusedRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    USER_STATUS_REFETCH_INTERVAL_MS,
+  );
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = normalizedPubkeys.length > 0;
 
@@ -76,7 +84,7 @@ export function useUserStatusQuery(pubkeys: string[]) {
 
       return lookup;
     },
-    staleTime: 60_000,
+    staleTime: USER_STATUS_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });

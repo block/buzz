@@ -18,6 +18,13 @@ import {
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 
+/** Suppresses focus refetches until workflow data is genuinely stale.
+ * Channel workflows and run approvals have push-invalidation from mutations;
+ * workflow runs poll when active (making the focus refetch redundant). */
+export const WORKFLOWS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+/** Keeps focused polling for run approvals at the established 10-second cadence. */
+export const RUN_APPROVALS_REFETCH_INTERVAL_MS = 10_000;
+
 export const allWorkflowsQueryKey = (channelIdKey: string) =>
   ["workflows-all", channelIdKey] as const;
 export const workflowsQueryKey = (channelId: string) =>
@@ -53,7 +60,7 @@ export function useChannelWorkflowsQuery(channelId: string | null) {
     queryFn: ({ queryKey: [, resolvedChannelId] }) =>
       getChannelWorkflows(resolvedChannelId),
     enabled: channelId !== null,
-    staleTime: 30_000,
+    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
     refetchOnWindowFocus: true,
   });
 }
@@ -75,7 +82,7 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
     queryFn: ({ queryKey: [, resolvedWorkflowId] }) =>
       getWorkflowRuns(resolvedWorkflowId),
     enabled: workflowId !== null,
-    staleTime: 10_000,
+    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
     refetchInterval: (query) => {
       if (!appFocused) return false;
       const runs = query.state.data as WorkflowRun[] | undefined;
@@ -91,14 +98,16 @@ export function useRunApprovalsQuery(
   workflowId: string | null,
   runId: string | null,
 ) {
-  const refetchInterval = useFocusedRefetchInterval(10_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    RUN_APPROVALS_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery({
     queryKey: runApprovalsQueryKey(workflowId ?? "", runId ?? ""),
     queryFn: ({ queryKey: [, resolvedWorkflowId, resolvedRunId] }) =>
       getRunApprovals(resolvedWorkflowId, resolvedRunId),
     enabled: workflowId !== null && runId !== null,
-    staleTime: 10_000,
+    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });
