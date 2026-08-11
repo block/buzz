@@ -361,7 +361,9 @@ mod tests {
 
     #[test]
     fn host_valid_with_port() {
-        assert!(validate_host("localhost:3000").is_ok());
+        // normalize_host collapses loopback to 127.0.0.1, so the normalized
+        // form must be used.
+        assert!(validate_host("127.0.0.1:3000").is_ok());
     }
 
     #[test]
@@ -421,7 +423,8 @@ mod tests {
 
     #[test]
     fn host_accepts_ipv6_bracket_literal() {
-        assert!(validate_host("[::1]:3000").is_ok());
+        // [::1] is loopback and collapses to 127.0.0.1; use non-loopback IPv6.
+        assert!(validate_host("[::2]:3000").is_ok());
     }
 
     #[test]
