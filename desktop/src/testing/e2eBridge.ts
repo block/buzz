@@ -82,6 +82,7 @@ type MockCommandAvailability = {
 export type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  relayUrl?: string;
   avatarUrl?: string | null;
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
@@ -2221,7 +2222,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     // Native serde always emits this key (`null` when unpinned) — the bridge
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
-    relay_url: DEFAULT_RELAY_WS_URL,
+    relay_url: seed.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -2254,7 +2255,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     respond_to_allowlist: seed.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
-      `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
+      `buzz-acp starting: relay=${seed.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
       "profile created; harness not started",
     ],
   };
