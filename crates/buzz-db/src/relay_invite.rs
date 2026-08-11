@@ -697,6 +697,27 @@ pub async fn claim_identity_handoff(
     let state = IdentityHandoffState::from_database(row.try_get("state")?)?;
     let is_expired: bool = row.try_get("is_expired")?;
 
+    if state == IdentityHandoffState::Claimed {
+        let membership_still_present = expected_pubkey == claimer_pubkey
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS( \
+                     SELECT 1 FROM relay_members \
+                     WHERE community_id = $1 AND pubkey = $2 \
+                 )",
+            )
+            .bind(community.as_uuid())
+            .bind(&claimer_pubkey)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.rollback().await?;
+        return Ok(if membership_still_present {
+            IdentityHandoffClaimOutcome::Claimed {
+                membership: IdentityHandoffMembershipOutcome::AlreadyMember,
+            }
+        } else {
+            IdentityHandoffClaimOutcome::AlreadyClaimed
+        });
+    }
     if state != IdentityHandoffState::Active {
         tx.rollback().await?;
         return Ok(terminal_claim_outcome(state));
@@ -852,10 +873,12 @@ pub async fn invalidate_identity_handoffs(
     let invalidated_count = sqlx::query(
         "UPDATE identity_handoffs \
          SET state = 'invalidated', terminal_at = transaction_timestamp() \
-         WHERE community_id = $1 AND expected_pubkey = $2 AND state = 'active'",
+         WHERE community_id = $1 AND expected_pubkey = $2 \
+           AND incarnation_hash = $3 AND state = 'active'",
     )
     .bind(community.as_uuid())
     .bind(&expected_pubkey)
+    .bind(incarnation_hash.as_slice())
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -878,7 +901,9 @@ pub async fn reap_terminal_identity_handoffs(pool: &PgPool) -> Result<u64> {
         "SELECT community_id, id, expected_pubkey \
          FROM identity_handoffs \
          WHERE terminal_at < transaction_timestamp() - make_interval(days => $1) \
-         ORDER BY terminal_at, community_id, id \
+            OR (state = 'active' AND \
+                expires_at < transaction_timestamp() - make_interval(days => $1)) \
+         ORDER BY COALESCE(terminal_at, expires_at), community_id, id \
          LIMIT $2",
     )
     .bind(IDENTITY_HANDOFF_RETENTION_DAYS)
@@ -915,7 +940,11 @@ pub async fn reap_terminal_identity_handoffs(pool: &PgPool) -> Result<u64> {
          USING UNNEST($1::uuid[], $2::uuid[]) AS target(community_id, handoff_id) \
          WHERE handoff.community_id = target.community_id \
            AND handoff.id = target.handoff_id \
-           AND handoff.terminal_at < transaction_timestamp() - make_interval(days => $3)",
+           AND ( \
+             handoff.terminal_at < transaction_timestamp() - make_interval(days => $3) \
+             OR (handoff.state = 'active' AND \
+                 handoff.expires_at < transaction_timestamp() - make_interval(days => $3)) \
+           )",
     )
     .bind(community_ids)
     .bind(handoff_ids)
@@ -1138,6 +1167,27 @@ mod tests {
                 .expect("claimed status"),
             Some(IdentityHandoffState::Claimed)
         );
+        assert_eq!(
+            claim_identity_handoff(&pool, community, &token_hash, &expected, None)
+                .await
+                .expect("idempotent matching retry"),
+            IdentityHandoffClaimOutcome::Claimed {
+                membership: IdentityHandoffMembershipOutcome::AlreadyMember,
+            }
+        );
+
+        sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+            .bind(community.as_uuid())
+            .bind(&expected)
+            .execute(&pool)
+            .await
+            .expect("remove claimed membership");
+        assert_eq!(
+            claim_identity_handoff(&pool, community, &token_hash, &expected, None)
+                .await
+                .expect("retry after membership removal"),
+            IdentityHandoffClaimOutcome::AlreadyClaimed
+        );
 
         delete_test_community(&pool, community).await;
     }
@@ -1330,18 +1380,90 @@ mod tests {
         .execute(&pool)
         .await
         .expect("age terminal handoff");
-        assert_eq!(
-            reap_terminal_identity_handoffs(&pool)
-                .await
-                .expect("reap terminal handoff"),
-            1
-        );
+        let untouched_expired_id = Uuid::new_v4();
+        insert_raw_identity_handoff(
+            &pool,
+            community,
+            untouched_expired_id,
+            [9; 32],
+            &expected,
+            identity_handoff_incarnation_digest(&test_incarnation()),
+            "active",
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+        )
+        .await
+        .expect("insert untouched expired handoff");
+        sqlx::query(
+            "UPDATE identity_handoffs \
+             SET created_at = transaction_timestamp() - interval '32 days', \
+                 expires_at = transaction_timestamp() - interval '31 days' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(untouched_expired_id)
+        .execute(&pool)
+        .await
+        .expect("age untouched expired handoff");
+        let reaped = reap_terminal_identity_handoffs(&pool)
+            .await
+            .expect("reap retained handoffs");
+        assert!(reaped >= 2);
+        let retained_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_handoffs \
+             WHERE community_id = $1 AND id = ANY($2::uuid[])",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![minted.handoff_id, untouched_expired_id])
+        .fetch_one(&pool)
+        .await
+        .expect("verify retained handoff cleanup");
+        assert_eq!(retained_rows, 0);
         assert!(matches!(
             mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
                 .await
                 .expect("mint after cleanup"),
             MintIdentityHandoffOutcome::RevokedIncarnation
         ));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_invalidation_does_not_cancel_a_new_link_incarnation() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let old_incarnation = test_incarnation();
+        let new_incarnation = test_incarnation();
+        let minted = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &new_incarnation, "owner")
+                .await
+                .expect("mint new-incarnation handoff"),
+        );
+
+        assert_eq!(
+            invalidate_identity_handoffs(&pool, community, &expected, &old_incarnation)
+                .await
+                .expect("invalidate stale incarnation"),
+            IdentityHandoffInvalidation {
+                fence_created: true,
+                invalidated_count: 0,
+            }
+        );
+        assert_eq!(
+            identity_handoff_status(
+                &pool,
+                community,
+                minted.handoff_id,
+                &expected,
+                &new_incarnation,
+            )
+            .await
+            .expect("read new-incarnation status"),
+            Some(IdentityHandoffState::Active)
+        );
 
         delete_test_community(&pool, community).await;
     }

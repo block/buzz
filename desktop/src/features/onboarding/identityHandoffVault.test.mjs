@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  clearIdentityHandoffVault,
   destroyIdentityHandoff,
   getIdentityHandoff,
   identityHandoffVaultSize,
+  resetIdentityHandoffVault,
   setIdentityHandoffPolicyReceipt,
   storeIdentityHandoff,
 } from "./identityHandoffVault.ts";
 
 const CODE = `v3.${"a".repeat(64)}`;
 
-test.beforeEach(() => clearIdentityHandoffVault());
+test.beforeEach(() => resetIdentityHandoffVault());
 
 test("identity handoff secrets live only under non-secret transaction ids", () => {
   storeIdentityHandoff("transaction-1", {
@@ -33,9 +33,26 @@ test("destroy and process restart abandon live handoff credentials", () => {
   assert.equal(getIdentityHandoff("transaction-1"), null);
 
   storeIdentityHandoff("transaction-2", { code: CODE });
-  clearIdentityHandoffVault();
+  resetIdentityHandoffVault();
   assert.equal(getIdentityHandoff("transaction-2"), null);
   assert.equal(identityHandoffVaultSize(), 0);
+});
+
+test("community reset preserves only an explicitly scoped recovery transaction", () => {
+  storeIdentityHandoff("recovery-transaction", {
+    code: CODE,
+    policyReceipt: "policy-receipt",
+  });
+  storeIdentityHandoff("old-community-transaction", { code: CODE });
+
+  resetIdentityHandoffVault("recovery-transaction");
+
+  assert.deepEqual(getIdentityHandoff("recovery-transaction"), {
+    code: CODE,
+    policyReceipt: "policy-receipt",
+  });
+  assert.equal(getIdentityHandoff("old-community-transaction"), null);
+  assert.equal(identityHandoffVaultSize(), 1);
 });
 
 test("policy acceptance adds a receipt without replacing the live code", () => {

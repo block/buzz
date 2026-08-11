@@ -439,7 +439,10 @@ export function CommunityOnboardingFlow({
 
   const importSavedIdentity = async (nsec: string) => {
     const identity = await importIdentity(nsec);
-    resetCommunityState({ resetAvatarState: true });
+    resetCommunityState({
+      resetAvatarState: true,
+      preserveIdentityHandoffTransactionId: transaction.id,
+    });
     // No community-scoped query may survive an identity replacement. Keep the
     // new identity authoritative while the same in-memory invite retries.
     queryClient.clear();

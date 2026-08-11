@@ -14,7 +14,7 @@ import {
   updateCurrentCommunityOnboardingTransaction,
 } from "./communityOnboarding.tsx";
 import {
-  clearIdentityHandoffVault,
+  resetIdentityHandoffVault,
   getIdentityHandoff,
 } from "./identityHandoffVault.ts";
 
@@ -32,7 +32,7 @@ function createMemoryStorage(initial = {}) {
   };
 }
 
-test.beforeEach(() => clearIdentityHandoffVault());
+test.beforeEach(() => resetIdentityHandoffVault());
 
 test("invite onboarding starts at claim and normalizes its relay", () => {
   const storage = createMemoryStorage();
@@ -134,7 +134,7 @@ for (const stage of [
     );
     saveCommunityOnboardingTransaction({ ...transaction, stage }, storage);
 
-    clearIdentityHandoffVault();
+    resetIdentityHandoffVault();
     const restarted = loadCommunityOnboardingTransaction(storage);
     assert.equal(restarted?.id, transaction.id);
     assert.equal(restarted?.stage, "handoff-terminal");

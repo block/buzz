@@ -37,9 +37,20 @@ export function destroyIdentityHandoff(transactionId: string): void {
   identityHandoffs.delete(transactionId);
 }
 
-/** Simulates process teardown in tests and prevents test credentials leaking. */
-export function clearIdentityHandoffVault(): void {
+/**
+ * Clears community-scoped handoffs while optionally retaining the one
+ * transaction whose identity replacement immediately retries the same claim.
+ */
+export function resetIdentityHandoffVault(
+  preserveTransactionId?: string,
+): void {
+  const preserved = preserveTransactionId
+    ? identityHandoffs.get(preserveTransactionId)
+    : undefined;
   identityHandoffs.clear();
+  if (preserveTransactionId && preserved) {
+    identityHandoffs.set(preserveTransactionId, { ...preserved });
+  }
 }
 
 export function identityHandoffVaultSize(): number {

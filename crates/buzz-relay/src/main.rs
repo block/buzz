@@ -1597,6 +1597,15 @@ async fn run_usage_metrics_tick(
                 warn!(error = %error, "failed to reap expired relay invites");
             }
         }
+        match state.db.reap_terminal_identity_handoffs().await {
+            Ok(deleted) if deleted > 0 => {
+                info!(deleted, "reaped retained identity handoffs");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap retained identity handoffs");
+            }
+        }
         run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }
 

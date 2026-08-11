@@ -30,6 +30,7 @@ import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
 import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
+import { resetIdentityHandoffVault } from "@/features/onboarding/identityHandoffVault";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
@@ -49,8 +50,10 @@ import type { Community } from "./types";
  */
 export function resetCommunityState({
   resetAvatarState,
+  preserveIdentityHandoffTransactionId,
 }: {
   resetAvatarState: boolean;
+  preserveIdentityHandoffTransactionId?: string;
 }): void {
   relayClient.disconnect();
   resetRateLimitGate();
@@ -73,6 +76,7 @@ export function resetCommunityState({
   resetBackgroundMediaUploads();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
+  resetIdentityHandoffVault(preserveIdentityHandoffTransactionId);
 }
 
 type CommunityInitResult =
