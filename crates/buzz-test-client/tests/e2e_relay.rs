@@ -22,6 +22,11 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use buzz_core::job::{
+    JobDisposition, JobResultPayload, JobVerification, JobVerificationStatus,
+    JOB_RESULT_SCHEMA_VERSION,
+};
+use buzz_core::kind::{KIND_JOB_REQUEST, KIND_JOB_RESULT};
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 use sha2::{Digest, Sha256};
@@ -412,6 +417,101 @@ async fn test_send_event_and_receive_via_subscription() {
 
     client_a.disconnect().await.expect("disconnect A");
     client_b.disconnect().await.expect("disconnect B");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_structured_and_legacy_job_results_round_trip() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let channel_id = Uuid::parse_str(&channel).expect("channel UUID");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let request = EventBuilder::new(
+        Kind::Custom(KIND_JOB_REQUEST as u16),
+        "Prepare the release handoff",
+    )
+    .tags([Tag::parse(["h", channel.as_str()]).expect("request h tag")])
+    .sign_with_keys(&keys)
+    .expect("sign job request");
+    let ok = client
+        .send_event(request.clone())
+        .await
+        .expect("send job request");
+    assert!(ok.accepted, "relay rejected job request: {}", ok.message);
+
+    let payload = JobResultPayload {
+        schema_version: JOB_RESULT_SCHEMA_VERSION,
+        job_request: request.id.to_hex(),
+        requested_outcome: "Prepare the release handoff".into(),
+        outcome: "Release handoff is ready".into(),
+        last_progress: Some("Verified the release checklist".into()),
+        disposition: JobDisposition::NoArtifact,
+        artifacts: Vec::new(),
+        verification: vec![JobVerification {
+            label: "Release checklist".into(),
+            status: JobVerificationStatus::Passed,
+            evidence: Some("All required items passed".into()),
+        }],
+        blocker: None,
+    };
+    let structured = buzz_sdk::build_job_result(channel_id, request.id, &payload)
+        .expect("build structured result")
+        .sign_with_keys(&keys)
+        .expect("sign structured result");
+    let ok = client
+        .send_event(structured.clone())
+        .await
+        .expect("send structured result");
+    assert!(
+        ok.accepted,
+        "relay rejected structured result: {}",
+        ok.message
+    );
+
+    let legacy_content = "Release handoff completed. Checklist passed.";
+    let legacy = EventBuilder::new(Kind::Custom(KIND_JOB_RESULT as u16), legacy_content)
+        .tags([
+            Tag::parse(["h", channel.as_str()]).expect("legacy h tag"),
+            Tag::parse(["e", &request.id.to_hex(), "", "reply"]).expect("legacy reply tag"),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign legacy result");
+    let ok = client
+        .send_event(legacy.clone())
+        .await
+        .expect("send legacy result");
+    assert!(ok.accepted, "relay rejected legacy result: {}", ok.message);
+
+    let sid = sub_id("job-result-round-trip");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_JOB_RESULT as u16))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to job results");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("query job results");
+
+    let stored_structured = events
+        .iter()
+        .find(|event| event.id == structured.id)
+        .expect("structured result returned by relay");
+    assert_eq!(
+        stored_structured.content,
+        payload.to_json().expect("payload JSON")
+    );
+    let stored_legacy = events
+        .iter()
+        .find(|event| event.id == legacy.id)
+        .expect("legacy result returned by relay");
+    assert_eq!(stored_legacy.content, legacy_content);
+
+    client.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]
