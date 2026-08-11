@@ -132,7 +132,9 @@ export class ReadOnlyRelayClient {
 
   private async openConnection(): Promise<void> {
     const generation = ++this.generation;
+    let pendingInbound: unknown[] | null = [];
     this.onMessageChannel = new Channel<unknown>((message) => {
+      if (pendingInbound) return void pendingInbound.push(message);
       void this.handleWsMessage(message, generation);
     });
 
@@ -142,7 +144,7 @@ export class ReadOnlyRelayClient {
       config: {},
     });
 
-    await new Promise<void>((resolve, reject) => {
+    const authentication = new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.authRequest = null;
         this.disconnect();
@@ -156,6 +158,12 @@ export class ReadOnlyRelayClient {
         timeout,
       };
     });
+
+    while (pendingInbound.length > 0) {
+      await this.handleWsMessage(pendingInbound.shift(), generation);
+    }
+    pendingInbound = null;
+    await authentication;
   }
 
   private requestHistory(
