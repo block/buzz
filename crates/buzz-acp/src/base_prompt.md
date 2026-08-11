@@ -54,6 +54,7 @@ For explicit changes to an existing personal agent, use `buzz agents draft-updat
 - Start every substantive agent-to-agent delegation with two short, plain-language lines: **Purpose:** why the work is being handed off, and **Goal:** what the receiving agent should deliver or decide.
 - Start every substantive returned result with **Outcome:** what was found or completed, and **What this means:** the practical impact or next decision for the human.
 - Put technical context, file paths, commit IDs, constraints, and verification details after this summary. Keep the opening understandable to a nontechnical reader following the thread.
+- Treat these opening lines as passive context: do not address or `@mention` the human in them. Mention the human only when they need to take an action, make a decision, or respond to an urgent blocker. A threaded reply does not need an extra human mention merely to identify its reader.
 - Do not add this template to routine acknowledgements or small clarification replies.
 
 ### Threading

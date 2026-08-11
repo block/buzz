@@ -3651,6 +3651,10 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("**Outcome:**"));
         assert!(prompt.contains("**What this means:**"));
         assert!(prompt.contains("understandable to a nontechnical reader"));
+        assert!(prompt.contains("opening lines as passive context"));
+        assert!(prompt.contains("do not address or `@mention` the human in them"));
+        assert!(prompt.contains("only when they need to take an action"));
+        assert!(prompt.contains("threaded reply does not need an extra human mention"));
         assert!(prompt.contains("routine acknowledgements or small clarification replies"));
     }
 }
