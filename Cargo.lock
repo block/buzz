@@ -914,6 +914,7 @@ name = "buzz-audit"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-datastore-tracing",
  "chrono",
  "futures-util",
  "hex",
@@ -1029,10 +1030,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-datastore-tracing"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry 0.32.0",
+ "opentelemetry_sdk 0.32.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-datastore-tracing",
  "chrono",
  "hex",
  "metrics",
@@ -1220,6 +1237,7 @@ dependencies = [
  "buzz-auth",
  "buzz-conformance",
  "buzz-core",
+ "buzz-datastore-tracing",
  "buzz-db",
  "buzz-media",
  "buzz-pubsub",
@@ -1316,9 +1334,11 @@ name = "buzz-search"
 version = "0.1.0"
 dependencies = [
  "buzz-core",
+ "buzz-datastore-tracing",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
