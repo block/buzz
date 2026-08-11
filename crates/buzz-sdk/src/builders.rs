@@ -5,9 +5,9 @@
 
 use buzz_core::{
     kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_PROFILE, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT,
+        KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
@@ -211,6 +211,174 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
         tags.push(Tag::parse(parts).map_err(|e| SdkError::InvalidTag(e.to_string()))?);
     }
     Ok(())
+}
+
+/// Current state of an agent's `kind:10100` directory record, as read back
+/// from the relay before applying an update.
+///
+/// Deliberately has **no `respond_to_allowlist` field**. `kind:10100` is
+/// queried community-wide, so the exact pubkeys allowed to trigger an
+/// `allowlist`-mode agent must never be published there — that's a private
+/// access boundary, not public routing state. Enforcement stays where it
+/// already lives: the harness process that actually decides whether to act
+/// on a mention. Consumers should treat `respond_to: "allowlist"` the same
+/// as `"anyone"` for *eligibility* purposes (can this be mentioned at all)
+/// and let the harness silently no-op for unauthorized senders.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AgentProfileState {
+    /// Display name shown in Buzz Desktop. Falls back to the pubkey/npub
+    /// when absent.
+    pub name: Option<String>,
+    /// Free-form agent type label (e.g. `"agent"`).
+    pub agent_type: String,
+    /// Legacy channel-name list, kept for wire compatibility. Prefer `channel_ids`.
+    pub channels: Vec<String>,
+    /// Channel UUIDs this agent is mentionable in.
+    pub channel_ids: Vec<String>,
+    /// Free-form capability tags.
+    pub capabilities: Vec<String>,
+    /// Presence status: `"online"`, `"away"`, or `"offline"`.
+    pub status: String,
+    /// Who this agent responds to: `"owner-only"`, `"allowlist"`, or `"anyone"`.
+    pub respond_to: String,
+    /// Who may add this agent to new channels: `"anyone"`, `"owner_only"`, or `"nobody"`.
+    pub channel_add_policy: String,
+    /// Monotonically increasing per write. The relay rejects a `kind:10100`
+    /// publish whose `generation` isn't strictly greater than the currently
+    /// stored value (see the ingest check in `buzz-relay`), turning the
+    /// "two writers silently clobber each other's fields" race into a loud,
+    /// retryable rejection instead of lost data.
+    pub generation: u64,
+}
+
+/// Fields an update wants to change. `None` means "leave as-is" (carried
+/// forward from the current record); collections replace wholesale when
+/// `Some`.
+#[derive(Debug, Clone, Default)]
+pub struct AgentProfilePatch {
+    /// New display name, or `None` to leave unchanged.
+    pub name: Option<String>,
+    /// New agent-type label, or `None` to leave unchanged (defaults to `"agent"`).
+    pub agent_type: Option<String>,
+    /// New legacy channel-name list, or `None` to leave unchanged.
+    pub channels: Option<Vec<String>>,
+    /// New channel UUID list, or `None` to leave unchanged.
+    pub channel_ids: Option<Vec<String>>,
+    /// New capability tags, or `None` to leave unchanged.
+    pub capabilities: Option<Vec<String>>,
+    /// New presence status, or `None` to leave unchanged (defaults to `"online"`).
+    pub status: Option<String>,
+    /// New respond-to mode, or `None` to leave unchanged (defaults to `"owner-only"`).
+    pub respond_to: Option<String>,
+    /// New channel-add policy, or `None` to leave unchanged (defaults to `"owner_only"`).
+    pub channel_add_policy: Option<String>,
+}
+
+const VALID_AGENT_STATUSES: &[&str] = &["online", "away", "offline"];
+const VALID_AGENT_RESPOND_TO: &[&str] = &["owner-only", "allowlist", "anyone"];
+const VALID_AGENT_CHANNEL_ADD_POLICIES: &[&str] = &["anyone", "owner_only", "nobody"];
+const MAX_AGENT_NAME_LEN: usize = 256;
+
+fn check_enum<'a>(value: &str, allowed: &[&'a str], field: &str) -> Result<&'a str, SdkError> {
+    allowed
+        .iter()
+        .find(|v| **v == value)
+        .copied()
+        .ok_or_else(|| {
+            SdkError::InvalidInput(format!("{field} must be one of {allowed:?} (got: {value})"))
+        })
+}
+
+/// Build a `kind:10100` agent-directory update by merging `patch` onto
+/// `current` (the latest known record for this identity, or `None` if it
+/// has never published one) and bumping `generation`.
+///
+/// This is meant to be the *only* place that constructs `kind:10100`
+/// content — every writer (the ACP harness, `buzz agents publish-profile`,
+/// `buzz-supervisor`) should go through this so a partial update from one
+/// writer can never silently erase fields another writer set, and so
+/// validation (enum bounds, UUID-shaped channel ids, name length) is
+/// enforced once instead of per-caller.
+pub fn build_agent_profile_update(
+    current: Option<&AgentProfileState>,
+    patch: AgentProfilePatch,
+) -> Result<EventBuilder, SdkError> {
+    let base = current.cloned().unwrap_or_default();
+
+    let name = patch.name.or(base.name);
+    if let Some(n) = &name {
+        if n.is_empty() || n.len() > MAX_AGENT_NAME_LEN {
+            return Err(SdkError::InvalidInput(format!(
+                "name must be 1..={MAX_AGENT_NAME_LEN} chars"
+            )));
+        }
+    }
+
+    let agent_type = patch.agent_type.unwrap_or_else(|| {
+        if base.agent_type.is_empty() {
+            "agent".to_string()
+        } else {
+            base.agent_type
+        }
+    });
+
+    let status = patch.status.unwrap_or_else(|| {
+        if base.status.is_empty() {
+            "online".to_string()
+        } else {
+            base.status
+        }
+    });
+    let status = check_enum(&status, VALID_AGENT_STATUSES, "status")?.to_string();
+
+    let respond_to = patch.respond_to.unwrap_or_else(|| {
+        if base.respond_to.is_empty() {
+            "owner-only".to_string()
+        } else {
+            base.respond_to
+        }
+    });
+    let respond_to = check_enum(&respond_to, VALID_AGENT_RESPOND_TO, "respond_to")?.to_string();
+
+    let channel_add_policy = patch.channel_add_policy.unwrap_or_else(|| {
+        if base.channel_add_policy.is_empty() {
+            "owner_only".to_string()
+        } else {
+            base.channel_add_policy
+        }
+    });
+    let channel_add_policy = check_enum(
+        &channel_add_policy,
+        VALID_AGENT_CHANNEL_ADD_POLICIES,
+        "channel_add_policy",
+    )?
+    .to_string();
+
+    let channel_ids = patch.channel_ids.unwrap_or(base.channel_ids);
+    for id in &channel_ids {
+        Uuid::parse_str(id)
+            .map_err(|_| SdkError::InvalidInput(format!("invalid channel_id: {id}")))?;
+    }
+
+    let channels = patch.channels.unwrap_or(base.channels);
+    let capabilities = patch.capabilities.unwrap_or(base.capabilities);
+    let generation = base.generation + 1;
+
+    let mut content = serde_json::json!({
+        "agent_type": agent_type,
+        "channels": channels,
+        "channel_ids": channel_ids,
+        "capabilities": capabilities,
+        "status": status,
+        "respond_to": respond_to,
+        "channel_add_policy": channel_add_policy,
+        "generation": generation,
+    });
+    if let Some(n) = name {
+        content["name"] = serde_json::Value::String(n);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content.to_string()).tags([]))
 }
 
 /// Build a stream message (kind 9).
@@ -4594,5 +4762,123 @@ mod tests {
 
         assert_eq!(accept_count, 11, "expected 11 accept cases");
         assert_eq!(reject_count, 20, "expected 20 reject cases");
+    }
+
+    // ── build_agent_profile_update ──────────────────────────────────────
+
+    fn parse_content(ev: &nostr::Event) -> serde_json::Value {
+        serde_json::from_str(&ev.content).expect("valid json content")
+    }
+
+    #[test]
+    fn agent_profile_first_publish_defaults_and_generation_one() {
+        let builder = build_agent_profile_update(
+            None,
+            AgentProfilePatch {
+                name: Some("Coder".into()),
+                respond_to: Some("anyone".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ev = sign(builder);
+        assert_eq!(ev.kind, Kind::Custom(KIND_AGENT_PROFILE as u16));
+        let c = parse_content(&ev);
+        assert_eq!(c["name"], "Coder");
+        assert_eq!(c["agent_type"], "agent");
+        assert_eq!(c["status"], "online");
+        assert_eq!(c["respond_to"], "anyone");
+        assert_eq!(c["channel_add_policy"], "owner_only");
+        assert_eq!(c["generation"], 1);
+        // No allowlist field must ever appear in the public content.
+        assert!(c.get("respond_to_allowlist").is_none());
+    }
+
+    #[test]
+    fn agent_profile_patch_preserves_untouched_fields_and_bumps_generation() {
+        let current = AgentProfileState {
+            name: Some("Coder".into()),
+            agent_type: "agent".into(),
+            channels: vec![],
+            channel_ids: vec!["11111111-1111-1111-1111-111111111111".into()],
+            capabilities: vec!["code".into()],
+            status: "online".into(),
+            respond_to: "anyone".into(),
+            channel_add_policy: "owner_only".into(),
+            generation: 5,
+        };
+        // Only changing status — everything else should carry forward.
+        let builder = build_agent_profile_update(
+            Some(&current),
+            AgentProfilePatch {
+                status: Some("away".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ev = sign(builder);
+        let c = parse_content(&ev);
+        assert_eq!(c["name"], "Coder");
+        assert_eq!(
+            c["channel_ids"],
+            serde_json::json!(["11111111-1111-1111-1111-111111111111"])
+        );
+        assert_eq!(c["capabilities"], serde_json::json!(["code"]));
+        assert_eq!(c["respond_to"], "anyone");
+        assert_eq!(c["channel_add_policy"], "owner_only");
+        assert_eq!(c["status"], "away");
+        assert_eq!(c["generation"], 6);
+    }
+
+    #[test]
+    fn agent_profile_rejects_invalid_status() {
+        let err = build_agent_profile_update(
+            None,
+            AgentProfilePatch {
+                status: Some("bogus".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("status"));
+    }
+
+    #[test]
+    fn agent_profile_rejects_invalid_respond_to() {
+        let err = build_agent_profile_update(
+            None,
+            AgentProfilePatch {
+                respond_to: Some("sometimes".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("respond_to"));
+    }
+
+    #[test]
+    fn agent_profile_rejects_non_uuid_channel_id() {
+        let err = build_agent_profile_update(
+            None,
+            AgentProfilePatch {
+                channel_ids: Some(vec!["not-a-uuid".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("channel_id"));
+    }
+
+    #[test]
+    fn agent_profile_rejects_empty_name() {
+        let err = build_agent_profile_update(
+            None,
+            AgentProfilePatch {
+                name: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("name"));
     }
 }

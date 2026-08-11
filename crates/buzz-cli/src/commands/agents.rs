@@ -164,7 +164,129 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::PublishProfile {
+            name,
+            agent_type,
+            channel_ids,
+            status,
+            respond_to,
+            channel_add_policy,
+        } => {
+            cmd_publish_profile(
+                client,
+                buzz_sdk::builders::AgentProfilePatch {
+                    name,
+                    agent_type,
+                    channels: None,
+                    channel_ids,
+                    capabilities: None,
+                    status,
+                    respond_to,
+                    channel_add_policy,
+                },
+            )
+            .await
+        }
     }
+}
+
+/// Fetches this identity's current `kind:10100` record (if any), applies
+/// `patch` on top of it via `buzz_sdk::builders::build_agent_profile_update`,
+/// and publishes. If the relay rejects the write as a stale generation —
+/// another writer published in between our read and our submit — re-fetches
+/// once and retries with a fresh generation before giving up.
+async fn cmd_publish_profile(
+    client: &BuzzClient,
+    patch: buzz_sdk::builders::AgentProfilePatch,
+) -> Result<(), CliError> {
+    for attempt in 0..2 {
+        let current = fetch_agent_profile_state(client).await?;
+        let builder =
+            buzz_sdk::builders::build_agent_profile_update(current.as_ref(), patch.clone())
+                .map_err(|e| CliError::Usage(e.to_string()))?;
+        let event = client.sign_event(builder)?;
+        match client.submit_event(event).await {
+            Ok(resp) => {
+                println!("{resp}");
+                return Ok(());
+            }
+            Err(CliError::Relay { status, body })
+                if attempt == 0 && body.contains("stale generation") =>
+            {
+                let _ = status;
+                // Another writer published between our read and our submit —
+                // re-fetch the now-current record and retry once.
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(CliError::Other(
+        "publish-profile: still hit a stale generation after retrying once".into(),
+    ))
+}
+
+/// Queries the relay for this identity's current `kind:10100` record and
+/// parses it into `AgentProfileState`. Returns `None` if it's never
+/// published one.
+async fn fetch_agent_profile_state(
+    client: &BuzzClient,
+) -> Result<Option<buzz_sdk::builders::AgentProfileState>, CliError> {
+    let my_pubkey = client.keys().public_key().to_hex();
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "authors": [my_pubkey],
+        "limit": 1,
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp)
+        .map_err(|e| CliError::Other(format!("invalid relay response: {e}")))?;
+    let Some(event) = events.into_iter().next() else {
+        return Ok(None);
+    };
+    let content: serde_json::Value = event
+        .get("content")
+        .and_then(|c| c.as_str())
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let as_str_vec = |key: &str| -> Vec<String> {
+        content
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let as_str = |key: &str| -> String {
+        content
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    Ok(Some(buzz_sdk::builders::AgentProfileState {
+        name: content
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        agent_type: as_str("agent_type"),
+        channels: as_str_vec("channels"),
+        channel_ids: as_str_vec("channel_ids"),
+        capabilities: as_str_vec("capabilities"),
+        status: as_str("status"),
+        respond_to: as_str("respond_to"),
+        channel_add_policy: as_str("channel_add_policy"),
+        generation: content
+            .get("generation")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    }))
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by

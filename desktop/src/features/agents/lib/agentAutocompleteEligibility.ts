@@ -18,10 +18,29 @@ export function relayAgentIsSharedWithUser(
     ? normalizePubkey(currentPubkey)
     : null;
 
-  if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
-    return agent.respondToAllowlist
-      .map((pubkey) => normalizePubkey(pubkey))
-      .includes(normalizedCurrentPubkey);
+  if (agent.respondTo === "allowlist") {
+    // The public directory (kind:10100, community-visible) no longer
+    // carries the exact allowlist — publishing precise access pubkeys there
+    // would leak a private boundary to every member (see the relay-side
+    // rejection in buzz-relay/handlers/ingest.rs). Treat "allowlist" the
+    // same as "anyone" for eligibility: the harness is the real enforcement
+    // point and silently no-ops for senders it doesn't authorize, so
+    // showing the agent as mentionable here is a UI-level "you may try",
+    // not a security decision.
+    //
+    // Records published before this change may still carry a non-empty
+    // respondToAllowlist; honor it while present so they don't regress to
+    // over-permissive until naturally republished with the new schema.
+    if (agent.respondToAllowlist.length > 0) {
+      return normalizedCurrentPubkey
+        ? agent.respondToAllowlist
+            .map((pubkey) => normalizePubkey(pubkey))
+            .includes(normalizedCurrentPubkey)
+        : false;
+    }
+    return agent.channelIds.some((channelId) =>
+      sharedChannelIds.has(channelId),
+    );
   }
 
   return (

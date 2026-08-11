@@ -1,7 +1,7 @@
 pub mod agent_management;
-mod client;
+pub mod client;
 mod commands;
-mod error;
+pub mod error;
 mod links;
 mod validate;
 
@@ -365,6 +365,45 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish this identity's relay agent profile (kind:10100) — makes a headless
+    /// (non-managed) agent discoverable and @mentionable by Buzz Desktop clients.
+    #[command(
+        after_help = "kind:10100 is a replaceable event with a generation counter: this fetches \
+the current record for the signing identity, applies your changes on top of it (fields you \
+don't pass are left as-is), and republishes with generation + 1. If another writer published \
+in between, the relay rejects the write as a stale generation and this command re-fetches and \
+retries once automatically.\n\n\
+There is no --respond-to-allowlist flag. kind:10100 is community-visible, so the exact pubkeys \
+allowed to trigger an `allowlist`-mode agent are never published here — that's a private access \
+boundary, not public routing state. The harness enforces the real allowlist locally; this \
+command only advertises the mode.\n\n\
+Examples:\n  \
+buzz agents publish-profile --name Coder --channel-ids <UUID> --respond-to allowlist\n  \
+buzz agents publish-profile --status away"
+    )]
+    PublishProfile {
+        /// Display name shown in Buzz Desktop. Leaves the current name unchanged if omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// Free-form agent type label. Defaults to "agent" on first publish.
+        #[arg(long)]
+        agent_type: Option<String>,
+        /// Channel UUIDs this agent should be considered mentionable in (comma-separated).
+        /// Replaces the full list; leaves it unchanged if omitted.
+        #[arg(long, value_delimiter = ',')]
+        channel_ids: Option<Vec<String>>,
+        /// Presence status: online, away, or offline. Defaults to "online" on first publish.
+        #[arg(long)]
+        status: Option<String>,
+        /// Who this agent responds to: owner-only, allowlist, or anyone.
+        /// Defaults to "owner-only" on first publish.
+        #[arg(long)]
+        respond_to: Option<String>,
+        /// Who may add this agent to new channels: anyone, owner_only, or nobody.
+        /// Defaults to "owner_only" on first publish.
+        #[arg(long)]
+        channel_add_policy: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2175,6 +2214,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "publish-profile",
                 "unarchive"
             ]
         );
@@ -2313,7 +2353,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

@@ -1,0 +1,51 @@
+[package]
+name = "buzz-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless relay-side team supervisor — the server analog of Desktop Managed Agents"
+
+[[bin]]
+name = "buzz-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+# Internal — reuses buzz-cli's already-battle-tested relay HTTP client
+# (NIP-98 signing, query/submit_event) instead of reimplementing it.
+buzz-cli = { path = "../buzz-cli" }
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+
+# Nostr
+nostr = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization / config
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "1.0"
+
+# IDs
+uuid = { workspace = true }
+
+# Extracting `workdir:<path>` out of free-text channel descriptions
+regex = "1"
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Safe wrapper around POSIX `kill(2)` for stop_process — keeps this crate
+# unsafe-code-free (matches buzz-acp's kill_process_group rationale).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
