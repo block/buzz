@@ -94,6 +94,22 @@ function loadPoofAudioBuffer() {
   return poofAudioBufferPromise;
 }
 
+/**
+ * Warm the Web Audio poof buffer without touching any HTMLAudioElement.
+ *
+ * Constructing an HTMLAudioElement at mount time (and calling `load()` on it)
+ * makes the renderer synchronously wait on the media pipeline
+ * (`selectMediaResource` -> `RemoteMediaPlayerMIMETypeCache::supportsTypeAndCodecs`)
+ * before the relay TCP connection is up, which deadlocks the app on macOS 27
+ * beta. The poof sound is a throwaway UI blip, so it plays through the Web
+ * Audio API (AudioContext + AudioBufferSourceNode) rather than an
+ * HTMLAudioElement; the HTMLAudioElement fallback is constructed only
+ * after an actual user-triggered Web Audio playback failure.
+ */
+export function warmPoofAudio() {
+  void loadPoofAudioBuffer();
+}
+
 function playFallbackPoofSound() {
   try {
     poofAudio ??= new Audio(POOF_SOUND_URL);
@@ -146,14 +162,7 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
       image.src = frame.src;
     }
 
-    void loadPoofAudioBuffer();
-    try {
-      poofAudio ??= new Audio(POOF_SOUND_URL);
-      poofAudio.preload = "auto";
-      poofAudio.load();
-    } catch {
-      // Best-effort only.
-    }
+    warmPoofAudio();
   }, []);
 
   useEffect(() => {
