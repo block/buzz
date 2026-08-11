@@ -26,12 +26,16 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
+use buzz_core::nostr_identity::{
+    parse_public_key_compat, parse_secret_key_compat, public_key_to_npub, secret_key_to_nsec,
+};
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use tracing::warn;
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(name = "buzz-admin", about = "Buzz instance administration")]
@@ -44,11 +48,11 @@ struct Cli {
 enum Command {
     /// Add a pubkey to the relay membership list.
     ///
-    /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
+    /// Accepts an npub (legacy hex remains accepted). After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
     /// the updated list immediately.
     AddMember {
-        /// Nostr public key — bech32 npub or 64-char hex.
+        /// Nostr public key in npub form.
         #[arg(long)]
         pubkey: String,
 
@@ -59,11 +63,11 @@ enum Command {
     },
     /// Remove a pubkey from the relay membership list.
     ///
-    /// Accepts a bech32 npub or 64-char hex pubkey. After removing the DB row,
+    /// Accepts an npub (legacy hex remains accepted). After removing the DB row,
     /// publishes a kind:13534 membership roster via Redis. Cannot remove the
     /// relay owner — change RELAY_OWNER_PUBKEY config instead.
     RemoveMember {
-        /// Nostr public key — bech32 npub or 64-char hex.
+        /// Nostr public key in npub form.
         #[arg(long)]
         pubkey: String,
 
@@ -99,7 +103,7 @@ enum Command {
         #[arg(long)]
         channel: Option<String>,
 
-        /// Relay private key (hex) for signing events. Falls back to
+        /// Relay private key (nsec) for signing events. Falls back to
         /// BUZZ_RELAY_PRIVATE_KEY env var. If neither is set, generates
         /// an ephemeral key (events will be unverifiable after restart).
         #[arg(long)]
@@ -143,8 +147,9 @@ async fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::GenerateKey => {
             let keys = Keys::generate();
-            println!("Public key:  {}", keys.public_key().to_hex());
-            println!("Secret key:  {}", keys.secret_key().display_secret());
+            println!("Public key:  {}", public_key_to_npub(&keys.public_key())?);
+            let nsec = Zeroizing::new(secret_key_to_nsec(keys.secret_key())?);
+            println!("Secret key:  {}", nsec.as_str());
             println!("\nSet BUZZ_PRIVATE_KEY to the secret key to use this identity.");
             Ok(0)
         }
@@ -181,6 +186,7 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
             return Ok(1);
         }
     };
+    let pubkey_npub = npub_from_protocol_hex(&pubkey_hex)?;
 
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
@@ -189,8 +195,8 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
         .add_relay_member(tenant.community(), &pubkey_hex, &role, None)
         .await
     {
-        Ok(true) => println!("added {pubkey_hex} as {role}"),
-        Ok(false) => println!("already a member: {pubkey_hex} (no change)"),
+        Ok(true) => println!("added {pubkey_npub} as {role}"),
+        Ok(false) => println!("already a member: {pubkey_npub} (no change)"),
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
             return Ok(5);
@@ -219,6 +225,7 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
             return Ok(1);
         }
     };
+    let pubkey_npub = npub_from_protocol_hex(&pubkey_hex)?;
 
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
@@ -233,21 +240,21 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
     };
 
     match result {
-        Ok(RemoveResult::Removed) => println!("removed {pubkey_hex}"),
+        Ok(RemoveResult::Removed) => println!("removed {pubkey_npub}"),
         Ok(RemoveResult::NotFound) => {
-            eprintln!("error: member not found: {pubkey_hex}");
+            eprintln!("error: member not found: {pubkey_npub}");
             return Ok(2);
         }
         Ok(RemoveResult::IsOwner) => {
             eprintln!(
-                "error: cannot remove relay owner: {pubkey_hex}\n\
+                "error: cannot remove relay owner: {pubkey_npub}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
             return Ok(3);
         }
         Ok(RemoveResult::RoleMismatch) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
-            eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
+            eprintln!("error: role mismatch — {pubkey_npub} is not currently '{role_str}'");
             return Ok(4);
         }
         Err(e) => {
@@ -266,7 +273,20 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
 async fn cmd_list_product_feedback(limit: u16) -> Result<i32> {
     let db = connect_db().await?;
     let feedback = db.list_product_feedback(i64::from(limit)).await?;
-    println!("{}", serde_json::to_string_pretty(&feedback)?);
+    let mut output = serde_json::to_value(feedback)?;
+    if let Some(items) = output.as_array_mut() {
+        for item in items {
+            if let Some(pubkey) = item
+                .get("submitter_pubkey")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+            {
+                item["submitter_pubkey"] =
+                    serde_json::Value::String(npub_from_protocol_hex(&pubkey)?);
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(0)
 }
 
@@ -286,10 +306,16 @@ async fn cmd_list_members() -> Result<i32> {
     );
     println!("{}", "-".repeat(160));
     for m in &members {
-        let added_by = m.added_by.as_deref().unwrap_or("-");
+        let pubkey = npub_from_protocol_hex(&m.pubkey)?;
+        let added_by = m
+            .added_by
+            .as_deref()
+            .map(npub_from_protocol_hex)
+            .transpose()?
+            .unwrap_or_else(|| "-".to_string());
         println!(
             "{:<66} {:<8} {:<66} {}",
-            m.pubkey,
+            pubkey,
             m.role,
             added_by,
             m.created_at.format("%Y-%m-%dT%H:%M:%SZ")
@@ -314,9 +340,15 @@ fn validate_role(role: &str) -> std::result::Result<(), String> {
 
 /// Parse a bech32 npub or 64-char hex pubkey into lowercase hex.
 fn parse_pubkey_hex(input: &str) -> std::result::Result<String, String> {
-    nostr::PublicKey::parse(input)
-        .map(|pk| pk.to_hex())
-        .map_err(|e| format!("invalid pubkey '{input}': {e}"))
+    parse_public_key_compat(input)
+        .map(|(public_key, _)| public_key.to_hex())
+        .map_err(|_| "invalid pubkey: expected an npub".to_string())
+}
+
+fn npub_from_protocol_hex(input: &str) -> Result<String> {
+    let public_key = nostr::PublicKey::from_hex(input)
+        .map_err(|_| anyhow::anyhow!("stored pubkey is invalid"))?;
+    Ok(public_key_to_npub(&public_key)?)
 }
 
 /// Publish kind:13534 with `custom_created_at = max(now, newest_existing + 1s)`.
@@ -403,13 +435,15 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let db = connect_db().await?;
 
     let relay_keypair = {
-        let hex = std::env::var("BUZZ_RELAY_PRIVATE_KEY").map_err(|_| {
+        let raw = Zeroizing::new(std::env::var("BUZZ_RELAY_PRIVATE_KEY").map_err(|_| {
             anyhow::anyhow!(
                 "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member.\n\
                  The relay must have a stable signing key to publish kind:13534 events."
             )
-        })?;
-        Keys::parse(&hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
+        })?);
+        let (secret_key, _) = parse_secret_key_compat(&raw)
+            .map_err(|_| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: expected an nsec"))?;
+        Keys::new(secret_key)
     };
 
     let redis_url =
@@ -491,14 +525,17 @@ async fn reconcile_channels(
         ));
     }
     let relay_keys = match configured_relay_key {
-        Some(key_hex) => {
-            Keys::parse(&key_hex).map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?
+        Some(raw_key) => {
+            let raw_key = Zeroizing::new(raw_key);
+            let (secret_key, _) = parse_secret_key_compat(&raw_key)
+                .map_err(|_| anyhow::anyhow!("invalid relay key: expected an nsec"))?;
+            Keys::new(secret_key)
         }
         None => {
             let k = Keys::generate();
             eprintln!(
                 "Warning: no relay key provided — using ephemeral key {}",
-                k.public_key().to_hex()
+                public_key_to_npub(&k.public_key())?
             );
             eprintln!("Events signed with this key won't be verifiable after this run.");
             eprintln!("Pass --relay-key or set BUZZ_RELAY_PRIVATE_KEY for production use.");

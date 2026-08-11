@@ -109,8 +109,7 @@ function resolveEntityHref(
   href: string,
   relayOrigin: string | null,
 ): string | null {
-  if (isEntityLink(href)) return href;
-  if (!/^https?:\/\//i.test(href)) return null;
+  if (!isEntityLink(href) && !/^https?:\/\//i.test(href)) return null;
 
   const preview = parseSupportedLinkPreview(href, relayOrigin);
   return preview && isEntityLink(preview.href) ? preview.href : null;
@@ -150,8 +149,8 @@ export function renderEntityLinkAnchor({
   if (!asChip) {
     return (
       <BuzzInlineLink
-        href={href}
-        title={href}
+        href={canonicalHref}
+        title={canonicalHref}
         aria-label={presentation.ariaLabel}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
@@ -164,9 +163,9 @@ export function renderEntityLinkAnchor({
   return (
     <BuzzLinkChip
       data-buzz-link-kind={parsed.value.type}
-      href={href}
+      href={canonicalHref}
       icon={presentation.icon}
-      title={href}
+      title={canonicalHref}
       aria-label={presentation.ariaLabel}
       interactive={interactive}
       onOpenLink={() => onOpenEntityLink(parsed.value)}

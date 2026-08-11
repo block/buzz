@@ -1,4 +1,4 @@
-use nostr::Keys;
+use nostr::{Keys, ToBech32};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -111,7 +111,10 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
     let relay_url = relay::relay_ws_url_with_override(&state);
     Ok(ActiveWorkspaceInfo {
         relay_url,
-        pubkey: keys.public_key().to_hex(),
+        pubkey: keys
+            .public_key()
+            .to_bech32()
+            .map_err(|error| format!("encode workspace npub: {error}"))?,
     })
 }
 

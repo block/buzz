@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
 
+use buzz_core::nostr_identity::{
+    parse_public_key_compat, parse_secret_key_compat, secret_key_to_nsec, KeyInputEncoding,
+};
+
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
 /// Must comfortably exceed accepted event content sizes after Nostr JSON and
@@ -51,7 +55,7 @@ pub struct JoinPolicyConfig {
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
 
 /// Relay runtime configuration, loaded from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
@@ -122,7 +126,7 @@ pub struct Config {
     /// If empty, permissive CORS is used (dev mode).
     /// Example: "tauri://localhost,http://localhost:3000"
     pub cors_origins: Vec<String>,
-    /// Optional hex-encoded private key for the relay's signing keypair.
+    /// Optional canonical nsec private key for the relay's signing keypair.
     /// If absent, a fresh keypair is generated at startup.
     pub relay_private_key: Option<String>,
     /// Optional Unix Domain Socket path. When set, the relay also listens on this
@@ -178,7 +182,7 @@ pub struct Config {
     /// streams are accepted, logged, and closed (no session consumer yet).
     pub mesh_demo_echo: bool,
 
-    /// Optional hex-encoded pubkey of the relay owner.
+    /// Optional relay-owner npub, normalized to protocol hex after parsing.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
@@ -199,8 +203,8 @@ pub struct Config {
     /// initial owners, but hold no implicit tenant membership row.
     /// Empty (the default) disables community provisioning entirely — fail closed.
     ///
-    /// Set via `RELAY_OPERATOR_PUBKEYS` as a comma-separated list of 64-char
-    /// hex pubkeys. Invalid entries are rejected at startup (config error), not
+    /// Set via `RELAY_OPERATOR_PUBKEYS` as a comma-separated list of npubs.
+    /// Invalid entries are rejected at startup (config error), not
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
@@ -632,25 +636,23 @@ impl Config {
         // config that may be shared across multiple services (e.g., ACP agent).
         let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
             .ok()
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .and_then(|s| {
-                // Must be exactly 64 lowercase hex characters (32-byte pubkey).
-                let valid = s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit());
-                if valid {
-                    Some(s)
-                } else {
-                    warn!(
-                        "RELAY_OWNER_PUBKEY is not a valid 64-char hex pubkey — ignoring. \
-                         Got: {s:?}"
-                    );
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| match parse_public_key_compat(&value) {
+                Ok((key, encoding)) => {
+                    if encoding == KeyInputEncoding::LegacyHex {
+                        warn!("RELAY_OWNER_PUBKEY uses legacy hex; use the canonical npub form");
+                    }
+                    Some(key.to_hex())
+                }
+                Err(_) => {
+                    warn!("RELAY_OWNER_PUBKEY is not a valid npub — ignoring");
                     None
                 }
             });
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
-        // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
-        // pubkeys. Unlike RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
+        // config family as RELAY_OWNER_PUBKEY. Comma-separated npubs. Unlike
+        // RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
         // entry here is a hard config error: silently dropping an operator
         // pubkey would silently disable provisioning for that operator.
         let relay_operator_api_origin = std::env::var("RELAY_OPERATOR_API_ORIGIN")
@@ -663,18 +665,21 @@ impl Config {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
                 for entry in raw.split(',') {
-                    let entry = entry.trim().to_lowercase();
+                    let entry = entry.trim();
                     if entry.is_empty() {
                         continue;
                     }
-                    let valid = entry.len() == 64 && entry.chars().all(|c| c.is_ascii_hexdigit());
-                    if !valid {
-                        return Err(ConfigError::InvalidValue(format!(
-                            "RELAY_OPERATOR_PUBKEYS entry is not a valid 64-char hex pubkey: {entry:?}"
-                        )));
+                    let (key, encoding) = parse_public_key_compat(entry).map_err(|_| {
+                        ConfigError::InvalidValue(
+                            "RELAY_OPERATOR_PUBKEYS contains an invalid npub".to_string(),
+                        )
+                    })?;
+                    if encoding == KeyInputEncoding::LegacyHex {
+                        warn!("RELAY_OPERATOR_PUBKEYS contains legacy hex; use canonical npubs");
                     }
-                    if !pubkeys.contains(&entry) {
-                        pubkeys.push(entry);
+                    let key = key.to_hex();
+                    if !pubkeys.contains(&key) {
+                        pubkeys.push(key);
                     }
                 }
                 pubkeys
@@ -706,7 +711,24 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
+        let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY")
+            .ok()
+            .map(|value| {
+                let (secret_key, encoding) = parse_secret_key_compat(&value).map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_RELAY_PRIVATE_KEY must be a valid nsec".to_string(),
+                    )
+                })?;
+                if encoding == KeyInputEncoding::LegacyHex {
+                    warn!("BUZZ_RELAY_PRIVATE_KEY uses legacy hex; store the canonical nsec form");
+                }
+                secret_key_to_nsec(&secret_key).map_err(|_| {
+                    ConfigError::InvalidValue(
+                        "BUZZ_RELAY_PRIVATE_KEY could not be encoded as nsec".to_string(),
+                    )
+                })
+            })
+            .transpose()?;
 
         let uds_path = std::env::var("BUZZ_UDS_PATH")
             .ok()
@@ -1369,7 +1391,8 @@ mod tests {
                 message.contains("BUZZ_REPLICA_READ_MAX_AGE_MS"),
                 "the error must name the replacement env var, got: {message}"
             ),
-            other => panic!("old env name must hard-fail startup, got {other:?}"),
+            Ok(_) => panic!("old env name must hard-fail startup, got Ok"),
+            Err(error) => panic!("old env name must hard-fail startup, got {error}"),
         }
     }
 
@@ -1512,9 +1535,13 @@ mod tests {
     #[test]
     fn relay_operator_pubkeys_parse_dedupe_and_normalize() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let first = nostr::Keys::generate().public_key();
+        let second = nostr::Keys::generate().public_key();
+        let first_npub = buzz_core::nostr_identity::public_key_to_npub(&first).unwrap();
+        let second_npub = buzz_core::nostr_identity::public_key_to_npub(&second).unwrap();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            format!("{first_npub},{second_npub},{first_npub}"),
         );
         std::env::set_var(
             "RELAY_OPERATOR_API_ORIGIN",
@@ -1526,11 +1553,27 @@ mod tests {
 
         assert_eq!(
             config.relay_operator_pubkeys,
-            vec![
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-            ]
+            vec![first.to_hex(), second.to_hex()]
         );
+    }
+
+    #[test]
+    fn relay_identity_env_accepts_nip19_and_normalizes_protocol_values() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let owner = nostr::Keys::generate();
+        let relay = nostr::Keys::generate();
+        let owner_npub =
+            buzz_core::nostr_identity::public_key_to_npub(&owner.public_key()).unwrap();
+        let relay_nsec = buzz_core::nostr_identity::secret_key_to_nsec(relay.secret_key()).unwrap();
+        std::env::set_var("RELAY_OWNER_PUBKEY", &owner_npub);
+        std::env::set_var("BUZZ_RELAY_PRIVATE_KEY", &relay_nsec);
+
+        let config = Config::from_env().expect("config");
+
+        std::env::remove_var("RELAY_OWNER_PUBKEY");
+        std::env::remove_var("BUZZ_RELAY_PRIVATE_KEY");
+        assert_eq!(config.relay_owner_pubkey, Some(owner.public_key().to_hex()));
+        assert_eq!(config.relay_private_key, Some(relay_nsec));
     }
 
     #[test]
@@ -1549,9 +1592,10 @@ mod tests {
     #[test]
     fn relay_operator_pubkeys_require_api_origin() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let operator = nostr::Keys::generate().public_key();
         std::env::set_var(
             "RELAY_OPERATOR_PUBKEYS",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            buzz_core::nostr_identity::public_key_to_npub(&operator).unwrap(),
         );
         std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
         let result = Config::from_env();

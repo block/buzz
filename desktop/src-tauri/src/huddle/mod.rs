@@ -81,12 +81,7 @@ pub use window::{close_huddle_companion, open_huddle_window};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::sync::atomic::Ordering;
-use tauri::State;
-use uuid::Uuid;
-
 use crate::{app_state::AppState, events, relay::submit_event};
-
 use agent_tts_routing::{
     classify_agent_tts_runtime, enqueue_agent_tts_text, normalize_agent_tts_text,
     AgentTtsRuntimeGate,
@@ -100,6 +95,9 @@ use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
     MAX_HUDDLE_AGENTS,
 };
+use std::sync::atomic::Ordering;
+use tauri::State;
+use uuid::Uuid;
 use window::close_huddle_window;
 
 fn normalize_huddle_channel_name(candidate: Option<String>, fallback: &str) -> String {
@@ -273,7 +271,8 @@ pub async fn start_huddle(
             match submit_event(add_builder, &state).await {
                 Ok(_) => successful_agents.push(pubkey.clone()),
                 Err(e) => {
-                    eprintln!("buzz-desktop: huddle add_member failed for {pubkey}: {e}");
+                    let who = crate::app_state::identity_npub_for_log_str(pubkey);
+                    eprintln!("buzz-desktop: huddle add_member failed for {who}: {e}");
                     // Intentionally not added — policy rejected this agent.
                 }
             }
@@ -575,7 +574,8 @@ async fn remove_huddle_agents(ephemeral_channel_id: &str, state: &AppState) {
             continue;
         };
         if let Err(e) = submit_event(remove_builder, state).await {
-            eprintln!("buzz-desktop: remove huddle agent {pubkey} failed: {e}");
+            let who = crate::app_state::identity_npub_for_log_str(&pubkey);
+            eprintln!("buzz-desktop: remove huddle agent {who} failed: {e}");
         }
     }
 }

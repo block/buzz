@@ -18,7 +18,7 @@
 //! ## Request shape
 //!
 //! ```json
-//! { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<hex>" }
+//! { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<npub>" }
 //! ```
 //!
 //! `initial_owner_pubkey` is optional. When present for an existing community,
@@ -34,6 +34,7 @@ use buzz_core::tenant::{normalize_host, TenantContext};
 use url::{Host, Url};
 
 use crate::state::AppState;
+use buzz_core::nostr_identity::{parse_public_key_compat, public_key_to_npub};
 
 /// Maximum accepted authority length. Matches `communities.host VARCHAR(255)`.
 const MAX_HOST_LEN: usize = 255;
@@ -68,10 +69,16 @@ pub struct ProvisionCommunityResponse {
     pub owner_pubkey: Option<String>,
 }
 
-pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
-    let normalized = value.to_ascii_lowercase();
-    (normalized.len() == 64 && normalized.chars().all(|c| c.is_ascii_hexdigit()))
-        .then_some(normalized)
+pub(crate) fn parse_pubkey_to_hex(value: &str) -> Option<String> {
+    parse_public_key_compat(value)
+        .ok()
+        .map(|(public_key, _)| public_key.to_hex())
+}
+
+pub(crate) fn pubkey_hex_to_npub(value: &str) -> Option<String> {
+    nostr::PublicKey::from_hex(value)
+        .ok()
+        .and_then(|public_key| public_key_to_npub(&public_key).ok())
 }
 
 /// Validate a normalized host authority value for a community.
@@ -252,6 +259,8 @@ pub async fn provision_community(
     request: ProvisionCommunityRequest,
 ) -> Result<ProvisionCommunityResponse, String> {
     let operator_hex = operator_pubkey.to_hex();
+    let operator_npub = public_key_to_npub(operator_pubkey)
+        .map_err(|_| "failed to encode operator npub".to_string())?;
 
     // Operator gate. Deliberately NOT a relay_members lookup: provisioning
     // authority spans tenants and lives in deployment config only. Empty
@@ -271,9 +280,8 @@ pub async fn provision_community(
         .initial_owner_pubkey
         .as_deref()
         .map(|value| {
-            validate_pubkey_hex(value).ok_or_else(|| {
-                "invalid initial_owner_pubkey: expected 64-char hex pubkey".to_string()
-            })
+            parse_pubkey_to_hex(value)
+                .ok_or_else(|| "invalid initial_owner_pubkey: expected an npub".to_string())
         })
         .transpose()?;
 
@@ -281,6 +289,8 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
+        let owner_npub = pubkey_hex_to_npub(owner_hex)
+            .ok_or_else(|| "failed to encode owner npub".to_string())?;
         let record = match state
             .db
             .create_community_with_owner(&request.host, owner_hex)
@@ -300,10 +310,10 @@ pub async fn provision_community(
         };
 
         info!(
-            operator = %operator_hex,
+            operator = %operator_npub,
             community = %record.id,
             host = %record.host,
-            owner = %owner_hex,
+            owner = %owner_npub,
             "community created via operator endpoint"
         );
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
@@ -311,7 +321,7 @@ pub async fn provision_community(
             community_id: record.id.to_string(),
             host: record.host,
             status: "created",
-            owner_pubkey: initial_owner,
+            owner_pubkey: Some(owner_npub),
         });
     }
 
@@ -333,11 +343,17 @@ pub async fn provision_community(
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
     }
 
+    let owner_npub = initial_owner
+        .as_deref()
+        .map(|owner| {
+            pubkey_hex_to_npub(owner).ok_or_else(|| "failed to encode owner npub".to_string())
+        })
+        .transpose()?;
     info!(
-        operator = %operator_hex,
+        operator = %operator_npub,
         community = %record.id,
         host = %record.host,
-        owner = initial_owner.as_deref().unwrap_or("<none>"),
+        owner = owner_npub.as_deref().unwrap_or("<none>"),
         created = record.created,
         "community provisioned via operator endpoint"
     );
@@ -346,13 +362,25 @@ pub async fn provision_community(
         community_id: record.id.to_string(),
         host: record.host,
         status: if record.created { "created" } else { "existed" },
-        owner_pubkey: initial_owner,
+        owner_pubkey: owner_npub,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_key_boundary_accepts_npub_and_emits_npub() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = public_key_to_npub(&keys.public_key()).unwrap();
+
+        assert_eq!(parse_pubkey_to_hex(&npub), Some(hex.clone()));
+        assert_eq!(parse_pubkey_to_hex(&hex), Some(hex.clone()));
+        assert_eq!(pubkey_hex_to_npub(&hex), Some(npub));
+        assert_eq!(parse_pubkey_to_hex("not-a-pubkey"), None);
+    }
 
     #[test]
     fn host_valid_bare_domain() {

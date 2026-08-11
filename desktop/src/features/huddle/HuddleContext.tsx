@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { type AudioInputDevice, useAudioDevices } from "./lib/useAudioDevices";
 import { usePipelineHotstart } from "./lib/usePipelineHotstart";
@@ -556,7 +557,7 @@ export function HuddleProvider({
       // Fetch self pubkey once for TTS filtering
       if (!selfPubkeyRef.current) {
         try {
-          const identity = await invoke<{ pubkey: string }>("get_identity");
+          const identity = await getIdentity();
           selfPubkeyRef.current = identity.pubkey;
         } catch {
           /* best-effort */

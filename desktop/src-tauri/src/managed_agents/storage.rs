@@ -7,7 +7,7 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
-use crate::app_state::keyring_service;
+use crate::app_state::{identity_npub_for_log_str, keyring_service};
 use crate::managed_agents::{
     ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
 };
@@ -209,7 +209,7 @@ fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> Key
                 Err(e) => {
                     eprintln!(
                         "buzz-desktop: keyring write for agent {} failed ({e}), keeping inline",
-                        record.pubkey
+                        identity_npub_for_log_str(&record.pubkey)
                     );
                     KeyMigration::KeptInline
                 }
@@ -330,7 +330,7 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
                 Ok(None) => {
                     eprintln!(
                         "buzz-desktop: agent {} has no key in JSON or keyring",
-                        record.pubkey
+                        identity_npub_for_log_str(&record.pubkey)
                     );
                 }
                 // Outage, NOT absence: the key may exist in the keyring but is
@@ -340,7 +340,7 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
                     eprintln!(
                         "buzz-desktop: agent {} key unavailable — keyring read failed ({e}); \
                          agent will be refused until the keyring is reachable",
-                        record.pubkey
+                        identity_npub_for_log_str(&record.pubkey)
                     );
                 }
             }
@@ -591,7 +591,10 @@ pub(crate) fn try_delete_agent_key(pubkey: &str) -> Result<(), String> {
 /// is deleted so its secret does not linger in the OS store.
 pub fn delete_agent_key(pubkey: &str) {
     if let Err(e) = try_delete_agent_key(pubkey) {
-        eprintln!("buzz-desktop: failed to delete agent {pubkey} key from keyring: {e}");
+        eprintln!(
+            "buzz-desktop: failed to delete agent {} key from keyring: {e}",
+            identity_npub_for_log_str(pubkey)
+        );
     }
 }
 

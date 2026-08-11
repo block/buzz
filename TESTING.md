@@ -330,7 +330,7 @@ CLI-side, only two matter for testing:
 | Variable                | Default                  | Notes |
 |-------------------------|--------------------------|-------|
 | `BUZZ_RELAY_URL`      | `http://localhost:3000`  | CLI relay base; accepts `ws(s)://` and normalises |
-| `BUZZ_PRIVATE_KEY`    | — (**required**)         | `nsec1…` or 64-char hex |
+| `BUZZ_PRIVATE_KEY`    | — (**required**)         | NIP-19 `nsec1…` |
 | `BUZZ_AUTH_TAG`       | unset                    | Optional NIP-OA owner attestation JSON |
 
 ---

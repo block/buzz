@@ -10,6 +10,7 @@ use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
     KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
+use buzz_core::nostr_identity::public_key_to_npub_or_invalid;
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
     OBSERVER_FRAME_TELEMETRY,
@@ -1090,8 +1091,8 @@ async fn handle_agent_observer_event(
     let stored_event = StoredEvent::new(event.clone(), None);
     debug!(
         event_id = %event_id_hex,
-        agent = %route.agent.to_hex(),
-        owner = %route.owner.to_hex(),
+        agent = %public_key_to_npub_or_invalid(&route.agent),
+        owner = %public_key_to_npub_or_invalid(&route.owner),
         direction = ?route.direction,
         "Agent observer fan-out"
     );

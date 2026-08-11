@@ -4,12 +4,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
-    load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    load_global_agent_config, load_managed_agents, load_personas, managed_agent_not_found_error,
+    managed_agent_runtime_log_path, process_is_running, record_agent_command,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -81,7 +81,12 @@ fn observer_lifecycle_key(
     outer_pubkey: &str,
     payload: &super::ManagedAgentRuntimeLifecycleObserverPayload,
 ) -> Result<ManagedAgentRuntimeKey, String> {
-    if !outer_pubkey.eq_ignore_ascii_case(&payload.pubkey) {
+    let (outer_pubkey, _) = buzz_core_pkg::nostr_identity::parse_public_key_compat(outer_pubkey)
+        .map_err(|_| "observer signer is not a valid public key".to_string())?;
+    let (payload_pubkey, _) =
+        buzz_core_pkg::nostr_identity::parse_public_key_compat(&payload.pubkey)
+            .map_err(|_| "lifecycle payload pubkey is not a valid public key".to_string())?;
+    if outer_pubkey != payload_pubkey {
         return Err("observer signer does not match lifecycle payload pubkey".into());
     }
     if matches!(
@@ -96,7 +101,7 @@ fn observer_lifecycle_key(
     if payload.lifecycle != ManagedAgentRuntimeLifecycle::Failed && payload.error.is_some() {
         return Err("lifecycle error is only valid for failed".into());
     }
-    ManagedAgentRuntimeKey::new(payload.pubkey.clone(), &payload.relay_url)
+    ManagedAgentRuntimeKey::new(payload_pubkey.to_hex(), &payload.relay_url)
 }
 
 #[tauri::command]
@@ -111,7 +116,7 @@ pub fn put_managed_agent_runtime_lifecycle(
     let record = records
         .iter()
         .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
-        .ok_or_else(|| format!("agent {} not found", key.pubkey))?;
+        .ok_or_else(|| managed_agent_not_found_error(&key.pubkey))?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -678,6 +683,20 @@ mod tests {
             None,
         );
         assert_ne!(key, observer_lifecycle_key(&other.pubkey, &other).unwrap());
+    }
+
+    #[test]
+    fn observer_lifecycle_accepts_npub_payload_for_hex_signer() {
+        let mut ready = payload(
+            "wss://relay.example",
+            ManagedAgentRuntimeLifecycle::Ready,
+            None,
+        );
+        let signer_hex = ready.pubkey.clone();
+        ready.pubkey = buzz_core_pkg::nostr_identity::canonical_npub(&signer_hex).unwrap();
+
+        let key = observer_lifecycle_key(&signer_hex, &ready).unwrap();
+        assert_eq!(key.pubkey, signer_hex);
     }
 
     #[test]

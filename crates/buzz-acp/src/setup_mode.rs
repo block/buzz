@@ -39,6 +39,7 @@ use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
+use buzz_core::nostr_identity::{parse_public_key_compat, public_key_to_npub};
 use nostr::EventId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -198,8 +199,9 @@ impl RequirementPayload {
 pub(crate) struct SetupPayload {
     /// Human-readable agent display name (for the nudge message).
     pub agent_name: String,
-    /// Hex-encoded agent pubkey. Carried so the desktop card can open
-    /// the Edit Agent dialog for this agent directly from the nudge.
+    /// Canonical npub. Carried so the desktop card can open the Edit Agent
+    /// dialog for this agent directly from the nudge. The environment parser
+    /// accepts legacy hex payloads and immediately normalizes them.
     pub agent_pubkey: String,
     /// Surface-discriminated list of missing requirements.
     pub requirements: Vec<RequirementPayload>,
@@ -228,8 +230,17 @@ impl SetupPayload {
             Some(v) if !v.is_empty() => v,
             _ => return Ok(None),
         };
-        let payload = serde_json::from_str::<Self>(&raw)
+        let mut payload = serde_json::from_str::<Self>(&raw)
             .map_err(|e| anyhow::anyhow!("malformed {SETUP_PAYLOAD_ENV_VAR}: {e}"))?;
+        let (public_key, _) = parse_public_key_compat(&payload.agent_pubkey).map_err(|_| {
+            anyhow::anyhow!("malformed {SETUP_PAYLOAD_ENV_VAR}: agent_pubkey must be a valid npub")
+        })?;
+        public_key.xonly().map_err(|_| {
+            anyhow::anyhow!("malformed {SETUP_PAYLOAD_ENV_VAR}: agent_pubkey must be a valid npub")
+        })?;
+        payload.agent_pubkey = public_key_to_npub(&public_key).map_err(|_| {
+            anyhow::anyhow!("malformed {SETUP_PAYLOAD_ENV_VAR}: failed to encode agent npub")
+        })?;
         Ok(Some(payload))
     }
 
@@ -651,6 +662,14 @@ async fn publish_setup_nudge(
 mod tests {
     use super::*;
 
+    const SETUP_AGENT_HEX: &str =
+        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn setup_agent_npub() -> String {
+        let (public_key, _) = parse_public_key_compat(SETUP_AGENT_HEX).unwrap();
+        public_key_to_npub(&public_key).unwrap()
+    }
+
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {
         // None → Ok(None): normal startup, no setup payload.
@@ -674,25 +693,58 @@ mod tests {
 
     #[test]
     fn setup_payload_deserializes_correctly() {
-        let json = r#"{
+        let json = format!(
+            r#"{{
             "agent_name": "Fizz",
-            "agent_pubkey": "aabbccddeeff0011",
+            "agent_pubkey": "{SETUP_AGENT_HEX}",
             "requirements": [
-                {"surface": "normalized_field", "field": "provider"},
-                {"surface": "env_key", "key": "ANTHROPIC_API_KEY"}
+                {{"surface": "normalized_field", "field": "provider"}},
+                {{"surface": "env_key", "key": "ANTHROPIC_API_KEY"}}
             ]
-        }"#;
-        let payload: SetupPayload = serde_json::from_str(json).unwrap();
+        }}"#
+        );
+        let payload = SetupPayload::from_raw_env_value(Some(json))
+            .unwrap()
+            .unwrap();
         assert_eq!(payload.agent_name, "Fizz");
+        assert_eq!(payload.agent_pubkey, setup_agent_npub());
         assert_eq!(payload.requirements.len(), 2);
     }
 
     #[test]
+    fn setup_payload_legacy_hex_is_normalized_in_user_visible_sentinel() {
+        let raw = format!(
+            r#"{{"agent_name":"Fizz","agent_pubkey":"{SETUP_AGENT_HEX}","requirements":[]}}"#
+        );
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .unwrap();
+        let body = payload.nudge_body();
+
+        assert_eq!(payload.agent_pubkey, setup_agent_npub());
+        assert!(body.contains(&setup_agent_npub()));
+        assert!(!body.contains(SETUP_AGENT_HEX));
+    }
+
+    #[test]
+    fn setup_payload_rejects_invalid_pubkey_without_echoing_it() {
+        let invalid = "not-a-public-key";
+        let raw =
+            format!(r#"{{"agent_name":"Fizz","agent_pubkey":"{invalid}","requirements":[]}}"#);
+        let error = SetupPayload::from_raw_env_value(Some(raw)).unwrap_err();
+
+        assert!(error.to_string().contains("valid npub"));
+        assert!(!error.to_string().contains(invalid));
+    }
+
+    #[test]
     fn setup_payload_deserializes_git_bash_requirement() {
-        let payload: SetupPayload = serde_json::from_str(
-            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"git_bash"}]}"#,
-        )
-        .unwrap();
+        let raw = format!(
+            r#"{{"agent_name":"Buzz Agent","agent_pubkey":"{SETUP_AGENT_HEX}","requirements":[{{"surface":"git_bash"}}]}}"#
+        );
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .unwrap();
         assert!(matches!(
             payload.requirements.as_slice(),
             [RequirementPayload::GitBash]
@@ -703,7 +755,7 @@ mod tests {
     fn nudge_body_names_all_requirements() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![
                 RequirementPayload::NormalizedField {
                     field: "provider".to_string(),
@@ -729,7 +781,7 @@ mod tests {
     fn nudge_body_codex_copy_does_not_mention_openai_api_key() {
         let payload = SetupPayload {
             agent_name: "Codex".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![RequirementPayload::CliLogin {
                 probe_args: vec![
                     "codex".to_string(),
@@ -761,7 +813,7 @@ mod tests {
         ] {
             let payload = SetupPayload {
                 agent_name: "Codex".to_string(),
-                agent_pubkey: "test".to_string(),
+                agent_pubkey: setup_agent_npub(),
                 requirements: vec![RequirementPayload::CliLogin {
                     probe_args: vec!["codex".to_string()],
                     setup_copy: "run `codex login`".to_string(),
@@ -784,7 +836,7 @@ mod tests {
     fn nudge_body_git_bash_copy_points_to_agent_runtimes() {
         let payload = SetupPayload {
             agent_name: "Buzz Agent".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![RequirementPayload::GitBash],
         };
         let body = payload.nudge_body();
@@ -802,7 +854,7 @@ mod tests {
     fn nudge_body_empty_requirements_falls_back_to_generic() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![],
         };
         let body = payload.nudge_body();
@@ -826,7 +878,7 @@ mod tests {
         // Edit Agent (which cannot fix an external config file).
         let payload = SetupPayload {
             agent_name: "Codex".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![make_cli_config_invalid(
                 "codex",
                 "unknown variant `ultra` for field `model_reasoning_effort`",
@@ -853,7 +905,7 @@ mod tests {
         // Footer must address both sides.
         let payload = SetupPayload {
             agent_name: "Codex".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![
                 RequirementPayload::EnvKey {
                     key: "SOME_API_KEY".to_string(),
@@ -877,7 +929,7 @@ mod tests {
         // Pure Buzz-managed requirements → original "Open Edit Agent" footer unchanged.
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![RequirementPayload::EnvKey {
                 key: "ANTHROPIC_API_KEY".to_string(),
             }],
@@ -897,7 +949,7 @@ mod tests {
         // can detect and strip it before rendering the ConfigNudgeCard.
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![RequirementPayload::EnvKey {
                 key: "ANTHROPIC_API_KEY".to_string(),
             }],
@@ -919,7 +971,7 @@ mod tests {
         // equivalent SetupPayload (same agent_name and requirements).
         let payload = SetupPayload {
             agent_name: "Atlas".to_string(),
-            agent_pubkey: "ddeeff00".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![
                 RequirementPayload::NormalizedField {
                     field: "model".to_string(),
@@ -962,7 +1014,7 @@ mod tests {
         // replacement, so all prior `body.contains(...)` invariants hold.
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
-            agent_pubkey: "test".to_string(),
+            agent_pubkey: setup_agent_npub(),
             requirements: vec![
                 RequirementPayload::NormalizedField {
                     field: "provider".to_string(),
@@ -1073,7 +1125,7 @@ mod tests {
         // Simulate the JSON desktop's runtime.rs emits — a full SetupPayload
         // with one cli_login requirement carrying the given availability state.
         format!(
-            r#"{{"agent_name":"TestAgent","agent_pubkey":"aa","requirements":[{{"surface":"cli_login","probe_args":["claude"],"setup_copy":"run claude login","availability":"{availability}"}}]}}"#
+            r#"{{"agent_name":"TestAgent","agent_pubkey":"{SETUP_AGENT_HEX}","requirements":[{{"surface":"cli_login","probe_args":["claude"],"setup_copy":"run claude login","availability":"{availability}"}}]}}"#
         )
     }
 

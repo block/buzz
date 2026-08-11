@@ -1,7 +1,7 @@
 use tauri::AppHandle;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         load_managed_agents, save_managed_agents, try_regenerate_nest, ManagedAgentRecord,
     },
@@ -53,14 +53,17 @@ fn restore_agent_update(
     pubkey: &str,
     rollback: AgentUpdateRollback,
 ) -> Result<(), String> {
+    let pubkey_display = identity_npub_for_log_str(pubkey);
     let current = records
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found while rolling back failed rename"))?;
+        .ok_or_else(|| {
+            format!("agent {pubkey_display} not found while rolling back failed rename")
+        })?;
 
     if !same_configuration(current, &rollback.attempted_record) {
         return Err(format!(
-            "agent {pubkey} changed again before the failed rename could be rolled back"
+            "agent {pubkey_display} changed again before the failed rename could be rolled back"
         ));
     }
 
@@ -91,6 +94,7 @@ pub(super) fn rollback_failed_agent_update(
     pubkey: &str,
     rollback: AgentUpdateRollback,
 ) -> Result<(), String> {
+    let pubkey_display = identity_npub_for_log_str(pubkey);
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -102,7 +106,9 @@ pub(super) fn rollback_failed_agent_update(
         let restored = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found after failed rename rollback"))?;
+            .ok_or_else(|| {
+                format!("agent {pubkey_display} not found after failed rename rollback")
+            })?;
         super::agents::retain_managed_agent_pending(app, state, restored);
     }
     try_regenerate_nest(app);
@@ -198,6 +204,8 @@ mod tests {
             .expect_err("a concurrent update must not be overwritten");
 
         assert!(error.contains("changed again"));
+        assert!(error.contains("<invalid npub>"));
+        assert!(!error.contains("abcd1234"));
         assert_eq!(records[0].name, "Newest name");
         assert_eq!(records[0].updated_at, "newer");
     }

@@ -18,7 +18,7 @@ use uuid::Uuid;
 use buzz_core::{CommunityId, TenantContext};
 
 use crate::handlers::community_provisioning::{
-    normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
+    normalize_candidate_host, parse_pubkey_to_hex, pubkey_hex_to_npub, ProvisionCommunityRequest,
 };
 use crate::state::AppState;
 
@@ -140,7 +140,7 @@ async fn check_operator_replay(
 /// `RELAY_OPERATOR_PUBKEYS`, body:
 ///
 /// ```json
-/// { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<hex>" }
+/// { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<npub>" }
 /// ```
 ///
 /// The request is authenticated against `RELAY_OPERATOR_API_ORIGIN` and does
@@ -222,10 +222,10 @@ pub async fn archive_community(
             "the deployment community cannot be archived",
         ));
     }
-    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+    let owner = parse_pubkey_to_hex(&request.owner_pubkey).ok_or_else(|| {
         api_error(
             StatusCode::BAD_REQUEST,
-            "invalid owner_pubkey: expected 64-char hex pubkey",
+            "invalid owner_pubkey: expected an npub",
         )
     })?;
     let record = state
@@ -277,10 +277,10 @@ pub async fn unarchive_community(
     })?;
     let normalized_host = normalize_candidate_host(&request.host)
         .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
-    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+    let owner = parse_pubkey_to_hex(&request.owner_pubkey).ok_or_else(|| {
         api_error(
             StatusCode::BAD_REQUEST,
-            "invalid owner_pubkey: expected 64-char hex pubkey",
+            "invalid owner_pubkey: expected an npub",
         )
     })?;
     let record = state
@@ -315,10 +315,10 @@ pub async fn list_owned_communities(
     )
     .await?;
 
-    let owner_pubkey = validate_pubkey_hex(&query.owner_pubkey).ok_or_else(|| {
+    let owner_pubkey = parse_pubkey_to_hex(&query.owner_pubkey).ok_or_else(|| {
         api_error(
             StatusCode::BAD_REQUEST,
-            "invalid owner_pubkey: expected 64-char hex pubkey",
+            "invalid owner_pubkey: expected an npub",
         )
     })?;
 
@@ -328,8 +328,10 @@ pub async fn list_owned_communities(
         .await
         .map_err(|e| internal_error(&format!("list owned communities: {e}")))?;
 
+    let owner_npub = pubkey_hex_to_npub(&owner_pubkey)
+        .ok_or_else(|| internal_error("operator owner npub encoding failed"))?;
     Ok(Json(serde_json::json!({
-        "owner_pubkey": owner_pubkey,
+        "owner_pubkey": owner_npub,
         "communities": rows.into_iter().map(|row| serde_json::json!({
             "community_id": row.id.to_string(),
             "host": row.host,
@@ -345,7 +347,7 @@ pub async fn list_owned_communities(
 /// `RELAY_OPERATOR_PUBKEYS`, body:
 ///
 /// ```json
-/// { "community_id": "<uuid>", "new_owner_pubkey": "<hex>" }
+/// { "community_id": "<uuid>", "new_owner_pubkey": "<npub>" }
 /// ```
 ///
 /// The previous owner is demoted to `member` (not `admin`). The transfer is
@@ -380,18 +382,18 @@ pub async fn transfer_community(
         )
     })?;
 
-    let new_owner_pubkey = validate_pubkey_hex(&request.new_owner_pubkey).ok_or_else(|| {
+    let new_owner_pubkey = parse_pubkey_to_hex(&request.new_owner_pubkey).ok_or_else(|| {
         api_error(
             StatusCode::BAD_REQUEST,
-            "invalid new_owner_pubkey: expected 64-char hex pubkey",
+            "invalid new_owner_pubkey: expected an npub",
         )
     })?;
 
     let expected_owner_pubkey =
-        validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(|| {
+        parse_pubkey_to_hex(&request.expected_owner_pubkey).ok_or_else(|| {
             api_error(
                 StatusCode::BAD_REQUEST,
-                "invalid expected_owner_pubkey: expected 64-char hex pubkey",
+                "invalid expected_owner_pubkey: expected an npub",
             )
         })?;
 
@@ -451,11 +453,20 @@ pub async fn transfer_community(
         }
     }
 
+    let new_owner_npub = pubkey_hex_to_npub(&new_owner_pubkey)
+        .ok_or_else(|| internal_error("operator owner npub encoding failed"))?;
+    let previous_owner_npub = previous_owner
+        .as_deref()
+        .map(|owner| {
+            pubkey_hex_to_npub(owner)
+                .ok_or_else(|| internal_error("operator previous-owner npub encoding failed"))
+        })
+        .transpose()?;
     let response = TransferCommunityResponse {
         community_id: request.community_id,
-        new_owner_pubkey,
+        new_owner_pubkey: new_owner_npub,
         status,
-        previous_owner,
+        previous_owner: previous_owner_npub,
     };
 
     Ok(Json(serde_json::to_value(response).map_err(|e| {
@@ -512,7 +523,9 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use buzz_core::{kind::KIND_NIP43_MEMBERSHIP_LIST, CommunityId};
+    use buzz_core::{
+        kind::KIND_NIP43_MEMBERSHIP_LIST, nostr_identity::public_key_to_npub, CommunityId,
+    };
     use buzz_db::event::EventQuery;
 
     use crate::router::build_router;
@@ -658,7 +671,8 @@ mod tests {
     ) -> axum::response::Response {
         let body = serde_json::json!({
             "host": host,
-            "initial_owner_pubkey": owner.public_key().to_hex(),
+            "initial_owner_pubkey": public_key_to_npub(&owner.public_key())
+                .expect("encode owner npub"),
             "create_only": true,
         })
         .to_string();
@@ -810,8 +824,8 @@ mod tests {
         let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
             return;
         };
-        let owner_hex = owner.public_key().to_hex();
-        let query = format!("owner_pubkey={owner_hex}");
+        let owner_npub = public_key_to_npub(&owner.public_key()).expect("encode owner npub");
+        let query = format!("owner_pubkey={owner_npub}");
         let url = format!("http://{INGRESS_HOST}/operator/communities?{query}");
         let auth = nip98_auth_header(&operator, &url, "GET", None);
 
@@ -831,7 +845,7 @@ mod tests {
         let json = read_json(response).await;
         assert_eq!(
             json.get("owner_pubkey").and_then(Value::as_str),
-            Some(owner_hex.as_str())
+            Some(owner_npub.as_str())
         );
     }
 
@@ -1135,11 +1149,15 @@ mod tests {
         let community_id = community.id.to_string();
         let initial_owner_hex = initial_owner.public_key().to_hex();
         let new_owner_hex = new_owner.public_key().to_hex();
+        let initial_owner_npub =
+            public_key_to_npub(&initial_owner.public_key()).expect("encode initial owner npub");
+        let new_owner_npub =
+            public_key_to_npub(&new_owner.public_key()).expect("encode new owner npub");
 
         let transfer_body = serde_json::json!({
             "community_id": community_id,
-            "new_owner_pubkey": new_owner_hex,
-            "expected_owner_pubkey": initial_owner_hex,
+            "new_owner_pubkey": new_owner_npub,
+            "expected_owner_pubkey": initial_owner_npub,
         })
         .to_string();
         let response = signed_operator_request(
@@ -1159,11 +1177,11 @@ mod tests {
         );
         assert_eq!(
             json.get("new_owner_pubkey").and_then(Value::as_str),
-            Some(new_owner_hex.as_str())
+            Some(new_owner_npub.as_str())
         );
         assert_eq!(
             json.get("previous_owner").and_then(Value::as_str),
-            Some(initial_owner_hex.as_str())
+            Some(initial_owner_npub.as_str())
         );
 
         // New owner is owner.

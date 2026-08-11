@@ -9,6 +9,7 @@ import {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteSearch = {
@@ -35,10 +36,16 @@ function validateChannelSearch(
   search: Record<string, unknown>,
 ): ChannelRouteSearch {
   return {
-    agentSession: nonEmptyString(search.agentSession),
+    agentSession:
+      typeof search.agentSession === "string"
+        ? (safeNpub(search.agentSession) ?? undefined)
+        : undefined,
     autoSend: nonEmptyString(search.autoSend),
     messageId: nonEmptyString(search.messageId),
-    profile: nonEmptyString(search.profile),
+    profile:
+      typeof search.profile === "string"
+        ? (safeNpub(search.profile) ?? undefined)
+        : undefined,
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
     thread: nonEmptyString(search.thread),

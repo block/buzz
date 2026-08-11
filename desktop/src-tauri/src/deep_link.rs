@@ -4,6 +4,8 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 use url::Url;
 
+use buzz_core_pkg::nostr_identity::parse_public_key_compat;
+
 use crate::nostr_bind;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -436,7 +438,7 @@ fn parse_entity_deep_link(url: &Url) -> Option<()> {
         *slot = Some(value.into_owned());
     }
 
-    if !owner.is_some_and(|owner| is_hex64(&owner)) {
+    if !owner.is_some_and(|owner| parse_public_key_compat(&owner).is_ok()) {
         return None;
     }
     if !dtag.is_some_and(|dtag| is_linkable_dtag(&dtag)) {

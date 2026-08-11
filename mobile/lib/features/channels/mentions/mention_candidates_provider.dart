@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
+import '../../../shared/nostr/nostr_keys.dart';
 import '../../../shared/relay/relay.dart';
 import '../../profile/user_cache_provider.dart';
 import '../../profile/user_profile.dart';
@@ -31,8 +32,14 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
+      final exactPubkey = tryPublicKeyHexFromInput(
+        trimmed,
+        allowLegacyHex: true,
+      );
       final events = await session.queryRelay([
-        NostrFilters.searchUsers(trimmed),
+        exactPubkey == null
+            ? NostrFilters.searchUsers(trimmed)
+            : NostrFilters.profile(exactPubkey),
       ]);
 
       // Keep only the latest kind:0 event per pubkey (the bridge does not

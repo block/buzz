@@ -25,7 +25,14 @@ class CommunityStorage {
   /// credentials if present.
   Future<List<Community>> loadAll() async {
     final raw = await _secure.read(key: _keyCommunities);
-    if (raw != null) return _decodeList(raw);
+    if (raw != null) {
+      final communities = _decodeList(raw);
+      final canonical = _encodeList(communities);
+      if (canonical != raw) {
+        await _secure.write(key: _keyCommunities, value: canonical);
+      }
+      return communities;
+    }
 
     final legacyCommunities = await _secure.read(key: _legacyCommunities);
     if (legacyCommunities != null) {
@@ -49,7 +56,7 @@ class CommunityStorage {
       final community = Community.create(
         name: name,
         relayUrl: legacyUrl,
-        pubkey: legacyPubkey,
+        npub: legacyPubkey,
         nsec: legacyNsec,
         sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
@@ -106,7 +113,9 @@ class CommunityStorage {
   }
 
   Future<void> _saveList(List<Community> communities) async {
-    final json = jsonEncode(communities.map((item) => item.toJson()).toList());
-    await _secure.write(key: _keyCommunities, value: json);
+    await _secure.write(key: _keyCommunities, value: _encodeList(communities));
   }
+
+  String _encodeList(List<Community> communities) =>
+      jsonEncode(communities.map((item) => item.toJson()).toList());
 }

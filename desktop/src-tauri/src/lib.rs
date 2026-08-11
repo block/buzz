@@ -9,6 +9,7 @@ mod egress_guard;
 mod event_sync;
 mod events;
 mod huddle;
+mod identity_display;
 mod identity_storage;
 mod initial_window;
 mod key_backup;
@@ -102,8 +103,7 @@ pub fn run() {
     {
         Ok(runtime) => {
             tauri::async_runtime::set(runtime.handle().clone());
-            // Keep the runtime alive for the process lifetime; dropping it
-            // would shut down the workers Tauri now depends on.
+            // Keep the runtime alive; dropping it would shut down Tauri's workers.
             std::mem::forget(runtime);
             eprintln!(
                 "buzz-mesh: installed tokio runtime with {} MiB worker stacks",

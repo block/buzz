@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
+use buzz_db::admin_moderation::{
+    AdminFeedback, AdminReport, AdminReportDetail, AdminReportedMessage,
+};
+
 pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap) -> bool {
     auth::is_admin_host(state, headers)
 }
@@ -94,7 +98,7 @@ async fn reports(
     State(state): State<Arc<crate::state::AppState>>,
     headers: HeaderMap,
     Query(query): Query<ReportQuery>,
-) -> Result<Json<Vec<buzz_db::admin_moderation::AdminReport>>, ApiError> {
+) -> Result<Json<Vec<AdminReportResponse>>, ApiError> {
     authorize(&state, &headers)?;
     validate(
         query.status.as_deref(),
@@ -119,21 +123,114 @@ async fn reports(
             limit(query.limit)?,
         )
         .await?;
-    Ok(Json(items))
+    Ok(Json(
+        items.into_iter().map(AdminReportResponse::from).collect(),
+    ))
 }
 
 async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
+) -> Result<Json<AdminReportDetailResponse>, ApiError> {
     authorize(&state, &headers)?;
     state
         .db
         .admin_get_report(id)
         .await?
+        .map(AdminReportDetailResponse::from)
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminReportResponse {
+    id: Uuid,
+    community_id: Uuid,
+    community_host: String,
+    report_event_id: String,
+    reporter_pubkey: String,
+    target_kind: String,
+    target: String,
+    channel_id: Option<Uuid>,
+    report_type: String,
+    note: Option<String>,
+    status: String,
+    resolved_by: Option<String>,
+    resolved_at: Option<DateTime<Utc>>,
+    action_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+}
+
+impl From<AdminReport> for AdminReportResponse {
+    fn from(report: AdminReport) -> Self {
+        let target = if report.target_kind == "pubkey" {
+            buzz_core::nostr_identity::canonical_npub_or_invalid(&report.target)
+        } else {
+            report.target
+        };
+        Self {
+            id: report.id,
+            community_id: report.community_id,
+            community_host: report.community_host,
+            report_event_id: report.report_event_id,
+            reporter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
+                &report.reporter_pubkey,
+            ),
+            target_kind: report.target_kind,
+            target,
+            channel_id: report.channel_id,
+            report_type: report.report_type,
+            note: report.note,
+            status: report.status,
+            resolved_by: report
+                .resolved_by
+                .map(|pubkey| buzz_core::nostr_identity::canonical_npub_or_invalid(&pubkey)),
+            resolved_at: report.resolved_at,
+            action_id: report.action_id,
+            created_at: report.created_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminReportedMessageResponse {
+    author_pubkey: String,
+    content: String,
+    created_at: DateTime<Utc>,
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+impl From<AdminReportedMessage> for AdminReportedMessageResponse {
+    fn from(message: AdminReportedMessage) -> Self {
+        Self {
+            author_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
+                &message.author_pubkey,
+            ),
+            content: message.content,
+            created_at: message.created_at,
+            deleted_at: message.deleted_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminReportDetailResponse {
+    #[serde(flatten)]
+    report: AdminReportResponse,
+    message: Option<AdminReportedMessageResponse>,
+}
+
+impl From<AdminReportDetail> for AdminReportDetailResponse {
+    fn from(detail: AdminReportDetail) -> Self {
+        Self {
+            report: detail.report.into(),
+            message: detail.message.map(Into::into),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -164,7 +261,9 @@ async fn feedback(
                 id: item.id,
                 community_id: item.community_id,
                 community_host: item.community_host,
-                submitter_pubkey: item.submitter_pubkey,
+                submitter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
+                    &item.submitter_pubkey,
+                ),
                 category: item.category,
                 body_summary,
                 received_at: item.received_at,
@@ -178,14 +277,49 @@ async fn feedback_detail(
     State(state): State<Arc<crate::state::AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<buzz_db::admin_moderation::AdminFeedback>, ApiError> {
+) -> Result<Json<AdminFeedbackResponse>, ApiError> {
     authorize(&state, &headers)?;
     state
         .db
         .admin_get_feedback(id)
         .await?
+        .map(AdminFeedbackResponse::from)
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminFeedbackResponse {
+    id: Uuid,
+    community_id: Uuid,
+    community_host: String,
+    event_id: String,
+    submitter_pubkey: String,
+    category: Option<String>,
+    body: String,
+    tags: serde_json::Value,
+    event_created_at: DateTime<Utc>,
+    received_at: DateTime<Utc>,
+}
+
+impl From<AdminFeedback> for AdminFeedbackResponse {
+    fn from(feedback: AdminFeedback) -> Self {
+        Self {
+            id: feedback.id,
+            community_id: feedback.community_id,
+            community_host: feedback.community_host,
+            event_id: feedback.event_id,
+            submitter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
+                &feedback.submitter_pubkey,
+            ),
+            category: feedback.category,
+            body: feedback.body,
+            tags: feedback.tags,
+            event_created_at: feedback.event_created_at,
+            received_at: feedback.received_at,
+        }
+    }
 }
 
 async fn feedback_attachment(
@@ -543,5 +677,134 @@ mod tests {
         assert!(!is_sha256(&HASH.to_uppercase()));
         assert!(!is_sha256(&HASH[..63]));
         assert!(!is_sha256(&format!("{HASH}.png")));
+    }
+
+    #[test]
+    fn admin_report_projection_uses_npub_for_identities_only() {
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let expected_npub =
+            buzz_core::nostr_identity::public_key_to_npub(&keys.public_key()).expect("npub");
+        let now = Utc::now();
+        let report = AdminReport {
+            id: Uuid::new_v4(),
+            community_id: Uuid::new_v4(),
+            community_host: "community.example".to_string(),
+            report_event_id: HASH.to_string(),
+            reporter_pubkey: pubkey_hex.clone(),
+            target_kind: "pubkey".to_string(),
+            target: pubkey_hex.clone(),
+            channel_id: Some(Uuid::new_v4()),
+            report_type: "spam".to_string(),
+            note: Some("report note".to_string()),
+            status: "resolved".to_string(),
+            resolved_by: Some(pubkey_hex.clone()),
+            resolved_at: Some(now),
+            action_id: Some(Uuid::new_v4()),
+            created_at: now,
+        };
+
+        let value = serde_json::to_value(AdminReportResponse::from(report.clone()))
+            .expect("serialize report response");
+        assert_eq!(value["reporterPubkey"], expected_npub);
+        assert_eq!(value["target"], expected_npub);
+        assert_eq!(value["resolvedBy"], expected_npub);
+        assert_eq!(value["reportEventId"], HASH);
+        assert!(!value.to_string().contains(&pubkey_hex));
+
+        let event_target = AdminReportResponse::from(AdminReport {
+            target_kind: "event".to_string(),
+            target: HASH.to_string(),
+            ..report
+        });
+        assert_eq!(event_target.target, HASH);
+    }
+
+    #[test]
+    fn admin_detail_and_feedback_projections_use_npub_without_changing_event_data() {
+        let keys = nostr::Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+        let expected_npub =
+            buzz_core::nostr_identity::public_key_to_npub(&keys.public_key()).expect("npub");
+        let now = Utc::now();
+        let report = AdminReport {
+            id: Uuid::new_v4(),
+            community_id: Uuid::new_v4(),
+            community_host: "community.example".to_string(),
+            report_event_id: HASH.to_string(),
+            reporter_pubkey: pubkey_hex.clone(),
+            target_kind: "event".to_string(),
+            target: HASH.to_string(),
+            channel_id: None,
+            report_type: "spam".to_string(),
+            note: None,
+            status: "open".to_string(),
+            resolved_by: None,
+            resolved_at: None,
+            action_id: None,
+            created_at: now,
+        };
+        let detail = AdminReportDetailResponse::from(AdminReportDetail {
+            report,
+            message: Some(AdminReportedMessage {
+                author_pubkey: pubkey_hex.clone(),
+                content: "message".to_string(),
+                created_at: now,
+                deleted_at: None,
+            }),
+        });
+        let detail_value = serde_json::to_value(detail).expect("serialize report detail response");
+        assert_eq!(detail_value["message"]["authorPubkey"], expected_npub);
+        assert_eq!(detail_value["target"], HASH);
+
+        let tags = serde_json::json!([["e", HASH]]);
+        let feedback = AdminFeedbackResponse::from(AdminFeedback {
+            id: Uuid::new_v4(),
+            community_id: Uuid::new_v4(),
+            community_host: "community.example".to_string(),
+            event_id: HASH.to_string(),
+            submitter_pubkey: pubkey_hex.clone(),
+            category: Some("bug".to_string()),
+            body: "feedback".to_string(),
+            tags: tags.clone(),
+            event_created_at: now,
+            received_at: now,
+        });
+        let feedback_value = serde_json::to_value(feedback).expect("serialize feedback response");
+        assert_eq!(feedback_value["submitterPubkey"], expected_npub);
+        assert_eq!(feedback_value["eventId"], HASH);
+        assert_eq!(feedback_value["tags"], tags);
+        assert!(!feedback_value.to_string().contains(&pubkey_hex));
+    }
+
+    #[test]
+    fn admin_identity_projection_fails_closed_for_an_invalid_curve_point() {
+        let now = Utc::now();
+        let response = AdminReportResponse::from(AdminReport {
+            id: Uuid::new_v4(),
+            community_id: Uuid::new_v4(),
+            community_host: "community.example".to_string(),
+            report_event_id: HASH.to_string(),
+            reporter_pubkey: "ff".repeat(32),
+            target_kind: "pubkey".to_string(),
+            target: "ff".repeat(32),
+            channel_id: None,
+            report_type: "spam".to_string(),
+            note: None,
+            status: "open".to_string(),
+            resolved_by: None,
+            resolved_at: None,
+            action_id: None,
+            created_at: now,
+        });
+
+        assert_eq!(
+            response.reporter_pubkey,
+            buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY
+        );
+        assert_eq!(
+            response.target,
+            buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY
+        );
     }
 }

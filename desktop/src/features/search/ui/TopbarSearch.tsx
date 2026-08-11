@@ -743,7 +743,7 @@ export function TopbarSearch({
           <UserAvatar
             avatarUrl={result.user.avatarUrl}
             className="h-7 w-7"
-            displayName={userDisplayName ?? result.user.pubkey}
+            displayName={userDisplayName ?? truncatePubkey(result.user.pubkey)}
             size="sm"
           />
         ) : (

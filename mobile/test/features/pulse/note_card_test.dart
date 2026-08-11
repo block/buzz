@@ -127,4 +127,47 @@ void main() {
     expect(find.text('2m'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('reply fallback formats an event ID as an event ID', (
+    tester,
+  ) async {
+    final parentEventId = 'ab' * 32;
+    final note = UserNote(
+      id: 'note-reply',
+      pubkey: 'alice',
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      content: 'A reply',
+      tags: [
+        ['e', parentEventId, '', 'reply'],
+      ],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier({
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            }),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: NoteCard(
+              note: note,
+              reaction: const PulseReactionState(
+                count: 0,
+                reactedByCurrentUser: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Replying to abababab…'), findsOneWidget);
+    expect(find.textContaining('npub1'), findsNothing);
+  });
 }

@@ -123,13 +123,12 @@ class _IdentityRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final privHex = nostr.Nip19.decode(payload: nsec).data;
-    final pubkey = privHex.isNotEmpty ? nostr.Keys(privHex).public : 'unknown';
+    final npub = tryIdentityFromNsec(nsec)?.npub;
 
     return AppListRow(
       icon: LucideIcons.key,
-      title: 'Identity (pubkey)',
-      subtitle: pubkey,
+      title: 'Identity (npub)',
+      subtitle: npub ?? 'Unknown identity',
       subtitleStyle: context.textTheme.bodySmall?.copyWith(
         color: context.colors.onSurfaceVariant,
         fontFamily: 'GeistMono',
@@ -137,10 +136,13 @@ class _IdentityRow extends StatelessWidget {
       ),
       subtitleMaxLines: 2,
       trailing: IconButton(
+        tooltip: 'Copy npub',
         icon: const Icon(LucideIcons.copy, size: 16),
-        onPressed: () async {
-          await copyToClipboard(context, pubkey, message: 'Pubkey copied');
-        },
+        onPressed: npub == null
+            ? null
+            : () async {
+                await copyToClipboard(context, npub, message: 'npub copied');
+              },
       ),
     );
   }

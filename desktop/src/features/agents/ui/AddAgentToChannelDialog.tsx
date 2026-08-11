@@ -11,6 +11,7 @@ import {
 import type { Channel, ChannelRole, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { PubKey } from "@/shared/ui/PubKey";
 import {
   Dialog,
   DialogContent,
@@ -18,7 +19,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { CopyButton } from "./CopyButton";
 
 export function AddAgentToChannelDialog({
   agent,
@@ -181,16 +181,15 @@ export function AddAgentToChannelDialog({
             </div>
 
             <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
-              <p className="text-sm font-semibold tracking-tight">
-                Agent pubkey
-              </p>
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <code className="min-w-0 flex-1 break-all rounded-xl border border-border/70 bg-background/80 px-3 py-2 text-xs">
-                  {agent?.pubkey ?? "No agent selected"}
-                </code>
+              <p className="text-sm font-semibold tracking-tight">Agent npub</p>
+              <div className="mt-3 min-w-0 rounded-xl border border-border/70 bg-background/80 px-3 py-2">
                 {agent ? (
-                  <CopyButton label="Copy pubkey" value={agent.pubkey} />
-                ) : null}
+                  <PubKey pubkey={agent.pubkey} variant="full" />
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    No agent selected
+                  </span>
+                )}
               </div>
             </div>
 

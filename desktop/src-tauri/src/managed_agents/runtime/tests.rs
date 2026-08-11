@@ -1,5 +1,20 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn managed_agent_lookup_errors_use_npub_without_protocol_hex() {
+    const VALID_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let npub = buzz_core_pkg::nostr_identity::canonical_npub(VALID_HEX).unwrap();
+    let valid_error = super::managed_agent_not_found_error(VALID_HEX);
+
+    assert_eq!(valid_error, format!("agent {npub} not found"));
+    assert!(!valid_error.contains(VALID_HEX));
+
+    let off_curve_hex = "ff".repeat(32);
+    let invalid_error = super::managed_agent_not_found_error(&off_curve_hex);
+    assert_eq!(invalid_error, "agent <invalid npub> not found");
+    assert!(!invalid_error.contains(&off_curve_hex));
+}
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]

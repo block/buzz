@@ -71,7 +71,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
   ObserverRelayState build() {
     final config = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
-    final identityKey = '${config.baseUrl}|${config.nsec ?? ''}';
+    final identityKey = '${config.baseUrl}|${npubFromNsec(config.nsec) ?? ''}';
 
     _disposed = false;
     if (_identityKey != null && _identityKey != identityKey) {

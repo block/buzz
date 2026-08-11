@@ -13,6 +13,7 @@
 use crate::paths::resolve_path;
 use crate::shell::SharedState;
 use base64::Engine;
+use buzz_core::nostr_identity::{parse_secret_key_compat, KeyInputEncoding};
 use image::{
     codecs::{jpeg::JpegEncoder, png::PngEncoder},
     DynamicImage, ExtendedColorType, ImageEncoder, ImageReader, Limits,
@@ -26,6 +27,7 @@ use serde::Deserialize;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 /// Hard cap on bytes we will read from disk / URL / data: URL.
 pub(crate) const MAX_SOURCE_BYTES: usize = 20 * 1024 * 1024;
@@ -296,14 +298,20 @@ fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
     if !is_relay_media_url(url, &relay) {
         return None;
     }
-    let key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
-    let keys = match nostr::Keys::parse(&key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated: {e}");
+    let mut key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
+    let parsed = parse_secret_key_compat(&key);
+    key.zeroize();
+    let (secret_key, encoding) = match parsed {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated");
             return None;
         }
     };
+    if encoding == KeyInputEncoding::LegacyHex {
+        tracing::warn!("BUZZ_PRIVATE_KEY uses legacy secret hex; configure an nsec instead");
+    }
+    let keys = nostr::Keys::new(secret_key);
     let authority = server_authority(url)?;
     match sign_media_get_auth(&keys, &authority) {
         Ok(header) => Some(header),

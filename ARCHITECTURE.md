@@ -536,16 +536,16 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
-| `send_dm` | Direct message to a user (pubkey hex or `{{trigger.author}}`) |
+| `send_dm` | Direct message to a user (`npub` or `{{trigger.author}}`) |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |
 | `request_approval` | Suspend execution; fields: `from`, `message`, `timeout` (default 24h) |
 | `delay` | Pause execution (max 300 seconds) |
 
-**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. Single-pass resolution (not recursive). Unknown variables left as literal text.
+**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. `{{trigger.author}}` renders as a canonical `npub`; the `| npub` filter is accepted as an idempotent compatibility spelling. Single-pass resolution (not recursive). Unknown variables left as literal text.
 
-**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.
+**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). For compatibility with existing stored definitions, `trigger_author` remains protocol hex inside this evaluation-only context; portable trigger JSON and rendered templates use `npub`. Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.
 
 **Concurrency:** `Arc<Semaphore>` with 100 permits. `try_acquire()` — returns `CapacityExceeded` immediately rather than queuing.
 
@@ -681,7 +681,7 @@ Subcommands:
 
 | Subcommand | Purpose |
 |------------|---------|
-| `add-member` | Add a pubkey to the relay membership list (`--pubkey`, `--role`); accepts npub or hex; publishes kind:13534 roster |
+| `add-member` | Add an `npub` to the relay membership list (`--pubkey`, `--role`); publishes kind:13534 roster |
 | `remove-member` | Remove a pubkey from the relay membership list (`--pubkey`, optional `--role` guard); publishes kind:13534 roster |
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |

@@ -48,7 +48,7 @@ export type SupportedLinkPreview = {
 };
 
 // Buzz relay hosts differ per community, so relay git URLs are recognized by
-// their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
+// their distinctive path shape (`/git/<owner-hex>/<repo>`) rather than by
 // hostname, and require an explicit scheme. Generic previews remain HTTPS-only.
 const SUPPORTED_URL_RE =
   /(^|[\s([{<>"'])(https:\/\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo|project)\?[^\s<>"'\]]+|(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
@@ -351,8 +351,7 @@ function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
   };
 }
 
-const BUZZ_GIT_PATH_RE =
-  /^\/git\/([a-f0-9]{64})\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
+const BUZZ_GIT_PATH_RE = /^\/git\/([^/]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
 
 /**
  * Recognize a Buzz relay git URL (`{relay-origin}/git/<owner-pubkey>/<repo>`,
@@ -380,6 +379,9 @@ function parseBuzzGitLink(
   if (!match) return null;
 
   const [, owner, repo] = match;
+  // Git transport paths intentionally use lowercase protocol hex. Entity
+  // links produced below convert that owner to canonical npub for people.
+  if (!/^[0-9a-f]{64}$/.test(owner)) return null;
   if (repo.startsWith(".") || repo.includes("..") || repo.length > 64) {
     return null;
   }

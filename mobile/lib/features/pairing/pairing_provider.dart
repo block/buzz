@@ -10,6 +10,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/auth/auth.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
+import '../../shared/nostr/nostr_keys.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
@@ -684,10 +685,16 @@ class PairingNotifier extends Notifier<PairingState> {
 
   void _handleAbort(Map<String, dynamic> msg) {
     final reason = msg['reason'] as String? ?? 'unknown';
+    final explanation = switch (reason) {
+      'sas_mismatch' => 'The verification codes did not match.',
+      'user_denied' => 'The request was declined on the source device.',
+      'timeout' => 'The pairing request timed out.',
+      _ => 'The source device reported a pairing error.',
+    };
     _cleanup();
     state = PairingState(
       status: PairingStatus.error,
-      errorMessage: 'Source device aborted pairing: $reason',
+      errorMessage: explanation,
     );
   }
 
@@ -698,11 +705,12 @@ class PairingNotifier extends Notifier<PairingState> {
     required bool protectSensitiveActions,
   }) async {
     try {
+      if (payloadType != 'custom' && payloadType != 'credentials') {
+        throw const FormatException('Unsupported pairing payload type');
+      }
       // Parse the custom payload.
       final data = jsonDecode(payload) as Map<String, dynamic>;
       final relayUrl = data['relayUrl'] as String?;
-      final pubkey = data['pubkey'] as String?;
-      final nsec = data['nsec'] as String?;
 
       if (relayUrl == null) {
         throw const FormatException('Missing relayUrl in payload');
@@ -710,29 +718,21 @@ class PairingNotifier extends Notifier<PairingState> {
 
       // Validate relay URL to prevent SSRF via private network addresses.
       _validateRelayUrl(relayUrl);
+      final community = _communityFromCredentialData(
+        data,
+        relayUrl,
+        sensitiveActionPolicy: protectSensitiveActions
+            ? SensitiveActionPolicy.enabled
+            : SensitiveActionPolicy.disabledByUser,
+      );
 
       // Validate credentials against the relay via NIP-42 WS handshake.
-      final credentialValidator = _credentialValidator ?? _validateCredentials;
-      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
+      await _validateCredentials(relayUrl: relayUrl, nsec: community.nsec!);
       if (pairingGeneration != _pairingGeneration ||
           state.status != PairingStatus.storing ||
           _sendIdentityToSource) {
         return;
       }
-
-      // Send complete only after credentials are validated.
-      _sendComplete(true);
-
-      // Store as community and switch to it.
-      final community = Community.create(
-        name: Community.nameFromUrl(relayUrl),
-        relayUrl: relayUrl,
-        pubkey: pubkey,
-        nsec: nsec,
-        sensitiveActionPolicy: protectSensitiveActions
-            ? SensitiveActionPolicy.enabled
-            : SensitiveActionPolicy.disabledByUser,
-      );
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
@@ -742,9 +742,11 @@ class PairingNotifier extends Notifier<PairingState> {
         return;
       }
 
+      // Acknowledge only after canonical credentials are durably accepted.
+      _sendComplete(true);
       _cleanup();
       state = const PairingState(status: PairingStatus.success);
-    } catch (e) {
+    } catch (_) {
       if (pairingGeneration != _pairingGeneration ||
           state.status != PairingStatus.storing ||
           _sendIdentityToSource) {
@@ -752,9 +754,10 @@ class PairingNotifier extends Notifier<PairingState> {
       }
       _sendComplete(false);
       _cleanup();
-      state = PairingState(
+      state = const PairingState(
         status: PairingStatus.error,
-        errorMessage: 'Failed to import credentials: $e',
+        errorMessage:
+            'Failed to import credentials. Check the pairing data and try again.',
       );
     }
   }
@@ -837,7 +840,7 @@ class PairingNotifier extends Notifier<PairingState> {
       final community = _parseLegacyInput(rawInput);
       await _validateCredentials(
         relayUrl: community.relayUrl,
-        nsec: community.nsec,
+        nsec: community.nsec!,
       );
 
       await ref
@@ -868,10 +871,11 @@ class PairingNotifier extends Notifier<PairingState> {
 
   Future<void> _validateCredentials({
     required String relayUrl,
-    required String? nsec,
+    required String nsec,
   }) async {
-    if (nsec == null || nsec.isEmpty) {
-      throw const FormatException('Pairing payload missing nsec');
+    final validator = _credentialValidator;
+    if (validator != null) {
+      return validator(relayUrl: relayUrl, nsec: nsec);
     }
     final uri = Uri.parse(relayUrl);
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
@@ -912,12 +916,44 @@ class PairingNotifier extends Notifier<PairingState> {
 
     _validateRelayUrl(relayUrl);
 
+    return _communityFromCredentialData(decoded, relayUrl);
+  }
+
+  Community _communityFromCredentialData(
+    Map<String, dynamic> data,
+    String relayUrl, {
+    SensitiveActionPolicy sensitiveActionPolicy =
+        SensitiveActionPolicy.disabledByUser,
+  }) {
+    final nsec = data['nsec'] as String?;
+    if (nsec == null || nsec.trim().isEmpty) {
+      throw const FormatException('Pairing payload missing nsec');
+    }
+    final identity = identityFromNsec(nsec);
+
+    // New payloads use `npub`; `pubkey` remains a read-only compatibility
+    // field for older desktop releases. Neither claim is trusted: the nsec is
+    // the source of truth and every supplied public identity must match it.
+    for (final field in ['npub', 'pubkey']) {
+      final claimed = data[field];
+      if (claimed == null) continue;
+      if (claimed is! String) {
+        throw const FormatException('Invalid public identity in payload');
+      }
+      final claimedHex = publicKeyHexFromInput(claimed, allowLegacyHex: true);
+      if (claimedHex != identity.publicKeyHex) {
+        throw const FormatException(
+          'Pairing public identity does not match nsec',
+        );
+      }
+    }
+
     return Community.create(
       name: Community.nameFromUrl(relayUrl),
       relayUrl: relayUrl,
-      pubkey: decoded['pubkey'] as String?,
-      nsec: decoded['nsec'] as String?,
-      sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
+      npub: identity.npub,
+      nsec: identity.nsec,
+      sensitiveActionPolicy: sensitiveActionPolicy,
     );
   }
 

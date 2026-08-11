@@ -13,6 +13,9 @@ use buzz_core::kind::{
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
     KIND_THREAD_SUMMARY,
 };
+use buzz_core::nostr_identity::{
+    canonical_npub_or_invalid, public_key_bytes_to_npub_or_invalid, public_key_to_npub_or_invalid,
+};
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
@@ -78,7 +81,7 @@ async fn disable_departed_member_workflows(
         Ok(n) => {
             tracing::info!(
                 channel = %channel_id,
-                owner = %hex::encode(target_pubkey),
+                owner = %public_key_bytes_to_npub_or_invalid(target_pubkey),
                 disabled = n,
                 "Disabled departed member's workflows"
             );
@@ -89,7 +92,7 @@ async fn disable_departed_member_workflows(
         Err(e) => {
             warn!(
                 channel = %channel_id,
-                owner = %hex::encode(target_pubkey),
+                owner = %public_key_bytes_to_npub_or_invalid(target_pubkey),
                 error = %e,
                 "Failed to disable departed member's workflows — per-fire authority gate still denies"
             );
@@ -909,6 +912,7 @@ pub async fn emit_membership_notification(
     notification_kind: u32,
 ) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
+    let target_npub = public_key_bytes_to_npub_or_invalid(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
 
@@ -964,7 +968,7 @@ pub async fn emit_membership_notification(
             .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
         warn!(
             channel = %channel_id,
-            target = %target_hex,
+            target = %target_npub,
             kind = notification_kind,
             "membership notification Redis publish failed: {e}"
         );
@@ -977,7 +981,7 @@ pub async fn emit_membership_notification(
 
     info!(
         channel = %channel_id,
-        target = %target_hex,
+        target = %target_npub,
         kind = notification_kind,
         "membership notification emitted"
     );
@@ -1197,7 +1201,7 @@ async fn handle_agent_profile(
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
         .await?;
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
+    info!(pubkey = %public_key_bytes_to_npub_or_invalid(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
     Ok(())
 }
 
@@ -1270,7 +1274,7 @@ async fn handle_kind0_profile(
     if let Err(ref e) = result {
         let msg = format!("{e}");
         if msg.contains("duplicate key value") || msg.contains("23505") {
-            warn!(pubkey = %hex::encode(&pubkey_bytes),
+            warn!(pubkey = %public_key_bytes_to_npub_or_invalid(&pubkey_bytes),
                 "kind:0 NIP-05 handle contested, syncing profile without it");
             state
                 .db
@@ -1288,7 +1292,7 @@ async fn handle_kind0_profile(
         }
     }
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), "kind:0 profile synced to users table");
+    info!(pubkey = %public_key_bytes_to_npub_or_invalid(&pubkey_bytes), "kind:0 profile synced to users table");
     Ok(())
 }
 
@@ -1362,7 +1366,7 @@ async fn handle_put_user(
         warn!(channel = %channel_id, error = %e, "membership notification emission failed");
     }
 
-    info!(channel = %channel_id, target = %target_hex, "NIP-29 PUT_USER processed");
+    info!(channel = %channel_id, target = %public_key_bytes_to_npub_or_invalid(&target_pubkey), "NIP-29 PUT_USER processed");
     Ok(())
 }
 
@@ -2676,7 +2680,7 @@ async fn handle_git_repo_announcement(
 
     info!(
         repo_id = %repo_id,
-        owner = %owner_hex,
+        owner = %public_key_to_npub_or_invalid(&event.pubkey),
         reserved = reserved_by_this_attempt,
         "kind:30617 repo announced (name reserved, manifest pointer ensured)"
     );
@@ -2700,7 +2704,7 @@ async fn handle_git_repo_announcement(
             // "repo now exists" event, but clone/push still works.
             warn!(
                 repo_id = %repo_id,
-                owner = %owner_hex,
+                owner = %public_key_to_npub_or_invalid(&event.pubkey),
                 error = %e,
                 "failed to emit initial kind:30618 ref state (non-fatal)"
             );
@@ -2785,8 +2789,9 @@ async fn seed_manifest_pointer(
                 .map_err(|e| anyhow::anyhow!("pointer body not utf-8: {e}"))?
                 .trim();
             if existing != digest {
+                let owner_npub = canonical_npub_or_invalid(owner_hex);
                 return Err(anyhow::anyhow!(
-                    "repo '{repo_id}' for owner {owner_hex} already has a non-empty pointer \
+                    "repo '{repo_id}' for owner {owner_npub} already has a non-empty pointer \
                      ({existing}); refusing to overwrite via announce"
                 ));
             }
@@ -3027,8 +3032,8 @@ async fn publish_nip43_delta(
         .await;
 
     info!(
-        target = %target_pubkey_hex,
-        relay = %relay_pubkey_hex,
+        target = %canonical_npub_or_invalid(target_pubkey_hex),
+        relay = %canonical_npub_or_invalid(&relay_pubkey_hex),
         "NIP-43 {label} event published"
     );
     Ok(())
@@ -3351,7 +3356,7 @@ pub async fn publish_dm_visibility_snapshot(
     }
 
     info!(
-        viewer = %viewer_hex,
+        viewer = %public_key_bytes_to_npub_or_invalid(viewer),
         hidden_count = hidden.len(),
         "NIP-DV DM visibility snapshot published"
     );
@@ -3412,8 +3417,8 @@ async fn publish_nipia_delta(
     dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
-        target = %target_pubkey_hex,
-        relay = %relay_pubkey_hex,
+        target = %canonical_npub_or_invalid(target_pubkey_hex),
+        relay = %canonical_npub_or_invalid(&relay_pubkey_hex),
         kind,
         consent = %consent_path,
         "NIP-IA delta event published"

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   createMockAgentMemoryListing,
@@ -409,7 +410,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     .getByRole("button", { name: `Open profile for ${agentName}` })
     .click();
   await expect(page.getByTestId("user-profile-public-key")).toContainText(
-    agentPubkey.slice(0, 8),
+    npubEncode(agentPubkey).slice(0, 8),
   );
   const dmSurface = await readOwnedAgentProfileContract(page);
 
@@ -479,7 +480,9 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
 
   await expect(page.getByTestId("profile-identity-details")).toBeHidden();
   await expandIdentity(page);
-  await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
+  await expect(page.getByTestId("profile-pubkey")).toContainText(
+    npubEncode("deadbeef".repeat(8)),
+  );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
 
   await page.getByTestId("profile-metadata-edit").click();
@@ -1444,7 +1447,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(publicKeyCopy).toHaveAttribute("data-copied", "true");
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(agentPubkey);
+    .toBe(npubEncode(agentPubkey));
   await expect(page.getByTestId("user-profile-agent-instruction")).toHaveCount(
     0,
   );

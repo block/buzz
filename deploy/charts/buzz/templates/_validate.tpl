@@ -49,14 +49,16 @@ surface at template time regardless of which manifest helm renders first.
 {{/* Owner pubkey required when requireRelayMembership */}}
 {{- if .Values.relay.requireRelayMembership -}}
   {{- if not .Values.ownerPubkey -}}
-    {{- fail "ownerPubkey is required when relay.requireRelayMembership=true. Set ownerPubkey to the 64-char lowercase hex Nostr pubkey of the relay operator, or set relay.requireRelayMembership=false for an open relay." -}}
+    {{- fail "ownerPubkey is required when relay.requireRelayMembership=true. Set ownerPubkey to the NIP-19 npub of the relay operator, or set relay.requireRelayMembership=false for an open relay." -}}
   {{- end -}}
 {{- end -}}
 
 {{/* ownerPubkey format check */}}
 {{- if .Values.ownerPubkey -}}
-  {{- if not (regexMatch "^[0-9a-f]{64}$" .Values.ownerPubkey) -}}
-    {{- fail (printf "ownerPubkey must be 64 lowercase hex characters (got %d chars; must match ^[0-9a-f]{64}$)." (len .Values.ownerPubkey)) -}}
+  {{- $isNpub := regexMatch "^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$" .Values.ownerPubkey -}}
+  {{- $isLegacyHex := regexMatch "^[0-9a-f]{64}$" .Values.ownerPubkey -}}
+  {{- if not (or $isNpub $isLegacyHex) -}}
+    {{- fail (printf "ownerPubkey must be a NIP-19 npub (got %d chars)." (len .Values.ownerPubkey)) -}}
   {{- end -}}
 {{- end -}}
 

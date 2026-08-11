@@ -29,7 +29,7 @@ Use this when the bot should be admitted as its own independent relay identity.
 ```bash
 BUZZ_RELAY_URL=ws://localhost:3000 \
 BUZZ_CHANNEL_ID=<channel-uuid> \
-BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
+BUZZ_BOT_PRIVATE_KEY=<bot-nsec> \
 BUZZ_BOT_AUTH_MODE=standalone \
 cargo run --manifest-path examples/countdown-bot/Cargo.toml
 ```
@@ -52,8 +52,8 @@ Generate the auth tag on the fly:
 ```bash
 BUZZ_RELAY_URL=ws://localhost:3000 \
 BUZZ_CHANNEL_ID=<channel-uuid> \
-BUZZ_BOT_PRIVATE_KEY=<bot-nsec-or-hex-secret> \
-BUZZ_OWNER_PRIVATE_KEY=<owner-or-agent-nsec-or-hex-secret> \
+BUZZ_BOT_PRIVATE_KEY=<bot-nsec> \
+BUZZ_OWNER_PRIVATE_KEY=<owner-or-agent-nsec> \
 BUZZ_BOT_AUTH_MODE=owner-attested \
 cargo run --manifest-path examples/countdown-bot/Cargo.toml
 ```

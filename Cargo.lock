@@ -882,6 +882,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -997,6 +998,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1892,6 +1894,7 @@ name = "countdown-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buzz-core",
  "buzz-sdk",
  "futures-util",
  "nostr 0.44.7",

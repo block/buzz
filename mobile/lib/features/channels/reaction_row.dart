@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -451,17 +452,13 @@ class _ReactorTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayName =
-        profile?.label ??
-        (pubkey.length >= 8 ? '${pubkey.substring(0, 8)}...' : pubkey);
+    final displayName = profile?.label ?? shortPubkey(pubkey);
     final about = profile?.about;
 
     return ListTile(
       leading: _ReactorAvatar(
         avatarUrl: profile?.avatarUrl,
-        initial:
-            profile?.initial ??
-            (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?'),
+        initial: profile?.initial ?? pubkeyAvatarInitial(pubkey),
       ),
       title: Text(
         displayName,

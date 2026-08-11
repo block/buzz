@@ -21,6 +21,7 @@ use buzz_core::kind::{
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
+use buzz_core::nostr_identity::{canonical_npub_or_invalid, public_key_to_npub_or_invalid};
 use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
@@ -227,6 +228,7 @@ async fn execute_relay_admin_command(
 ) -> Result<(), String> {
     let kind = event.kind.as_u16() as u32;
     let sender_hex = event.pubkey.to_hex();
+    let sender_npub = public_key_to_npub_or_invalid(&event.pubkey);
 
     // This mirrors the NIP-42 auth event freshness check and prevents replay
     // of captured admin commands. The window is intentionally tight — admin
@@ -282,7 +284,7 @@ async fn execute_relay_admin_command(
             // publishes no announcement event (unlike 9030/9031), so this warn
             // is the only durable attribution of who changed the icon.
             warn!(
-                sender = %sender_hex,
+                sender = %sender_npub,
                 "workspace profile change admitted without a roster role (open relay, no steward)"
             );
         }
@@ -300,13 +302,14 @@ async fn execute_relay_admin_command(
             .await
             .map_err(|e| format!("failed to store workspace icon: {e}"))?;
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        info!(sender = %sender_npub, icon_len = icon.len(), "workspace profile updated");
         return Ok(());
     }
 
     let target_hex = extract_p_tag_hex(event)
         .ok_or_else(|| "missing or invalid p tag".to_string())?
         .to_ascii_lowercase();
+    let target_npub = canonical_npub_or_invalid(&target_hex);
 
     match kind {
         // kind:9030 — Add relay member
@@ -340,8 +343,8 @@ async fn execute_relay_admin_command(
                 .map_err(|e| format!("database error: {e}"))?;
 
             info!(
-                sender = %sender_hex,
-                target = %target_hex,
+                sender = %sender_npub,
+                target = %target_npub,
                 role = %role,
                 was_inserted,
                 "relay member add attempted"
@@ -397,7 +400,7 @@ async fn execute_relay_admin_command(
                     return Err("cannot remove the relay owner".to_string());
                 }
                 RemoveResult::NotFound => {
-                    return Err(format!("member not found: {target_hex}"));
+                    return Err(format!("member not found: {target_npub}"));
                 }
                 RemoveResult::RoleMismatch => {
                     return Err("actor not authorized: admins can only remove members".to_string());
@@ -405,8 +408,8 @@ async fn execute_relay_admin_command(
             }
 
             info!(
-                sender = %sender_hex,
-                target = %target_hex,
+                sender = %sender_npub,
+                target = %target_npub,
                 "relay member removed"
             );
 
@@ -459,13 +462,13 @@ async fn execute_relay_admin_command(
                 return Err(if exists.is_some() {
                     "cannot change the relay owner's role".to_string()
                 } else {
-                    format!("member not found: {target_hex}")
+                    format!("member not found: {target_npub}")
                 });
             }
 
             info!(
-                sender = %sender_hex,
-                target = %target_hex,
+                sender = %sender_npub,
+                target = %target_npub,
                 new_role = %new_role,
                 "relay member role changed"
             );

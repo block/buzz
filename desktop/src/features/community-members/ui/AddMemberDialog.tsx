@@ -368,8 +368,7 @@ export function DirectAddMemberForm({
                   </>
                 ) : (
                   <p className="px-3 py-3 text-sm text-muted-foreground">
-                    No people found. Paste a full npub or hex public key to add
-                    someone directly.
+                    No people found. Paste a full npub to add someone directly.
                   </p>
                 )}
               </div>
@@ -446,9 +445,7 @@ function SearchResult({
         {name}
       </span>
       {isDirectPubkey ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          public key
-        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">npub</span>
       ) : null}
     </button>
   );
@@ -473,7 +470,7 @@ export function AddMemberDialog({
           <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Add member</DialogTitle>
             <DialogDescription>
-              Add a person to this community by their public key.
+              Add a person to this community by their npub.
             </DialogDescription>
           </DialogHeader>
           <div className="px-6 py-4">

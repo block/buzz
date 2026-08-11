@@ -1,5 +1,7 @@
 import 'package:uuid/uuid.dart';
 
+import '../nostr/nostr_keys.dart';
+
 const _uuid = Uuid();
 const _sentinel = Object();
 
@@ -9,7 +11,10 @@ class Community {
   final String id;
   final String name;
   final String relayUrl;
-  final String? pubkey;
+
+  /// Canonical bech32 public identity. NIP-01 hex is derived only at the wire
+  /// boundary and is never persisted here.
+  final String? npub;
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
   final DateTime addedAt;
@@ -18,7 +23,7 @@ class Community {
     required this.id,
     required this.name,
     required this.relayUrl,
-    this.pubkey,
+    this.npub,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
     required this.addedAt,
@@ -27,17 +32,18 @@ class Community {
   factory Community.create({
     required String name,
     required String relayUrl,
-    String? pubkey,
+    String? npub,
     String? nsec,
     SensitiveActionPolicy sensitiveActionPolicy =
         SensitiveActionPolicy.disabledByUser,
   }) {
+    final identity = tryIdentityFromStoredSecret(nsec);
     return Community(
       id: _uuid.v4(),
       name: name,
       relayUrl: relayUrl,
-      pubkey: pubkey,
-      nsec: nsec,
+      npub: identity?.npub ?? tryNpubFromPublicKey(npub),
+      nsec: identity?.nsec ?? nsec,
       sensitiveActionPolicy: sensitiveActionPolicy,
       addedAt: DateTime.now(),
     );
@@ -46,7 +52,7 @@ class Community {
   Community copyWith({
     String? name,
     String? relayUrl,
-    Object? pubkey = _sentinel,
+    Object? npub = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
   }) {
@@ -54,7 +60,7 @@ class Community {
       id: id,
       name: name ?? this.name,
       relayUrl: relayUrl ?? this.relayUrl,
-      pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
+      npub: npub == _sentinel ? this.npub : npub as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
@@ -66,24 +72,32 @@ class Community {
     'id': id,
     'name': name,
     'relayUrl': relayUrl,
-    if (pubkey != null) 'pubkey': pubkey,
+    if (npub != null) 'npub': npub,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
     'addedAt': addedAt.toIso8601String(),
   };
 
-  factory Community.fromJson(Map<String, dynamic> json) => Community(
-    id: json['id'] as String,
-    name: json['name'] as String,
-    relayUrl: json['relayUrl'] as String,
-    pubkey: json['pubkey'] as String?,
-    nsec: json['nsec'] as String?,
-    sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(
-      (value) => value.name == json['sensitiveActionPolicy'],
-      orElse: () => SensitiveActionPolicy.disabledByUser,
-    ),
-    addedAt: DateTime.parse(json['addedAt'] as String),
-  );
+  factory Community.fromJson(Map<String, dynamic> json) {
+    final storedNsec = json['nsec'] as String?;
+    final identity = tryIdentityFromStoredSecret(storedNsec);
+    final storedPublicKey =
+        json['npub'] as String? ?? json['pubkey'] as String?;
+    return Community(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      relayUrl: json['relayUrl'] as String,
+      // A valid secret is the source of truth and repairs stale/mismatched
+      // legacy public-key fields during migration.
+      npub: identity?.npub ?? tryNpubFromPublicKey(storedPublicKey),
+      nsec: identity?.nsec ?? storedNsec,
+      sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(
+        (value) => value.name == json['sensitiveActionPolicy'],
+        orElse: () => SensitiveActionPolicy.disabledByUser,
+      ),
+      addedAt: DateTime.parse(json['addedAt'] as String),
+    );
+  }
 
   /// Derive a human-friendly community name from a relay URL.
   static String nameFromUrl(String url) {

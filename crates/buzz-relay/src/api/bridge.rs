@@ -14,7 +14,12 @@ use base64::Engine;
 use serde_json::Value;
 
 use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
-use buzz_core::TenantContext;
+use buzz_core::{
+    nostr_identity::{
+        parse_public_key_compat, public_key_bytes_to_npub_or_invalid, public_key_to_npub_or_invalid,
+    },
+    TenantContext,
+};
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
@@ -116,9 +121,15 @@ pub(crate) fn verify_bridge_auth_with_options(
 
     // Dev-mode fallback: X-Pubkey header (only when require_auth_token is false)
     if !require_auth_token {
-        if let Some(hex_val) = headers.get("x-pubkey").and_then(|v| v.to_str().ok()) {
-            let pubkey = nostr::PublicKey::from_hex(hex_val)
-                .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid X-Pubkey hex"))?;
+        if let Some(value) = headers.get("x-pubkey").and_then(|v| v.to_str().ok()) {
+            let pubkey = parse_public_key_compat(value)
+                .map(|(public_key, _)| public_key)
+                .map_err(|_| {
+                    api_error(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid X-Pubkey: expected an npub",
+                    )
+                })?;
             // Zero event ID — no replay detection needed for dev mode
             return Ok((pubkey, [0u8; 32]));
         }
@@ -644,7 +655,7 @@ pub async fn submit_event(
         Some(&body),
         state.config.require_auth_token,
     )?;
-    let pubkey_hex = pubkey.to_hex();
+    let pubkey_npub = public_key_to_npub_or_invalid(&pubkey);
 
     // Everything after auth — admission, replay, membership, parse, ingest —
     // runs inside the helper.  The thin wrapper here owns the single terminal
@@ -656,7 +667,7 @@ pub async fn submit_event(
     match &outcome {
         SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/events",
                 status = 200u16,
                 accepted,
@@ -671,7 +682,7 @@ pub async fn submit_event(
             ..
         } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/events",
                 status = 400u16,
                 accepted = false,
@@ -683,7 +694,7 @@ pub async fn submit_event(
         }
         SubmitOutcome::Rejected { kind, reason, .. } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/events",
                 status = 400u16,
                 accepted = false,
@@ -694,7 +705,7 @@ pub async fn submit_event(
         }
         SubmitOutcome::Err { status, .. } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/events",
                 status = status.as_u16(),
                 accepted = false,
@@ -915,7 +926,7 @@ pub async fn query_events(
         Some(&body),
         state.config.require_auth_token,
     )?;
-    let pubkey_hex = pubkey.to_hex();
+    let pubkey_npub = public_key_to_npub_or_invalid(&pubkey);
 
     // Admission, replay, membership, and filter execution all run inside the
     // helper.  The single terminal attribution line fires here from the Result
@@ -926,7 +937,7 @@ pub async fn query_events(
     match &result {
         Ok(Json(Value::Array(events))) => {
             tracing::info!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/query",
                 status = 200u16,
                 result_count = events.len(),
@@ -934,11 +945,11 @@ pub async fn query_events(
             );
         }
         Ok(_) => {
-            tracing::info!(pubkey = %pubkey_hex, route = "/query", status = 200u16, "HTTP bridge request");
+            tracing::info!(pubkey = %pubkey_npub, route = "/query", status = 200u16, "HTTP bridge request");
         }
         Err((status, _)) => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/query",
                 status = status.as_u16(),
                 "HTTP bridge request"
@@ -1402,7 +1413,7 @@ pub async fn count_events(
         Some(&body),
         state.config.require_auth_token,
     )?;
-    let pubkey_hex = pubkey.to_hex();
+    let pubkey_npub = public_key_to_npub_or_invalid(&pubkey);
 
     // Admission, replay, membership, and count execution all run inside the
     // helper.  The single terminal attribution line fires here from the Result
@@ -1414,7 +1425,7 @@ pub async fn count_events(
         Ok(Json(value)) => {
             let count = value.get("count").and_then(Value::as_u64);
             tracing::info!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/count",
                 status = 200u16,
                 result_count = count,
@@ -1423,7 +1434,7 @@ pub async fn count_events(
         }
         Err((status, _)) => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
+                pubkey = %pubkey_npub,
                 route = "/count",
                 status = status.as_u16(),
                 "HTTP bridge request"
@@ -2266,20 +2277,22 @@ pub async fn moderation_restricted(
 fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
     let (target_kind, target) = match &r.target {
         buzz_db::moderation::ReportTarget::Event(id) => ("event", hex::encode(id)),
-        buzz_db::moderation::ReportTarget::Pubkey(pk) => ("pubkey", hex::encode(pk)),
+        buzz_db::moderation::ReportTarget::Pubkey(pk) => {
+            ("pubkey", public_key_bytes_to_npub_or_invalid(pk))
+        }
         buzz_db::moderation::ReportTarget::Blob(sha) => ("blob", hex::encode(sha)),
     };
     serde_json::json!({
         "id": r.id,
         "report_event_id": hex::encode(&r.report_event_id),
-        "reporter_pubkey": hex::encode(&r.reporter_pubkey),
+        "reporter_pubkey": public_key_bytes_to_npub_or_invalid(&r.reporter_pubkey),
         "target_kind": target_kind,
         "target": target,
         "channel_id": r.channel_id,
         "report_type": r.report_type,
         "note": r.note,
         "status": r.status,
-        "resolved_by": r.resolved_by.as_ref().map(hex::encode),
+        "resolved_by": r.resolved_by.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
         "resolved_at": r.resolved_at,
         "action_id": r.action_id,
         "created_at": r.created_at,
@@ -2289,9 +2302,9 @@ fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
 fn action_json(a: &buzz_db::moderation::ActionRecord) -> Value {
     serde_json::json!({
         "id": a.id,
-        "actor_pubkey": hex::encode(&a.actor_pubkey),
+        "actor_pubkey": public_key_bytes_to_npub_or_invalid(&a.actor_pubkey),
         "action": a.action,
-        "target_pubkey": a.target_pubkey.as_ref().map(hex::encode),
+        "target_pubkey": a.target_pubkey.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
         "target_event_id": a.target_event_id.as_ref().map(hex::encode),
         "channel_id": a.channel_id,
         "reason_code": a.reason_code,
@@ -2304,13 +2317,13 @@ fn action_json(a: &buzz_db::moderation::ActionRecord) -> Value {
 
 fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
     serde_json::json!({
-        "pubkey": hex::encode(&b.pubkey),
+        "pubkey": public_key_bytes_to_npub_or_invalid(&b.pubkey),
         "banned": b.banned,
         "ban_expires_at": b.ban_expires_at,
         "ban_reason": b.ban_reason,
         "muted_until": b.muted_until,
         "mute_reason": b.mute_reason,
-        "actor_pubkey": hex::encode(&b.actor_pubkey),
+        "actor_pubkey": public_key_bytes_to_npub_or_invalid(&b.actor_pubkey),
         "updated_at": b.updated_at,
     })
 }
@@ -2326,6 +2339,74 @@ mod tests {
         deadpool_redis::Config::from_url(url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("create redis pool")
+    }
+
+    #[test]
+    fn moderation_projections_emit_identity_fields_as_npub() {
+        let identity = Keys::generate().public_key().to_bytes().to_vec();
+        let identity_hex = hex::encode(&identity);
+        let now = chrono::Utc::now();
+
+        let report = buzz_db::moderation::ReportRecord {
+            id: uuid::Uuid::new_v4(),
+            report_event_id: vec![0x11; 32],
+            reporter_pubkey: identity.clone(),
+            target: buzz_db::moderation::ReportTarget::Pubkey(identity.clone()),
+            channel_id: None,
+            report_type: "spam".into(),
+            note: None,
+            status: "resolved".into(),
+            resolved_by: Some(identity.clone()),
+            resolved_at: Some(now),
+            action_id: None,
+            created_at: now,
+        };
+        let report = report_json(&report);
+        for field in ["reporter_pubkey", "target", "resolved_by"] {
+            assert!(report[field].as_str().unwrap().starts_with("npub1"));
+        }
+
+        let action = buzz_db::moderation::ActionRecord {
+            id: uuid::Uuid::new_v4(),
+            actor_pubkey: identity.clone(),
+            action: "ban".into(),
+            target_pubkey: Some(identity.clone()),
+            target_event_id: Some(vec![0x22; 32]),
+            channel_id: None,
+            reason_code: None,
+            public_reason: None,
+            private_reason: None,
+            matched_principal: Some("self".into()),
+            created_at: now,
+        };
+        let action = action_json(&action);
+        assert!(action["actor_pubkey"]
+            .as_str()
+            .unwrap()
+            .starts_with("npub1"));
+        assert!(action["target_pubkey"]
+            .as_str()
+            .unwrap()
+            .starts_with("npub1"));
+        assert_eq!(action["target_event_id"], hex::encode(vec![0x22; 32]));
+
+        let ban = buzz_db::moderation::BanRecord {
+            pubkey: identity.clone(),
+            banned: true,
+            ban_expires_at: None,
+            ban_reason: None,
+            muted_until: None,
+            mute_reason: None,
+            actor_pubkey: identity,
+            updated_at: now,
+        };
+        let ban = ban_json(&ban);
+        assert!(ban["pubkey"].as_str().unwrap().starts_with("npub1"));
+        assert!(ban["actor_pubkey"].as_str().unwrap().starts_with("npub1"));
+
+        assert!(!report.to_string().contains(&identity_hex));
+        assert!(!action.to_string().contains(&identity_hex));
+        assert!(!ban.to_string().contains(&identity_hex));
     }
 
     fn fresh_tenant(host: &str) -> TenantContext {
@@ -3778,9 +3859,12 @@ mod tests {
             "expected exactly 1 attribution line for invalid-JSON arm, got {n};\nlog:\n{log}"
         );
         assert!(
-            log.contains(&pubkey_hex[..16]),
+            log.contains(&buzz_core::nostr_identity::canonical_npub_or_invalid(
+                &pubkey_hex
+            )),
             "attribution line must carry the pubkey;\nlog:\n{log}"
         );
+        assert!(!log.contains(&pubkey_hex));
     }
 
     /// T3b — exactly-once invariant, post-parse IngestError::Rejected arm (relay-only kind).
@@ -3838,8 +3922,11 @@ mod tests {
             "expected exactly 1 attribution line for IngestError::Rejected arm, got {n};\nlog:\n{log}"
         );
         assert!(
-            log.contains(&pubkey_hex[..16]),
+            log.contains(&buzz_core::nostr_identity::canonical_npub_or_invalid(
+                &pubkey_hex
+            )),
             "attribution line must carry the pubkey;\nlog:\n{log}"
         );
+        assert!(!log.contains(&pubkey_hex));
     }
 }

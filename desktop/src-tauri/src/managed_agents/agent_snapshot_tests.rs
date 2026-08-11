@@ -7,6 +7,9 @@ use super::*;
 use crate::managed_agents::types::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 
+const ALLOWLIST_MEMBER_HEX: &str =
+    "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
 /// Build a minimal `ManagedAgentRecord` for testing. Only the fields
 /// relevant to snapshot export are filled; the rest use defaults.
 fn minimal_record() -> ManagedAgentRecord {
@@ -70,7 +73,7 @@ fn minimal_record() -> ManagedAgentRecord {
         source_team_persona_slug: Some("lep".to_string()), // MUST NOT appear
         definition_respond_to: Some("allowlist".to_string()),
         catalog_source: None,
-        definition_respond_to_allowlist: vec!["abc123def".to_string()],
+        definition_respond_to_allowlist: vec![ALLOWLIST_MEMBER_HEX.to_string()],
         definition_parallelism: Some(4),
         relay_mesh: None,
         effort_level: None,
@@ -86,6 +89,48 @@ fn json_round_trip_config_only() {
     let bytes = encode_snapshot_json(&snapshot).unwrap();
     let parsed = decode_snapshot_json(&bytes).unwrap();
     assert_eq!(parsed, snapshot);
+}
+
+#[test]
+fn json_export_uses_npub_allowlist_without_member_hex() {
+    let record = minimal_record();
+    let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
+    let bytes = encode_snapshot_json(&snapshot).unwrap();
+    let json = String::from_utf8(bytes.clone()).unwrap();
+    let public_key = nostr::PublicKey::from_hex(ALLOWLIST_MEMBER_HEX).unwrap();
+    let npub = buzz_core_pkg::nostr_identity::public_key_to_npub(&public_key).unwrap();
+
+    assert!(json.contains(&npub), "portable artifact must contain npub");
+    assert!(
+        !json.contains(ALLOWLIST_MEMBER_HEX),
+        "portable artifact must not contain the allowlist member's hex key"
+    );
+
+    let parsed = decode_snapshot_json(&bytes).unwrap();
+    assert_eq!(
+        parsed.definition.respond_to_allowlist,
+        vec![ALLOWLIST_MEMBER_HEX.to_string()],
+        "import must normalize npub to protocol-native hex"
+    );
+}
+
+#[test]
+fn json_import_accepts_legacy_hex_allowlist_and_normalizes_case() {
+    let mut value = serde_json::to_value(build_snapshot(
+        &minimal_record(),
+        MemoryLevel::None,
+        vec![],
+        None,
+    ))
+    .unwrap();
+    value["definition"]["respondToAllowlist"] =
+        serde_json::json!([ALLOWLIST_MEMBER_HEX.to_ascii_uppercase()]);
+    let parsed = decode_snapshot_json(value.to_string().as_bytes()).unwrap();
+
+    assert_eq!(
+        parsed.definition.respond_to_allowlist,
+        vec![ALLOWLIST_MEMBER_HEX.to_string()]
+    );
 }
 
 #[test]

@@ -7,6 +7,9 @@ import {
   scoreUserCandidate,
 } from "./userCandidateSearch.ts";
 
+const HEX = "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
+const NPUB = "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
+
 function makeUser(overrides = {}) {
   return {
     avatarUrl: null,
@@ -14,7 +17,7 @@ function makeUser(overrides = {}) {
     isAgent: false,
     nip05Handle: null,
     ownerPubkey: null,
-    pubkey: "abcdef1234567890",
+    pubkey: HEX,
     ...overrides,
   };
 }
@@ -38,13 +41,35 @@ test("scoreUserCandidate ranks display labels before pubkeys", () => {
     2,
   );
   assert.equal(
-    scoreUserCandidate({ label: "Alice Johnson", query: "abcd", user }),
-    3,
+    scoreUserCandidate({
+      label: "Alice Johnson",
+      query: HEX.slice(0, 8),
+      user,
+    }),
+    5,
   );
   assert.equal(
-    scoreUserCandidate({ label: "Alice Johnson", query: "3456", user }),
-    4,
+    scoreUserCandidate({
+      label: "Alice Johnson",
+      query: HEX.slice(16, 24),
+      user,
+    }),
+    6,
   );
+});
+
+test("scoreUserCandidate prefers canonical npub and retains legacy hex compatibility", () => {
+  for (const pubkey of [HEX, NPUB]) {
+    const user = makeUser({ displayName: "Alice Johnson", pubkey });
+    assert.equal(
+      scoreUserCandidate({ label: "Alice Johnson", query: NPUB, user }),
+      3,
+    );
+    assert.equal(
+      scoreUserCandidate({ label: "Alice Johnson", query: HEX, user }),
+      5,
+    );
+  }
 });
 
 test("scoreUserCandidate supports agent labels and empty-query defaults", () => {
@@ -77,7 +102,7 @@ test("scoreUserCandidate tolerates one name typo as a lower-ranked fallback", ()
 
   assert.equal(
     scoreUserCandidate({ label: "Alice Johnson", query: "alcie", user }),
-    5,
+    7,
   );
   assert.equal(
     scoreUserCandidate({ label: "Alice Johnson", query: "alc", user }),

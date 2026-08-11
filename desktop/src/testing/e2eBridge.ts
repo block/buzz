@@ -65,7 +65,7 @@ import {
   ensureRelayOriginFetch,
   resetMediaCaches,
 } from "@/shared/lib/mediaUrl";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import {
   isValidLinkPreviewSnapshotCanonicalUrl,
   parseLinkPreviewSnapshots,
@@ -1670,7 +1670,7 @@ function syncMockChannel(channel: MockChannel) {
 
   channel.participant_pubkeys = channel.members.map((member) => member.pubkey);
   channel.participants = channel.members.map(
-    (member) => member.display_name ?? member.pubkey.slice(0, 8),
+    (member) => member.display_name ?? truncatePubkey(member.pubkey),
   );
 }
 
@@ -3801,7 +3801,7 @@ function importMockIdentity(nsec: string) {
   }
 
   return {
-    pubkey,
+    pubkey: npubEncode(pubkey),
     display_name: username,
   };
 }
@@ -11326,7 +11326,7 @@ export function maybeInstallE2eTauriMocks() {
         const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
         const nextIdentity = {
           pubkey_hex: activeIdentity.pubkey,
-          npub: `npub1${activeIdentity.pubkey}`,
+          npub: npubEncode(activeIdentity.pubkey),
         };
         if (activeConfig?.mock)
           activeConfig.mock.builderlabIdentity = nextIdentity;
@@ -11413,14 +11413,19 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig?.mock?.identityLocked === true;
         if (identity) {
           return {
-            pubkey: identity.pubkey,
+            pubkey: npubEncode(identity.pubkey),
             display_name: identity.username,
             lost: false,
             locked: false,
           };
         }
 
-        return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
+        return {
+          ...DEFAULT_MOCK_IDENTITY,
+          pubkey: npubEncode(DEFAULT_MOCK_IDENTITY.pubkey),
+          lost: isLost,
+          locked: isLocked,
+        };
       }
       case "sign_nostr_identity_binding": {
         const request = payload as {
@@ -11504,8 +11509,7 @@ export function maybeInstallE2eTauriMocks() {
         const pubkey = pubkeys[Math.min(index, pubkeys.length - 1)];
         backupVerificationCallCount += 1;
         return {
-          pubkey,
-          npub: npubEncode(pubkey),
+          pubkey: npubEncode(pubkey),
           matchesCurrentIdentity:
             pubkey === (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey),
         };
@@ -11536,7 +11540,7 @@ export function maybeInstallE2eTauriMocks() {
         const currentDisplayName =
           identity?.username ?? DEFAULT_MOCK_IDENTITY.display_name;
         return {
-          pubkey: currentPubkey,
+          pubkey: npubEncode(currentPubkey),
           display_name: currentDisplayName,
           lost: false,
           locked: false,

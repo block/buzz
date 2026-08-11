@@ -1,3 +1,5 @@
+import { truncatePubkey } from "@/shared/lib/pubkey";
+
 import { effectiveCloneUrls } from "./projectCloneUrl";
 
 export type ProjectRepoHost =
@@ -19,7 +21,11 @@ export function projectRepoHost(
   try {
     const clone = new URL(cloneUrl);
     const relay = new URL(relayOrigin);
-    const isBuzzPath = /^\/git\/[0-9a-f]{64}\/[^/]+\/?$/i.test(clone.pathname);
+    const pathSegments = clone.pathname.split("/").filter(Boolean);
+    const isBuzzPath =
+      pathSegments.length === 3 &&
+      pathSegments[0] === "git" &&
+      /^[0-9a-f]{64}$/.test(pathSegments[1]);
 
     if (clone.origin === relay.origin && isBuzzPath) {
       return { kind: "buzz" };
@@ -74,7 +80,7 @@ export function repositoryDisplayPath(
   if (!cloneUrl) return null;
 
   if (projectRepoHost(cloneUrl, relayOrigin).kind === "buzz") {
-    const owner = ownerLabel?.trim() || `${repository.owner.slice(0, 8)}…`;
+    const owner = ownerLabel?.trim() || truncatePubkey(repository.owner);
     return `${owner}/${repository.dtag}`;
   }
 

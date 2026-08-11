@@ -11,6 +11,7 @@ import {
   type HistorySearchSetterOptions,
   useHistorySearchState,
 } from "@/shared/hooks/useHistorySearchState";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 import {
   buildAutoSendClearPatch,
   CHANNEL_SEARCH_KEYS,
@@ -52,21 +53,24 @@ export function useChannelPanelHistoryState() {
   // Opening, switching, or closing a profile always resets its sub-view —
   // the carried `profileView` would otherwise leak onto the next profile.
   const setProfilePanelPubkey = React.useCallback<PanelValueSetter>(
-    (value, options) =>
-      applyPatch(
-        { profile: value, profileTab: null, profileView: null },
-        options,
-      ),
+    (value, options) => {
+      const profile = value === null ? null : safeNpub(value);
+      if (value !== null && !profile) return;
+      applyPatch({ profile, profileTab: null, profileView: null }, options);
+    },
     [applyPatch],
   );
 
   const openProfilePanel = React.useCallback(
-    (pubkey: string, options?: ProfilePanelOpenOptions) =>
+    (pubkey: string, options?: ProfilePanelOpenOptions) => {
+      const profile = safeNpub(pubkey);
+      if (!profile) return;
       applyPatch({
-        profile: pubkey,
+        profile,
         profileTab: options?.tab === "info" ? null : (options?.tab ?? null),
         profileView: null,
-      }),
+      });
+    },
     [applyPatch],
   );
 
@@ -83,11 +87,17 @@ export function useChannelPanelHistoryState() {
   );
 
   const setOpenAgentSessionPubkey = React.useCallback<PanelValueSetter>(
-    (value, options) =>
+    (value, options) => {
+      const agentSession = value === null ? null : safeNpub(value);
+      if (value !== null && !agentSession) return;
       applyPatch(
-        { agentSession: value, agentSessionChannel: value ? undefined : null },
+        {
+          agentSession,
+          agentSessionChannel: value ? undefined : null,
+        },
         options,
-      ),
+      );
+    },
     [applyPatch],
   );
 
@@ -126,10 +136,14 @@ export function useChannelPanelHistoryState() {
     clearAutoSend,
     clearMessageRouteTarget,
     openAgentSessionChannelId: values.agentSessionChannel,
-    openAgentSessionPubkey: values.agentSession,
+    openAgentSessionPubkey: values.agentSession
+      ? parsePubkeyInput(values.agentSession)
+      : null,
     openProfilePanel,
     openThreadHeadId: values.thread,
-    profilePanelPubkey: values.profile,
+    profilePanelPubkey: values.profile
+      ? parsePubkeyInput(values.profile)
+      : null,
     profilePanelTab: profilePanelTabFromSearch(values.profileTab),
     profilePanelView: profilePanelViewFromSearch(values.profileView),
     setChannelManagementOpen,

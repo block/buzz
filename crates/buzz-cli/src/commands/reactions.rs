@@ -4,7 +4,43 @@ use nostr::EventId;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{format_npub, validate_hex64};
+
+fn normalize_reactions(events: &[serde_json::Value]) -> Result<serde_json::Value, CliError> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for event in events {
+        let emoji = event
+            .get("content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("+")
+            .to_string();
+        let pubkey = event
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| CliError::Other("relay response missing reaction author".into()))?;
+        groups.entry(emoji).or_default().push(format_npub(pubkey)?);
+    }
+
+    let mut reactions: Vec<serde_json::Value> = groups
+        .into_iter()
+        .map(|(emoji, pubkeys)| {
+            serde_json::json!({
+                "emoji": emoji,
+                "count": pubkeys.len(),
+                "pubkeys": pubkeys,
+            })
+        })
+        .collect();
+    reactions.sort_by(|a, b| {
+        a.get("emoji")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("emoji").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+
+    Ok(serde_json::json!({ "reactions": reactions }))
+}
 
 pub async fn cmd_add_reaction(
     client: &BuzzClient,
@@ -86,42 +122,31 @@ pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
 
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for e in &events {
-        let emoji = e
-            .get("content")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("+")
-            .to_string();
-        let pubkey = e
-            .get("pubkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        groups.entry(emoji).or_default().push(pubkey);
-    }
-
-    let mut reactions: Vec<serde_json::Value> = groups
-        .into_iter()
-        .map(|(emoji, pubkeys)| {
-            serde_json::json!({
-                "emoji": emoji,
-                "count": pubkeys.len(),
-                "pubkeys": pubkeys,
-            })
-        })
-        .collect();
-    reactions.sort_by(|a, b| {
-        a.get("emoji")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .cmp(b.get("emoji").and_then(|v| v.as_str()).unwrap_or(""))
-    });
-
-    let output = serde_json::json!({ "reactions": reactions });
+    let output = normalize_reactions(&events)?;
     println!("{}", serde_json::to_string(&output).unwrap_or_default());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_reactions;
+    use serde_json::json;
+
+    #[test]
+    fn reaction_author_lists_emit_npub_not_hex() {
+        let hex = nostr::Keys::generate().public_key().to_hex();
+        let output = normalize_reactions(&[json!({
+            "content": "+",
+            "pubkey": hex.clone(),
+        })])
+        .expect("reactions format");
+        let displayed = output["reactions"][0]["pubkeys"][0]
+            .as_str()
+            .expect("string public key");
+        assert!(displayed.starts_with("npub1"));
+        assert_ne!(displayed, hex);
+        assert!(!output.to_string().contains(&hex));
+    }
 }
 
 pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(), CliError> {

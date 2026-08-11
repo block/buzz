@@ -372,11 +372,12 @@ mesh-dev-fresh:
     set -euo pipefail
     ./scripts/dev-reset.sh --yes
     ./scripts/setup-desktop-test-data.sh
-    export BUZZ_PRIVATE_KEY="3dbaebadb5dfd777ff25149ee230d907a15a9e1294b40b830661e65bb42f6c03"
+    # Canonical human/config forms; relay internals normalize these to protocol hex.
+    export BUZZ_PRIVATE_KEY="nsec18kawhtd4mlth0le9zj0wyvxeq7s448sjjj6qhqcxv8n9hdp0dspsaqmxsm"
     export BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
     export BUZZ_ALLOW_NIP_OA_AUTH=true
-    export RELAY_OWNER_PUBKEY="e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34"
-    export BUZZ_RELAY_PRIVATE_KEY="0000000000000000000000000000000000000000000000000000000000000001"
+    export RELAY_OWNER_PUBKEY="npub1uh4udnd40xlpzt3ndnp3ndvcnd9mdtc30ph2jrd7226lprt5rv6q28qswd"
+    export BUZZ_RELAY_PRIVATE_KEY="nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl"
     export BUZZ_RECONCILE_CHANNELS=true
     export BUZZ_RESET_WEBVIEW_STATE=1
     exec just mesh=1 dev

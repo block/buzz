@@ -19,7 +19,7 @@ helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
   --set redis.enabled=true \
   --set minio.enabled=true \
   --set relayUrl=wss://buzz.example.com \
-  --set ownerPubkey=<64-char-hex-pubkey>
+  --set ownerPubkey=<npub>
 ```
 
 This brings up **everything in-cluster** — Postgres, Redis, and MinIO (with
@@ -46,7 +46,7 @@ See:
 | Key | What | When required |
 |---|---|---|
 | `relayUrl` | Public `wss://` URL clients connect to | Always |
-| `ownerPubkey` | 64-char lowercase hex Nostr pubkey of the relay operator | When `relay.requireRelayMembership=true` (default) |
+| `ownerPubkey` | NIP-19 `npub` of the relay operator | When `relay.requireRelayMembership=true` (default) |
 | `secrets.existingSecret` | Name of pre-created Secret | Production / GitOps |
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
 

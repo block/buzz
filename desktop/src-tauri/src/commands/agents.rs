@@ -4,7 +4,7 @@ use tauri::{AppHandle, State};
 use super::managed_agent_definition::validate_create_definition;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str as npub, AppState},
     managed_agents::{
         build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
         find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
@@ -125,6 +125,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     pubkey: &str,
     relay_urls: &[String],
 ) -> Result<ManagedAgentSummary, String> {
+    let who = npub(pubkey);
     let record_snapshot = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -133,10 +134,10 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         load_managed_agents(app)?
             .into_iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+            .ok_or_else(|| format!("agent {who} not found"))?
     };
     if record_snapshot.backend != BackendKind::Local {
-        return Err(format!("agent {pubkey} is not a local agent"));
+        return Err(format!("agent {who} is not a local agent"));
     }
     let personas_for_preflight = load_personas(app).unwrap_or_default();
     let global_for_preflight =
@@ -198,7 +199,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     let record = records
         .iter()
         .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        .ok_or_else(|| format!("agent {who} not found"))?;
     summarize_from_disk(app, record, &runtimes)
 }
 
@@ -210,6 +211,7 @@ pub(super) async fn start_local_agent_with_preflight(
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
 ) -> Result<ManagedAgentSummary, String> {
+    let who = npub(pubkey);
     let record_snapshot = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -220,11 +222,11 @@ pub(super) async fn start_local_agent_with_preflight(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .cloned()
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+            .ok_or_else(|| format!("agent {who} not found"))?
     };
 
     if record_snapshot.backend != BackendKind::Local {
-        return Err(format!("agent {pubkey} is not a local agent"));
+        return Err(format!("agent {who} is not a local agent"));
     }
 
     // Preflight against the same resolution spawn uses — `resolve_effective_config`
@@ -273,7 +275,7 @@ pub(super) async fn start_local_agent_with_preflight(
         .map_err(|e| e.to_string())?;
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     if record.backend != BackendKind::Local {
-        return Err(format!("agent {pubkey} is no longer a local agent"));
+        return Err(format!("agent {who} is no longer a local agent"));
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
     // starts with the current persona config (system_prompt, model, provider,
@@ -310,7 +312,7 @@ pub(super) async fn start_local_agent_with_preflight(
     let record = records
         .iter()
         .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        .ok_or_else(|| format!("agent {who} not found"))?;
     build_managed_agent_summary(
         app,
         record,
@@ -443,7 +445,7 @@ pub async fn create_managed_agent(
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
         if records.iter().any(|record| record.pubkey == pubkey) {
-            return Err(format!("agent {pubkey} already exists"));
+            return Err(format!("agent {} already exists", npub(&pubkey)));
         }
         let private_key_nsec = keys
             .secret_key()
@@ -511,7 +513,7 @@ pub async fn create_managed_agent(
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
         // (extremely unlikely but safe to check).
         if records.iter().any(|record| record.pubkey == pubkey) {
-            return Err(format!("agent {pubkey} already exists"));
+            return Err(format!("agent {} already exists", npub(&pubkey)));
         }
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
@@ -865,6 +867,7 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    let who = npub(&pubkey);
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
@@ -999,11 +1002,11 @@ pub async fn start_managed_agent(
             let record = records
                 .iter()
                 .find(|r| r.pubkey == pubkey)
-                .ok_or_else(|| format!("agent {pubkey} not found"))?;
+                .ok_or_else(|| format!("agent {who} not found"))?;
             summarize_from_disk(&app, record, &runtimes)
         }
         StartTarget::Provider { backend, .. } => Err(format!(
-            "agent {pubkey} has unsupported backend kind: {backend:?}"
+            "agent {who} has unsupported backend kind: {backend:?}"
         )),
     };
 
@@ -1021,14 +1024,13 @@ pub async fn start_managed_agent(
         let reconcile_app = app.clone();
         tauri::async_runtime::spawn(async move {
             use tauri::Manager;
+            let who = npub(&reconcile_pubkey);
             let state = reconcile_app.state::<AppState>();
             if let Err(e) =
                 reconcile_agent_profile(&state, &reconcile_app, &reconcile_pubkey, &reconcile_data)
                     .await
             {
-                eprintln!(
-                    "buzz-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
-                );
+                eprintln!("buzz-desktop: profile reconciliation failed for agent {who}: {e}");
             }
         });
     }
@@ -1080,7 +1082,7 @@ pub async fn stop_managed_agent(
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {} not found", npub(&pubkey)))?;
         summarize_from_disk(&app, record, &runtimes)
     })
     .await
@@ -1149,7 +1151,7 @@ pub async fn delete_managed_agent(
             let initial_len = records.len();
             records.retain(|record| record.pubkey != pubkey);
             if records.len() == initial_len {
-                return Err(format!("agent {pubkey} not found"));
+                return Err(format!("agent {} not found", npub(&pubkey)));
             }
             save_managed_agents(&app, &records)?;
             crate::managed_agents::delete_agent_key(&pubkey);

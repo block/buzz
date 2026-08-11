@@ -13,12 +13,13 @@
 //!   still queue normally.
 //! - **Queue** — all events accumulate; batched on the next flush cycle.
 
-use nostr::{Event, ToBech32};
+use nostr::Event;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::DedupMode;
+use buzz_core::nostr_identity::{parse_public_key_compat, public_key_to_npub};
 
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
@@ -1101,15 +1102,18 @@ fn resolve_prompt_label(
 }
 
 fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup>) -> String {
+    let npub = parse_public_key_compat(pubkey)
+        .and_then(|(public_key, _)| public_key_to_npub(&public_key))
+        .unwrap_or_else(|_| "<invalid-pubkey>".to_string());
     match resolve_prompt_label(pubkey, profile_lookup) {
-        Some(label) => format!("{label} ({pubkey})"),
-        None => pubkey.to_string(),
+        Some(label) => format!("{label} ({npub})"),
+        None => npub,
     }
 }
 
 /// Format the per-event `[Event]` block for a single [`BatchEvent`].
 ///
-/// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
+/// Includes: event_id, channel (name + UUID), kind, sender (npub),
 /// time, content, all tags (never stripped), and parsed structural fields.
 ///
 /// Reused by the goose-native steer path (lib.rs mode-gate) to render the
@@ -1123,7 +1127,8 @@ pub(crate) fn format_event_block(
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
     let hex = be.event.pubkey.to_hex();
-    let npub = be.event.pubkey.to_bech32().unwrap_or_else(|_| hex.clone());
+    let npub =
+        public_key_to_npub(&be.event.pubkey).unwrap_or_else(|_| "<invalid-pubkey>".to_string());
 
     let time = chrono::DateTime::from_timestamp(be.event.created_at.as_secs() as i64, 0)
         .map(|dt| dt.to_rfc3339())
@@ -1145,8 +1150,8 @@ pub(crate) fn format_event_block(
          Time: {time}\n\
          Content: {}",
         match resolve_prompt_label(&hex, profile_lookup) {
-            Some(label) => format!("{label} (npub: {npub}, hex: {hex})"),
-            None => format!("{npub} (hex: {hex})"),
+            Some(label) => format!("{label} ({npub})"),
+            None => npub,
         },
         be.event.content,
     );
@@ -1776,7 +1781,7 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp, ToBech32};
     use std::time::Duration;
 
     /// Build a test event with the given content and kind.
@@ -3434,13 +3439,11 @@ mod tests {
     #[test]
     fn test_format_prompt_with_profiles_prefers_display_names() {
         let ch = Uuid::new_v4();
-        let event = make_event_with_tags(
-            "hello there",
-            vec![vec![
-                "p".into(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            ]],
-        );
+        let mentioned = nostr::Keys::generate().public_key();
+        let mentioned_hex = mentioned.to_hex();
+        let mentioned_npub = mentioned.to_bech32().unwrap();
+        let event =
+            make_event_with_tags("hello there", vec![vec!["p".into(), mentioned_hex.clone()]]);
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
@@ -3472,7 +3475,7 @@ mod tests {
                 },
             ),
             (
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                mentioned_hex,
                 PromptProfile {
                     display_name: Some("Rick".into()),
                     nip05_handle: None,
@@ -3491,10 +3494,8 @@ mod tests {
         )
         .join("\n\n");
 
-        assert!(prompt.contains("From: Wes (npub:"));
-        assert!(prompt.contains(
-            "mentions=[Rick (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)]"
-        ));
+        assert!(prompt.contains("From: Wes (npub1"));
+        assert!(prompt.contains(&format!("mentions=[Rick ({mentioned_npub})]")));
         assert!(prompt.contains("[1] Wes ("));
     }
 
@@ -3859,7 +3860,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_event_block_includes_hex_and_npub() {
+    fn test_format_event_block_uses_npub_for_sender() {
         let ch = Uuid::new_v4();
         let event = make_event("test");
         let hex = event.pubkey.to_hex();
@@ -3877,9 +3878,10 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("From: {npub} (hex: {hex})")),
-            "prompt should contain both npub and hex"
+            prompt.contains(&format!("From: {npub}")),
+            "prompt should contain the sender npub"
         );
+        assert!(!prompt.contains(&format!("From: {npub} (hex: {hex})")));
     }
 
     #[test]

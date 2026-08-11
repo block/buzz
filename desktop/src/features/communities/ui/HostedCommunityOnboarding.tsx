@@ -196,6 +196,7 @@ export function HostedCommunityOnboarding({
     });
 
   const boundPubkey = identity?.pubkey_hex ?? null;
+  const boundNpub = safeNpub(identity?.npub ?? boundPubkey ?? "");
   const identityMismatch = Boolean(
     identity &&
       boundPubkey &&
@@ -543,9 +544,9 @@ export function HostedCommunityOnboarding({
                 this device, or sign out to use a different email.
               </DialogDescription>
               <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
-                Account: {identity.npub ?? boundPubkey}
+                Account: {boundNpub ?? "Unavailable"}
                 <br />
-                This device: {localNpub ?? localPubkey}
+                This device: {localNpub ?? "Unavailable"}
               </p>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
               <div className="mt-6 flex flex-col items-stretch gap-2">

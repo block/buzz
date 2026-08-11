@@ -107,7 +107,8 @@ export function ChannelMemberInviteCard({
   );
 
   // Someone without a kind:0 profile on the relay is invisible to user
-  // search — let the caller paste their npub or hex pubkey directly instead.
+  // search — let the caller paste their npub directly instead. The parser also
+  // accepts legacy hex at this input boundary for compatibility.
   const directInvitee = React.useMemo<UserSearchResult | null>(() => {
     const pubkey = parsePubkeyInput(deferredInviteQuery);
     if (
@@ -191,7 +192,7 @@ export function ChannelMemberInviteCard({
               disabled={isPending}
               id="channel-management-search-users"
               onChange={(event) => setInviteQuery(event.target.value)}
-              placeholder="Search people, or paste a public key"
+              placeholder="Search people, or paste an npub"
               value={inviteQuery}
             />
           </div>
@@ -276,7 +277,7 @@ export function ChannelMemberInviteCard({
                           {truncatePubkey(directInvitee.pubkey)}
                         </p>
                         <span className="shrink-0 text-xs text-muted-foreground">
-                          by public key
+                          by npub
                         </span>
                       </div>
                       <span className="text-xs text-muted-foreground">Add</span>

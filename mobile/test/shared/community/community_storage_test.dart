@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 
@@ -88,6 +89,9 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
 }
 
 void main() {
+  final keys = nostr.Keys(
+    '1111111111111111111111111111111111111111111111111111111111111111',
+  );
   late FakeSecureStorage fakeSecure;
   late CommunityStorage storage;
 
@@ -106,7 +110,8 @@ void main() {
       final ws = Community.create(
         name: 'Test',
         relayUrl: 'https://relay.example.com',
-        pubkey: 'abc123',
+        npub: keys.npub,
+        nsec: keys.nsec,
       );
 
       await storage.save(ws);
@@ -116,7 +121,8 @@ void main() {
       expect(loaded.first.id, ws.id);
       expect(loaded.first.name, 'Test');
       expect(loaded.first.relayUrl, 'https://relay.example.com');
-      expect(loaded.first.pubkey, 'abc123');
+      expect(loaded.first.npub, keys.npub);
+      expect(loaded.first.nsec, keys.nsec);
     });
 
     test('save updates existing community with same id', () async {
@@ -186,15 +192,15 @@ void main() {
       test('migrates legacy keys to community on first load', () async {
         fakeSecure['buzz_relay_url'] = 'https://legacy.example.com';
         fakeSecure['buzz_token'] = 'legacy_token';
-        fakeSecure['buzz_pubkey'] = 'legacy_pub';
-        fakeSecure['buzz_nsec'] = 'legacy_nsec';
+        fakeSecure['buzz_pubkey'] = keys.public;
+        fakeSecure['buzz_nsec'] = keys.nsec;
 
         final loaded = await storage.loadAll();
 
         expect(loaded, hasLength(1));
         expect(loaded.first.relayUrl, 'https://legacy.example.com');
-        expect(loaded.first.pubkey, 'legacy_pub');
-        expect(loaded.first.nsec, 'legacy_nsec');
+        expect(loaded.first.npub, keys.npub);
+        expect(loaded.first.nsec, keys.nsec);
         expect(loaded.first.name, isNotEmpty);
         expect(
           loaded.first.sensitiveActionPolicy,
@@ -210,6 +216,29 @@ void main() {
         // Active ID should be set.
         final activeId = await storage.loadActiveId();
         expect(activeId, loaded.first.id);
+      });
+
+      test('canonicalizes legacy stored hex identity fields', () async {
+        fakeSecure['buzz_communities'] = jsonEncode([
+          {
+            'id': 'legacy',
+            'name': 'Legacy',
+            'relayUrl': 'https://legacy.example.com',
+            'pubkey': keys.public,
+            'nsec': keys.secret,
+            'addedAt': DateTime.utc(2026).toIso8601String(),
+          },
+        ]);
+
+        final loaded = await storage.loadAll();
+
+        expect(loaded.single.npub, keys.npub);
+        expect(loaded.single.nsec, keys.nsec);
+        final rewritten = fakeSecure['buzz_communities']!;
+        expect(rewritten, contains('"npub":"${keys.npub}"'));
+        expect(rewritten, contains('"nsec":"${keys.nsec}"'));
+        expect(rewritten, isNot(contains('"pubkey"')));
+        expect(rewritten, isNot(contains(keys.secret)));
       });
 
       test('does not migrate when no legacy keys exist', () async {

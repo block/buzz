@@ -7,7 +7,7 @@
  * round-trip, and to normalize input so the Rust validator sees clean data.
  */
 
-const HEX_64 = /^[0-9a-f]{64}$/i;
+import { parsePubkeyInput as parseSinglePubkeyInput } from "@/shared/lib/nostrUtils";
 
 export type ParsedAllowlist = {
   /** Successfully parsed entries — lowercase hex, deduplicated, in order. */
@@ -22,8 +22,8 @@ export type ParsedAllowlist = {
  * pattern used by `ChannelMemberInviteCard` so users have one mental model.
  *
  * - Splits on `/[\s,]+/`.
- * - Trims and lowercases each entry.
- * - Validates each entry is exactly 64 hex chars.
+ * - Accepts canonical npubs plus legacy hex at this paste boundary.
+ * - Normalizes valid entries to lowercase hex for Nostr protocol internals.
  * - Deduplicates while preserving insertion order.
  */
 export function parsePubkeyInput(raw: string): ParsedAllowlist {
@@ -33,14 +33,14 @@ export function parsePubkeyInput(raw: string): ParsedAllowlist {
   for (const piece of raw.split(/[\s,]+/)) {
     const trimmed = piece.trim();
     if (trimmed.length === 0) continue;
-    if (!HEX_64.test(trimmed)) {
+    const pubkey = parseSinglePubkeyInput(trimmed);
+    if (!pubkey) {
       invalid.push(trimmed);
       continue;
     }
-    const lower = trimmed.toLowerCase();
-    if (!seen.has(lower)) {
-      seen.add(lower);
-      valid.push(lower);
+    if (!seen.has(pubkey)) {
+      seen.add(pubkey);
+      valid.push(pubkey);
     }
   }
   return { valid, invalid };
@@ -51,13 +51,13 @@ export function parsePubkeyInput(raw: string): ParsedAllowlist {
  * deduplicating without reordering existing entries.
  */
 export function mergeAllowlist(existing: string[], add: string[]): string[] {
-  const seen = new Set(existing.map((p) => p.toLowerCase()));
-  const out = [...existing.map((p) => p.toLowerCase())];
-  for (const candidate of add) {
-    const lower = candidate.toLowerCase();
-    if (!HEX_64.test(lower) || seen.has(lower)) continue;
-    seen.add(lower);
-    out.push(lower);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const candidate of [...existing, ...add]) {
+    const pubkey = parseSinglePubkeyInput(candidate);
+    if (!pubkey || seen.has(pubkey)) continue;
+    seen.add(pubkey);
+    out.push(pubkey);
   }
   return out;
 }

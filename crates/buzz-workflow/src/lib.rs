@@ -952,7 +952,7 @@ async fn should_fire_workflow(
 /// Build a [`executor::TriggerContext`] from a [`buzz_core::StoredEvent`].
 ///
 /// - `text` — event content (message body or reaction emoji character)
-/// - `author` — pubkey hex string
+/// - `author` — protocol hex internally; serialized and rendered as canonical npub
 /// - `channel_id` — channel UUID as string (empty if no channel scope)
 /// - `timestamp` — Unix timestamp as string
 /// - `emoji` — for `KIND_REACTION` events, the content is the emoji; otherwise empty

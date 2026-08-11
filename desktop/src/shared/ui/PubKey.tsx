@@ -16,12 +16,12 @@ import {
 const HOVER_CLOSE_DELAY_MS = 200;
 
 type PubKeyProps = {
-  /** 64-char hex pubkey. */
+  /** Canonical npub or a legacy 64-character hex public key. */
   pubkey: string;
   /**
-   * `compact` — truncated hex, click/tap opens a popover with the full npub,
-   * full hex, and copy buttons. The default for identity display in lists,
-   * cards, and metadata rows.
+   * `compact` — truncated npub, click/tap opens a popover with the full npub
+   * and copy button. The default for identity display in lists, cards, and
+   * metadata rows.
    *
    * `full` — the complete npub rendered inline with copy buttons. Required on
    * security-decision surfaces (invite/approve, removal, trust/pairing, new
@@ -66,12 +66,10 @@ function CopyRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function PubKeyDetails({ pubkey }: { pubkey: string }) {
-  const npub = safeNpub(pubkey);
+function PubKeyDetails({ npub }: { npub: string }) {
   return (
     <div className="space-y-2">
-      {npub ? <CopyRow label="npub" value={npub} /> : null}
-      <CopyRow label="hex" value={pubkey} />
+      <CopyRow label="npub" value={npub} />
     </div>
   );
 }
@@ -119,14 +117,25 @@ export function PubKey({
 
   React.useEffect(() => clearHoverTimer, [clearHoverTimer]);
 
+  const npub = safeNpub(pubkey);
+  if (!npub) {
+    return (
+      <span
+        className={cn("font-mono text-xs text-muted-foreground", className)}
+        data-testid={testId}
+      >
+        Invalid public key
+      </span>
+    );
+  }
+
   if (variant === "full") {
-    const npub = safeNpub(pubkey);
     return (
       <span
         className={cn("inline-flex min-w-0 items-center gap-1", className)}
         data-testid={testId}
       >
-        <span className="break-all font-mono text-xs">{npub ?? pubkey}</span>
+        <span className="break-all font-mono text-xs">{npub}</span>
         <Popover>
           <PopoverTrigger asChild>
             <Button
@@ -139,7 +148,7 @@ export function PubKey({
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-96 max-w-[90vw]">
-            <PubKeyDetails pubkey={pubkey} />
+            <PubKeyDetails npub={npub} />
           </PopoverContent>
         </Popover>
       </span>
@@ -168,7 +177,7 @@ export function PubKey({
           onMouseLeave={handleMouseLeave}
           type="button"
         >
-          {truncatePubkey(pubkey)}
+          {truncatePubkey(npub)}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -178,7 +187,7 @@ export function PubKey({
         onMouseLeave={handleMouseLeave}
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
-        <PubKeyDetails pubkey={pubkey} />
+        <PubKeyDetails npub={npub} />
       </PopoverContent>
     </Popover>
   );

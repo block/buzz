@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { mergeAllowlist, parsePubkeyInput } from "./respondToAllowlist.ts";
 
-const HEX_A = "a".repeat(64);
-const HEX_B = "b".repeat(64);
-const HEX_A_UPPER = "A".repeat(64);
+const HEX_A =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const HEX_B =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const HEX_A_UPPER = HEX_A.toUpperCase();
+const NPUB_A = npubEncode(HEX_A);
 
 test("parsePubkeyInput splits on commas, whitespace, and newlines", () => {
   const input = `${HEX_A}, ${HEX_B}\n${HEX_A_UPPER}`;
@@ -25,11 +29,17 @@ test("parsePubkeyInput surfaces invalid entries separately", () => {
   assert.deepEqual(result.invalid, ["notgood", "z".repeat(64)]);
 });
 
-test("parsePubkeyInput rejects npub-style strings (hex only)", () => {
-  const npub = `npub1${"a".repeat(59)}`;
-  const result = parsePubkeyInput(npub);
+test("parsePubkeyInput accepts canonical npubs and normalizes to protocol hex", () => {
+  const result = parsePubkeyInput(`${NPUB_A} ${HEX_A}`);
+  assert.deepEqual(result.valid, [HEX_A]);
+  assert.deepEqual(result.invalid, []);
+});
+
+test("parsePubkeyInput rejects npubs with invalid checksums", () => {
+  const invalidNpub = `${NPUB_A.slice(0, -1)}q`;
+  const result = parsePubkeyInput(invalidNpub);
   assert.deepEqual(result.valid, []);
-  assert.deepEqual(result.invalid, [npub]);
+  assert.deepEqual(result.invalid, [invalidNpub]);
 });
 
 test("parsePubkeyInput rejects wrong-length entries", () => {
@@ -51,7 +61,7 @@ test("mergeAllowlist preserves existing order and appends new", () => {
 });
 
 test("mergeAllowlist dedupes case-insensitively", () => {
-  const merged = mergeAllowlist([HEX_A], [HEX_A_UPPER]);
+  const merged = mergeAllowlist([NPUB_A], [HEX_A_UPPER]);
   assert.deepEqual(merged, [HEX_A]);
 });
 

@@ -10,6 +10,7 @@ use nostr::{Event, PublicKey};
 use tracing::{info, warn};
 
 use buzz_core::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE};
+use buzz_core::nostr_identity::{canonical_npub_or_invalid, public_key_to_npub_or_invalid};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::EventQuery;
@@ -89,8 +90,8 @@ pub async fn handle_identity_archive_event(
     };
 
     info!(
-        actor = %actor_hex,
-        target = %target_hex,
+        actor = %public_key_to_npub_or_invalid(&event.pubkey),
+        target = %canonical_npub_or_invalid(&target_hex),
         consent = consent_path.as_str(),
         changed,
         kind,

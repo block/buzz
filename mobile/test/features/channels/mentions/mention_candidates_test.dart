@@ -19,18 +19,19 @@ ChannelMember member(String pubkey, {String role = 'member'}) {
 }
 
 void main() {
-  test('role-only agent mentions fall back to a pubkey prefix label', () {
-    const pubkey = 'deadbeef0123456789';
+  test('role-only agent mentions fall back to a compact npub label', () {
+    final pubkey = 'e' * 64;
 
-    expect(
-      mentionNamesWithDirectoryLabels(
-        mentionPubkeys: const [pubkey],
-        profileMentionNames: const {},
-        directoryDisplayNames: const {},
-        agentMentionPubkeys: const {pubkey},
-      ),
-      const {pubkey: 'deadbeef'},
-    );
+    final label = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: [pubkey],
+      profileMentionNames: const {},
+      directoryDisplayNames: const {},
+      agentMentionPubkeys: {pubkey},
+    )[pubkey];
+
+    expect(label, startsWith('npub1'));
+    expect(label, contains('…'));
+    expect(label, isNot(startsWith('eeeeeeee')));
   });
 
   group('agentIsSharedWithUser', () {
@@ -66,10 +67,9 @@ void main() {
         ownerPubkey: UserProfile(pubkey: ownerPubkey, displayName: 'Wes'),
       };
       expect(formatOwnerLabel(ownerPubkey, userPubkey, profiles), 'Wes');
-      expect(
-        formatOwnerLabel(ownerPubkey, userPubkey, const {}),
-        '${'d' * 8}\u2026',
-      );
+      final fallback = formatOwnerLabel(ownerPubkey, userPubkey, const {});
+      expect(fallback, startsWith('npub1'));
+      expect(fallback, contains('…'));
     });
 
     test('returns null without an owner', () {

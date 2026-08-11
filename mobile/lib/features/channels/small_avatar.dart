@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../profile/user_profile.dart';
 
@@ -21,8 +22,7 @@ class SmallAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final profile = userCache[pubkey.toLowerCase()];
     final avatarUrl = profile?.avatarUrl;
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
+    final initial = profile?.initial ?? pubkeyAvatarInitial(pubkey);
 
     return Container(
       width: size,

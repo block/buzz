@@ -4,6 +4,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Serialize)]
 pub struct IdentityInfo {
+    /// Canonical npub at the Tauri boundary. Frontend protocol code decodes it
+    /// to hex once inside `tauriIdentity.ts`.
     pub pubkey: String,
     pub display_name: String,
     /// Durable location of the active identity key.

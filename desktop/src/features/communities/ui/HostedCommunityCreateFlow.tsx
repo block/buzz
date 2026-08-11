@@ -148,6 +148,7 @@ export function HostedCommunityCreateFlow({
     });
 
   const boundPubkey = identity?.pubkey_hex ?? null;
+  const boundNpub = safeNpub(identity?.npub ?? boundPubkey ?? "");
   const identityMismatch = Boolean(
     identity &&
       boundPubkey &&
@@ -343,9 +344,9 @@ export function HostedCommunityCreateFlow({
           this device, or sign in with another account.
         </p>
         <div className="rounded-xl bg-muted/40 px-4 py-3 font-mono text-xs text-muted-foreground">
-          <p className="break-all">Account: {identity.npub ?? boundPubkey}</p>
+          <p className="break-all">Account: {boundNpub ?? "Unavailable"}</p>
           <p className="mt-1 break-all">
-            This device: {localNpub ?? localPubkey}
+            This device: {localNpub ?? "Unavailable"}
           </p>
         </div>
         {errorBox}

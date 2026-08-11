@@ -3,10 +3,10 @@
  * `features/messages/lib/messageLink.ts` for `buzz://message`.
  *
  * Formats:
- *   buzz://repo?owner=<owner-pubkey>&d=<repo-dtag>[&tab=<tab>][&commit=<git-hash>]
- *   buzz://project?owner=<owner-pubkey>&d=<project-dtag>[&tab=<tab>]
- *   buzz://pr?id=<event-id>&owner=<owner-pubkey>&d=<repo-dtag>
- *   buzz://issue?id=<event-id>&owner=<owner-pubkey>&d=<repo-dtag>
+ *   buzz://repo?owner=<owner-npub>&d=<repo-dtag>[&tab=<tab>][&commit=<git-hash>]
+ *   buzz://project?owner=<owner-npub>&d=<project-dtag>[&tab=<tab>]
+ *   buzz://pr?id=<event-id>&owner=<owner-npub>&d=<repo-dtag>
+ *   buzz://issue?id=<event-id>&owner=<owner-npub>&d=<repo-dtag>
  *
  * `owner` + `d` identify the NIP-34 repository coordinate
  * (`30617:<owner>:<d>`) or the NIP-MP project coordinate
@@ -17,6 +17,8 @@
  * same format — the two must stay compatible (see the golden-format tests
  * on both sides).
  */
+
+import { parsePubkeyInput, pubkeyToNpub } from "@/shared/lib/nostrUtils";
 
 const ENTITY_LINK_SCHEME = "buzz:";
 
@@ -66,10 +68,15 @@ function isValidDtag(dtag: string): boolean {
   return DTAG_RE.test(dtag) && !dtag.startsWith(".") && !dtag.includes("..");
 }
 
-function checkCoordinate(owner: string, dtag: string): void {
-  if (!HEX64_RE.test(owner)) {
-    throw new Error("entityLink: owner must be a 64-char hex pubkey");
+function canonicalOwnerNpub(owner: string): string {
+  const pubkeyHex = parsePubkeyInput(owner);
+  if (!pubkeyHex) {
+    throw new Error("entityLink: owner must be a valid npub");
   }
+  return pubkeyToNpub(pubkeyHex);
+}
+
+function checkDtag(dtag: string): void {
   if (!isValidDtag(dtag)) {
     throw new Error("entityLink: invalid addressable d-tag");
   }
@@ -82,7 +89,7 @@ function checkCoordinate(owner: string, dtag: string): void {
  * affordance rather than surface a builder throw.
  */
 export function isLinkableCoordinate(owner: string, dtag: string): boolean {
-  return HEX64_RE.test(owner) && isValidDtag(dtag);
+  return parsePubkeyInput(owner) !== null && isValidDtag(dtag);
 }
 
 function checkEventId(id: string): void {
@@ -105,8 +112,8 @@ export function buildRepoLink(input: {
   dtag: string;
   tab?: EntityLinkTab;
 }): string {
-  checkCoordinate(input.owner, input.dtag);
-  return `buzz://repo?owner=${input.owner.toLowerCase()}&d=${input.dtag}${tabSuffix(input.tab)}`;
+  checkDtag(input.dtag);
+  return `buzz://repo?owner=${canonicalOwnerNpub(input.owner)}&d=${input.dtag}${tabSuffix(input.tab)}`;
 }
 
 /** Build a link to a specific commit in a repository. */
@@ -115,11 +122,11 @@ export function buildCommitLink(input: {
   owner: string;
   dtag: string;
 }): string {
-  checkCoordinate(input.owner, input.dtag);
+  checkDtag(input.dtag);
   if (!GIT_OBJECT_ID_RE.test(input.commitHash)) {
     throw new Error("entityLink: commit must be a 40- or 64-char hex hash");
   }
-  return `buzz://repo?owner=${input.owner.toLowerCase()}&d=${input.dtag}&tab=commits&commit=${input.commitHash.toLowerCase()}`;
+  return `buzz://repo?owner=${canonicalOwnerNpub(input.owner)}&d=${input.dtag}&tab=commits&commit=${input.commitHash.toLowerCase()}`;
 }
 
 /** Build a `buzz://project` link for a project announcement (kind 30621). */
@@ -128,8 +135,8 @@ export function buildProjectLink(input: {
   dtag: string;
   tab?: EntityLinkTab;
 }): string {
-  checkCoordinate(input.owner, input.dtag);
-  return `buzz://project?owner=${input.owner.toLowerCase()}&d=${input.dtag}${tabSuffix(input.tab)}`;
+  checkDtag(input.dtag);
+  return `buzz://project?owner=${canonicalOwnerNpub(input.owner)}&d=${input.dtag}${tabSuffix(input.tab)}`;
 }
 
 /** Build a `buzz://pr` link for a pull request event (kind 1618). */
@@ -139,8 +146,8 @@ export function buildPullRequestLink(input: {
   dtag: string;
 }): string {
   checkEventId(input.id);
-  checkCoordinate(input.owner, input.dtag);
-  return `buzz://pr?id=${input.id.toLowerCase()}&owner=${input.owner.toLowerCase()}&d=${input.dtag}`;
+  checkDtag(input.dtag);
+  return `buzz://pr?id=${input.id.toLowerCase()}&owner=${canonicalOwnerNpub(input.owner)}&d=${input.dtag}`;
 }
 
 /** Build a `buzz://issue` link for an issue event (kind 1621). */
@@ -150,8 +157,8 @@ export function buildIssueLink(input: {
   dtag: string;
 }): string {
   checkEventId(input.id);
-  checkCoordinate(input.owner, input.dtag);
-  return `buzz://issue?id=${input.id.toLowerCase()}&owner=${input.owner.toLowerCase()}&d=${input.dtag}`;
+  checkDtag(input.dtag);
+  return `buzz://issue?id=${input.id.toLowerCase()}&owner=${canonicalOwnerNpub(input.owner)}&d=${input.dtag}`;
 }
 
 /**
@@ -240,8 +247,9 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
   }
 
   const owner = parsed.searchParams.get("owner");
+  const ownerHex = owner ? parsePubkeyInput(owner) : null;
   const dtag = parsed.searchParams.get("d");
-  if (!owner || !HEX64_RE.test(owner)) {
+  if (!ownerHex) {
     return { ok: false, reason: "invalid-owner" };
   }
   if (!dtag || !isValidDtag(dtag)) {
@@ -265,7 +273,7 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
       ok: true,
       value: {
         type: host,
-        owner: owner.toLowerCase(),
+        owner: ownerHex,
         dtag,
         ...(tab !== null && isEntityLinkTab(tab) ? { tab } : {}),
         ...(commitHash !== null
@@ -285,7 +293,7 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
     value: {
       type: host,
       id: id.toLowerCase(),
-      owner: owner.toLowerCase(),
+      owner: ownerHex,
       dtag,
     },
   };

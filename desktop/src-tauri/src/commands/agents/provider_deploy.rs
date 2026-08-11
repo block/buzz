@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::AppHandle;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str as npub, AppState},
     managed_agents::{
         discover_provider_candidates, load_managed_agents, provider_deploy,
         resolve_provider_binary, save_managed_agents, BackendKind,
@@ -43,6 +43,7 @@ pub(crate) async fn deploy_to_provider(
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
 ) -> Result<(), String> {
+    let who = npub(pubkey);
     let deploy_lock = {
         let mut locks = state
             .provider_deploy_locks
@@ -67,10 +68,10 @@ pub(crate) async fn deploy_to_provider(
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {who} not found"))?;
         let (provider_id, config) = match &record.backend {
             BackendKind::Provider { id, config } => (id.clone(), config.clone()),
-            BackendKind::Local => return Err(format!("agent {pubkey} is not provider-backed")),
+            BackendKind::Local => return Err(format!("agent {who} is not provider-backed")),
         };
         (
             provider_id,
@@ -114,7 +115,7 @@ pub(crate) async fn deploy_to_provider(
     let rec = records
         .iter_mut()
         .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        .ok_or_else(|| format!("agent {who} not found"))?;
 
     let result = apply_deploy_result(rec, deploy_result, &deployed_agent_json);
     save_managed_agents(app, &records)?;

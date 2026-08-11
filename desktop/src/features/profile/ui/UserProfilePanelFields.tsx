@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
   HoverCopyIndicator,
@@ -164,8 +165,9 @@ export function buildPublicFields({
   const fields: ProfileField[] = [];
 
   if (pubkey) {
+    const npub = safeNpub(pubkey);
     fields.push({
-      copyValue: pubkey,
+      copyValue: npub ?? undefined,
       displayValue: truncatePubkey(pubkey),
       displayNode: (
         <PubKey
@@ -249,6 +251,7 @@ export function buildOwnerFields({
 }): ProfileField[] {
   const fields: ProfileField[] = [];
   const respondTo = managedAgent?.respondTo ?? relayAgent?.respondTo ?? null;
+  const ownerNpub = safeNpub(ownerProfilePubkey ?? ownerPubkey ?? "");
   const respondToDisplayValue = respondTo
     ? respondTo === "owner-only"
       ? ownerDisplayName
@@ -265,7 +268,7 @@ export function buildOwnerFields({
     fields.push({
       copyValue: ownerClickable
         ? undefined
-        : (ownerProfilePubkey ?? ownerPubkey ?? ownerHandle ?? undefined),
+        : (ownerNpub ?? ownerHandle ?? undefined),
       displayValue: ownerDisplayName,
       displayNode: <span className="truncate">{ownerDisplayName}</span>,
       icon: UserRound,
@@ -308,7 +311,7 @@ export function buildOwnerFields({
     });
   } else if (ownerPubkey) {
     fields.push({
-      copyValue: ownerPubkey,
+      copyValue: ownerNpub ?? undefined,
       displayValue: "Declared owner verified",
       icon: UserRound,
       label: "Agent profile",

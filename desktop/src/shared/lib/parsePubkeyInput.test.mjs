@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
-import { parsePubkeyInput } from "./nostrUtils.ts";
+import {
+  containsNsecShapedInput,
+  nsecToNpub,
+  parsePubkeyInput,
+  pubkeyToNpub,
+  safeNpub,
+} from "./nostrUtils.ts";
 
 const HEX = "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
 const NPUB = "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
@@ -17,6 +24,12 @@ describe("parsePubkeyInput", () => {
 
   it("decodes an npub to its hex pubkey", () => {
     assert.equal(parsePubkeyInput(NPUB), HEX);
+    assert.equal(parsePubkeyInput(NPUB.toUpperCase()), HEX);
+    assert.equal(parsePubkeyInput(`N${NPUB.slice(1)}`), null);
+  });
+
+  it("accepts a nostr:npub URI", () => {
+    assert.equal(parsePubkeyInput(`nostr:${NPUB}`), HEX);
   });
 
   it("tolerates surrounding whitespace from copy-paste", () => {
@@ -42,9 +55,57 @@ describe("parsePubkeyInput", () => {
     assert.equal(parsePubkeyInput(`${HEX}0`), null);
   });
 
+  it("rejects public-key bytes that cannot lift to secp256k1", () => {
+    const invalidPoint = "ff".repeat(32);
+    assert.equal(parsePubkeyInput(invalidPoint), null);
+    assert.equal(parsePubkeyInput(npubEncode(invalidPoint)), null);
+  });
+
   it("rejects non-hex non-npub input", () => {
     assert.equal(parsePubkeyInput(""), null);
     assert.equal(parsePubkeyInput("alice"), null);
     assert.equal(parsePubkeyInput(`z${HEX.slice(1)}`), null);
+  });
+});
+
+describe("canonical npub formatting", () => {
+  it("converts legacy hex and is idempotent for npub input", () => {
+    assert.equal(pubkeyToNpub(HEX), NPUB);
+    assert.equal(pubkeyToNpub(NPUB), NPUB);
+    assert.equal(safeNpub(`nostr:${NPUB}`), NPUB);
+  });
+
+  it("fails closed without returning malformed source text", () => {
+    assert.equal(safeNpub("not-a-key"), null);
+    assert.throws(() => pubkeyToNpub("not-a-key"));
+  });
+});
+
+describe("canonical nsec input", () => {
+  const NSEC =
+    "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+
+  it("accepts uniform uppercase and rejects mixed-case bech32", () => {
+    const expected = nsecToNpub(NSEC);
+    assert.ok(expected?.startsWith("npub1"));
+    assert.equal(nsecToNpub(NSEC.toUpperCase()), expected);
+    assert.equal(nsecToNpub(`N${NSEC.slice(1)}`), null);
+  });
+
+  it("detects every nsec-shaped value before external search", () => {
+    for (const value of [
+      NSEC,
+      NSEC.toUpperCase(),
+      `nostr:${NSEC}`,
+      `NOSTR:${NSEC.toUpperCase()}`,
+      "nSeC1truncated",
+      "deploy from:nsec1malformed",
+      "look up nsec1copy-paste-mistake now",
+    ]) {
+      assert.equal(containsNsecShapedInput(value), true, value);
+    }
+    assert.equal(containsNsecShapedInput(NPUB), false);
+    assert.equal(containsNsecShapedInput("announce1 release"), false);
+    assert.equal(containsNsecShapedInput("xnsec1not-a-token"), false);
   });
 });

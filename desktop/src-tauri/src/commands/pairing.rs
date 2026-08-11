@@ -138,17 +138,8 @@ async fn start_pairing_session(
 
     if mode == PairingMode::SendIdentity {
         let keys = state.signing_keys()?;
-        let nsec = keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|e| format!("encode nsec: {e}"))?;
-        let payload_json = serde_json::json!({
-            "relayUrl": http_url,
-            "pubkey": keys.public_key().to_hex(),
-            "nsec": nsec,
-        });
         *pairing.payload.lock().map_err(|e| e.to_string())? =
-            Some(Zeroizing::new(payload_json.to_string()));
+            Some(identity_pairing_payload(&http_url, &keys)?);
     }
 
     {
@@ -176,6 +167,28 @@ async fn start_pairing_session(
     ));
 
     Ok(qr_uri)
+}
+
+fn identity_pairing_payload(
+    relay_url: &str,
+    keys: &nostr::Keys,
+) -> Result<Zeroizing<String>, String> {
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|e| format!("encode nsec: {e}"))?;
+    let npub = keys
+        .public_key()
+        .to_bech32()
+        .map_err(|e| format!("encode npub: {e}"))?;
+    Ok(Zeroizing::new(
+        serde_json::json!({
+            "relayUrl": relay_url,
+            "npub": npub,
+            "nsec": nsec,
+        })
+        .to_string(),
+    ))
 }
 
 /// User confirmed the SAS codes match. Sends sas-confirm + payload.

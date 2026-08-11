@@ -13,6 +13,10 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
+use buzz_core::nostr_identity::{
+    parse_public_key_compat, parse_secret_key_compat, public_key_to_npub,
+};
+
 use crate::filter::SubscriptionRule;
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
@@ -175,7 +179,7 @@ impl std::fmt::Display for PermissionMode {
 /// This is a standalone `Parser` (not a subcommand variant) because the
 /// `models` path must bypass `Config::from_cli()` entirely — no relay,
 /// no private key, no harness setup.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "buzz-acp models",
     about = "Query available models from the configured agent"
@@ -246,10 +250,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
+    /// Nostr private key in nsec form (legacy hex remains accepted).
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     pub private_key: String,
 
-    /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
+    /// Agent owner npub. Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
     pub agent_owner: Option<String>,
 
@@ -467,7 +472,7 @@ pub struct CliArgs {
     )]
     pub respond_to: RespondTo,
 
-    /// Comma-separated 64-char hex pubkeys for allowlist mode.
+    /// Comma-separated npubs for allowlist mode.
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
@@ -663,18 +668,16 @@ pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> 
     format!("{agent}{SESSION_TITLE_SEPARATOR}#{channel}")
 }
 
-/// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
+/// Validate and deduplicate allowlist entries, normalizing to protocol hex.
 fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError> {
     let mut validated = HashSet::new();
     for entry in entries {
-        let trimmed = entry.trim().to_ascii_lowercase();
-        if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ConfigError::ConfigFile(format!(
-                "invalid pubkey in --respond-to-allowlist: '{entry}' \
-                 (must be exactly 64 hex characters)"
-            )));
-        }
-        validated.insert(trimmed);
+        let (public_key, _) = parse_public_key_compat(entry).map_err(|_| {
+            ConfigError::ConfigFile(
+                "invalid pubkey in --respond-to-allowlist (expected an npub)".to_string(),
+            )
+        })?;
+        validated.insert(public_key.to_hex());
     }
     Ok(validated)
 }
@@ -871,13 +874,17 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        let parsed_key = parse_secret_key_compat(&args.private_key);
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
         args.private_key
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
+        let (secret_key, _) = parsed_key.map_err(|_| {
+            ConfigError::ConfigFile("BUZZ_PRIVATE_KEY must be a valid nsec".to_string())
+        })?;
+        let keys = Keys::new(secret_key);
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -1048,6 +1055,18 @@ impl Config {
             HashSet::new()
         };
 
+        let agent_owner = args
+            .agent_owner
+            .as_deref()
+            .map(|value| {
+                parse_public_key_compat(value)
+                    .map(|(public_key, _)| public_key.to_hex())
+                    .map_err(|_| {
+                        ConfigError::ConfigFile("--agent-owner must be a valid npub".to_string())
+                    })
+            })
+            .transpose()?;
+
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
             // Validate each entry is a known RespondTo mode.
@@ -1140,7 +1159,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
-            agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            agent_owner,
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
         };
@@ -1166,7 +1185,8 @@ impl Config {
         format!(
             "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
-            self.keys.public_key().to_hex(),
+            public_key_to_npub(&self.keys.public_key())
+                .unwrap_or_else(|_| "<invalid-pubkey>".to_string()),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
@@ -2548,14 +2568,21 @@ channels = "ALL"
 
     #[test]
     fn test_validate_allowlist_valid_entries() {
-        let entries = vec!["ab".repeat(32), "cd".repeat(32)];
+        let first = Keys::generate().public_key();
+        let second = Keys::generate().public_key();
+        let entries = vec![
+            public_key_to_npub(&first).unwrap(),
+            public_key_to_npub(&second).unwrap(),
+        ];
         let result = validate_allowlist(&entries).unwrap();
         assert_eq!(result.len(), 2);
+        assert!(result.contains(&first.to_hex()));
+        assert!(result.contains(&second.to_hex()));
     }
 
     #[test]
     fn test_validate_allowlist_deduplicates() {
-        let pk = "ab".repeat(32);
+        let pk = public_key_to_npub(&Keys::generate().public_key()).unwrap();
         let entries = vec![pk.clone(), pk.clone(), pk];
         let result = validate_allowlist(&entries).unwrap();
         assert_eq!(result.len(), 1);
@@ -2563,53 +2590,42 @@ channels = "ALL"
 
     #[test]
     fn test_validate_allowlist_normalizes_case() {
-        let upper = "AB".repeat(32);
-        let lower = "ab".repeat(32);
-        let entries = vec![upper, lower];
+        let lower = Keys::generate().public_key().to_hex();
+        let upper = lower.to_ascii_uppercase();
+        let entries = vec![upper, lower.clone()];
         let result = validate_allowlist(&entries).unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&"ab".repeat(32)));
+        assert!(result.contains(&lower));
     }
 
     #[test]
     fn test_validate_allowlist_trims_whitespace() {
-        let entries = vec![format!("  {}  ", "ab".repeat(32))];
+        let public_key = Keys::generate().public_key();
+        let entries = vec![format!("  {}  ", public_key_to_npub(&public_key).unwrap())];
         let result = validate_allowlist(&entries).unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&"ab".repeat(32)));
+        assert!(result.contains(&public_key.to_hex()));
     }
 
     #[test]
     fn test_validate_allowlist_rejects_short() {
         let entries = vec!["abcd".to_string()];
         let err = validate_allowlist(&entries).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("must be exactly 64 hex characters"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("expected an npub"), "got: {err}");
     }
 
     #[test]
     fn test_validate_allowlist_rejects_non_hex() {
         let entries = vec!["zz".repeat(32)];
         let err = validate_allowlist(&entries).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("must be exactly 64 hex characters"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("expected an npub"), "got: {err}");
     }
 
     #[test]
     fn test_validate_allowlist_rejects_too_long() {
         let entries = vec!["ab".repeat(33)]; // 66 chars
         let err = validate_allowlist(&entries).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("must be exactly 64 hex characters"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("expected an npub"), "got: {err}");
     }
 
     #[test]

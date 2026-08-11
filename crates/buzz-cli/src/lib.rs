@@ -5,11 +5,13 @@ mod error;
 mod links;
 mod validate;
 
+use buzz_core::nostr_identity::{parse_secret_key_compat, public_key_to_npub};
 use clap::{Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -69,7 +71,7 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -82,7 +84,7 @@ struct Cli {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
+    /// Nostr private key in nsec form (legacy hex remains accepted).
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
 
@@ -309,16 +311,16 @@ running under BUZZ_AUTH_TAG signs as itself, so it can only ever satisfy \
 the self path (target == signer) — not the owner-of-agent path for another \
 identity.\n\n\
 Examples:\n  \
-buzz agents archive <PUBKEY> --reason retired\n  \
-buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
+buzz agents archive <NPUB> --reason retired\n  \
+buzz agents archive <NPUB> --reason bot-rebuilt --replaced-by <NEW_NPUB>"
     )]
     Archive {
-        /// Target identity pubkey (hex)
+        /// Target identity npub
         target_pubkey: String,
         /// Machine-readable reason code, max 64 UTF-8 bytes
         #[arg(long)]
         reason: Option<String>,
-        /// Rotation pointer pubkey (hex); must differ from the target
+        /// Rotation pointer npub; must differ from the target
         #[arg(long)]
         replaced_by: Option<String>,
         /// Optional human-readable note (not parsed for authorization)
@@ -337,10 +339,10 @@ buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
 extraction failure, then exits with an error if still unresolvable. Use --admin to bypass \
 for relay-admin callers.\n\n\
 Examples:\n  \
-buzz agents unarchive <PUBKEY> --reason returned"
+buzz agents unarchive <NPUB> --reason returned"
     )]
     Unarchive {
-        /// Target identity pubkey (hex)
+        /// Target identity npub
         target_pubkey: String,
         /// Machine-readable reason code, max 64 UTF-8 bytes
         #[arg(long)]
@@ -392,7 +394,7 @@ pub enum MessagesCmd {
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
-        /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
+        /// Npub to mention (repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify. Legacy hex remains accepted.
         #[arg(long = "mention")]
         mentions: Vec<String>,
     },
@@ -503,7 +505,7 @@ pub enum MessagesCmd {
         /// Search query string (optional when --author is given)
         #[arg(long)]
         query: Option<String>,
-        /// Filter by author: 64-char hex pubkey, npub, or display name
+        /// Filter by author: npub or display name
         #[arg(long)]
         author: Option<String>,
         /// Unix timestamp — return messages after this time
@@ -681,7 +683,7 @@ pub enum ChannelsCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Member pubkey (64-char hex)
+        /// Member npub
         #[arg(long)]
         pubkey: String,
         /// Member role (owner, admin, member, guest, bot)
@@ -694,7 +696,7 @@ pub enum ChannelsCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Member pubkey (64-char hex)
+        /// Member npub
         #[arg(long)]
         pubkey: String,
     },
@@ -809,7 +811,7 @@ pub enum DmsCmd {
     },
     /// Open a new direct message with one or more users
     Open {
-        /// User pubkey(s) to DM (64-char hex, 1-8)
+        /// User npub(s) to DM (1-8)
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
@@ -818,7 +820,7 @@ pub enum DmsCmd {
         /// DM conversation UUID
         #[arg(long)]
         channel: String,
-        /// User pubkey to add (64-char hex)
+        /// User npub to add
         #[arg(long)]
         pubkey: String,
     },
@@ -834,13 +836,13 @@ pub enum DmsCmd {
 pub enum UsersCmd {
     /// Look up user profiles by pubkey or name
     Get {
-        /// User pubkey(s) to look up (64-char hex). Omit for your own profile
+        /// User npub(s) to look up. Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
-        /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
+        /// Scope an exact-name agent lookup to its owner (`me` or npub; legacy hex remains accepted)
         #[arg(long = "owner", requires = "name")]
         owner: Option<String>,
     },
@@ -862,7 +864,7 @@ pub enum UsersCmd {
     },
     /// Get presence status for users
     Presence {
-        /// Comma-separated pubkeys (64-char hex)
+        /// Comma-separated npubs
         #[arg(long)]
         pubkeys: String,
     },
@@ -998,7 +1000,7 @@ pub enum SocialCmd {
     /// Set your contact list (NIP-02 kind:3)
     #[command(name = "set-contacts")]
     SetContactList {
-        /// JSON array of contacts: [{"pubkey":"hex","relay_url":"...","petname":"..."}]
+        /// JSON array of contacts: [{"pubkey":"npub1...","relay_url":"...","petname":"..."}]
         #[arg(long)]
         contacts: String,
     },
@@ -1012,7 +1014,7 @@ pub enum SocialCmd {
     /// Get recent notes published by a user
     #[command(name = "notes")]
     GetUserNotes {
-        /// 64-char hex pubkey of the author.
+        /// Author npub.
         #[arg(long)]
         pubkey: String,
         /// Maximum number of notes to return (default 50, max 100).
@@ -1028,7 +1030,7 @@ pub enum SocialCmd {
     /// Get a user's contact list
     #[command(name = "contacts")]
     GetContactList {
-        /// 64-char hex pubkey.
+        /// Author npub.
         #[arg(long)]
         pubkey: String,
     },
@@ -1048,7 +1050,7 @@ pub enum SocialCmd {
     /// Get NIP-51/NIP-65 social lists or sets by author and kind.
     #[command(name = "list")]
     GetList {
-        /// 64-char hex pubkey of the author.
+        /// Author npub.
         #[arg(long)]
         pubkey: String,
         /// Supported kind: 10000, 10001, 10002, 10003, 30000, or 30003.
@@ -1103,7 +1105,7 @@ pub enum NotesCmd {
         /// Slug to look up across authors. Mutually exclusive with `--naddr`.
         #[arg(long)]
         name: Option<String>,
-        /// Disambiguate `--name` to a specific author (hex pubkey, display name, or `me`).
+        /// Disambiguate `--name` to a specific author (npub, display name, or `me`).
         #[arg(long)]
         author: Option<String>,
         /// On an ambiguous `--name` (multiple authors), pick the most recently updated note
@@ -1116,7 +1118,7 @@ pub enum NotesCmd {
     },
     /// List notes. Defaults to your own.
     Ls {
-        /// Hex pubkey, display name, `me`, or `all`.
+        /// Npub, display name, `me`, or `all`.
         #[arg(long, default_value = "me")]
         author: Option<String>,
         /// Filter by NIP-23 `t` tag.
@@ -1172,13 +1174,13 @@ pub enum ReposCmd {
         /// Repository identifier (d-tag)
         #[arg(long)]
         id: String,
-        /// Owner pubkey (64-char hex). Omit to match any owner.
+        /// Owner npub. Omit to match any owner.
         #[arg(long)]
         owner: Option<String>,
     },
     /// List repository announcements
     List {
-        /// Owner pubkey (64-char hex). Omit for your repos.
+        /// Owner npub. Omit for your repos.
         #[arg(long)]
         owner: Option<String>,
         /// Maximum number of results
@@ -1283,7 +1285,7 @@ pub enum ProjectsCmd {
         /// Project identifier (slug), up to 1024 bytes
         slug: String,
         /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
-        /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
+        /// `30617:<owner-npub>:<repo-d>` for cross-owner or colon-bearing repo ids.
         /// At least one --repo is required.
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
@@ -1304,13 +1306,13 @@ pub enum ProjectsCmd {
     Get {
         /// Project slug
         slug: String,
-        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        /// Owner npub. Defaults to the current identity.
         #[arg(long)]
         owner: Option<String>,
     },
     /// List projects
     List {
-        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        /// Owner npub. Defaults to the current identity.
         #[arg(long)]
         owner: Option<String>,
         /// Maximum number of results
@@ -1322,7 +1324,7 @@ pub enum ProjectsCmd {
     AddRepo {
         /// Project slug
         slug: String,
-        /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
+        /// Member repository coordinate (bare id or full `30617:<owner-npub>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
     },
@@ -1331,7 +1333,7 @@ pub enum ProjectsCmd {
     RemoveRepo {
         /// Project slug
         slug: String,
-        /// Member repository coordinate to remove (bare id or full `30617:<owner-hex>:<repo-d>`)
+        /// Member repository coordinate to remove (bare id or full `30617:<owner-npub>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
     },
@@ -1376,10 +1378,10 @@ pub enum ProjectsCmd {
 pub enum PatchesCmd {
     /// Send a git patch (NIP-34 kind:1617)
     #[command(
-        after_help = "Examples:\n  git format-patch -1 HEAD --stdout | buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file - --root\n  buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file 0001-fix.patch --reply-to <prev-patch-id>"
+        after_help = "Examples:\n  git format-patch -1 HEAD --stdout | buzz patches send --repo-owner <npub> --repo-id myrepo --patch-file - --root\n  buzz patches send --repo-owner <npub> --repo-id myrepo --patch-file 0001-fix.patch --reply-to <prev-patch-id>"
     )]
     Send {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
@@ -1391,7 +1393,7 @@ pub enum PatchesCmd {
         /// Earliest-unique-commit of the repo
         #[arg(long)]
         euc: Option<String>,
-        /// Additional recipient pubkey(s) — can be specified multiple times
+        /// Additional recipient npub(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
         /// Previous patch event id (series) or original root (revision)
@@ -1424,13 +1426,13 @@ pub enum PatchesCmd {
     },
     /// List patches for a repo
     List {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
         #[arg(long)]
         repo_id: String,
-        /// Filter by patch author pubkey
+        /// Filter by patch author npub
         #[arg(long)]
         author: Option<String>,
         /// Maximum number of results
@@ -1448,7 +1450,7 @@ pub enum PatchesCmd {
         /// Markdown context for the status change ('-' to read from stdin)
         #[arg(long)]
         content: Option<String>,
-        /// Repo owner pubkey — requires --repo-id
+        /// Repo owner npub — requires --repo-id
         #[arg(long, requires = "repo_id")]
         repo_owner: Option<String>,
         /// Repo identifier (d-tag) — requires --repo-owner
@@ -1460,13 +1462,13 @@ pub enum PatchesCmd {
         /// Root id of the revision that was accepted (status=merged only)
         #[arg(long)]
         revision: Option<String>,
-        /// Additional recipient pubkey(s) for the status event (besides the
+        /// Additional recipient npub(s) for the status event (besides the
         /// repo owner, which is tagged automatically when --repo-owner is
         /// given) — e.g. root/revision author. Can be specified multiple times.
         #[arg(long = "to")]
         to: Vec<String>,
         /// Applied patch event id — can be specified multiple times (status=merged only).
-        /// Accepts `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`.
+        /// Accepts `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<npub>`.
         #[arg(long = "q")]
         q: Vec<String>,
         /// Merge commit id (status=merged only)
@@ -1482,10 +1484,10 @@ pub enum PatchesCmd {
 pub enum PrCmd {
     /// Open a git pull request (NIP-34 kind:1618)
     #[command(
-        after_help = "Examples:\n  buzz pr open --repo-owner <hex> --repo-id myrepo --subject 'Fix bug' --body-file - --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo --branch-name fix-bug\n  buzz pr update --repo-owner <hex> --repo-id myrepo --pr <event> --pr-author <hex> --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo"
+        after_help = "Examples:\n  buzz pr open --repo-owner <npub> --repo-id myrepo --subject 'Fix bug' --body-file - --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo --branch-name fix-bug\n  buzz pr update --repo-owner <npub> --repo-id myrepo --pr <event> --pr-author <npub> --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo"
     )]
     Open {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
@@ -1518,7 +1520,7 @@ pub enum PrCmd {
         /// Label — can be specified multiple times
         #[arg(long = "label")]
         label: Vec<String>,
-        /// Additional recipient pubkey(s) — can be specified multiple times
+        /// Additional recipient npub(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
         /// Channel where this pull request originated (NIP-29 h-tag)
@@ -1530,7 +1532,7 @@ pub enum PrCmd {
     },
     /// Update a git pull request tip (NIP-34 kind:1619)
     Update {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
@@ -1539,7 +1541,7 @@ pub enum PrCmd {
         /// Pull request event id being updated
         #[arg(long)]
         pr: String,
-        /// Pull request author's pubkey
+        /// Pull request author's npub (legacy hex remains accepted)
         #[arg(long)]
         pr_author: String,
         /// Updated tip commit of the PR branch
@@ -1560,7 +1562,7 @@ pub enum PrCmd {
         /// Earliest-unique-commit of the repo
         #[arg(long)]
         euc: Option<String>,
-        /// Additional recipient pubkey(s) — can be specified multiple times
+        /// Additional recipient npub(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
     },
@@ -1572,13 +1574,13 @@ pub enum PrCmd {
     },
     /// List PRs for a repo
     List {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
         #[arg(long)]
         repo_id: String,
-        /// Filter by PR author pubkey
+        /// Filter by PR author npub (legacy hex remains accepted)
         #[arg(long)]
         author: Option<String>,
         /// Filter by label
@@ -1602,7 +1604,7 @@ pub enum PrCmd {
         /// Path to markdown context for the status change, or '-' to read from stdin.
         #[arg(long, conflicts_with = "body")]
         body_file: Option<String>,
-        /// Repo owner pubkey — requires --repo-id
+        /// Repo owner npub — requires --repo-id
         #[arg(long, requires = "repo_id")]
         repo_owner: Option<String>,
         /// Repo identifier (d-tag) — requires --repo-owner
@@ -1611,7 +1613,7 @@ pub enum PrCmd {
         /// Earliest-unique-commit of the repo
         #[arg(long)]
         euc: Option<String>,
-        /// Additional recipient pubkey(s) for the status event (besides the
+        /// Additional recipient npub(s) for the status event (besides the
         /// repo owner, which is tagged automatically when --repo-owner is
         /// given) — e.g. PR author/reviewers. Can be specified multiple times.
         #[arg(long = "to")]
@@ -1626,7 +1628,7 @@ pub enum PrCmd {
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
@@ -1641,7 +1643,7 @@ pub enum IssuesCmd {
         /// Label — can be specified multiple times
         #[arg(long = "label")]
         label: Vec<String>,
-        /// Additional recipient pubkey(s) — can be specified multiple times
+        /// Additional recipient npub(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
     },
@@ -1653,13 +1655,13 @@ pub enum IssuesCmd {
     },
     /// List issues for a repo
     List {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
         #[arg(long)]
         repo_id: String,
-        /// Filter by issue author pubkey
+        /// Filter by issue author npub (legacy hex remains accepted)
         #[arg(long)]
         author: Option<String>,
         /// Filter by label
@@ -1680,7 +1682,7 @@ pub enum IssuesCmd {
         /// Markdown context for the status change ('-' to read from stdin)
         #[arg(long)]
         content: Option<String>,
-        /// Repo owner pubkey — requires --repo-id
+        /// Repo owner npub — requires --repo-id
         #[arg(long, requires = "repo_id")]
         repo_owner: Option<String>,
         /// Repo identifier (d-tag) — requires --repo-owner
@@ -1689,7 +1691,7 @@ pub enum IssuesCmd {
         /// Earliest-unique-commit of the repo
         #[arg(long)]
         euc: Option<String>,
-        /// Additional recipient pubkey(s) for the status event (besides the
+        /// Additional recipient npub(s) for the status event (besides the
         /// repo owner, which is tagged automatically when --repo-owner is
         /// given) — e.g. the issue author. Can be specified multiple times.
         #[arg(long = "to")]
@@ -1702,17 +1704,17 @@ pub enum IssuesCmd {
         /// Issue event id (64-char hex)
         #[arg(long)]
         issue: String,
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub (legacy hex remains accepted)
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
         #[arg(long)]
         repo_id: String,
-        /// Assignee pubkey (64-char hex) — can be specified multiple times
+        /// Assignee npub (legacy hex remains accepted) — can be specified multiple times
         #[arg(long = "assignee", required = true)]
         assignee: Vec<String>,
         /// Human-readable assignee name(s) for the note body, e.g. "Thomas".
-        /// Defaults to the truncated assignee pubkeys.
+        /// Defaults to the truncated assignee npubs.
         #[arg(long)]
         label: Option<String>,
     },
@@ -1722,17 +1724,17 @@ pub enum IssuesCmd {
         /// Issue event id (64-char hex)
         #[arg(long)]
         issue: String,
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner npub (legacy hex remains accepted)
         #[arg(long)]
         repo_owner: String,
         /// Repo identifier (d-tag)
         #[arg(long)]
         repo_id: String,
-        /// Assignee pubkey to remove — can be specified multiple times
+        /// Assignee npub to remove (legacy hex remains accepted) — can be specified multiple times
         #[arg(long = "assignee", required = true)]
         assignee: Vec<String>,
         /// Human-readable assignee name(s) for the note body.
-        /// Defaults to the truncated assignee pubkeys.
+        /// Defaults to the truncated assignee npubs.
         #[arg(long)]
         label: Option<String>,
     },
@@ -1765,10 +1767,10 @@ pub enum MediaCmd {
 pub enum MemCmd {
     /// List non-tombstoned memory entries
     Ls {
-        /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
+        /// Owner npub. Overrides BUZZ_AUTH_TAG.
         #[arg(long)]
         owner: Option<String>,
-        /// Agent pubkey (hex) to read as this key's owner.
+        /// Agent npub to read as this key's owner.
         #[arg(long)]
         agent: Option<String>,
         /// Emit JSON instead of tab-delimited lines.
@@ -1780,7 +1782,7 @@ pub enum MemCmd {
         slug: String,
         #[arg(long)]
         owner: Option<String>,
-        /// Agent pubkey (hex) to read as this key's owner.
+        /// Agent npub to read as this key's owner.
         #[arg(long)]
         agent: Option<String>,
     },
@@ -1789,7 +1791,7 @@ pub enum MemCmd {
         slug: String,
         #[arg(long)]
         owner: Option<String>,
-        /// Agent pubkey (hex) to read as this key's owner.
+        /// Agent npub to read as this key's owner.
         #[arg(long)]
         agent: Option<String>,
     },
@@ -1898,10 +1900,10 @@ pub enum ModerationCmd {
     },
     /// Ban a member from the community (kind 9040)
     #[command(
-        after_help = "Examples:\n  buzz moderation ban --pubkey <HEX>\n  buzz moderation ban --pubkey <HEX> --expires-in 604800 --reason \"repeated spam\""
+        after_help = "Examples:\n  buzz moderation ban --pubkey <npub>\n  buzz moderation ban --pubkey <npub> --expires-in 604800 --reason \"repeated spam\""
     )]
     Ban {
-        /// Target member pubkey (hex)
+        /// Target member npub
         #[arg(long)]
         pubkey: String,
         /// Ban duration in seconds from now (omit for a permanent ban)
@@ -1916,16 +1918,16 @@ pub enum ModerationCmd {
     },
     /// Lift a member's ban (kind 9041)
     Unban {
-        /// Target member pubkey (hex)
+        /// Target member npub
         #[arg(long)]
         pubkey: String,
     },
     /// Time out a member — a write-block, not a disconnect (kind 9042)
     #[command(
-        after_help = "Examples:\n  buzz moderation timeout --pubkey <HEX> --expires-in 3600\n  buzz moderation timeout --pubkey <HEX> --expires-at 1783500000 --reason \"cool off\""
+        after_help = "Examples:\n  buzz moderation timeout --pubkey <npub> --expires-in 3600\n  buzz moderation timeout --pubkey <npub> --expires-at 1783500000 --reason \"cool off\""
     )]
     Timeout {
-        /// Target member pubkey (hex)
+        /// Target member npub
         #[arg(long)]
         pubkey: String,
         /// Timeout duration in seconds from now
@@ -1940,7 +1942,7 @@ pub enum ModerationCmd {
     },
     /// Clear a member's timeout early (kind 9043)
     Untimeout {
-        /// Target member pubkey (hex)
+        /// Target member npub
         #[arg(long)]
         pubkey: String,
     },
@@ -2002,11 +2004,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
+    let private_key = Zeroizing::new(cli.private_key.ok_or_else(|| {
         CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+    })?);
+    let (secret_key, _) = parse_secret_key_compat(&private_key)
+        .map_err(|_| CliError::Key("invalid BUZZ_PRIVATE_KEY: expected an nsec".to_string()))?;
+    let keys = Keys::new(secret_key);
 
     // NIP-OA: parse and verify the auth tag if provided.
     //
@@ -2020,10 +2023,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let json = normalize_auth_tag_input(input);
             let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
                 .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
+            let current_identity = public_key_to_npub(&keys.public_key()).map_err(|e| {
+                CliError::Auth(format!("failed to format current identity as npub: {e}"))
+            })?;
             buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
                 CliError::Auth(format!(
                     "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
+                    current_identity
                 ))
             })?;
             // Canonical wire form derives from the parsed-and-verified tag

@@ -3,7 +3,7 @@ use super::{
     save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
     ManagedAgentProcess,
 };
-use crate::app_state::AppState;
+use crate::app_state::{identity_npub_for_log_str, AppState};
 use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
@@ -66,7 +66,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
         let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
             eprintln!(
                 "buzz-desktop: persona-snapshot backfill: agent {} links persona {persona_id} which no longer exists; leaving it orphaned — spawn will refuse it",
-                record.pubkey
+                identity_npub_for_log_str(&record.pubkey)
             );
             continue;
         };
@@ -475,7 +475,10 @@ pub async fn restore_managed_agents_on_launch(
                 crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
                     .await
             {
-                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
+                eprintln!(
+                    "buzz-desktop: profile reconciliation failed for agent {}: {e}",
+                    identity_npub_for_log_str(&pubkey)
+                );
             }
         });
     }
@@ -511,6 +514,7 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
             .unwrap_or_else(|| data.relay_url.clone());
         tauri::async_runtime::spawn(async move {
             let state = reconcile_app.state::<AppState>();
+            let who = identity_npub_for_log_str(&pubkey);
             match crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
                 .await
             {
@@ -521,13 +525,13 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
                         &relay_url,
                     ) {
                         eprintln!(
-                            "buzz-desktop: failed to record profile reconciliation for agent {pubkey}: {error}"
+                            "buzz-desktop: failed to record profile reconciliation for agent {who}: {error}"
                         );
                     }
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!(
-                    "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
+                    "buzz-desktop: profile reconciliation failed for agent {who}: {error}"
                 ),
             }
         });

@@ -10,6 +10,7 @@ futures-util = { workspace = true }
 nostr = { workspace = true }
 serde_json = { workspace = true }
 buzz-sdk = { path = "../../crates/buzz-sdk" }
+buzz-core = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
 tokio-tungstenite = { workspace = true }
 url = { workspace = true }

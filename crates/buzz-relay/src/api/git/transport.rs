@@ -37,7 +37,10 @@ use super::hydrate::{
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
-use buzz_core::TenantContext;
+use buzz_core::{
+    nostr_identity::{canonical_npub_or_invalid, public_key_to_npub_or_invalid},
+    TenantContext,
+};
 
 /// Timeout for `info/refs` — ref advertisement is fast (essentially `git show-ref`).
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -220,7 +223,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         .await
         .is_err()
         {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+            warn!(pubkey = %public_key_to_npub_or_invalid(&pubkey), "git: relay membership denied");
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
@@ -263,8 +266,8 @@ async fn deny_banned_git_principal(
 
     enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
         warn!(
-            pubkey = %pubkey.to_hex(),
-            owner = ?owner.map(|owner| owner.to_hex()),
+            pubkey = %public_key_to_npub_or_invalid(pubkey),
+            owner = ?owner.as_ref().map(public_key_to_npub_or_invalid),
             "git: community ban denied request"
         );
         (status, "blocked: banned from this community").into_response()
@@ -284,7 +287,7 @@ async fn git_restriction_state(
     db.moderation_restriction_state(community, pubkey.as_bytes())
         .await
         .map_err(|error| {
-            warn!(pubkey = %pubkey.to_hex(), error = %error, "git: ban lookup failed closed");
+            warn!(pubkey = %public_key_to_npub_or_invalid(pubkey), error = %error, "git: ban lookup failed closed");
             (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
         })
 }
@@ -427,7 +430,7 @@ fn acquire_git_permit(
 /// paths share. Below-pointer failure ⇒ 5xx; pointer-absent is signalled
 /// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
 fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
-    error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
+    error!(error = %err, owner = %canonical_npub_or_invalid(owner), repo = %repo, "hydrate failed");
     if matches!(err, HydrateError::ResourceLimit(_)) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1819,6 +1822,7 @@ async fn finalize_push_inner(
     #[cfg(not(test))]
     let _ = hooks;
 
+    let owner_npub = canonical_npub_or_invalid(&ctx.owner);
     // The push fence, part 0 — **a rejected push publishes nothing.**
     //
     // `ctx.pack.ok` is false when git aborted the ref updates: either the
@@ -1839,7 +1843,7 @@ async fn finalize_push_inner(
     // hook's decline message; only the publish side effects are suppressed.
     if !ctx.pack.ok {
         warn!(
-            owner = %ctx.owner,
+            owner = %owner_npub,
             repo = %ctx.repo_id,
             "receive-pack exited non-zero (e.g. pre-receive hook decline); \
              skipping CAS publish and kind:30618 — no state published"
@@ -1861,7 +1865,7 @@ async fn finalize_push_inner(
     {
         Ok(guard) => guard,
         Err(error) => {
-            warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push rejected by community deletion fence");
+            warn!(owner = %owner_npub, repo = %ctx.repo, %error, "push rejected by community deletion fence");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "community writes are fenced",
@@ -1871,7 +1875,7 @@ async fn finalize_push_inner(
     };
 
     if let Err(error) = serving_write.verify().await {
-        warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push lost community serving lease");
+        warn!(owner = %owner_npub, repo = %ctx.repo, %error, "push lost community serving lease");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "community write lease lost",
@@ -1904,7 +1908,7 @@ async fn finalize_push_inner(
                 ..
             }) => {
                 warn!(
-                    owner = %ctx.owner,
+                    owner = %owner_npub,
                     repo = %ctx.repo,
                     winner = %winner_manifest_key,
                     "push lost CAS race; tempdir dropped, returning 409"
@@ -1921,7 +1925,7 @@ async fn finalize_push_inner(
                 // empty head, malformed parent). Pre-CAS — no pointer was
                 // written.
                 warn!(
-                    owner = %ctx.owner,
+                    owner = %owner_npub,
                     repo = %ctx.repo,
                     error = %e,
                     "push rejected: manifest validation failed"
@@ -1934,7 +1938,7 @@ async fn finalize_push_inner(
             }
             Err(CasError::ResourceLimit(e)) => {
                 warn!(
-                    owner = %ctx.owner,
+                    owner = %owner_npub,
                     repo = %ctx.repo,
                     error = %e,
                     "push rejected: repo exceeds relay resource limits"
@@ -1952,7 +1956,7 @@ async fn finalize_push_inner(
                 // winner-fetch, the winner is already installed and the
                 // loser's data is unrelated).
                 error!(
-                    owner = %ctx.owner,
+                    owner = %owner_npub,
                     repo = %ctx.repo,
                     error = %e,
                     "push failed pre-response"
@@ -1961,7 +1965,7 @@ async fn finalize_push_inner(
             }
         },
         Err(error) => {
-            warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push lost community serving lease during CAS publish");
+            warn!(owner = %owner_npub, repo = %ctx.repo, %error, "push lost community serving lease during CAS publish");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "community write lease lost",
@@ -2038,7 +2042,7 @@ async fn finalize_push_inner(
                         )
                         .await;
                         info!(
-                            owner = %ctx.owner,
+                            owner = %owner_npub,
                             repo = %ctx.repo_id,
                             manifest = %success.manifest_key,
                             "kind:30618 published (derived after CAS)"
@@ -2047,7 +2051,7 @@ async fn finalize_push_inner(
                     }
                     Ok((_, false)) => {
                         info!(
-                            owner = %ctx.owner,
+                            owner = %owner_npub,
                             repo = %ctx.repo_id,
                             "kind:30618 deduplicated by relay db"
                         );
@@ -2066,7 +2070,7 @@ async fn finalize_push_inner(
     // acquisition cannot overtake the pointer CAS, durable 30618 insert, or
     // local fan-out attempt; only now may the lease be released.
     if let Err(error) = serving_write.finish().await {
-        warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "failed to release community serving lease after push publication");
+        warn!(owner = %owner_npub, repo = %ctx.repo, %error, "failed to release community serving lease after push publication");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "community write lease lost during publication",
@@ -2075,7 +2079,7 @@ async fn finalize_push_inner(
     }
     if let Err(error) = publication_result {
         error!(
-            owner = %ctx.owner,
+            owner = %owner_npub,
             repo = %ctx.repo_id,
             manifest = %success.manifest_key,
             %error,

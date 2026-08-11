@@ -10,6 +10,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -3254,22 +3255,18 @@ void main() {
       expect(find.text('Alice'), findsNWidgets(2));
     });
 
-    testWidgets('shows pubkey fallback when no profile', (tester) async {
+    testWidgets('shows npub fallback when no profile', (tester) async {
+      final pubkey = 'ab' * 32;
       final messages = [
-        _textMsg(
-          id: 'msg1',
-          pubkey: 'abcdef1234567890',
-          content: 'Hi',
-          createdAt: 1000,
-        ),
+        _textMsg(id: 'msg1', pubkey: pubkey, content: 'Hi', createdAt: 1000),
       ];
 
       await tester.pumpWidget(_buildTestable(messages: messages));
       await tester.pumpAndSettle();
 
       expect(findRichText('Hi'), findsOneWidget);
-      // Should show first 8 chars of pubkey + ellipsis
-      expect(find.text('abcdef12…'), findsOneWidget);
+      expect(find.text(shortPubkey(pubkey)), findsOneWidget);
+      expect(find.textContaining('abababab'), findsNothing);
     });
   });
 
@@ -3451,6 +3448,12 @@ void main() {
     testWidgets('opens a profile sheet from a membership system avatar', (
       tester,
     ) async {
+      final alice = nostr.Keys(
+        '1111111111111111111111111111111111111111111111111111111111111111',
+      );
+      final bob = nostr.Keys(
+        '2222222222222222222222222222222222222222222222222222222222222222',
+      );
       await tester.pumpWidget(
         _buildTestable(
           messages: [
@@ -3458,14 +3461,17 @@ void main() {
               id: 'sys-membership-avatar',
               payload: {
                 'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'bob',
+                'actor': alice.public,
+                'target': bob.public,
               },
             ),
           ],
           users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            alice.public: UserProfile(
+              pubkey: alice.public,
+              displayName: 'Alice',
+            ),
+            bob.public: UserProfile(pubkey: bob.public, displayName: 'Bob'),
           },
         ),
       );
@@ -3474,28 +3480,30 @@ void main() {
       await tester.tap(find.byType(CircleAvatar));
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
-      expect(find.text('alice'), findsNothing);
+      expect(find.text('Copy npub'), findsOneWidget);
+      expect(find.text(alice.public), findsNothing);
+      expect(find.text(bob.public), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
 
+      String? copiedText;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copiedText =
+                  (call.arguments as Map<Object?, Object?>)['text'] as String?;
+            }
+            return null;
+          });
       addTearDown(
         () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(SystemChannels.platform, null),
       );
-      await tester.ensureVisible(find.text('Copy public key'));
+      await tester.ensureVisible(find.text('Copy npub'));
       await tester.pumpAndSettle();
-      final copyAction = find
-          .ancestor(
-            of: find.text('Copy public key'),
-            matching: find.byType(GestureDetector),
-          )
-          .last;
-      tester.widget<GestureDetector>(copyAction).onTap!();
+      await tester.tap(find.text('Copy npub'));
       await tester.pump();
-      await tester.pump();
-      expect(find.text('Public key copied'), findsOneWidget);
+      expect(copiedText, bob.npub);
+      expect(find.text('npub copied'), findsOneWidget);
 
       await tester.tap(find.byTooltip('Close sheet'));
       await tester.pumpAndSettle();
@@ -3526,7 +3534,7 @@ void main() {
       await tester.tap(find.byType(CircleAvatar));
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Copy npub'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 
@@ -3657,7 +3665,7 @@ void main() {
       await tester.tap(find.byType(CircleAvatar).first);
       await tester.pumpAndSettle();
 
-      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('Copy npub'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 

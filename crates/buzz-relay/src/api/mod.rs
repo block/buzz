@@ -37,7 +37,11 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// `git/transport.rs`, and `audio/handler.rs`.
 pub mod relay_members {
     use axum::{http::StatusCode, response::Json};
-    use buzz_core::{tenant::CommunityId, TenantContext};
+    use buzz_core::{
+        nostr_identity::{canonical_npub_or_invalid, public_key_to_npub_or_invalid},
+        tenant::CommunityId,
+        TenantContext,
+    };
     use tracing::{debug, info};
 
     use crate::state::AppState;
@@ -70,6 +74,7 @@ pub mod relay_members {
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
+        let agent_npub = canonical_npub_or_invalid(&pubkey_hex);
         let is_member = state
             .db
             .is_relay_member(community, &pubkey_hex)
@@ -94,15 +99,15 @@ pub mod relay_members {
                             .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {
                             debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
+                                agent = %agent_npub,
+                                owner = %public_key_to_npub_or_invalid(&owner_pubkey),
                                 "NIP-OA membership granted via owner"
                             );
                             return Ok(MembershipDecision::ViaOwner(owner_pubkey));
                         }
                     }
                     Err(e) => {
-                        info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
+                        info!(agent = %agent_npub, "NIP-OA auth tag invalid: {e}");
                     }
                 }
             }

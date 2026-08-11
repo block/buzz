@@ -65,6 +65,7 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
+use super::setup_payload::serialize_setup_payload;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
@@ -350,7 +351,16 @@ pub fn find_managed_agent_mut<'a>(
     records
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))
+        .ok_or_else(|| managed_agent_not_found_error(pubkey))
+}
+
+/// Format a managed-agent lookup miss for a human-facing error without
+/// exposing the protocol-native hex key stored on the record.
+pub(crate) fn managed_agent_not_found_error(pubkey: &str) -> String {
+    format!(
+        "agent {} not found",
+        crate::app_state::identity_npub_for_log_str(pubkey)
+    )
 }
 
 /// Pure decision function for the inbound author gate env vars.
@@ -564,7 +574,8 @@ pub fn spawn_agent_child(
     // when desktop has computed NotReady — the desktop is the sole readiness
     // source and buzz-acp only transports the payload.
     //
-    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
+    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp. Identity
+    // is canonical npub at this app-defined boundary (never record hex):
     //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
     //
     // `spawned_setup_mode` is captured outside the block so it can be stamped
@@ -625,16 +636,11 @@ pub fn spawn_agent_child(
                         }),
                     })
                     .collect();
-                let payload = serde_json::json!({
-                    "agent_name": record.name,
-                    "agent_pubkey": record.pubkey,
-                    "requirements": reqs,
-                });
-                match serde_json::to_string(&payload) {
+                match serialize_setup_payload(&record.name, &record.pubkey, reqs) {
                     Ok(json) => Some(json),
                     Err(e) => {
                         eprintln!(
-                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
+                            "buzz-desktop: refused setup payload for {}: {e}",
                             record.name
                         );
                         None

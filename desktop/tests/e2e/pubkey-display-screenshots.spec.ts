@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   installMockBridge,
@@ -10,6 +11,12 @@ import { waitForAnimations } from "../helpers/animations";
 const SHOTS = "test-results/pubkey-display";
 
 const AGENT_PUBKEY = "cafef00d".repeat(8);
+const PROFILE_PUBKEY = "deadbeef".repeat(8);
+
+function compactNpub(pubkey: string): string {
+  const npub = npubEncode(pubkey);
+  return `${npub.slice(0, 8)}…${npub.slice(-4)}`;
+}
 
 // Screenshot evidence for the pubkey-display work: the canonical profile
 // surfaces, plus the new-DM recipient identity-hover states retained by it.
@@ -18,6 +25,7 @@ test("profile panel Public key row reveals its copy action on hover", async ({
   page,
 }) => {
   await installMockBridge(page);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/");
 
   await page.getByTestId("channel-general").click();
@@ -30,7 +38,10 @@ test("profile panel Public key row reveals its copy action on hover", async ({
 
   const pubkeyRow = page.getByTestId("user-profile-public-key");
   const copyIndicator = page.getByTestId("user-profile-public-key-copy-status");
-  await expect(page.getByTestId("user-profile-copy-pubkey")).toBeVisible();
+  const pubkeyDisplay = page.getByTestId("user-profile-copy-pubkey");
+  const profileNpub = npubEncode(PROFILE_PUBKEY);
+  await expect(pubkeyDisplay).toHaveText(compactNpub(PROFILE_PUBKEY));
+  await expect(pubkeyRow).not.toContainText(PROFILE_PUBKEY);
   await expect(copyIndicator).toHaveCSS("opacity", "0");
   await pubkeyRow.hover();
   await expect(copyIndicator).toHaveCSS("opacity", "1");
@@ -38,6 +49,11 @@ test("profile panel Public key row reveals its copy action on hover", async ({
   await page.screenshot({
     path: `${SHOTS}/profile-panel-pubkey-hover-copy.png`,
   });
+  await pubkeyRow.click();
+  await expect(copyIndicator).toHaveAttribute("data-copied", "true");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(profileNpub);
 });
 
 test("new-DM agent name swaps to its public key on name hover", async ({
@@ -120,7 +136,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
     )
     .toBe(true);
   await expect(settledAgentNpub).not.toHaveCSS("opacity", "0");
-  await expect(settledAgentNpub).toHaveText("cafef00d…f00d");
+  await expect(settledAgentNpub).toHaveText(compactNpub(AGENT_PUBKEY));
   await expect(
     settledAgentName.getByText("Pinky", { exact: true }),
   ).not.toHaveCSS("opacity", "1");
@@ -158,7 +174,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    compactNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await page.mouse.move(1_100, 500);
   await expect(charlieNpub).toHaveCSS("opacity", "0");
@@ -189,7 +205,9 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieNameTrigger.click();
   await expect(charlieKeyPopover).toBeVisible();
   await expect(charliePubkey).toContainText("npub1");
-  await expect(charlieKeyPopover).toContainText(TEST_IDENTITIES.charlie.pubkey);
+  await expect(charlieKeyPopover).not.toContainText(
+    TEST_IDENTITIES.charlie.pubkey,
+  );
   await waitForAnimations(page);
   await page.getByTestId("new-message-page").screenshot({
     path: `${SHOTS}/new-dm-selected-recipient-key.png`,
@@ -206,7 +224,7 @@ test("selected new-DM recipient can be verified again through search", async ({
   await charlieName.hover();
   await expect(charlieNpub).toHaveCSS("opacity", "1");
   await expect(charlieNpub).toHaveText(
-    `${TEST_IDENTITIES.charlie.pubkey.slice(0, 8)}…${TEST_IDENTITIES.charlie.pubkey.slice(-4)}`,
+    compactNpub(TEST_IDENTITIES.charlie.pubkey),
   );
   await expect(charlieName.getByText("charlie", { exact: true })).toHaveCSS(
     "opacity",

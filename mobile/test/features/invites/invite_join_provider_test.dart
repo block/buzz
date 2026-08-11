@@ -23,13 +23,16 @@ void main() {
       () async {
         var generatedKeys = 0;
         var claimRequests = 0;
+        final existingKeys = nostr.Keys(
+          '1111111111111111111111111111111111111111111111111111111111111111',
+        );
         final storage = CommunityStorage(secure: FakeSecureStorage());
         final existing = Community(
           id: 'existing-id',
           name: 'Existing',
           relayUrl: existingRelayUrl,
-          pubkey: 'old-pubkey',
-          nsec: 'old-nsec',
+          npub: existingKeys.npub,
+          nsec: existingKeys.nsec,
           addedAt: DateTime.utc(2026),
         );
         await storage.save(existing);
@@ -67,8 +70,8 @@ void main() {
         expect(state.status, InviteJoinStatus.switchedExisting);
         expect(await storage.loadActiveId(), existing.id);
         expect(stored.relayUrl, existingRelayUrl);
-        expect(stored.pubkey, 'old-pubkey');
-        expect(stored.nsec, 'old-nsec');
+        expect(stored.npub, existingKeys.npub);
+        expect(stored.nsec, existingKeys.nsec);
         expect(generatedKeys, 0);
         expect(claimRequests, 0);
         expect(auth.authenticatedCommunities, isEmpty);
@@ -154,7 +157,7 @@ void main() {
         auth.authenticatedCommunities.single.relayUrl,
         'wss://relay.example.com',
       );
-      expect(auth.authenticatedCommunities.single.pubkey, keys.public);
+      expect(auth.authenticatedCommunities.single.npub, keys.npub);
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
       expect(
         auth.authenticatedCommunities.single.sensitiveActionPolicy,

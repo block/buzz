@@ -15,9 +15,11 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use buzz_core::nostr_identity::{parse_secret_key_compat, public_key_to_npub};
 use futures_util::{SinkExt, StreamExt};
 use nostr::{
     Alphabet, Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, SingleLetterTag, Tag,
+    ToBech32,
 };
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -35,10 +37,9 @@ const BOT_ICON_DATA_URL: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.
 async fn main() -> Result<()> {
     let config = Config::from_env()?;
 
-    eprintln!(
-        "countdown-bot pubkey: {}",
-        config.bot_keys.public_key().to_hex()
-    );
+    let bot_npub =
+        public_key_to_npub(&config.bot_keys.public_key()).context("encode countdown-bot npub")?;
+    eprintln!("countdown-bot npub: {bot_npub}");
     eprintln!("connecting to {}", config.relay_url);
 
     let mut ws = connect_and_authenticate(&config).await?;
@@ -84,8 +85,9 @@ impl Config {
         let relay_url =
             std::env::var("BUZZ_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
         let channel_id = required_env("BUZZ_CHANNEL_ID")?;
-        let bot_keys = Keys::parse(&required_env("BUZZ_BOT_PRIVATE_KEY")?)
-            .context("BUZZ_BOT_PRIVATE_KEY must be an nsec or hex private key")?;
+        let (bot_secret, _) = parse_secret_key_compat(&required_env("BUZZ_BOT_PRIVATE_KEY")?)
+            .map_err(|_| anyhow!("BUZZ_BOT_PRIVATE_KEY must be a valid nsec"))?;
+        let bot_keys = Keys::new(bot_secret);
 
         let auth_mode =
             std::env::var("BUZZ_BOT_AUTH_MODE").unwrap_or_else(|_| "standalone".to_string());
@@ -95,15 +97,20 @@ impl Config {
                 let tag_json = match std::env::var("BUZZ_AUTH_TAG") {
                     Ok(value) if !value.trim().is_empty() => value,
                     _ => {
-                        let owner_keys = Keys::parse(&required_env("BUZZ_OWNER_PRIVATE_KEY")?)
-                            .context("BUZZ_OWNER_PRIVATE_KEY must be an nsec or hex private key")?;
+                        let (owner_secret, _) =
+                            parse_secret_key_compat(&required_env("BUZZ_OWNER_PRIVATE_KEY")?)
+                                .map_err(|_| {
+                                    anyhow!("BUZZ_OWNER_PRIVATE_KEY must be a valid nsec")
+                                })?;
+                        let owner_keys = Keys::new(owner_secret);
                         buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &bot_keys.public_key(), "")?
                     }
                 };
 
                 let owner = buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &bot_keys.public_key())
                     .context("BUZZ_AUTH_TAG is not valid for BUZZ_BOT_PRIVATE_KEY")?;
-                eprintln!("owner-attested auth tag verified; owner={}", owner.to_hex());
+                let owner_npub = owner.to_bech32().context("encode owner npub")?;
+                eprintln!("owner-attested auth tag verified; owner={owner_npub}");
                 Some(buzz_sdk::nip_oa::parse_auth_tag(&tag_json)?)
             }
             other => {

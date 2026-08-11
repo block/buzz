@@ -23,6 +23,7 @@ const VALID_NSEC = nsecEncode(generateSecretKey());
 test("classify_by_hrp_with_whitespace_tolerance", () => {
   assert.equal(classifyKeyImportInput(`  ${NCRYPTSEC}\n`), "ncryptsec");
   assert.equal(classifyKeyImportInput(VALID_NSEC), "nsec");
+  assert.equal(classifyKeyImportInput(VALID_NSEC.toUpperCase()), "nsec");
   assert.equal(classifyKeyImportInput("npub1whatever"), "unknown");
   assert.equal(classifyKeyImportInput(""), "unknown");
   // nsec must not be shadowed by the longer HRP check.
@@ -61,6 +62,8 @@ test("plausible_ncryptsec_requires_complete_checksummed_nip49_payload", () => {
 
 test("submit_gating_nsec_path_unchanged", () => {
   assert.equal(keyImportSubmitEnabled(VALID_NSEC, ""), true);
+  assert.equal(keyImportSubmitEnabled(VALID_NSEC.toUpperCase(), ""), true);
+  assert.equal(keyImportSubmitEnabled(`N${VALID_NSEC.slice(1)}`, ""), false);
   assert.equal(keyImportSubmitEnabled("nsec1garbage", ""), false);
   assert.equal(keyImportSubmitEnabled("", ""), false);
 });

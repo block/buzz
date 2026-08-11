@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
         load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
@@ -284,19 +284,20 @@ async fn restart_local_agent_on_config_change(
         }
 
         // Re-check eligibility under lock with current record state.
+        let pubkey_display = identity_npub_for_log_str(&pubkey_owned);
         let record = records
             .iter()
             .find(|r| r.pubkey == pubkey_owned)
-            .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
+            .ok_or_else(|| format!("agent {pubkey_display} not found"))?;
 
         if record.backend != BackendKind::Local {
-            return Err(format!("agent {pubkey_owned} is no longer a local agent"));
+            return Err(format!("agent {pubkey_display} is no longer a local agent"));
         }
         let runtime_keys =
             crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
         if runtime_keys.is_empty() {
             return Err(format!(
-                "agent {pubkey_owned} no longer has a live pair runtime after sync"
+                "agent {pubkey_display} no longer has a live pair runtime after sync"
             ));
         }
 
@@ -318,7 +319,7 @@ async fn restart_local_agent_on_config_change(
         let env_changed = old_ready && old_effective.env != new_effective.env;
         if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
             return Err(format!(
-                "agent {pubkey_owned} restart condition no longer valid under lock"
+                "agent {pubkey_display} restart condition no longer valid under lock"
             ));
         }
 
@@ -331,15 +332,18 @@ async fn restart_local_agent_on_config_change(
     })
     .await;
 
+    let pubkey_display = identity_npub_for_log_str(pubkey);
     let runtime_keys = match stop_result {
         Ok(Ok(runtime_keys)) => runtime_keys,
         Ok(Err(e)) => {
-            eprintln!("buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: skipping restart of {pubkey_display}: {e}"
+            );
             return RestartOutcome::Skipped;
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey}: {e}"
+                "buzz-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey_display}: {e}"
             );
             return RestartOutcome::Skipped;
         }
@@ -353,17 +357,17 @@ async fn restart_local_agent_on_config_change(
     {
         Ok(_) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
+                "buzz-desktop: set_global_agent_config: restarted agent {pubkey_display} with updated config"
             );
             RestartOutcome::Restarted
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
+                "buzz-desktop: set_global_agent_config: failed to start {pubkey_display} after restart: {e}"
             );
             if let Err(save_err) = persist_last_error(app, pubkey, &e) {
                 eprintln!(
-                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
+                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey_display}: {save_err}"
                 );
             }
             RestartOutcome::FailedAfterStop

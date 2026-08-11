@@ -1,4 +1,4 @@
-use nostr::ToBech32;
+use buzz_core::nostr_identity::{parse_secret_key_compat, public_key_to_npub, secret_key_to_nsec};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use zeroize::Zeroize;
@@ -88,24 +88,43 @@ fn write_keyfile(shim_dir: &Path, raw: &str) -> Option<KeyInfo> {
     if raw.is_empty() {
         return None;
     }
-    let keys = match nostr::Keys::parse(raw) {
-        Ok(k) => k,
-        Err(e) => {
+    let (secret_key, _) = match parse_secret_key_compat(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
             eprintln!(
-                "buzz-dev-mcp: warning: NOSTR_PRIVATE_KEY is set but invalid ({e}); \
+                "buzz-dev-mcp: warning: NOSTR_PRIVATE_KEY is set but invalid; \
                  git auth/signing will be disabled"
             );
             return None;
         }
     };
+    let keys = nostr::Keys::new(secret_key);
     let pubkey_hex = keys.public_key().to_hex();
-    let npub = keys
-        .public_key()
-        .to_bech32()
-        .unwrap_or_else(|_| pubkey_hex.clone());
+    let npub = match public_key_to_npub(&keys.public_key()) {
+        Ok(npub) => npub,
+        Err(_) => {
+            eprintln!(
+                "buzz-dev-mcp: warning: failed to encode public identity as npub; \
+                 git auth/signing will be disabled"
+            );
+            return None;
+        }
+    };
+    let mut nsec = match secret_key_to_nsec(keys.secret_key()) {
+        Ok(nsec) => nsec,
+        Err(_) => {
+            eprintln!(
+                "buzz-dev-mcp: warning: failed to encode private identity as nsec; \
+                 git auth/signing will be disabled"
+            );
+            return None;
+        }
+    };
 
     let keyfile = shim_dir.join(".nostr-key");
-    if write_keyfile_atomic(&keyfile, raw.as_bytes()).is_err() {
+    let write_result = write_keyfile_atomic(&keyfile, nsec.as_bytes());
+    nsec.zeroize();
+    if write_result.is_err() {
         eprintln!(
             "buzz-dev-mcp: warning: failed to write nostr keyfile; git auth/signing disabled"
         );
@@ -691,5 +710,37 @@ mod git_user_name_tests {
         for c in ['.', '-', '_', '@', '(', 'a', '🐝'] {
             assert!(!is_git_crud(c), "{c:?} should not be crud");
         }
+    }
+}
+
+#[cfg(test)]
+mod keyfile_tests {
+    use super::write_keyfile;
+    use buzz_core::nostr_identity::secret_key_to_nsec;
+
+    #[test]
+    fn write_keyfile_normalizes_legacy_secret_hex_to_nsec() {
+        let keys = nostr::Keys::generate();
+        let legacy_hex = keys.secret_key().to_secret_hex();
+        let expected_nsec = secret_key_to_nsec(keys.secret_key()).expect("secret key formats");
+        let dir = tempfile::tempdir().expect("tempdir created");
+
+        let info = write_keyfile(dir.path(), &legacy_hex).expect("keyfile written");
+        let persisted = std::fs::read_to_string(&info.keyfile_path).expect("keyfile readable");
+
+        assert_eq!(persisted, expected_nsec);
+        assert!(persisted.starts_with("nsec1"));
+        assert!(!persisted.contains(&legacy_hex));
+        assert!(info.npub.starts_with("npub1"));
+        assert!(!info.npub.contains(&info.pubkey_hex));
+    }
+
+    #[test]
+    fn write_keyfile_rejects_invalid_secret_without_persisting_it() {
+        let invalid = "not-a-secret-value";
+        let dir = tempfile::tempdir().expect("tempdir created");
+
+        assert!(write_keyfile(dir.path(), invalid).is_none());
+        assert!(!dir.path().join(".nostr-key").exists());
     }
 }

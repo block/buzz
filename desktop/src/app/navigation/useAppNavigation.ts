@@ -9,6 +9,7 @@ import {
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
 import type { SearchHit } from "@/shared/api/types";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 
 type NavigationBehavior = {
   force?: boolean;
@@ -82,14 +83,17 @@ export function useAppNavigation() {
   );
 
   const goProfile = React.useCallback(
-    (pubkey: string, behavior?: NavigationBehavior) =>
-      commitNavigation(
+    (pubkey: string, behavior?: NavigationBehavior) => {
+      const profile = safeNpub(pubkey);
+      if (!profile) return Promise.resolve(false);
+      return commitNavigation(
         {
           to: "/pulse",
-          search: { profile: pubkey },
+          search: { profile },
         },
         behavior,
-      ),
+      );
+    },
     [commitNavigation],
   );
 
@@ -208,7 +212,7 @@ export function useAppNavigation() {
                 }
               : {}),
             ...(options?.agentSession
-              ? { agentSession: options.agentSession }
+              ? { agentSession: safeNpub(options.agentSession) ?? undefined }
               : {}),
             ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),

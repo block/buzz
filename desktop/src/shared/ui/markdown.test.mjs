@@ -533,6 +533,7 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { npubEncode } from "nostr-tools/nip19";
 
 import { isChannelLink } from "../../features/messages/lib/channelLink.ts";
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
@@ -541,6 +542,7 @@ import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 const OWNER_HEX =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
+const OWNER_NPUB = npubEncode(OWNER_HEX);
 const EVENT_HEX =
   "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
 
@@ -691,6 +693,11 @@ test("renderEntityLinkAnchor_matchingOriginCloneUrl_returnsEntityAnchor", () => 
     null,
     "matching-origin clone URL must produce an entity anchor",
   );
+  assert.equal(
+    el.props.href,
+    `buzz://repo?owner=${OWNER_NPUB}&d=my-repo`,
+    "copyable href must use the canonical npub entity link",
+  );
   const html = renderToStaticMarkup(el);
   // The entity anchor must be rendered — it carries the original href (for display)
   // and navigates in-app via onClick. Verify the anchor is present with the cursor style.
@@ -744,6 +751,23 @@ test("renderEntityLinkAnchor_directEntityLink_returnsAnchorRegardlessOfOrigin", 
     el,
     null,
     "direct buzz://pr link must produce an entity anchor regardless of origin",
+  );
+  assert.equal(
+    el.props.href,
+    `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_NPUB}&d=buzz-world`,
+    "legacy hex links must be canonicalized before display or copy",
+  );
+
+  const projectLink = `buzz://project?owner=${OWNER_HEX}&d=buzz-world`;
+  const project = renderEntityLinkAnchor({
+    children: React.createElement("span", null, "Buzz World"),
+    href: projectLink,
+    onOpenEntityLink: () => {},
+    relayOrigin: null,
+  });
+  assert.equal(
+    project?.props.href,
+    `buzz://project?owner=${OWNER_NPUB}&d=buzz-world`,
   );
 });
 

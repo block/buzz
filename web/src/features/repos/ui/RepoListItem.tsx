@@ -4,7 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { Badge } from "@/shared/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { relativeTime } from "@/shared/lib/relative-time";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { formatNpub, truncatePubkey } from "@/shared/lib/pubkey";
 import type { Repo } from "../use-repos";
 
 export function RepoListItem({
@@ -50,7 +50,7 @@ export function RepoListItem({
               {truncatePubkey(repo.owner)}
             </span>
           </TooltipTrigger>
-          <TooltipContent>{repo.owner}</TooltipContent>
+          <TooltipContent>{formatNpub(repo.owner)}</TooltipContent>
         </Tooltip>
         <span>Updated {relativeTime(repo.createdAt)}</span>
       </div>

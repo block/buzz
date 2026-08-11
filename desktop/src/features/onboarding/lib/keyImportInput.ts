@@ -71,7 +71,7 @@ export function classifyKeyImportInput(input: string): KeyImportKind {
   // valid backup routes to the encrypted path (and decodes there); mixed
   // case routes there too and fails in Rust with the accurate error.
   if (trimmed.slice(0, 10).toLowerCase() === "ncryptsec1") return "ncryptsec";
-  if (trimmed.startsWith("nsec1")) return "nsec";
+  if (trimmed.slice(0, 5).toLowerCase() === "nsec1") return "nsec";
   return "unknown";
 }
 

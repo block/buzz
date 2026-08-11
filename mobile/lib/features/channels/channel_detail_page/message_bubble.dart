@@ -328,8 +328,7 @@ class _UserAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
+    final initial = profile?.initial ?? pubkeyAvatarInitial(pubkey);
     final avatarUrl = profile?.avatarUrl;
 
     return AvatarImage(

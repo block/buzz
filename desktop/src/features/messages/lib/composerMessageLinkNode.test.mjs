@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   ComposerMessageLinkNode,
@@ -18,9 +19,12 @@ const CHANNEL_HREF = `buzz://channel/${CHANNEL_ID}`;
 const CHANNEL_MESSAGE_ID = "a".repeat(64);
 const CHANNEL_MESSAGE_HREF = `buzz://channel/${CHANNEL_ID}/${CHANNEL_MESSAGE_ID}`;
 const OWNER = "a".repeat(64);
+const OWNER_NPUB = npubEncode(OWNER);
 const REPO_HREF = `buzz://repo?owner=${OWNER}&d=buzz-world`;
+const CANONICAL_REPO_HREF = `buzz://repo?owner=${OWNER_NPUB}&d=buzz-world`;
 const ISSUE_ID = "b".repeat(64);
 const ISSUE_HREF = `buzz://issue?id=${ISSUE_ID}&owner=${OWNER}&d=buzz-world`;
+const CANONICAL_ISSUE_HREF = `buzz://issue?id=${ISSUE_ID}&owner=${OWNER_NPUB}&d=buzz-world`;
 
 test("resolves a composer preview and canonicalizes the underlying href", () => {
   assert.deepEqual(
@@ -60,11 +64,11 @@ test("resolves channel and entity links as composer chips", () => {
   );
   assert.deepEqual(
     resolveComposerMessageLinkAttributes(REPO_HREF, () => undefined),
-    { channelName: "", href: REPO_HREF },
+    { channelName: "", href: CANONICAL_REPO_HREF },
   );
   assert.deepEqual(
     resolveComposerMessageLinkAttributes(ISSUE_HREF, () => undefined),
-    { channelName: "", href: ISSUE_HREF },
+    { channelName: "", href: CANONICAL_ISSUE_HREF },
   );
 });
 
@@ -133,7 +137,10 @@ test("real markdown-it parsing materializes mixed Buzz permalink chips", () => {
   const html = md.renderInline(`${HREF} ${CHANNEL_HREF} ${REPO_HREF}`);
   assert.equal((html.match(/data-composer-buzz-link=""/g) ?? []).length, 3);
   assert.match(html, /data-href="buzz:\/\/channel\/9a1657ac/);
-  assert.match(html, /data-href="buzz:\/\/repo\?owner=a{64}&amp;d=buzz-world/);
+  assert.match(
+    html,
+    new RegExp(`data-href="buzz://repo\\?owner=${OWNER_NPUB}&amp;d=buzz-world`),
+  );
 });
 
 test("real markdown-it parsing preserves underscores in restored entity links", () => {
@@ -146,7 +153,10 @@ test("real markdown-it parsing preserves underscores in restored entity links", 
   const html = md.renderInline(href);
 
   assert.equal((html.match(/data-composer-buzz-link=""/g) ?? []).length, 1);
-  assert.match(html, /data-href="buzz:\/\/repo\?owner=a{64}&amp;d=my_repo"/);
+  assert.match(
+    html,
+    new RegExp(`data-href="buzz://repo\\?owner=${OWNER_NPUB}&amp;d=my_repo"`),
+  );
   assert.doesNotMatch(html, /<\/span>_repo/);
 });
 

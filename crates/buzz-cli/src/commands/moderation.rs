@@ -18,7 +18,7 @@ use nostr::Timestamp;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{normalize_pubkey, validate_hex64};
 use crate::{ModerationCmd, OutputFormat};
 
 /// Resolve `--expires-in <secs>` / `--expires-at <unix>` into an absolute
@@ -38,9 +38,9 @@ async fn cmd_ban(
     expires_at: Option<u64>,
     reason: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let expiry = resolve_expiry(expires_in, expires_at);
-    let builder = buzz_sdk::build_moderation_ban(pubkey, expiry, reason)
+    let builder = buzz_sdk::build_moderation_ban(&pubkey, expiry, reason)
         .map_err(|e| CliError::Usage(format!("invalid ban: {e}")))?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -49,8 +49,8 @@ async fn cmd_ban(
 }
 
 async fn cmd_unban(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
-    let builder = buzz_sdk::build_moderation_unban(pubkey)
+    let pubkey = normalize_pubkey(pubkey)?;
+    let builder = buzz_sdk::build_moderation_unban(&pubkey)
         .map_err(|e| CliError::Usage(format!("invalid unban: {e}")))?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -65,10 +65,10 @@ async fn cmd_timeout(
     expires_at: Option<u64>,
     reason: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let expiry = resolve_expiry(expires_in, expires_at)
         .ok_or_else(|| CliError::Usage("timeout requires --expires-in or --expires-at".into()))?;
-    let builder = buzz_sdk::build_moderation_timeout(pubkey, expiry, reason)
+    let builder = buzz_sdk::build_moderation_timeout(&pubkey, expiry, reason)
         .map_err(|e| CliError::Usage(format!("invalid timeout: {e}")))?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -77,8 +77,8 @@ async fn cmd_timeout(
 }
 
 async fn cmd_untimeout(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
-    let builder = buzz_sdk::build_moderation_untimeout(pubkey)
+    let pubkey = normalize_pubkey(pubkey)?;
+    let builder = buzz_sdk::build_moderation_untimeout(&pubkey)
         .map_err(|e| CliError::Usage(format!("invalid untimeout: {e}")))?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;

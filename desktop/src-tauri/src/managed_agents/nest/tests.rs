@@ -31,7 +31,7 @@ fn init_nest_dir_prod_sets_buzz() {
 
 #[test]
 fn nest_skill_contains_safe_mention_workflow() {
-    assert!(BUZZ_CLI_SKILL_MD.contains("--mention <hex-or-npub>"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("--mention <npub>"));
     assert!(BUZZ_CLI_SKILL_MD.contains("every presentation-only name that should notify"));
     assert!(BUZZ_CLI_SKILL_MD
         .contains("permits unresolved or ambiguous `@Name` text as presentation-only"));

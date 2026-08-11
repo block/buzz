@@ -11,9 +11,12 @@
 
 use std::collections::HashMap;
 
+use buzz_core::nostr_identity::{
+    canonical_npub, canonical_npub_or_invalid, parse_public_key_compat,
+};
 use buzz_core::tenant::CommunityId;
 use evalexpr::HashMapContext;
-use nostr::ToBech32;
+use serde::{Deserialize, Deserializer, Serializer};
 use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -27,7 +30,8 @@ use crate::WorkflowEngine;
 pub struct TriggerContext {
     /// Message content (message_posted trigger).
     pub text: String,
-    /// Pubkey of the event author (hex string).
+    /// Pubkey of the event author (protocol hex internally, npub when serialized).
+    #[serde(with = "trigger_author_serde")]
     pub author: String,
     /// Channel UUID as string.
     pub channel_id: String,
@@ -39,6 +43,40 @@ pub struct TriggerContext {
     pub message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
+}
+
+/// Portable trigger contexts use npub while runtime authorization and condition
+/// evaluation continue to use protocol-native lowercase hex.
+mod trigger_author_serde {
+    use super::*;
+    use serde::de::Error as _;
+    use serde::ser::Error as _;
+
+    pub fn serialize<S>(author: &str, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if author.is_empty() {
+            return serializer.serialize_str("");
+        }
+
+        let npub = canonical_npub(author).map_err(S::Error::custom)?;
+        serializer.serialize_str(&npub)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let author = String::deserialize(deserializer)?;
+        if author.is_empty() {
+            return Ok(author);
+        }
+
+        parse_public_key_compat(&author)
+            .map(|(public_key, _)| public_key.to_hex())
+            .map_err(D::Error::custom)
+    }
 }
 
 impl TriggerContext {
@@ -63,8 +101,9 @@ impl TriggerContext {
 ///
 /// Supports filters:
 /// - `| truncate(N)` — truncate to N characters
-/// - `| npub` — encode a hex pubkey as its full bech32 `npub` (non-pubkey
-///   values pass through unchanged); `truncate_pubkey` is a legacy alias
+/// `trigger.author` is always rendered as a canonical npub. The `| npub`
+/// filter remains as an idempotent compatibility spelling; `truncate_pubkey`
+/// is a legacy alias.
 ///
 /// Unknown `{{keys}}` are left as literal text (no error, no substitution).
 pub fn resolve_template(
@@ -128,6 +167,13 @@ fn resolve_variable(
     trigger_ctx: &TriggerContext,
     step_outputs: &HashMap<String, JsonValue>,
 ) -> Option<String> {
+    if path == "trigger.author" {
+        if trigger_ctx.author.is_empty() {
+            return Some(String::new());
+        }
+        return Some(canonical_npub_or_invalid(&trigger_ctx.author));
+    }
+
     if let Some(field) = path.strip_prefix("trigger.") {
         return trigger_ctx.get_field(field).map(|s| s.to_owned());
     }
@@ -189,10 +235,7 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
 
     // `npub` (alias `truncate_pubkey`): full bech32 npub — truncated prefixes are grindable.
     if filter == "npub" || filter == "truncate_pubkey" {
-        if let Ok(pk) = nostr::PublicKey::from_hex(&value) {
-            return Ok(pk.to_bech32().unwrap_or(value));
-        }
-        return Ok(value);
+        return Ok(canonical_npub(&value).unwrap_or(value));
     }
 
     Err(WorkflowError::TemplateError(format!(
@@ -1258,10 +1301,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const AUTHOR_HEX: &str = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f";
+    const AUTHOR_NPUB: &str = "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux";
+
     fn make_trigger() -> TriggerContext {
         TriggerContext {
             text: "P1 incident in production".to_owned(),
-            author: "abc123def456".to_owned(),
+            author: AUTHOR_HEX.to_owned(),
             channel_id: "channel-uuid-here".to_owned(),
             timestamp: "1700000000".to_owned(),
             emoji: "fire".to_owned(),
@@ -1281,7 +1327,8 @@ mod tests {
     fn resolve_trigger_author() {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(out, "By abc123def456");
+        assert_eq!(out, format!("By {AUTHOR_NPUB}"));
+        assert!(!out.contains(AUTHOR_HEX));
     }
 
     #[test]
@@ -1312,28 +1359,22 @@ mod tests {
     #[test]
     fn resolve_npub_filter_encodes_hex_pubkey() {
         let mut ctx = make_trigger();
-        ctx.author = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f".to_owned();
+        ctx.author = AUTHOR_HEX.to_owned();
         let out = resolve_template("{{trigger.author | npub}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(
-            out,
-            "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux"
-        );
+        assert_eq!(out, AUTHOR_NPUB);
     }
 
     #[test]
     fn resolve_truncate_pubkey_is_alias_for_npub() {
         let mut ctx = make_trigger();
-        ctx.author = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f".to_owned();
+        ctx.author = AUTHOR_HEX.to_owned();
         let out = resolve_template(
             "{{trigger.author | truncate_pubkey}}",
             &ctx,
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(
-            out,
-            "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux"
-        );
+        assert_eq!(out, AUTHOR_NPUB);
     }
 
     #[test]
@@ -1352,7 +1393,10 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(out, "abc123def456 said: P1 incident in production");
+        assert_eq!(
+            out,
+            format!("{AUTHOR_NPUB} said: P1 incident in production")
+        );
     }
 
     #[test]
@@ -1584,8 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_pubkey_filter_non_pubkey_passes_through() {
-        // Values that are not valid hex pubkeys are returned unchanged.
+    fn resolve_trigger_author_invalid_value_fails_closed() {
         let mut ctx = make_trigger();
         ctx.author = "short".to_owned();
         let out = resolve_template(
@@ -1594,16 +1637,16 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(out, "short");
+        assert_eq!(out, buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY);
     }
 
     #[test]
     fn resolve_npub_filter_passes_npub_through() {
-        // Already-encoded npubs are not valid hex, so they pass through intact.
+        // Compatibility callers that already hold an npub remain idempotent.
         let mut ctx = make_trigger();
-        ctx.author = "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux".to_owned();
+        ctx.author = AUTHOR_NPUB.to_owned();
         let out = resolve_template("{{trigger.author | npub}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(out, ctx.author);
+        assert_eq!(out, AUTHOR_NPUB);
     }
 
     #[test]
@@ -1631,7 +1674,7 @@ mod tests {
         let ctx = make_trigger();
         let out =
             resolve_template("{{trigger.author}}{{trigger.emoji}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(out, "abc123def456fire");
+        assert_eq!(out, format!("{AUTHOR_NPUB}fire"));
     }
 
     #[tokio::test]
@@ -1726,9 +1769,9 @@ mod tests {
 
     #[tokio::test]
     async fn condition_author_field() {
-        let ctx = make_trigger(); // author = "abc123def456"
+        let ctx = make_trigger();
         let result = evaluate_condition(
-            "str_starts_with(trigger_author, \"abc\")",
+            "str_starts_with(trigger_author, \"e17e\")",
             &ctx,
             &HashMap::new(),
         )
@@ -1804,7 +1847,7 @@ mod tests {
     fn trigger_context_get_field_known_fields() {
         let ctx = make_trigger();
         assert_eq!(ctx.get_field("text"), Some("P1 incident in production"));
-        assert_eq!(ctx.get_field("author"), Some("abc123def456"));
+        assert_eq!(ctx.get_field("author"), Some(AUTHOR_HEX));
         assert_eq!(ctx.get_field("channel_id"), Some("channel-uuid-here"));
         assert_eq!(ctx.get_field("timestamp"), Some("1700000000"));
         assert_eq!(ctx.get_field("emoji"), Some("fire"));
@@ -1836,6 +1879,52 @@ mod tests {
         assert_eq!(ctx.emoji, "");
         assert_eq!(ctx.message_id, "");
         assert!(ctx.webhook_fields.is_empty());
+    }
+
+    #[test]
+    fn trigger_context_legacy_hex_deserializes_to_internal_hex_and_serializes_as_npub() {
+        let value = json!({
+            "text": "hello",
+            "author": AUTHOR_HEX.to_ascii_uppercase(),
+            "channel_id": "",
+            "timestamp": "",
+            "emoji": "",
+            "message_id": "",
+            "webhook_fields": {},
+        });
+
+        let context: TriggerContext = serde_json::from_value(value).unwrap();
+        assert_eq!(context.author, AUTHOR_HEX);
+
+        let serialized = serde_json::to_value(&context).unwrap();
+        assert_eq!(serialized["author"], AUTHOR_NPUB);
+        assert_ne!(serialized["author"], AUTHOR_HEX);
+    }
+
+    #[test]
+    fn trigger_context_npub_deserializes_to_internal_hex() {
+        let value = json!({
+            "text": "hello",
+            "author": AUTHOR_NPUB,
+            "channel_id": "",
+            "timestamp": "",
+            "emoji": "",
+            "message_id": "",
+            "webhook_fields": {},
+        });
+
+        let context: TriggerContext = serde_json::from_value(value).unwrap();
+        assert_eq!(context.author, AUTHOR_HEX);
+    }
+
+    #[test]
+    fn trigger_context_empty_author_sentinel_round_trips() {
+        let context = TriggerContext::default();
+        let serialized = serde_json::to_value(&context).unwrap();
+        assert_eq!(serialized["author"], "");
+
+        let deserialized: TriggerContext = serde_json::from_value(serialized).unwrap();
+        assert!(deserialized.author.is_empty());
     }
 
     #[test]

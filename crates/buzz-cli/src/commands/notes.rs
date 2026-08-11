@@ -32,7 +32,7 @@ use nostr::{Event, EventBuilder, Kind, PublicKey, Tag, Timestamp, ToBech32};
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{format_npub, normalize_pubkey, reject_secret_key_input};
 
 /// NIP-23 long-form content kind.
 pub const KIND_LONG_FORM: u16 = 30023;
@@ -198,16 +198,20 @@ pub async fn fetch_by_slug(client: &BuzzClient, slug: &str) -> Result<Vec<Event>
 ///
 /// Accepts:
 /// - `"me"` → the CLI's own keypair.
-/// - 64-hex pubkey → parsed directly.
+/// - npub (or compatibility-only hex) → parsed directly.
 /// - anything else → treated as a petname / display name, searched against
 ///   kind:0 profiles. Exact-one match required; ambiguity is a hard error.
 pub async fn resolve_author(client: &BuzzClient, author_flag: &str) -> Result<PublicKey, CliError> {
     if author_flag == "me" {
         return Ok(client.keys().public_key());
     }
-    if validate_hex64(author_flag).is_ok() {
-        return PublicKey::from_hex(author_flag)
+    reject_secret_key_input(author_flag)?;
+    if let Ok(pubkey_hex) = normalize_pubkey(author_flag) {
+        return PublicKey::from_hex(&pubkey_hex)
             .map_err(|e| CliError::Usage(format!("invalid pubkey: {e}")));
+    }
+    if author_flag.starts_with("npub1") || author_flag.starts_with("nostr:npub1") {
+        return Err(CliError::Usage("invalid npub".to_string()));
     }
     // Petname lookup: NIP-50 search on kind:0, then exact-name filter.
     let filter = serde_json::json!({
@@ -234,11 +238,11 @@ pub async fn resolve_author(client: &BuzzClient, author_flag: &str) -> Result<Pu
         .collect();
     match matches.len() {
         0 => Err(CliError::Usage(format!(
-            "no user found with display_name {author_flag:?}; pass a 64-hex pubkey or \"me\""
+            "no user found with display_name {author_flag:?}; pass an npub or \"me\""
         ))),
         1 => Ok(matches[0].pubkey),
         n => Err(CliError::Usage(format!(
-            "{n} users match display_name {author_flag:?}; disambiguate with --author <hex-pubkey>"
+            "{n} users match display_name {author_flag:?}; disambiguate with --author <npub>"
         ))),
     }
 }
@@ -275,7 +279,7 @@ pub fn coord_for(author: &PublicKey, slug: &str) -> nostr::nips::nip01::Coordina
 
 /// Format a list of candidate notes for the "ambiguous slug" error path.
 /// One line per candidate; sorted newest-first. Designed so the user can
-/// paste a pubkey into a follow-up `--author <hex>` invocation.
+/// paste an npub into a follow-up `--author <npub>` invocation.
 pub fn format_note_candidates(snapshots: &[NoteSnapshot]) -> String {
     let mut rows: Vec<&NoteSnapshot> = snapshots.iter().collect();
     rows.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
@@ -286,12 +290,9 @@ pub fn format_note_candidates(snapshots: &[NoteSnapshot]) -> String {
         } else {
             s.title.as_str()
         };
-        out.push_str(&format!(
-            "  {} {} {}\n",
-            s.pubkey.to_hex(),
-            s.updated_at,
-            title
-        ));
+        let npub =
+            format_npub(&s.pubkey.to_hex()).unwrap_or_else(|_| "<invalid-pubkey>".to_string());
+        out.push_str(&format!("  {npub} {} {title}\n", s.updated_at));
     }
     out
 }
@@ -321,7 +322,7 @@ impl TryFrom<&NoteSnapshot> for NoteOutput {
             .map_err(|e| CliError::Other(format!("failed to encode naddr: {e}")))?;
         Ok(Self {
             id: snapshot.id.to_hex(),
-            pubkey: snapshot.pubkey.to_hex(),
+            pubkey: format_npub(&snapshot.pubkey.to_hex())?,
             naddr,
             coordinate: coordinate.to_string(),
             slug: snapshot.slug.clone(),
@@ -633,8 +634,9 @@ pub async fn cmd_get(
         if let Some(author_flag) = author {
             let author_pk = resolve_author(client, author_flag).await?;
             let coord = coord_for(&author_pk, &slug);
+            let author_npub = format_npub(&author_pk.to_hex())?;
             let event = fetch_by_coord(client, &coord).await?.ok_or_else(|| {
-                CliError::NotFound(format!("note not found: {}/{}", author_pk.to_hex(), slug))
+                CliError::NotFound(format!("note not found: {author_npub}/{slug}"))
             })?;
             snapshot_from_event(&event)?
         } else {
@@ -648,7 +650,7 @@ pub async fn cmd_get(
                         snapshots.remove(0)
                     } else {
                         return Err(CliError::Usage(format!(
-                            "note name {slug:?} is ambiguous; pass --author <pubkey> or --latest\n{}",
+                            "note name {slug:?} is ambiguous; pass --author <npub> or --latest\n{}",
                             format_note_candidates(&snapshots)
                         )));
                     }
@@ -719,10 +721,10 @@ pub async fn cmd_rm(client: &BuzzClient, slug: &str) -> Result<(), CliError> {
     // want a clear "nothing to delete" signal rather than emitting a kind:5
     // for a coordinate that was never published.
     let me = client.keys().public_key();
+    let me_npub = format_npub(&me.to_hex())?;
     if fetch_own_note(client, slug).await?.is_none() {
         return Err(CliError::NotFound(format!(
-            "no note {slug:?} found for you ({}); nothing to delete",
-            me.to_hex()
+            "no note {slug:?} found for you ({me_npub}); nothing to delete"
         )));
     }
 
@@ -979,6 +981,10 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("newer"));
         assert!(lines[1].contains("older"));
+        assert!(lines[0].contains("npub1"));
+        assert!(lines[1].contains("npub1"));
+        assert!(!out.contains(&keys_a.public_key().to_hex()));
+        assert!(!out.contains(&keys_b.public_key().to_hex()));
     }
 
     #[test]
@@ -1326,5 +1332,28 @@ mod tests {
             validate_get_args(false, true, true, true),
             Err(CliError::Usage(m)) if m.contains("mutually exclusive")
         ));
+    }
+
+    #[tokio::test]
+    async fn author_secret_shapes_are_rejected_before_relay_search() {
+        let client = crate::client::BuzzClient::new(
+            "http://127.0.0.1:9".to_string(),
+            Keys::generate(),
+            None,
+            None,
+        )
+        .expect("test client builds");
+
+        for supplied in [
+            "nsec1secret-shaped-input",
+            "nostr:nsec1secret-shaped-input",
+            "NSEC1SECRET-SHAPED-INPUT",
+        ] {
+            let error = resolve_author(&client, supplied)
+                .await
+                .expect_err("secret input must fail locally");
+            assert!(matches!(&error, CliError::Usage(_)));
+            assert!(!error.to_string().contains(supplied));
+        }
     }
 }

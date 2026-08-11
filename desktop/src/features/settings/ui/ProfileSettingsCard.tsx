@@ -19,6 +19,7 @@ import {
   parseEmojiAvatarDataUrl,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { cn } from "@/shared/lib/cn";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
@@ -302,7 +303,8 @@ export function ProfileSettingsCard({
     profile?.displayName ||
     fallbackDisplayName ||
     "Your profile";
-  const resolvedPubkey = profile?.pubkey ?? currentPubkey ?? "Unavailable";
+  const identityNpub = safeNpub(profile?.pubkey ?? currentPubkey ?? "");
+  const resolvedPubkey = identityNpub ?? "Unavailable";
   const nip05Handle = profile?.nip05Handle ?? "Not set";
   const emojiAvatarPreview = React.useMemo(
     () => parseEmojiAvatarDataUrl(avatarUrlDraft),
@@ -786,9 +788,7 @@ export function ProfileSettingsCard({
                               data-testid="profile-identity-details"
                             >
                               <IdentityRow
-                                copyValue={
-                                  profile?.pubkey ?? currentPubkey ?? undefined
-                                }
+                                copyValue={identityNpub ?? undefined}
                                 label="Public key"
                                 testId="profile-pubkey"
                                 value={resolvedPubkey}

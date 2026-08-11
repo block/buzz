@@ -36,4 +36,5 @@ tracing = { workspace = true }
 sqlx = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 clap = { version = "4", features = ["derive"] }

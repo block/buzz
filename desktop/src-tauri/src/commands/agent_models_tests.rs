@@ -642,15 +642,21 @@ fn databricks_passive_auth_error_has_reachable_create_flow_guidance() {
 fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     // get_agent_models is a user-facing surface: a dangling harness must
     // render as a sentence, never as the raw DANGLING_HARNESS_ID: sentinel.
+    let pubkey = Keys::generate().public_key().to_hex();
+    let pubkey_display = npub(&pubkey);
     let raw = format!("{}doomed", crate::managed_agents::DANGLING_HARNESS_PREFIX);
-    let msg = model_discovery_error("agent-pk", &raw);
-    assert!(msg.contains("cannot discover models for agent-pk"));
+    let msg = model_discovery_error(&pubkey, &raw);
+    assert!(msg.contains(&format!("cannot discover models for {pubkey_display}")));
+    assert!(!msg.contains(&pubkey));
     assert!(msg.contains("\"doomed\"") && msg.contains("deleted"));
     assert!(!msg.contains(crate::managed_agents::DANGLING_HARNESS_PREFIX));
 
     // Non-dangling errors pass through untouched.
-    let plain = model_discovery_error("agent-pk", "plain failure");
-    assert_eq!(plain, "cannot discover models for agent-pk: plain failure");
+    let plain = model_discovery_error(&pubkey, "plain failure");
+    assert_eq!(
+        plain,
+        format!("cannot discover models for {pubkey_display}: plain failure")
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -5,8 +5,9 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
-    infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    format_npub, infer_language, normalize_pubkey, parse_event_id, parse_uuid, read_or_stdin,
+    reject_secret_key_input, truncate_diff, validate_content_size, validate_hex64, validate_uuid,
+    MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -134,14 +135,22 @@ fn resolve_names_to_pubkeys(
             [] if has_explicit_mentions => {}
             [] => {
                 return Err(CliError::Usage(format!(
-                    "mention '@{name}' does not match a current channel member; retry with --mention <pubkey>"
+                    "mention '@{name}' does not match a current channel member; retry with --mention <npub>"
                 )))
             }
             _ if has_explicit_mentions => {}
             candidates => {
+                let candidates = candidates
+                    .iter()
+                    .map(|pubkey| match format_npub(pubkey) {
+                        Ok(npub) => npub,
+                        Err(_) => "<invalid-pubkey>".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(CliError::Usage(format!(
-                    "mention '@{name}' is ambiguous; candidates: {}. Retry with --mention <pubkey>",
-                    candidates.join(", ")
+                    "mention '@{name}' is ambiguous; candidates: {}. Retry with --mention <npub>",
+                    candidates
                 )))
             }
         }
@@ -228,9 +237,8 @@ async fn resolve_content_mentions(
 fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
     let mut normalized = Vec::new();
     for value in values {
-        let pubkey = PublicKey::parse(value.trim())
-            .map_err(|_| CliError::Usage(format!("invalid --mention pubkey: {value}")))?;
-        let hex = pubkey.to_hex();
+        let hex = normalize_pubkey(value)
+            .map_err(|_| CliError::Usage("invalid --mention: expected a valid npub".into()))?;
         if !normalized.contains(&hex) {
             normalized.push(hex);
         }
@@ -273,6 +281,10 @@ fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
         .filter(|pk| !members.contains(pk.as_str()))
         .cloned()
         .collect()
+}
+
+fn format_pubkeys_for_output(pubkeys: &[String]) -> Result<Vec<String>, CliError> {
+    pubkeys.iter().map(|pubkey| format_npub(pubkey)).collect()
 }
 
 fn event_mention_pubkeys(event: &nostr::Event) -> Vec<String> {
@@ -476,20 +488,19 @@ pub async fn cmd_search(
 
 /// Resolve an `--author` value to a 64-char hex pubkey.
 ///
-/// Accepts, in order of precedence: 64-char hex (validated), an `npub1…`
-/// bech32 key, or a display name resolved via NIP-50 profile search. A name
+/// Accepts, in order of precedence: an `npub1…` key (or compatibility-only
+/// hex), or a display name resolved via NIP-50 profile search. A name
 /// must match exactly one user (case-insensitive, on `display_name` or
 /// `name`) — ambiguity is an error listing the candidates rather than a
 /// silent mix of authors.
 async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, CliError> {
     let author = author.trim();
-    if author.len() == 64 && author.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(author.to_ascii_lowercase());
+    reject_secret_key_input(author)?;
+    if let Ok(pubkey) = normalize_pubkey(author) {
+        return Ok(pubkey);
     }
-    if author.starts_with("npub1") {
-        return nostr::PublicKey::parse(author)
-            .map(|pk| pk.to_hex())
-            .map_err(|_| CliError::Usage(format!("invalid npub: {author}")));
+    if author.starts_with("npub1") || author.starts_with("nostr:npub1") {
+        return Err(CliError::Usage("invalid npub".to_string()));
     }
 
     // Display name → NIP-50 search on kind:0, exact case-insensitive match.
@@ -503,7 +514,7 @@ async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, Cli
     let mut matches = match_profiles_by_name(&events, author);
     match matches.len() {
         0 => Err(CliError::Usage(format!(
-            "no user found with name '{author}' — pass a hex pubkey or npub instead"
+            "no user found with name '{author}' — pass an npub instead"
         ))),
         1 => Ok(matches.remove(0).0),
         _ => {
@@ -512,13 +523,16 @@ async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, Cli
             let shown = 5.min(matches.len());
             let mut listing: Vec<String> = matches[..shown]
                 .iter()
-                .map(|(pk, name)| format!("{name} ({pk})"))
+                .map(|(pk, name)| match format_npub(pk) {
+                    Ok(npub) => format!("{name} ({npub})"),
+                    Err(_) => format!("{name} (<invalid-pubkey>)"),
+                })
                 .collect();
             if matches.len() > shown {
                 listing.push(format!("… and {} more", matches.len() - shown));
             }
             Err(CliError::Usage(format!(
-                "name '{author}' is ambiguous — matches: {}. Pass a pubkey instead",
+                "name '{author}' is ambiguous — matches: {}. Pass an npub instead",
                 listing.join(", ")
             )))
         }
@@ -600,11 +614,12 @@ pub async fn cmd_send_message(
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() {
+        let missing = format_pubkeys_for_output(&missing)?;
         return Err(CliError::Usage(
             serde_json::json!({
-                "message": "mentioned pubkeys are not channel members; add them explicitly before retrying",
+                "message": "mentioned npubs are not channel members; add them explicitly before retrying",
                 "missing_member_pubkeys": missing,
-                "add_member_command": format!("buzz channels add-member --channel {} --pubkey <pubkey> --role <member|bot>", p.channel_id),
+                "add_member_command": format!("buzz channels add-member --channel {} --pubkey <npub> --role <member|bot>", p.channel_id),
             })
             .to_string(),
         ));
@@ -679,6 +694,7 @@ pub async fn cmd_send_message(
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
+    let emitted_mentions = format_pubkeys_for_output(&emitted_mentions)?;
     let resp = client.submit_event(event).await?;
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
         .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
@@ -993,10 +1009,12 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, format_pubkeys_for_output,
+        match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_author,
         resolve_names_to_pubkeys,
     };
+    use crate::validate::format_npub;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1235,6 +1253,12 @@ mod tests {
             vec![PK_VALID_A]
         );
         assert!(normalize_explicit_mentions(&["not-a-key".into()]).is_err());
+        let mistaken_secret = nostr::Keys::generate().secret_key().to_bech32().unwrap();
+        let error = normalize_explicit_mentions(std::slice::from_ref(&mistaken_secret))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(&mistaken_secret));
+        assert!(error.contains("expected a valid npub"));
     }
 
     #[test]
@@ -1260,8 +1284,14 @@ mod tests {
             Vec::<String>::new()
         );
         let error = resolve_names_to_pubkeys(&names, &profiles, false).unwrap_err();
-        assert!(error.to_string().contains(PK_VALID_A));
-        assert!(error.to_string().contains(PK_VALID_B));
+        assert!(error
+            .to_string()
+            .contains(&format_npub(PK_VALID_A).unwrap()));
+        assert!(error
+            .to_string()
+            .contains(&format_npub(PK_VALID_B).unwrap()));
+        assert!(!error.to_string().contains(PK_VALID_A));
+        assert!(!error.to_string().contains(PK_VALID_B));
     }
 
     #[test]
@@ -1299,6 +1329,30 @@ mod tests {
             ),
             vec![PK_VALID_B]
         );
+    }
+
+    #[test]
+    fn mention_output_lists_emit_npub_not_hex() {
+        let displayed = format_pubkeys_for_output(&[PK_VALID_A.into(), PK_VALID_B.into()])
+            .expect("mention identities format");
+        assert_eq!(displayed[0], format_npub(PK_VALID_A).unwrap());
+        assert_eq!(displayed[1], format_npub(PK_VALID_B).unwrap());
+        let serialized = serde_json::to_string(&displayed).unwrap();
+        assert!(!serialized.contains(PK_VALID_A));
+        assert!(!serialized.contains(PK_VALID_B));
+    }
+
+    #[test]
+    fn unresolved_mention_guidance_requests_npub() {
+        let error = resolve_names_to_pubkeys(
+            &["unknown".into()],
+            &std::collections::HashMap::new(),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--mention <npub>"));
+        assert!(!error.contains("<pubkey>"));
     }
 
     #[test]
@@ -1371,5 +1425,28 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn author_secret_shapes_are_rejected_before_relay_search() {
+        let client = crate::client::BuzzClient::new(
+            "http://127.0.0.1:9".to_string(),
+            nostr::Keys::generate(),
+            None,
+            None,
+        )
+        .expect("test client builds");
+
+        for supplied in [
+            "nsec1secret-shaped-input",
+            "nostr:nsec1secret-shaped-input",
+            "NOSTR:NSEC1SECRET-SHAPED-INPUT",
+        ] {
+            let error = resolve_author(&client, supplied)
+                .await
+                .expect_err("secret input must fail locally");
+            assert!(matches!(&error, crate::error::CliError::Usage(_)));
+            assert!(!error.to_string().contains(supplied));
+        }
     }
 }

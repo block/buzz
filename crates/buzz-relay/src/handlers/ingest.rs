@@ -36,6 +36,7 @@ use buzz_core::kind::{
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
+use buzz_core::nostr_identity::public_key_to_npub_or_invalid;
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
@@ -2424,7 +2425,7 @@ async fn ingest_event_inner(
             warn!(error = %e, "failed to publish NIP-43 membership list");
         }
 
-        info!(pubkey = %sender_hex, "relay member left via NIP-43 leave request");
+        info!(pubkey = %public_key_to_npub_or_invalid(&event.pubkey), "relay member left via NIP-43 leave request");
 
         return Ok(IngestResult {
             event_id: event_id_hex,

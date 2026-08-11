@@ -1,5 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import type { Identity, IdentityStorage } from "@/shared/api/types";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 
 type RawIdentity = {
   pubkey: string;
@@ -11,8 +12,10 @@ type RawIdentity = {
 };
 
 function fromRawIdentity(raw: RawIdentity): Identity {
+  const pubkey = parsePubkeyInput(raw.pubkey);
+  if (!pubkey) throw new Error("Desktop returned an invalid identity npub");
   return {
-    pubkey: raw.pubkey,
+    pubkey,
     displayName: raw.display_name,
     storage: raw.storage,
     lost: raw.lost === true,
@@ -88,8 +91,8 @@ export async function saveNcryptsecCopy(
 }
 
 export type BackupVerification = {
+  /** Canonical npub returned by the native backup verifier. */
   pubkey: string;
-  npub: string;
   matchesCurrentIdentity: boolean;
 };
 

@@ -26,6 +26,8 @@ pub mod invite;
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.
 pub mod network;
+/// Human-facing Nostr identity parsing and NIP-19 formatting helpers.
+pub mod nostr_identity;
 /// Agent observer frame helpers.
 pub mod observer;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.

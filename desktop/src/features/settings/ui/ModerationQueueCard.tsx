@@ -31,7 +31,7 @@ import {
   type SeverityTier,
 } from "@/features/settings/lib/moderationQueue";
 import { cn } from "@/shared/lib/cn";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateHexId, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -192,14 +192,13 @@ const SEVERITY_BADGE: Record<SeverityTier, string> = {
 };
 
 function targetLabel(group: ModerationQueueGroup): string {
-  const short = truncatePubkey(group.target);
   switch (group.targetKind) {
     case "event":
-      return `Message ${short}`;
+      return `Message ${truncateHexId(group.target)}`;
     case "pubkey":
-      return `Member ${short}`;
+      return `Member ${truncatePubkey(group.target)}`;
     case "blob":
-      return `Attachment ${short}`;
+      return `Attachment ${truncateHexId(group.target)}`;
   }
 }
 
@@ -470,7 +469,7 @@ function AuditRow({
   const targetShort = action.targetPubkey
     ? truncatePubkey(action.targetPubkey)
     : action.targetEventId
-      ? truncatePubkey(action.targetEventId)
+      ? truncateHexId(action.targetEventId)
       : null;
   return (
     <div

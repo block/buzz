@@ -233,6 +233,7 @@ test("stripConfigNudgeSentinel removes preceding blank line", () => {
 //     (simulated inline to keep the test self-contained without React).
 
 import { normalizePubkey } from "./pubkey.ts";
+import { pubkeyToNpub } from "./nostrUtils.ts";
 
 /**
  * Simulate the auth guard in MarkdownInner's configNudge useMemo.
@@ -253,6 +254,8 @@ function authGuardedExtract(content, configNudgeAuthorPubkey) {
 
 const FIZZ_PUBKEY_AUTH = "aabbccddeeff0011223344556677889900aabbcc";
 const OTHER_PUBKEY = "ffffffffffffffffffffffffffffffffffffffff";
+const VALID_AGENT_HEX =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
 function makeNudgeBody(agentPubkey) {
   const payload = {
@@ -304,6 +307,23 @@ test("authGuard_matchingAuthor_returnsPayload", () => {
   const result = authGuardedExtract(body, FIZZ_PUBKEY_AUTH);
   assert.notEqual(result, null, "matching author must yield the payload");
   assert.equal(result?.agent_pubkey, FIZZ_PUBKEY_AUTH);
+});
+
+test("authGuard_canonicalNpubPayload_matchesProtocolHexAuthor", () => {
+  const agentNpub = pubkeyToNpub(VALID_AGENT_HEX);
+  const body = makeNudgeBody(agentNpub);
+  const result = authGuardedExtract(body, VALID_AGENT_HEX);
+
+  assert.notEqual(
+    result,
+    null,
+    "canonical npub must authenticate against event hex",
+  );
+  assert.equal(result?.agent_pubkey, agentNpub);
+  assert.ok(
+    !body.includes(VALID_AGENT_HEX),
+    "sentinel must not emit agent hex",
+  );
 });
 
 test("authGuard_matchingAuthor_caseInsensitive", () => {

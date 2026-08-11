@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/message_content.dart';
@@ -53,7 +54,7 @@ class ForumPostCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? _shortPubkey(post.pubkey);
+    final displayName = profile?.label ?? shortPubkey(post.pubkey);
     final profileMentionNames = ref.watch(
       userCacheProvider.select(
         (cache) => _buildMentionNames(post.mentionPubkeys, cache),
@@ -313,8 +314,7 @@ class _PostAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
+    final initial = profile?.initial ?? pubkeyAvatarInitial(pubkey);
     final avatarUrl = profile?.avatarUrl;
 
     return AvatarImage(
@@ -330,11 +330,6 @@ class _PostAvatar extends StatelessWidget {
       ),
     );
   }
-}
-
-String _shortPubkey(String pubkey) {
-  if (pubkey.length > 12) return '${pubkey.substring(0, 8)}\u2026';
-  return pubkey;
 }
 
 Map<String, String> _buildMentionNames(

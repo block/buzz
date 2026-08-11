@@ -31,7 +31,7 @@ spec:
         name: buzz
   values:
     relayUrl: wss://buzz.example.com
-    ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"  # replace
+    ownerPubkey: "REPLACE_WITH_NPUB"
     replicaCount: 3
 
     secrets:

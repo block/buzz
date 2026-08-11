@@ -31,6 +31,7 @@ import { useCreateProjectIssueMutation } from "@/features/projects/issueMutation
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -504,13 +505,24 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const {
     handleCloseProfilePanel,
     handleOpenDm,
-    handleOpenProfilePanel,
+    handleOpenProfilePanel: handleOpenProfilePanelValue,
     handleProfilePanelTabChange,
     handleProfilePanelViewChange,
-    profilePanelPubkey,
+    profilePanelPubkey: profilePanelValue,
     profilePanelTab,
     profilePanelView,
   } = useProjectProfilePanel();
+  const profilePanelPubkey = profilePanelValue
+    ? parsePubkeyInput(profilePanelValue)
+    : null;
+  const handleOpenProfilePanel = React.useCallback(
+    (pubkey: string) => {
+      const profile = safeNpub(pubkey);
+      if (!profile) return;
+      handleOpenProfilePanelValue(profile);
+    },
+    [handleOpenProfilePanelValue],
+  );
   const { activeRightPanelWidth, threadPanelWidth } = useProjectPanelWidths(
     repositoryPanel.mode,
   );

@@ -3,7 +3,7 @@
 Gated by BUZZ_TESTBED_LIVE=1 with stack coordinates in the environment:
   BUZZ_TESTBED_RELAY_HTTP   (default http://localhost:3000)
   BUZZ_TESTBED_RELAY_WS     (default ws://host.docker.internal:3000)
-  BUZZ_TESTBED_OWNER_KEY    relay owner secret key (hex)
+  BUZZ_TESTBED_OWNER_KEY    relay owner secret key (nsec)
   BUZZ_TESTBED_PG_DSN       benchmark Postgres DSN
 """
 

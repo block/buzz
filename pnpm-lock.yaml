@@ -29,6 +29,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.0
         version: 6.0.5(vite@8.0.16(@types/node@25.6.0)(jiti@2.7.0)(yaml@2.9.0))
+      nostr-tools:
+        specifier: ^2.23.3
+        version: 2.23.12(typescript@6.0.3)
       react:
         specifier: ^19.1.0
         version: 19.2.8
