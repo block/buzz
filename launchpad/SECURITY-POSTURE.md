@@ -197,9 +197,9 @@ scanning and push protection are even switched on cannot be answered without adm
 in [What is true today](#what-is-true-today). Compliance therefore rests on the attention
 of whoever is writing, which
 [#62](https://github.com/launchpad-26/buzz/issues/62) already measured and declined to
-treat as a control: the near-misses it records were "all caught by human attention alone",
-and "Three catches in one session is not evidence that attention works; it is evidence of
-the rate at which this material is generated."
+treat as a control. Of the near-misses it records: "All three were caught by human
+attention alone." Its verdict on that: "Three catches in one session is not evidence that
+attention works; it is evidence of the rate at which this material is generated."
 
 ---
 
