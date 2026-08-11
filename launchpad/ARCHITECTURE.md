@@ -57,6 +57,7 @@ The diagram is a topology, not a deployment. What is actually running on 2026-08
 | Desktop, mobile and web clients | upstream `block/buzz` | `IMPLEMENTED` upstream |
 | Agent harness `buzz-acp` → `buzz-agent` → `buzz-dev-mcp` | upstream `block/buzz` | `IMPLEMENTED` upstream |
 | Relay deployment and host configuration | cohort | `OPEN` — [#5](https://github.com/launchpad-26/buzz/issues/5), [#22](https://github.com/launchpad-26/buzz/issues/22), [#24](https://github.com/launchpad-26/buzz/issues/24) |
+| Relay datastores — PostgreSQL, Redis, and object storage such as MinIO | cohort | `OPEN` — [#5](https://github.com/launchpad-26/buzz/issues/5) |
 | Containment at the agent execution boundary | cohort | `OPEN` — [#43](https://github.com/launchpad-26/buzz/issues/43) |
 | Upstream intelligence | cohort | `OPEN` — [#3](https://github.com/launchpad-26/buzz/issues/3) |
 | Knowledge layer | cohort | `OPEN` — [#4](https://github.com/launchpad-26/buzz/issues/4) |
@@ -73,6 +74,15 @@ The upstream components above are directories in this repository:
 cohort operates them and does not change them — see
 [`AGENTS.md`](AGENTS.md) §1.
 
+The datastore row is drawn because the relay's state is load-bearing rather than
+incidental: the `communities` row each environment depends on is a Postgres table created
+by [`migrations/0001_initial_schema.sql`](../migrations/0001_initial_schema.sql), and the
+consequence of it being absent is in
+[ENVIRONMENTS.md § What must never differ between them](ENVIRONMENTS.md#what-must-never-differ-between-them).
+The component names are those in
+[#5](https://github.com/launchpad-26/buzz/issues/5)'s Evidence section; the marker is
+`OPEN` because the cohort has deployed none of them.
+
 The split of concerns between this repository and `launchpad-26/rhizomorph` is recorded in
 [VISION.md § Relationship to rhizomorph](VISION.md#relationship-to-rhizomorph) and is not
 restated here.
@@ -86,7 +96,7 @@ different statuses, and are kept apart here on purpose.
 
 | Claim | Status |
 |---|---|
-| Buzz can initiate an agent and run it as the `buzz-acp` → `buzz-agent` → `buzz-dev-mcp` process tree, carrying the production MCP toolset — shell, file tools, and the `buzz` CLI on the shell's `PATH` | `IMPLEMENTED` upstream — [`benchmarks/harbor-buzz-orchestra/README.md`](../benchmarks/harbor-buzz-orchestra/README.md), [`crates/buzz-acp`](../crates/buzz-acp), [`crates/buzz-agent`](../crates/buzz-agent), [`crates/buzz-dev-mcp`](../crates/buzz-dev-mcp) |
+| Buzz can initiate an agent and run it as the `buzz-acp` → `buzz-agent` → `buzz-dev-mcp` process tree, carrying the production MCP toolset — shell, file tools, todo — with the `buzz` CLI on the shell's `PATH` | `IMPLEMENTED` upstream — [`benchmarks/harbor-buzz-orchestra/README.md`](../benchmarks/harbor-buzz-orchestra/README.md), [`crates/buzz-acp`](../crates/buzz-acp), [`crates/buzz-agent`](../crates/buzz-agent), [`crates/buzz-dev-mcp`](../crates/buzz-dev-mcp) |
 | The cohort initiating agents on its own relay and executing them on contributors' machines | `OPEN` — [#43](https://github.com/launchpad-26/buzz/issues/43) |
 
 Those markers cover only the rows present when this section was written; a claim added

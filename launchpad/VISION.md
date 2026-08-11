@@ -39,7 +39,9 @@ use running it as the way we learn to operate real systems. Beyond that, the int
 Buzz to become an operational intelligence and knowledge platform for the cohort, rather
 than only the software the cohort happens to be running.
 
-Synthesised from [`AGENTS.md` §1](AGENTS.md), milestone M0 and milestone M1. Marked
+Synthesised from [`AGENTS.md` §1](AGENTS.md),
+[milestone M0](https://github.com/launchpad-26/buzz/milestone/1) and
+[milestone M1](https://github.com/launchpad-26/buzz/milestone/2). Marked
 `PROPOSED` rather than `DECIDED` because nobody has written or confirmed these particular
 sentences: [#42](https://github.com/launchpad-26/buzz/issues/42) requires the vision to be
 written or confirmed by a human, and approving this document's pull request is what
@@ -64,10 +66,10 @@ The section-level marker above covers only the rows present when this section wa
 written. A row added later does not inherit it — give any new reason its own status
 marker and its own link to evidence.
 
-The wording of "One surface for humans, agents and knowledge" comes from milestone M1,
-whose completion statement is the cohort being able to answer those two questions "without
-first needing to know which repository, changelog, issue, PR or documentation file
-contains the answer."
+The wording of "One surface for humans, agents and knowledge" comes from
+[milestone M1](https://github.com/launchpad-26/buzz/milestone/2), whose completion
+statement is the cohort being able to answer those two questions "without first needing to
+know which repository, changelog, issue, PR or documentation file contains the answer."
 
 ---
 
@@ -111,12 +113,12 @@ Every row below is sourced, and every status was checked against the live issue 
 
 | Constraint | Status | Source |
 |---|---|---|
-| The repository is public; every tracked file is world-readable | `IMPLEMENTED` | `launchpad/AGENTS.md` §8 |
-| No secrets, keys, tokens, private hostnames or member rosters in tracked files | `IMPLEMENTED` | `launchpad/AGENTS.md` §8 and [#42](https://github.com/launchpad-26/buzz/issues/42) |
-| The cohort operates Buzz and does not develop it; product bugs go upstream | `IMPLEMENTED` | `launchpad/AGENTS.md` §1 |
-| Upstream files are never moved or renamed; cohort files live under `launchpad/` | `IMPLEMENTED` | `launchpad/AGENTS.md` §3 |
-| Stable knowledge is a document; active work is an issue | `IMPLEMENTED` | `launchpad/AGENTS.md` §2 |
-| Agents draft everything and approve nothing | `IMPLEMENTED` | `launchpad/AGENTS.md` §5 rule 1 |
+| The repository is public; every tracked file is world-readable | `IMPLEMENTED` | [`launchpad/AGENTS.md` §8](AGENTS.md) |
+| No secrets, keys, tokens, private hostnames or member rosters in tracked files | `IMPLEMENTED` as a binding rule, not as a checked property of the repository — [SECURITY-POSTURE.md § The public-repository rule](SECURITY-POSTURE.md#the-public-repository-rule) | [`launchpad/AGENTS.md` §8](AGENTS.md) and [#42](https://github.com/launchpad-26/buzz/issues/42) |
+| The cohort operates Buzz and does not develop it; product bugs go upstream | `IMPLEMENTED` | [`launchpad/AGENTS.md` §1](AGENTS.md) |
+| Upstream files are never moved or renamed; cohort files live under `launchpad/` | `IMPLEMENTED` | [`launchpad/AGENTS.md` §3](AGENTS.md) |
+| Stable knowledge is a document; active work is an issue | `IMPLEMENTED` | [`launchpad/AGENTS.md` §2](AGENTS.md) |
+| Agents draft everything and approve nothing | `IMPLEMENTED` | [`launchpad/AGENTS.md` §5 rule 1](AGENTS.md) |
 | One VPS of cohort scale; whether the stack fits the proposed sizing is unmeasured | `OPEN` | [#18](https://github.com/launchpad-26/buzz/issues/18), [#21](https://github.com/launchpad-26/buzz/issues/21) |
 | Routine deployment without distributing root credentials to cohort members | `OPEN` | [#5](https://github.com/launchpad-26/buzz/issues/5), [#25](https://github.com/launchpad-26/buzz/issues/25) |
 
@@ -139,14 +141,14 @@ their own issues.
 
 | Measure | Status | Source |
 |---|---|---|
-| Multiple cohort members can connect to a usable internet-facing Buzz server and communicate through it | `DECIDED` | milestone M0 |
-| The server is hardened around least privilege, minimal exposure and explicit trust | `DECIDED` | milestone M0 |
-| Running it does not require routine sharing of root credentials | `DECIDED` | milestone M0 |
-| The server can be deployed and maintained through automation | `DECIDED` | milestone M0 |
-| The server can be rebuilt from a bare supported Ubuntu host if the existing one is lost | `DECIDED` | milestone M0 |
-| The outcome is a shared Buzz platform the cohort can safely depend on and recreate — not merely "Buzz is running" | `DECIDED` | milestone M0 |
-| The cohort can answer "What is changing?" without first knowing which repository, changelog, issue, PR or documentation file holds the answer | `DECIDED` | milestone M1 |
-| The cohort can answer "How does this work?" on the same terms | `DECIDED` | milestone M1 |
+| Multiple cohort members can connect to a usable internet-facing Buzz server and communicate through it | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| The server is hardened around least privilege, minimal exposure and explicit trust | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| Running it does not require routine sharing of root credentials | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| The server can be deployed and maintained through automation | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| The server can be rebuilt from a bare supported Ubuntu host if the existing one is lost | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| The outcome is a shared Buzz platform the cohort can safely depend on and recreate — not merely "Buzz is running" | `DECIDED` | [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| The cohort can answer "What is changing?" without first knowing which repository, changelog, issue, PR or documentation file holds the answer | `DECIDED` | [milestone M1](https://github.com/launchpad-26/buzz/milestone/2) |
+| The cohort can answer "How does this work?" on the same terms | `DECIDED` | [milestone M1](https://github.com/launchpad-26/buzz/milestone/2) |
 | Agents initiated on the relay do useful work assisting development of `launchpad-26/rhizomorph` | `PROPOSED` | beyond both current milestones; direction recorded in [#42](https://github.com/launchpad-26/buzz/issues/42) |
 
 `DECIDED` here means the measure is agreed and recorded on its milestone, and is not met
@@ -158,12 +160,12 @@ yet. None of these is `IMPLEMENTED`.
 
 | Concern | In this cohort's scope? | Status |
 |---|---|---|
-| Deploying Buzz and configuring the host it runs on | Yes | `DECIDED` — milestone M0 |
-| Operating the relay and the community running on it | Yes | `DECIDED` — milestone M0 |
+| Deploying Buzz and configuring the host it runs on | Yes | `DECIDED` — [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
+| Operating the relay and the community running on it | Yes | `DECIDED` — [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) |
 | Documenting what the cohort is doing with Buzz and why | Yes | `IMPLEMENTED` for this document; the wider set is [#42](https://github.com/launchpad-26/buzz/issues/42) |
-| Automating deployment, CI/CD and agent workflows around Buzz | Yes | `DECIDED` — milestone M0 and milestone M1 |
+| Automating deployment, CI/CD and agent workflows around Buzz | Yes | `DECIDED` — [milestone M0](https://github.com/launchpad-26/buzz/milestone/1) and [milestone M1](https://github.com/launchpad-26/buzz/milestone/2) |
 | Developing Buzz itself — Rust crates, desktop, mobile | No. Genuine product bugs go to [`block/buzz` issues](https://github.com/block/buzz/issues) | `IMPLEMENTED` — [`AGENTS.md` §1](AGENTS.md) |
-| Publishing the knowledge layer — the MkDocs surface, page contract, provenance gates and synthesised content | No. Owned by [#4](https://github.com/launchpad-26/buzz/issues/4) on milestone M1, per [#42](https://github.com/launchpad-26/buzz/issues/42)'s non-goals | `OPEN` — [#4](https://github.com/launchpad-26/buzz/issues/4) |
+| Publishing the knowledge layer — the MkDocs surface, page contract, provenance gates and synthesised content | No. Owned by [#4](https://github.com/launchpad-26/buzz/issues/4) on [milestone M1](https://github.com/launchpad-26/buzz/milestone/2), per [#42](https://github.com/launchpad-26/buzz/issues/42)'s non-goals | `OPEN` — [#4](https://github.com/launchpad-26/buzz/issues/4) |
 
 This document produces source material a later synthesis can draw from. If its content
 ends up published, it is published by [#4](https://github.com/launchpad-26/buzz/issues/4)'s

@@ -26,8 +26,8 @@ not restated here.
 | Cohort VPS | The shared internet-facing relay | `OPEN` | [#21](https://github.com/launchpad-26/buzz/issues/21), [#22](https://github.com/launchpad-26/buzz/issues/22) |
 | Contributors' machines | Where relay-initiated agent work executes | `OPEN` | [#43](https://github.com/launchpad-26/buzz/issues/43) |
 
-No hostnames. `AGENTS.md` §8 forbids private hostnames in tracked files, and the VPS
-hostname is not decided anyway.
+No hostnames. [`AGENTS.md` §8](AGENTS.md) forbids private hostnames in tracked files, and
+the VPS hostname is not decided anyway.
 
 The status markers above cover only the rows present when this section was written. A
 new environment is a new row, and it carries its own status marker and its own tracking

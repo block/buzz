@@ -124,6 +124,10 @@ need one approving review — the branch is protected and you can't approve your
 | [`README.md`](README.md) | This file — start here |
 | [`AGENTS.md`](AGENTS.md) | Normative spec: types, rules, agent constraints, git workflow |
 | [`AGENT_PR_TEMPLATE.md`](AGENT_PR_TEMPLATE.md) | PR body schema for agent-authored PRs |
+| [`VISION.md`](VISION.md) | What this cohort is building on Buzz, for whom, and what "done" looks like |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Target architecture: what runs where, who owns which part, what does not exist yet |
+| [`ENVIRONMENTS.md`](ENVIRONMENTS.md) | Where Buzz runs, what each place proves, and what must hold in all of them |
+| [`SECURITY-POSTURE.md`](SECURITY-POSTURE.md) | Where security controls stand today, which risks are accepted, and the gap nothing owns |
 | [`labels.yml`](labels.yml) | Label source of truth |
 | [`sync-labels.sh`](sync-labels.sh) | Applies `labels.yml` to the repo |
 | `decisions/` | ADRs, once accepted |
