@@ -33,6 +33,7 @@ pub(super) const RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     supports_acp_native_config: false,
     thinking_env_var: None,
     max_tokens_env_var: None,
+    max_rounds_env_var: None,
     context_limit_env_var: None,
     required_normalized_fields: &[],
     login_hint: None,

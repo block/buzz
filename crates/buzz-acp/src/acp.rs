@@ -211,6 +211,13 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Accumulated `agent_message_chunk` text for the in-flight prompt turn.
+    /// Used as a fallback chat reply when the agent ends the turn without
+    /// calling `buzz messages send` — model text is otherwise invisible.
+    turn_assistant_text: String,
+    /// True when this turn already issued a tool that looks like a channel
+    /// message publish (`buzz messages send`). Suppresses the auto-post fallback.
+    turn_posted_via_tool: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -550,6 +557,8 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_assistant_text: String::new(),
+            turn_posted_via_tool: false,
         })
     }
 
@@ -776,6 +785,9 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        // Fresh capture buffers for auto-post fallback at end of turn.
+        self.turn_assistant_text.clear();
+        self.turn_posted_via_tool = false;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -1733,6 +1745,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.turn_assistant_text.push_str(text);
                 }
                 false
             }
@@ -1746,6 +1759,9 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if looks_like_messages_send_tool(update) {
+                    self.turn_posted_via_tool = true;
+                }
                 true
             }
             "tool_call_update" => {
@@ -1755,6 +1771,10 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // Catch shell tools that only reveal the full command on update.
+                if looks_like_messages_send_tool(update) {
+                    self.turn_posted_via_tool = true;
+                }
                 false
             }
             "plan" => {
@@ -1932,6 +1952,37 @@ impl AcpClient {
         StopReason::from_str(raw)
             .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
     }
+
+    /// Take the assistant text accumulated this turn and whether the agent
+    /// already posted via a tool. Clears the capture buffers.
+    pub(crate) fn take_turn_chat_capture(&mut self) -> TurnChatCapture {
+        TurnChatCapture {
+            assistant_text: std::mem::take(&mut self.turn_assistant_text),
+            posted_via_tool: std::mem::take(&mut self.turn_posted_via_tool),
+        }
+    }
+}
+
+/// Capture of model-visible text + whether the agent already published via tools.
+#[derive(Debug, Default)]
+pub(crate) struct TurnChatCapture {
+    pub assistant_text: String,
+    pub posted_via_tool: bool,
+}
+
+/// True when a tool_call / tool_call_update looks like a channel message publish.
+fn looks_like_messages_send_tool(update: &serde_json::Value) -> bool {
+    let title = update
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if title.contains("messages send") || title.contains("messages_send") {
+        return true;
+    }
+    // Shell tools often put the full command in rawInput / content.
+    let blob = update.to_string().to_ascii_lowercase();
+    blob.contains("messages send") || blob.contains("messages_send")
 }
 
 /// Build `session/prompt` params from one or more text content blocks.

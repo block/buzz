@@ -52,6 +52,17 @@ export function getThreadReference(tags: string[][]): ThreadReference {
 }
 
 /**
+ * Thread head used for typing/working indicators.
+ *
+ * Prefer the root e-tag so nested-reply typing still lights the open thread
+ * panel (which keys on the thread head, not the immediate parent).
+ */
+export function getTypingThreadHeadId(tags: string[][]): string | null {
+  const ref = getThreadReference(tags);
+  return ref.rootId ?? ref.parentId ?? null;
+}
+
+/**
  * Best-effort client-side normalization of mention pubkeys: lowercase, deduplicate, skip self.
  * The relay performs authoritative validation (hex format, 64-char length, cap of 50)
  * on top of the same normalization — this helper keeps optimistic UI tags consistent.

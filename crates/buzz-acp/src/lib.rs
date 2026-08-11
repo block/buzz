@@ -2214,7 +2214,7 @@ async fn tokio_main() -> Result<()> {
                 for (channel_id, thread_tags) in
                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                 {
-                    typing_channels.insert(channel_id, thread_tags);
+                    track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                 }
             }
         }
@@ -2252,7 +2252,7 @@ async fn tokio_main() -> Result<()> {
             for (channel_id, thread_tags) in
                 dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
             {
-                typing_channels.insert(channel_id, thread_tags);
+                track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
             }
         }
 
@@ -2767,7 +2767,7 @@ async fn tokio_main() -> Result<()> {
                                 for (channel_id, thread_tags) in
                                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                                 {
-                                    typing_channels.insert(channel_id, thread_tags);
+                                    track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                                 }
                             }
                         }
@@ -2817,7 +2817,7 @@ async fn tokio_main() -> Result<()> {
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                         {
-                            typing_channels.insert(channel_id, thread_tags);
+                            track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                         }
                     } else if pool.any_idle() {
                         dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
@@ -2857,15 +2857,7 @@ async fn tokio_main() -> Result<()> {
                     // they're ephemeral and must not block the main loop during
                     // relay reconnection (#35).
                     for (&ch, thread_tags) in &typing_channels {
-                        if let Ok(event) = relay.build_typing_event(
-                            ch,
-                            thread_tags.root_event_id.as_deref(),
-                            thread_tags.parent_event_id.as_deref(),
-                        ) {
-                            if let Err(e) = relay.try_publish_event(event) {
-                                tracing::debug!("typing indicator dropped for {ch}: {e}");
-                            }
-                        }
+                        publish_typing_indicator(&relay, ch, thread_tags);
                     }
                     None
                 }
@@ -2916,7 +2908,7 @@ async fn tokio_main() -> Result<()> {
                 for (channel_id, thread_tags) in
                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                 {
-                    typing_channels.insert(channel_id, thread_tags);
+                    track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
@@ -2941,7 +2933,7 @@ async fn tokio_main() -> Result<()> {
                 for (channel_id, thread_tags) in
                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                 {
-                    typing_channels.insert(channel_id, thread_tags);
+                    track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
@@ -3085,7 +3077,7 @@ async fn tokio_main() -> Result<()> {
                 for (channel_id, thread_tags) in
                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                 {
-                    typing_channels.insert(channel_id, thread_tags);
+                    track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                 }
             }
             Some(PoolEvent::Wake(attempt, result)) => {
@@ -3113,7 +3105,7 @@ async fn tokio_main() -> Result<()> {
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                         {
-                            typing_channels.insert(channel_id, thread_tags);
+                            track_channel_typing(&mut typing_channels, &relay, channel_id, thread_tags);
                         }
                     }
                     Err(error) => {
@@ -3436,6 +3428,33 @@ fn try_native_steer(
             false
         }
     }
+}
+
+/// Publish one kind:20002 typing indicator for a channel (best-effort, non-blocking).
+///
+/// Used both by the 3s refresh ticker and immediately when a turn starts so
+/// clients show a thinking/working state before the first interval fires.
+fn publish_typing_indicator(relay: &HarnessRelay, channel_id: Uuid, thread_tags: &ThreadTags) {
+    if let Ok(event) = relay.build_typing_event(
+        channel_id,
+        thread_tags.root_event_id.as_deref(),
+        thread_tags.parent_event_id.as_deref(),
+    ) {
+        if let Err(e) = relay.try_publish_event(event) {
+            tracing::debug!("typing indicator dropped for {channel_id}: {e}");
+        }
+    }
+}
+
+/// Record that a channel has an in-flight turn and emit a typing tick now.
+fn track_channel_typing(
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    relay: &HarnessRelay,
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+) {
+    typing_channels.insert(channel_id, thread_tags.clone());
+    publish_typing_indicator(relay, channel_id, &thread_tags);
 }
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────

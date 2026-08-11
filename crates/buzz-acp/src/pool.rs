@@ -2174,6 +2174,13 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        maybe_auto_post_turn_reply(
+                            &ctx,
+                            &mut agent,
+                            &source,
+                            &batch,
+                            &StopReason::EndTurn,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2236,6 +2243,10 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            // If the model produced chat text but never called `buzz messages send`,
+            // publish it as a kind:9 so the room is not left empty (observer-only).
+            maybe_auto_post_turn_reply(&ctx, &mut agent, &source, &batch, &stop_reason);
 
             send_prompt_result(
                 &result_tx,
@@ -3960,38 +3971,146 @@ pub(crate) async fn post_failure_notice(
     thread_tags: &ThreadTags,
     content: &str,
 ) {
-    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
-        let root_id = nostr::EventId::from_hex(root).ok()?;
-        let parent_id = thread_tags
-            .parent_event_id
-            .as_deref()
-            .and_then(|p| nostr::EventId::from_hex(p).ok())
-            .unwrap_or(root_id);
-        Some(buzz_sdk::ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: parent_id,
-        })
-    });
+    post_channel_message(rest, channel_id, thread_tags, None, content, "failure notice").await;
+}
+
+/// Best-effort: publish the model’s streamed text as a kind:9 when a turn ends
+/// without `buzz messages send`. Without this, agent_message_chunk is only in
+/// logs/observer and the channel looks like a silent failure.
+pub(crate) async fn post_turn_reply(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    trigger_event_id: Option<&str>,
+    content: &str,
+) {
+    post_channel_message(
+        rest,
+        channel_id,
+        thread_tags,
+        trigger_event_id,
+        content,
+        "turn reply",
+    )
+    .await;
+}
+
+async fn post_channel_message(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    trigger_event_id: Option<&str>,
+    content: &str,
+    label: &str,
+) {
+    let thread_ref = resolve_reply_thread_ref(thread_tags, trigger_event_id);
     let builder =
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                tracing::warn!(channel = %channel_id, "{label}: build failed: {e}");
                 return;
             }
         };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, "{label}: sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Ok(_)) => {
+            tracing::info!(channel = %channel_id, "{label}: published kind:9");
+        }
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "{label} failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "{label} timed out"),
     }
+}
+
+/// Prefer existing thread tags; otherwise open a thread under the trigger event.
+fn resolve_reply_thread_ref(
+    thread_tags: &ThreadTags,
+    trigger_event_id: Option<&str>,
+) -> Option<buzz_sdk::ThreadRef> {
+    if let Some(root) = thread_tags.root_event_id.as_deref() {
+        let root_id = nostr::EventId::from_hex(root).ok()?;
+        let parent_id = thread_tags
+            .parent_event_id
+            .as_deref()
+            .and_then(|p| nostr::EventId::from_hex(p).ok())
+            .unwrap_or(root_id);
+        return Some(buzz_sdk::ThreadRef {
+            root_event_id: root_id,
+            parent_event_id: parent_id,
+        });
+    }
+    let trigger = trigger_event_id?;
+    let id = nostr::EventId::from_hex(trigger).ok()?;
+    Some(buzz_sdk::ThreadRef {
+        root_event_id: id,
+        parent_event_id: id,
+    })
+}
+
+/// Publish model text as a channel reply when the agent finished without
+/// calling `buzz messages send`. Heartbeats and empty buffers are no-ops.
+fn maybe_auto_post_turn_reply(
+    ctx: &PromptContext,
+    agent: &mut OwnedAgent,
+    source: &PromptSource,
+    batch: &Option<FlushBatch>,
+    stop_reason: &StopReason,
+) {
+    // Only successful completed turns — never on cancel/refusal/error.
+    if !matches!(
+        stop_reason,
+        StopReason::EndTurn | StopReason::MaxTokens | StopReason::MaxTurnRequests
+    ) {
+        return;
+    }
+    let PromptSource::Channel(channel_id) = source else {
+        return;
+    };
+    let Some(batch) = batch.as_ref() else {
+        return;
+    };
+    let capture = agent.acp.take_turn_chat_capture();
+    if capture.posted_via_tool {
+        return;
+    }
+    let text = capture.assistant_text.trim();
+    if text.is_empty() {
+        return;
+    }
+    // Cap runaway model dumps.
+    let content = if text.chars().count() > 12_000 {
+        let truncated: String = text.chars().take(12_000).collect();
+        format!("{truncated}\n\n…(truncated)")
+    } else {
+        text.to_string()
+    };
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|be| crate::queue::parse_thread_tags(&be.event))
+        .unwrap_or_default();
+    let trigger_id = batch
+        .events
+        .last()
+        .map(|be| be.event.id.to_hex());
+    let rest = ctx.rest_client.clone();
+    let channel_id = *channel_id;
+    tokio::spawn(async move {
+        post_turn_reply(
+            &rest,
+            channel_id,
+            &thread_tags,
+            trigger_id.as_deref(),
+            &content,
+        )
+        .await;
+    });
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.

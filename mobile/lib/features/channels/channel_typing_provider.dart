@@ -67,9 +67,12 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
 
   void _handleTypingEvent(NostrEvent event) {
     final now = DateTime.now().millisecondsSinceEpoch;
+    // Scope to the thread root (not immediate parent) so nested-reply typing
+    // still matches the open thread head and keeps the thinking indicator lit.
+    final threadRef = event.threadReference;
     final entry = TypingEntry(
       pubkey: event.pubkey,
-      threadHeadId: event.getTagValue('e'),
+      threadHeadId: threadRef.rootId ?? threadRef.parentId,
       expiresAtMs: now + _ttlMs,
     );
 

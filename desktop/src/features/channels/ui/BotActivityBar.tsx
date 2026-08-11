@@ -2,11 +2,7 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
-import {
-  getActivityHeadline,
-  isMeaningfulItem,
-  isSpineItem,
-} from "@/features/agents/ui/agentSessionTranscriptPresentation";
+import { collectActivityHeadlines } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -61,37 +57,7 @@ export function BotActivityComposerAction({
     if (!singleWorkingAgent) {
       return [];
     }
-
-    const seen = new Set<string>();
-    const headlines: string[] = [];
-    const scopedTranscript = channelId
-      ? transcript.filter((item) => item.channelId === channelId)
-      : transcript;
-
-    // Two-tier scan: spine items first (reads recede when real work is present).
-    // If no spine headlines are found (session start / idle), fall back to all
-    // meaningful items so the bar isn't left empty.
-    const passFilter: (item: (typeof scopedTranscript)[number]) => boolean =
-      scopedTranscript.some(isSpineItem) ? isSpineItem : isMeaningfulItem;
-
-    for (let i = scopedTranscript.length - 1; i >= 0; i--) {
-      const item = scopedTranscript[i];
-      if (!passFilter(item)) {
-        continue;
-      }
-      const headline = getActivityHeadline(item);
-      if (!headline || seen.has(headline)) {
-        continue;
-      }
-
-      seen.add(headline);
-      headlines.unshift(headline);
-      if (headlines.length >= 5) {
-        break;
-      }
-    }
-
-    return headlines;
+    return collectActivityHeadlines(transcript, { channelId, limit: 5 });
   }, [channelId, singleWorkingAgent, transcript]);
   const [headlineIndex, setHeadlineIndex] = React.useState(0);
 
@@ -145,14 +111,16 @@ export function BotActivityComposerAction({
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
   const triggerLabel =
     workingAgents.length === 1
-      ? `${workingAgents[0]?.name ?? "Agent"} is working`
-      : `${workingAgents.length} agents working`;
+      ? `${workingAgents[0]?.name ?? "Agent"} is thinking`
+      : `${workingAgents.length} agents thinking`;
   const isInline = variant === "inline";
+  // Prefer live tool/activity headlines when observer frames have them; fall
+  // back to "Thinking" so pure model stalls still read as active work.
   const visibleStatusLabel =
     workingAgents.length === 1
       ? `${workingAgents[0]?.name ?? "Agent"}: ${
           activityHeadlines[headlineIndex % activityHeadlines.length] ??
-          "Working"
+          "Thinking"
         }`
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 

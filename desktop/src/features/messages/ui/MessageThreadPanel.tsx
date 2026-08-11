@@ -17,6 +17,9 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
+import { ThreadAgentWorkingIndicator } from "@/features/channels/ui/ThreadAgentWorkingIndicator";
+import { resolveAgentWorkingAnchors } from "@/features/messages/lib/resolveAgentWorkingAnchors";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -113,8 +116,13 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
   videoReviewPresentation?: VideoReviewPresentation;
+  /** Human typing / non-agent dock chrome only. */
   activityAccessoryContent?: React.ReactNode;
   activityAccessoryVisible: boolean;
+  /** Agents currently working in this thread — indicator sits under the trigger message. */
+  workingAgents?: BotActivityAgent[];
+  workingBotPubkeys?: string[];
+  onOpenAgentSession?: (pubkey: string, channelId?: string | null) => void;
   widthPx: number;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -234,6 +242,9 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   activityAccessoryContent,
   activityAccessoryVisible,
+  workingAgents = [],
+  workingBotPubkeys = [],
+  onOpenAgentSession,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -255,10 +266,57 @@ export function MessageThreadPanel({
     !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
   );
   const hasConstrainedColumn = columnMaxWidthPx != null;
-  // Whether the composer dock trades its quiet-state spacer for the
-  // conditional activity accessory (agent working and/or someone typing).
+  // Composer dock only hosts human typing (and any non-agent accessory).
+  // Agent work is anchored under the trigger message in the timeline.
   const hasComposerBottomActivity =
     activityAccessoryVisible || threadTypingPubkeys.length > 0;
+
+  const agentWorkingByMessageId = React.useMemo(() => {
+    if (workingBotPubkeys.length === 0) {
+      return new Map<string, string[]>();
+    }
+    const messages: TimelineMessage[] = [];
+    if (threadHead) {
+      messages.push(threadHead);
+    }
+    for (const entry of threadReplies) {
+      messages.push(entry.message);
+    }
+    const anchors = resolveAgentWorkingAnchors(messages, workingBotPubkeys);
+    return new Map(
+      anchors.map((anchor) => [anchor.messageId, anchor.agentPubkeys]),
+    );
+  }, [threadHead, threadReplies, workingBotPubkeys]);
+
+  const renderAgentWorkingUnderMessage = React.useCallback(
+    (messageId: string) => {
+      const agentPubkeys = agentWorkingByMessageId.get(messageId);
+      if (!agentPubkeys?.length) {
+        return null;
+      }
+      return (
+        <div
+          className="min-w-0 pb-1 pl-[calc(2.25rem+0.5rem)]"
+          data-testid="message-agent-working-footer"
+        >
+          <ThreadAgentWorkingIndicator
+            agents={workingAgents}
+            channelId={channelId}
+            onOpenAgentSession={onOpenAgentSession}
+            profiles={profiles}
+            workingBotPubkeys={agentPubkeys}
+          />
+        </div>
+      );
+    },
+    [
+      agentWorkingByMessageId,
+      channelId,
+      onOpenAgentSession,
+      profiles,
+      workingAgents,
+    ],
+  );
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -625,6 +683,7 @@ export function MessageThreadPanel({
                   threadHead.id,
                 )}
               />
+              {renderAgentWorkingUnderMessage(threadHead.id)}
             </div>
           </div>
         )}
@@ -787,6 +846,7 @@ export function MessageThreadPanel({
                           entry.message.id,
                         )}
                       />
+                      {renderAgentWorkingUnderMessage(entry.message.id)}
                       {entry.summary ? (
                         <MessageThreadSummaryRow
                           collapseDepthGuideActions={collapseDepthGuideActions}

@@ -50,6 +50,12 @@ export function getActivityHeadline(item: TranscriptItem): string | null {
   }
 
   if (item.type === "thought") {
+    // Prefer the thought body so channel/timeline indicators read as CoT, not
+    // a static "Thinking" label.
+    const body = item.text.trim().replace(/\s+/g, " ");
+    if (body.length > 0) {
+      return body.length > 72 ? `${body.slice(0, 69)}…` : body;
+    }
     return item.title === "Plan" ? "Planning" : item.title;
   }
 
@@ -97,4 +103,54 @@ export function isMeaningfulItem(item: TranscriptItem): boolean {
 export function isSpineItem(item: TranscriptItem): boolean {
   if (!isMeaningfulItem(item)) return false;
   return item.type !== "metadata";
+}
+
+/**
+ * Newest-first activity headlines for a composer/status bar.
+ * Spine items (tools, messages, thoughts) win over metadata reads; when no
+ * spine work is present, falls back to meaningful items so the bar is not empty.
+ */
+export function collectActivityHeadlines(
+  transcript: readonly TranscriptItem[],
+  options: { channelId?: string | null; limit?: number } = {},
+): string[] {
+  const { channelId = null, limit = 5 } = options;
+  const scoped = channelId
+    ? transcript.filter((item) => item.channelId === channelId)
+    : transcript;
+
+  const passFilter: (item: TranscriptItem) => boolean = scoped.some(isSpineItem)
+    ? isSpineItem
+    : isMeaningfulItem;
+
+  const seen = new Set<string>();
+  const headlines: string[] = [];
+  for (let i = scoped.length - 1; i >= 0; i--) {
+    const item = scoped[i];
+    if (!passFilter(item)) {
+      continue;
+    }
+    const headline = getActivityHeadline(item);
+    if (!headline || seen.has(headline)) {
+      continue;
+    }
+    seen.add(headline);
+    headlines.unshift(headline);
+    if (headlines.length >= limit) {
+      break;
+    }
+  }
+  return headlines;
+}
+
+/** Latest headline for a turn, or null when the transcript has nothing useful. */
+export function latestActivityHeadline(
+  transcript: readonly TranscriptItem[],
+  channelId?: string | null,
+): string | null {
+  const headlines = collectActivityHeadlines(transcript, {
+    channelId,
+    limit: 1,
+  });
+  return headlines[headlines.length - 1] ?? null;
 }

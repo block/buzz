@@ -250,11 +250,11 @@ class _MemberTile extends ConsumerWidget {
                 BuzzLoadingIndicator(
                   size: 14,
                   color: context.appColors.success,
-                  semanticLabel: 'Agent working',
+                  semanticLabel: 'Agent thinking',
                 ),
                 const SizedBox(width: Grid.half),
                 Text(
-                  'Working\u2026',
+                  'Thinking\u2026',
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.appColors.success,
                     fontWeight: FontWeight.w600,

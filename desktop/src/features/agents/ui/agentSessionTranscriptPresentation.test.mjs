@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectActivityHeadlines,
   getActivityHeadline,
   isMeaningfulItem,
   isSpineItem,
+  latestActivityHeadline,
   shouldShowTranscriptRowTimestamp,
 } from "./agentSessionTranscriptPresentation.ts";
 
@@ -212,13 +214,7 @@ test("two-tier headline: metadata excluded when spine work is present", () => {
   // Simulate what BotActivityBar does: when any spine item exists, only spine
   // items are eligible for the headline rotation.
   const transcript = [metadataSystemPrompt, makeTool()];
-  const hasSpine = transcript.some(isSpineItem);
-  const passFilter = hasSpine ? isSpineItem : isMeaningfulItem;
-
-  const headlines = transcript
-    .filter(passFilter)
-    .map((item) => getActivityHeadline(item))
-    .filter(Boolean);
+  const headlines = collectActivityHeadlines(transcript, { limit: 5 });
 
   assert.ok(
     !headlines.includes("System prompt"),
@@ -227,6 +223,10 @@ test("two-tier headline: metadata excluded when spine work is present", () => {
   assert.ok(
     headlines.some((h) => h?.includes("Send Message")),
     "Tool headline should appear",
+  );
+  assert.equal(
+    latestActivityHeadline(transcript),
+    headlines[headlines.length - 1],
   );
 });
 

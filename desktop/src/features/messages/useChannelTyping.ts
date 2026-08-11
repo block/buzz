@@ -2,7 +2,7 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
   getChannelIdFromTags,
-  getThreadReference,
+  getTypingThreadHeadId,
 } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -58,7 +58,7 @@ function isTypingCompletionEvent(event: RelayEvent | null | undefined) {
 }
 
 function getTypingScopeId(event: RelayEvent) {
-  return getThreadReference(event.tags).parentId ?? null;
+  return getTypingThreadHeadId(event.tags);
 }
 
 function getTypingStateKey(pubkey: string, threadHeadId: string | null) {

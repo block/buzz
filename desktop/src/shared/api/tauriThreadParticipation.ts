@@ -1,4 +1,4 @@
-import { invokeTauri } from "./invokeTauri";
+import { invokeTauri } from "@/shared/api/tauri";
 
 export type ThreadParticipationPref = {
   enabled: boolean;

@@ -38,8 +38,9 @@ import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewMod
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
-import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
+import { ThreadAgentWorkingIndicator } from "@/features/channels/ui/ThreadAgentWorkingIndicator";
+import { resolveAgentWorkingAnchors } from "@/features/messages/lib/resolveAgentWorkingAnchors";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerGuidanceLayer,
@@ -398,31 +399,35 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isMainDeferredEditPending &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
-  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
+  // Observer + typing working set for the channel. Agent chrome is anchored
+  // under the trigger message (👀 / last human prompt), not under composers.
+  const channelWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
-  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
-  const hasCardMintActivity = useCardMintJobs().length > 0;
-  const hasComposerBottomActivity =
-    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
-  const threadComposerBotTypingPubkeys = React.useMemo(() => {
+  // When a thread is open, agent work is owned by the thread panel. Main
+  // timeline does not also host the same indicator.
+  const mainTimelineWorkingBotPubkeys = openThreadHeadId
+    ? []
+    : channelWorkingBotPubkeys;
+  // Thread-scoped typing for this head, plus channel working as observer
+  // fallback (typing dies across reconnects / pure model stalls).
+  const threadWorkingBotPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) return [];
-    return botTypingEntries
+    const fromTyping = botTypingEntries
       .filter((entry) => entry.threadHeadId === openThreadHeadId)
-      .map((entry) => entry.pubkey)
-      .filter(
-        (pubkey, index, all) =>
-          all.findIndex(
-            (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
-          ) === index,
-      );
-  }, [botTypingEntries, openThreadHeadId]);
-  const hasThreadComposerBotActivity =
-    threadComposerBotTypingPubkeys.length > 0;
+      .map((entry) => entry.pubkey);
+    const merged = [...fromTyping, ...channelWorkingBotPubkeys];
+    return merged.filter(
+      (pubkey, index, all) =>
+        all.findIndex(
+          (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
+        ) === index,
+    );
+  }, [botTypingEntries, channelWorkingBotPubkeys, openThreadHeadId]);
+  // Composer docks only show human typing + card mint — never agent work.
+  const hasCardMintActivity = useCardMintJobs().length > 0;
+  const hasComposerBottomActivity = hasTypingActivity || hasCardMintActivity;
+
   const directMessageIntro = React.useMemo(
     () =>
       buildDirectMessageIntro({
@@ -455,6 +460,47 @@ export const ChannelPane = React.memo(function ChannelPane({
     profiles,
     threadSummaries,
   });
+
+  // Message-anchored agent status (main timeline). Empty while a thread panel
+  // owns the same working agents so we do not paint the indicator twice.
+  const agentWorkingMessageFooters = React.useMemo(() => {
+    if (mainTimelineWorkingBotPubkeys.length === 0) {
+      return undefined;
+    }
+    const anchors = resolveAgentWorkingAnchors(
+      visibleMessages,
+      mainTimelineWorkingBotPubkeys,
+    );
+    if (anchors.length === 0) {
+      return undefined;
+    }
+    const footers: Record<string, React.ReactNode> = {};
+    for (const anchor of anchors) {
+      footers[anchor.messageId] = (
+        <div
+          className="min-w-0 pb-1.5 pl-[calc(2.25rem+0.5rem)] pr-2"
+          data-testid="message-agent-working-footer"
+        >
+          <ThreadAgentWorkingIndicator
+            agents={activityAgents}
+            channelId={activeChannel?.id ?? null}
+            onOpenAgentSession={onOpenAgentSession}
+            profiles={profiles}
+            workingBotPubkeys={anchor.agentPubkeys}
+          />
+        </div>
+      );
+    }
+    return footers;
+  }, [
+    activeChannel?.id,
+    activityAgents,
+    mainTimelineWorkingBotPubkeys,
+    onOpenAgentSession,
+    profiles,
+    visibleMessages,
+  ]);
+
   useRenderScopedReactionHydration({
     activeChannel,
     mainTimelineEntries,
@@ -669,6 +715,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             entranceMessageId={entranceMessageId}
             onEntranceMessageComplete={onEntranceMessageComplete}
             mainEntries={mainTimelineEntries}
+            messageFooters={agentWorkingMessageFooters}
             threadSummaries={threadSummaries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
@@ -806,7 +853,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   profiles={profiles}
                   typingPubkeys={typingPubkeys}
                   visible={hasComposerBottomActivity}
-                  workingBotPubkeys={composerWorkingBotPubkeys}
+                  workingBotPubkeys={[]}
                 />
               </div>
             </div>
@@ -892,20 +939,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                 )}
                 threadReplyUnreadCounts={threadReplyUnreadCounts}
                 threadTypingPubkeys={threadTypingPubkeys}
-                activityAccessoryVisible={hasThreadComposerBotActivity}
-                activityAccessoryContent={
-                  hasThreadComposerBotActivity ? (
-                    <BotActivityComposerAction
-                      agents={activityAgents}
-                      channelId={activeChannel?.id ?? null}
-                      onOpenAgentSession={onOpenAgentSession}
-                      openAgentSessionPubkey={openAgentSessionPubkey}
-                      profiles={profiles}
-                      workingBotPubkeys={threadComposerBotTypingPubkeys}
-                      variant="inline"
-                    />
-                  ) : null
-                }
+                activityAccessoryVisible={threadTypingPubkeys.length > 0}
+                activityAccessoryContent={null}
+                workingAgents={activityAgents}
+                workingBotPubkeys={threadWorkingBotPubkeys}
+                onOpenAgentSession={onOpenAgentSession}
               />
             );
             return wrapThreadPanel(panel);
