@@ -350,6 +350,19 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+fn parse_message_kinds(raw: &str) -> Result<Vec<u16>, CliError> {
+    raw.split(',')
+        .map(|token| {
+            let token = token.trim();
+            token.parse::<u16>().map_err(|_| {
+                CliError::Usage(format!(
+                    "invalid --kinds value {token:?}: expected comma-separated event kinds in 0..=65535"
+                ))
+            })
+        })
+        .collect()
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -368,12 +381,8 @@ pub async fn cmd_get_messages(
         "limit": limit
     });
 
-    // If specific kinds requested, override
-    if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
+    if let Some(kinds) = kinds {
+        filter["kinds"] = serde_json::json!(parse_message_kinds(kinds)?);
     }
 
     if let Some(b) = before {
@@ -994,9 +1003,10 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys, parse_message_kinds,
         resolve_names_to_pubkeys,
     };
+    use crate::CliError;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1011,6 +1021,31 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn message_kind_filter_parses_every_token() {
+        assert_eq!(
+            parse_message_kinds("9, 40002,65535").unwrap(),
+            vec![9, 40002, 65535]
+        );
+    }
+
+    #[test]
+    fn message_kind_filter_rejects_invalid_tokens() {
+        for value in ["", "garbage", "9,garbage", "9,,40002", "9,"] {
+            let error = parse_message_kinds(value).unwrap_err();
+            assert!(
+                matches!(error, CliError::Usage(ref message) if message.contains("--kinds")),
+                "unexpected error for {value:?}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn message_kind_filter_rejects_values_outside_u16() {
+        let error = parse_message_kinds("65536").unwrap_err();
+        assert!(matches!(error, CliError::Usage(message) if message.contains("65536")));
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
