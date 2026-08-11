@@ -283,6 +283,10 @@ pub struct SessionState {
     pub identity_session: Option<String>,
     /// Whether the first Room turn still needs the identity handoff context.
     pub identity_handoff_pending: bool,
+    /// Whether the shared identity session has successfully received standing
+    /// context. All Room aliases share this flag because they share one Codex
+    /// task, while delivered event IDs remain scoped to each Room.
+    pub identity_standing_context_sent: bool,
     pub identity_turn_count: u32,
     pub heartbeat_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
@@ -341,8 +345,10 @@ impl SessionState {
         self.turn_counts.clear();
         self.core_sections.clear();
         self.canvas_sections.clear();
+        self.deliveries.clear();
         self.identity_session = None;
         self.identity_handoff_pending = false;
+        self.identity_standing_context_sent = false;
         self.identity_turn_count = 0;
     }
 
@@ -352,6 +358,7 @@ impl SessionState {
         self.turn_counts.clear();
         self.identity_session = None;
         self.identity_handoff_pending = false;
+        self.identity_standing_context_sent = false;
         self.identity_turn_count = 0;
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -367,9 +374,22 @@ impl SessionState {
         standing_context_sent: bool,
         event_ids: impl IntoIterator<Item = String>,
     ) {
+        if self.identity_session.is_some() {
+            self.identity_standing_context_sent |= standing_context_sent;
+        }
         let delivery = self.deliveries.entry(channel_id).or_default();
         delivery.standing_context_sent |= standing_context_sent;
         delivery.delivered_event_ids.extend(event_ids);
+    }
+
+    fn standing_context_sent_for_channel(&self, channel_id: &Uuid) -> bool {
+        if self.identity_session.is_some() {
+            self.identity_standing_context_sent
+        } else {
+            self.deliveries
+                .get(channel_id)
+                .is_some_and(|delivery| delivery.standing_context_sent)
+        }
     }
 
     #[cfg(test)]
@@ -465,6 +485,7 @@ impl OwnedAgent {
         let session_id = loaded.session_id;
         self.state.identity_session = Some(session_id.clone());
         self.state.identity_handoff_pending = true;
+        self.state.identity_standing_context_sent = false;
         self.state.identity_turn_count = 0;
         tracing::info!(
             target: "pool::session",
@@ -2217,6 +2238,7 @@ pub async fn run_prompt_task(
                 );
                 agent.state.identity_session = Some(sid.clone());
                 agent.state.identity_handoff_pending = false;
+                agent.state.identity_standing_context_sent = false;
                 agent.state.sessions.insert(*cid, sid.clone());
                 if let Some((pending_cid, section)) = pending_canvas.take() {
                     agent.state.canvas_sections.insert(pending_cid, section);
@@ -2401,11 +2423,7 @@ pub async fn run_prompt_task(
     // sessions created before this field existed fail safe by behaving as
     // undelivered once, rather than silently omitting standing context.
     let mut standing_context_sent = match &source {
-        PromptSource::Channel(cid) => agent
-            .state
-            .deliveries
-            .get(cid)
-            .is_some_and(|delivery| delivery.standing_context_sent),
+        PromptSource::Channel(cid) => agent.state.standing_context_sent_for_channel(cid),
         PromptSource::Heartbeat => agent.state.heartbeat_standing_context_sent,
     };
 
@@ -6255,6 +6273,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            supports_load_session: false,
         };
         agent.state.heartbeat_session = Some("live-session".into());
 
@@ -6349,6 +6368,7 @@ done"#
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            supports_load_session: false,
         };
         agent
             .state
@@ -6501,6 +6521,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_name: "legacy-test-agent".into(),
             goose_system_prompt_supported: None,
             protocol_version: 1,
+            supports_load_session: false,
         };
         agent
             .state
@@ -6751,6 +6772,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (mut state, ch_a, ch_b) = make_state();
         state.identity_session = Some("shared-task".into());
         state.identity_handoff_pending = true;
+        state.identity_standing_context_sent = true;
         state.identity_turn_count = 4;
         state.sessions.insert(ch_a, "shared-task".into());
         state.sessions.insert(ch_b, "shared-task".into());
@@ -6759,10 +6781,33 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         assert!(state.identity_session.is_none());
         assert!(!state.identity_handoff_pending);
+        assert!(!state.identity_standing_context_sent);
         assert_eq!(state.identity_turn_count, 0);
         assert!(state.sessions.is_empty());
         assert!(state.turn_counts.is_empty());
+        assert!(state.deliveries.is_empty());
         assert_eq!(state.heartbeat_session.as_deref(), Some("sess-hb"));
+    }
+
+    #[test]
+    fn identity_session_shares_standing_context_across_room_aliases() {
+        let (mut state, ch_a, ch_b) = make_state();
+        state.identity_session = Some("shared-task".into());
+        state.sessions.insert(ch_a, "shared-task".into());
+
+        assert!(!state.standing_context_sent_for_channel(&ch_a));
+        assert!(!state.standing_context_sent_for_channel(&ch_b));
+
+        state.mark_channel_delivery_success(ch_a, true, ["event-a".to_string()]);
+
+        assert!(state.standing_context_sent_for_channel(&ch_a));
+        assert!(state.standing_context_sent_for_channel(&ch_b));
+        assert!(state.deliveries[&ch_a]
+            .delivered_event_ids
+            .contains("event-a"));
+        assert!(!state.deliveries[&ch_b]
+            .delivered_event_ids
+            .contains("event-a"));
     }
 
     #[test]
@@ -6770,6 +6815,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (mut state, ch_a, ch_b) = make_state();
         state.identity_session = Some("shared-task".into());
         state.identity_handoff_pending = true;
+        state.identity_standing_context_sent = true;
         state.sessions.insert(ch_a, "shared-task".into());
         state.sessions.insert(ch_b, "shared-task".into());
 
@@ -6777,6 +6823,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         assert_eq!(state.identity_session.as_deref(), Some("shared-task"));
         assert!(state.identity_handoff_pending);
+        assert!(state.identity_standing_context_sent);
         assert!(!state.sessions.contains_key(&ch_a));
         assert_eq!(
             state.sessions.get(&ch_b).map(String::as_str),
