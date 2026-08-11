@@ -111,6 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_CONTEXT_MESSAGE_LIMIT` | no | `12` | Maximum channel/thread/DM messages the harness supplies per turn (`0` disables; max `100`). |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -118,6 +119,20 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+### Secure Messaging and Conversation Context
+
+When `BUZZ_ACP_MCP_COMMAND` resolves to `buzz-message-mcp`, the harness passes
+`BUZZ_PRIVATE_KEY` only to that restricted, send-only MCP child. The general
+agent subprocess and its terminal tools do not receive the signing key.
+
+The harness uses its authenticated relay client to supply bounded context before
+each routed turn: recent top-level messages for plain channels, the reply chain
+for threads, and recent conversation messages for DMs. Channel context excludes
+thread replies, is ordered oldest-to-newest, and is capped by
+`BUZZ_ACP_CONTEXT_MESSAGE_LIMIT`. Secure turns must reply through
+`mcp__buzz_message_mcp__send_message`; they are never instructed to fetch
+history or send replies through the terminal CLI.
 
 ### Parallel Agents & Heartbeat
 
