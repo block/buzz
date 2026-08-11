@@ -16,7 +16,7 @@
 //! calls hit the cache and silently refresh when expired.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -490,6 +490,7 @@ fn read_cache(path: &Path) -> Option<CachedToken> {
 /// closed instead of using an exposed file.
 #[cfg(unix)]
 fn read_private_cache(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let mut file = fs::OpenOptions::new()
