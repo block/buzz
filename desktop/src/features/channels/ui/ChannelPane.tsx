@@ -25,7 +25,6 @@ import {
 import { buildVideoReviewPresentationByMessageId } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
-import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -73,7 +72,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   autoSendDraftKey = null,
   onAutoSendComplete = null,
   botTypingEntries,
-  channelFind,
   channelManagementOpen = false,
   currentPubkey,
   editTarget = null,
@@ -557,19 +555,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
-          {channelFind.isOpen ? (
-            <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
-              <ChannelFindBar
-                matchCount={channelFind.matchCount}
-                matchIndex={channelFind.activeIndex}
-                onClose={channelFind.close}
-                onNext={channelFind.goToNext}
-                onPrevious={channelFind.goToPrevious}
-                onQueryChange={channelFind.setQuery}
-                query={channelFind.query}
-              />
-            </div>
-          ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
             channelId={activeChannel?.id}
@@ -631,9 +616,6 @@ export const ChannelPane = React.memo(function ChannelPane({
             }
             onTargetReached={onTargetReached}
             onToggleReaction={onToggleReaction}
-            searchActiveMessageId={channelFind.activeMatch?.messageId ?? null}
-            searchMatchingMessageIds={channelFind.matchingMessageIds}
-            searchQuery={channelFind.query}
             targetMessageId={targetMessageId}
             splitThreadPanelOpen={
               useSplitAuxiliaryPane &&

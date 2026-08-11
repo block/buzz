@@ -8,7 +8,6 @@ import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
-import type { useChannelFind } from "@/features/search/useChannelFind";
 import type {
   ProfilePanelTab,
   ProfilePanelView,
@@ -35,7 +34,6 @@ export type ChannelPaneProps = {
    */
   onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
-  channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
   currentPubkey?: string;
   editTarget?: {
