@@ -171,7 +171,9 @@ accepted ADR in [`decisions/`](decisions) — see [`AGENTS.md`](AGENTS.md) §2.
 
 ## The public-repository rule
 
-`IMPLEMENTED` — [`AGENTS.md` §8](AGENTS.md), quoted in full:
+The rule exists and binds — `IMPLEMENTED` — [`AGENTS.md` §8](AGENTS.md). Nothing enforces
+it; the last paragraph of this section says what that marker does and does not cover.
+Quoted in full:
 
 > - **Never open a public issue for a vulnerability.** Use the private advisory link on
 >   the issue chooser page.
@@ -187,6 +189,17 @@ operational detail reaches a world-readable file.
 A vulnerability in Buzz the product, rather than in this cohort's operation of it, routes
 as [`SECURITY.md`](../SECURITY.md) directs — still never as a public issue here. That
 split is recorded in [#62](https://github.com/launchpad-26/buzz/issues/62)'s non-goals.
+
+`IMPLEMENTED` above marks the rule's existence and its binding force, and nothing beyond
+that. **A rule that binds is not a mechanism that checks.** Nothing detects a violation of
+§8: detection of secret material in diffs and history is `OPEN`, and whether secret
+scanning and push protection are even switched on cannot be answered without admin — both
+in [What is true today](#what-is-true-today). Compliance therefore rests on the attention
+of whoever is writing, which
+[#62](https://github.com/launchpad-26/buzz/issues/62) already measured and declined to
+treat as a control: the near-misses it records were "all caught by human attention alone",
+and "Three catches in one session is not evidence that attention works; it is evidence of
+the rate at which this material is generated."
 
 ---
 
