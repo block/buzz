@@ -108,13 +108,13 @@ class _ComposeBarLayout extends StatelessWidget {
             TextField(
               controller: controller,
               focusNode: focusNode,
-              textInputAction: TextInputAction.send,
+              keyboardType: TextInputType.multiline,
+              textInputAction: TextInputAction.newline,
               contextMenuBuilder: contextMenuBuilder,
               contentInsertionConfiguration: ContentInsertionConfiguration(
                 allowedMimeTypes: _pastedImageMimeTypes,
                 onContentInserted: onContentInserted,
               ),
-              onSubmitted: (_) => onSend(),
               minLines: 1,
               maxLines: 5,
               style: context.textTheme.bodyLarge,

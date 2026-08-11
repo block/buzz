@@ -104,3 +104,41 @@ test("allows agents to update only personal, editable profiles", () => {
     false,
   );
 });
+
+test("parses allowlist access updates with pubkey list", () => {
+  const pubkey = "a".repeat(64);
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-allowlist",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "allowlist",
+      respondToAllowlist: [pubkey],
+    },
+  };
+
+  assert.deepEqual(parseAgentManagementRequest(payload), {
+    ...payload,
+    request: {
+      ...payload.request,
+      respondToAllowlist: [pubkey],
+    },
+  });
+});
+
+test("rejects allowlist mode without pubkeys", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-allowlist-empty",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "allowlist",
+    },
+  };
+
+  assert.equal(parseAgentManagementRequest(payload), null);
+});
