@@ -3,7 +3,7 @@
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config_for_keys, build_git_clone_auth_config, clone_url_owner, run_git,
+    build_git_auth_config_for_identity, build_git_clone_auth_config, clone_url_owner, run_git,
     validate_local_clone_url, validate_local_clone_url_for_workspace, validate_workspace_clone_url,
     GitAuthConfig,
 };
@@ -548,7 +548,10 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    let auth = build_git_auth_config_for_identity(
+        &owner_identity.keys,
+        owner_identity.auth_tag.as_deref(),
+    )?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
