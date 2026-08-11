@@ -179,11 +179,18 @@ test("persistent agents transition atomically before Enter-send resolves", async
         // to ProseMirror coordinates proves selection.from/to === doc.content.size.
         return {
           empty: selection.isCollapsed,
+          text: element.textContent,
+          endsWithSpace: element.textContent?.endsWith(" ") ?? false,
           atDocumentEnd: position + 1 === viewDesc.size - 2,
         };
       }),
     )
-    .toEqual({ empty: true, atDocumentEnd: true });
+    .toEqual({
+      empty: true,
+      text: "@Morgarita ",
+      endsWithSpace: true,
+      atDocumentEnd: true,
+    });
 });
 
 test("timeline agent send remains one-shot and returns to the placeholder", async ({
