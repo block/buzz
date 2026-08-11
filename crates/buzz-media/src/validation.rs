@@ -282,7 +282,7 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
 /// - Exactly one video track using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
 /// - At most one audio track, using `mp4a` (AAC)
 /// - Duration ≤ 600 seconds (from mvhd timescale, not edit lists)
-/// - Resolution ≤ 3840×2160
+/// - Resolution ≤ 3840×2160 in either orientation
 /// - moov atom precedes mdat (fast-start / web-optimised)
 ///
 /// Returns [`VideoMeta`] on success.
@@ -358,10 +358,18 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                     return Err(MediaError::DurationTooLong);
                 }
 
-                // Resolution check.
+                // Resolution check, applied to the long and short edge rather
+                // than to width and height. The same 4K frame is 3840x2160
+                // landscape and 2160x3840 portrait; comparing raw width and
+                // height would accept one and reject the other.
                 let width = track.width() as u32;
                 let height = track.height() as u32;
-                if width > 3840 || height > 2160 {
+                let (long_edge, short_edge) = if width >= height {
+                    (width, height)
+                } else {
+                    (height, width)
+                };
+                if long_edge > 3840 || short_edge > 2160 {
                     return Err(MediaError::ResolutionTooHigh);
                 }
 
@@ -2539,6 +2547,31 @@ mod tests {
     fn test_validate_video_resolution_too_high() {
         let config = test_config();
         let mp4_bytes = build_mp4_too_large();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        let result = validate_video_file(tmp.path(), &config);
+        assert!(
+            matches!(result, Err(MediaError::ResolutionTooHigh)),
+            "expected ResolutionTooHigh, got {result:?}"
+        );
+    }
+
+    /// 2160x3840 is the same 4K frame as the accepted 3840x2160, rotated.
+    #[test]
+    fn test_validate_video_accepts_portrait_4k() {
+        let config = test_config();
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 1_000, 2160, 3840, false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        let meta = validate_video_file(tmp.path(), &config).expect("portrait 4K accepted");
+        assert_eq!((meta.width, meta.height), (2160, 3840));
+    }
+
+    /// The bound still bites in portrait — one pixel past the long edge.
+    #[test]
+    fn test_validate_video_rejects_portrait_above_long_edge() {
+        let config = test_config();
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 1_000, 2160, 3841, false);
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &mp4_bytes).unwrap();
         let result = validate_video_file(tmp.path(), &config);
