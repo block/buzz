@@ -30,20 +30,46 @@ function makeLocalStorage() {
 
 function makeFakeTimers() {
   let nextId = 1;
+  let now = 0;
   const timers = new Map();
+
+  function runThrough(targetTime) {
+    while (true) {
+      const next = [...timers.entries()]
+        .filter(([, timer]) => timer.dueAt <= targetTime)
+        .sort(
+          ([firstId, first], [secondId, second]) =>
+            first.dueAt - second.dueAt || firstId - secondId,
+        )[0];
+      if (!next) break;
+
+      const [id, timer] = next;
+      timers.delete(id);
+      now = timer.dueAt;
+      timer.fn();
+    }
+    now = targetTime;
+  }
+
   return {
-    setTimeout(fn) {
+    setTimeout(fn, delay = 0) {
       const id = nextId++;
-      timers.set(id, fn);
+      timers.set(id, { fn, dueAt: now + delay });
       return id;
     },
     clearTimeout(id) {
       timers.delete(id);
     },
+    advanceBy(ms) {
+      runThrough(now + ms);
+    },
     runAll() {
-      const pending = [...timers.values()];
-      timers.clear();
-      for (const fn of pending) fn();
+      while (timers.size > 0) {
+        const nextDueAt = Math.min(
+          ...[...timers.values()].map((timer) => timer.dueAt),
+        );
+        runThrough(nextDueAt);
+      }
     },
     get size() {
       return timers.size;
@@ -98,7 +124,7 @@ function withFakeTimers() {
   const timers = makeFakeTimers();
   const originalSetTimeout = globalThis.window.setTimeout;
   const originalClearTimeout = globalThis.window.clearTimeout;
-  globalThis.window.setTimeout = (fn) => timers.setTimeout(fn);
+  globalThis.window.setTimeout = (fn, ms) => timers.setTimeout(fn, ms);
   globalThis.window.clearTimeout = (id) => timers.clearTimeout(id);
   return {
     timers,
@@ -130,6 +156,40 @@ test("advanceContext burst coalesces local persistence into one write", () => {
       3,
       "one writeStoredReadState call writes its three blobs once",
     );
+  } finally {
+    manager.destroy();
+    restore();
+  }
+});
+
+test("sustained advances persist within each one-second window", () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager("5".repeat(64), makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.seedContextRead("channel-1", 100);
+
+    for (let timestamp = 200; timestamp <= 3_200; timestamp += 200) {
+      timers.advanceBy(200);
+      manager.seedContextRead("channel-1", timestamp);
+
+      if (timestamp % 1_000 === 0) {
+        assert.equal(
+          storage.writes.length - baselineWrites,
+          (timestamp / 1_000) * 3,
+          "latest state should persist once per one-second window",
+        );
+      }
+    }
+
+    const contexts = JSON.parse(
+      storage.getItem(`buzz.channel-read-state.v2:${"5".repeat(64)}`),
+    );
+    assert.equal(contexts["channel-1"], new Date(2_800_000).toISOString());
+    assert.equal(timers.size, 1, "latest advance should open the next window");
   } finally {
     manager.destroy();
     restore();

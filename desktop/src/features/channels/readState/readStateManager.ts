@@ -24,7 +24,7 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
 const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
 const PUBLISH_DEBOUNCE_MS = 5_000;
-const LOCAL_PERSIST_DEBOUNCE_MS = 1_000;
+const LOCAL_PERSIST_MAX_WAIT_MS = 1_000;
 
 function generateHex(bytes: number): string {
   const arr = new Uint8Array(bytes);
@@ -943,14 +943,12 @@ export class ReadStateManager {
   }
 
   private persistLocalState(): void {
-    if (this.localPersistTimer !== null) {
-      window.clearTimeout(this.localPersistTimer);
-    }
+    if (this.localPersistTimer !== null) return;
 
     this.localPersistTimer = window.setTimeout(() => {
       this.localPersistTimer = null;
       this.writeLocalState();
-    }, LOCAL_PERSIST_DEBOUNCE_MS);
+    }, LOCAL_PERSIST_MAX_WAIT_MS);
   }
 
   private readonly flushLocalState = (): void => {
