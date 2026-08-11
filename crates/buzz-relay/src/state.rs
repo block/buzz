@@ -36,6 +36,7 @@ use crate::connection::{ConnectionSubscriptions, RestartClose};
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
+pub(crate) type ScopedInviteQuotaKey = (CommunityId, u8, [u8; 32]);
 
 /// Leaves headroom under the process-wide drain deadline for a stalled writer.
 const RESTART_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -688,6 +689,17 @@ pub struct AppState {
     /// generate fresh Nostr keys.
     pub invite_claim_rate_limiter:
         Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// One-hour v3 mint quotas, scoped by community and linked public key.
+    pub identity_handoff_mint_rate_limiter:
+        Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// One-minute v3 status quotas. The discriminator separates aggregate
+    /// linked-key counters from per-handoff counters in the same bounded cache.
+    pub identity_handoff_status_rate_limiter:
+        Arc<moka::sync::Cache<ScopedInviteQuotaKey, Arc<std::sync::atomic::AtomicU32>>>,
+    /// Ten-minute v3 claim quotas. The discriminator separates claimant and
+    /// token-digest counters without retaining the bearer code.
+    pub identity_handoff_claim_rate_limiter:
+        Arc<moka::sync::Cache<ScopedInviteQuotaKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
@@ -869,6 +881,24 @@ impl AppState {
                 moka::sync::Cache::builder()
                     .max_capacity(crate::api::invites::CLAIM_RATE_CACHE_CAPACITY)
                     .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
+                    .build(),
+            ),
+            identity_handoff_mint_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::IDENTITY_HANDOFF_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::IDENTITY_HANDOFF_MINT_RATE_WINDOW)
+                    .build(),
+            ),
+            identity_handoff_status_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::IDENTITY_HANDOFF_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::IDENTITY_HANDOFF_STATUS_RATE_WINDOW)
+                    .build(),
+            ),
+            identity_handoff_claim_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::IDENTITY_HANDOFF_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::IDENTITY_HANDOFF_CLAIM_RATE_WINDOW)
                     .build(),
             ),
             media_uploads_in_flight: Arc::new(DashMap::new()),

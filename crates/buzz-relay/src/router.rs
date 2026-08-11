@@ -94,6 +94,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
+        .route(
+            "/api/identity-handoffs",
+            post(api::invites::mint_identity_handoff),
+        )
+        .route(
+            "/api/identity-handoffs/status",
+            post(api::invites::identity_handoff_status),
+        )
+        .route(
+            "/api/identity-handoffs/invalidate",
+            post(api::invites::invalidate_identity_handoffs),
+        )
         .route("/api/join-policy", get(api::invites::join_policy))
         // Policy documents as standalone pages — desktop opens these in the
         // system browser instead of rendering the Markdown in-app.
@@ -400,11 +412,32 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// Status endpoint — service name, version, uptime.
 async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let uptime_secs = state.started_at.elapsed().as_secs();
-    Json(json!({
+    Json(status_payload(&deployment_identity(), uptime_secs))
+}
+
+fn deployment_identity() -> String {
+    ["BUZZ_DEPLOYMENT_IDENTITY", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_owned())
+        .find(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:@".contains(&byte))
+        })
+        .unwrap_or_else(|| format!("buzz-relay-{}", env!("CARGO_PKG_VERSION")))
+}
+
+fn status_payload(deployment_identity: &str, uptime_secs: u64) -> serde_json::Value {
+    json!({
         "service": "buzz-relay",
         "version": env!("CARGO_PKG_VERSION"),
+        "deployment_identity": deployment_identity,
+        "capabilities": [crate::api::invites::IDENTITY_HANDOFF_PROTOCOL],
         "uptime_seconds": uptime_secs,
-    }))
+    })
 }
 
 /// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
@@ -488,6 +521,18 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[test]
+    fn status_projection_advertises_v3_identity_handoff_capability() {
+        let status = status_payload("pod-test", 42);
+        assert_eq!(status["service"], "buzz-relay");
+        assert_eq!(status["deployment_identity"], "pod-test");
+        assert_eq!(status["uptime_seconds"], 42);
+        assert_eq!(
+            status["capabilities"],
+            serde_json::json!(["identity-handoff-v3"])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

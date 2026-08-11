@@ -18,11 +18,13 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{Html, Json},
+    http::{header, HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Json, Response},
 };
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
 use buzz_core::invite::{
@@ -44,6 +46,55 @@ const CLAIM_RATE_LIMIT: u32 = 10;
 /// NIP-98 proves key ownership, not that a key is costly to create, so this
 /// bound is required in addition to expiry.
 pub(crate) const CLAIM_RATE_CACHE_CAPACITY: u64 = 10_000;
+
+/// V3 identity-handoff protocol marker carried on mint responses and claims.
+pub const IDENTITY_HANDOFF_PROTOCOL: &str = "identity-handoff-v3";
+const IDENTITY_HANDOFF_MAX_BODY_BYTES: usize = 4 * 1024;
+const IDENTITY_HANDOFF_MINT_RATE_LIMIT: u32 = 10;
+const IDENTITY_HANDOFF_STATUS_RATE_LIMIT: u32 = 60;
+const IDENTITY_HANDOFF_CLAIM_RATE_LIMIT: u32 = 10;
+pub(crate) const IDENTITY_HANDOFF_RATE_CACHE_CAPACITY: u64 = 20_000;
+pub(crate) const IDENTITY_HANDOFF_MINT_RATE_WINDOW: Duration = Duration::from_secs(60 * 60);
+pub(crate) const IDENTITY_HANDOFF_STATUS_RATE_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const IDENTITY_HANDOFF_CLAIM_RATE_WINDOW: Duration = Duration::from_secs(10 * 60);
+const STATUS_KEY_DIMENSION: u8 = 1;
+const STATUS_HANDOFF_DIMENSION: u8 = 2;
+const CLAIM_CLAIMANT_DIMENSION: u8 = 1;
+const CLAIM_TOKEN_DIMENSION: u8 = 2;
+
+type ApiError = (StatusCode, Json<Value>);
+type IdentityHandoffResult = Result<Json<Value>, IdentityHandoffApiError>;
+
+enum IdentityHandoffApiError {
+    Standard(ApiError),
+    RateLimited {
+        retry_after: u64,
+        reason: &'static str,
+    },
+}
+
+impl From<ApiError> for IdentityHandoffApiError {
+    fn from(error: ApiError) -> Self {
+        Self::Standard(error)
+    }
+}
+
+impl IntoResponse for IdentityHandoffApiError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Standard(error) => error.into_response(),
+            Self::RateLimited {
+                retry_after,
+                reason,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after.to_string())],
+                Json(serde_json::json!({ "error": reason })),
+            )
+                .into_response(),
+        }
+    }
+}
 
 /// Body for `POST /api/invites`.
 #[derive(Debug, Default, Deserialize)]
@@ -94,6 +145,44 @@ pub struct ClaimInviteRequest {
     /// Relay-issued proof of accepting the configured terms, when required.
     #[serde(default)]
     pub policy_receipt: Option<String>,
+    /// Required exact marker for v3 identity-handoff claims. Generic v1/v2
+    /// callers may continue omitting it.
+    #[serde(default)]
+    pub protocol: Option<String>,
+}
+
+/// Body for `POST /api/identity-handoffs`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MintIdentityHandoffRequest {
+    /// Public key the handoff is bound to.
+    pub expected_pubkey: String,
+    /// Non-secret Identity link incarnation identifier.
+    pub link_incarnation_id: String,
+    /// Fixed one-hour lifetime. Other values are rejected.
+    pub ttl_secs: u64,
+}
+
+/// Body for `POST /api/identity-handoffs/status`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityHandoffStatusRequest {
+    /// Opaque, non-authorizing handoff locator.
+    pub handoff_id: String,
+    /// Linked public key used to reauthorize the lookup.
+    pub expected_pubkey: String,
+    /// Link incarnation used to reauthorize the lookup.
+    pub link_incarnation_id: String,
+}
+
+/// Body for `POST /api/identity-handoffs/invalidate`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvalidateIdentityHandoffsRequest {
+    /// Linked public key whose active handoffs must be invalidated.
+    pub expected_pubkey: String,
+    /// Link incarnation that must be permanently fenced.
+    pub link_incarnation_id: String,
 }
 
 /// Body for `POST /api/invites/accept-policy`.
@@ -260,6 +349,149 @@ async fn authenticate(
     Ok((tenant, pubkey))
 }
 
+fn require_identity_handoff_nonce(headers: &HeaderMap) -> Result<(), ApiError> {
+    let encoded = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Nostr "))
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid NIP-98 nonce"))?;
+    let event: Value = serde_json::from_slice(&decoded)
+        .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid NIP-98 nonce"))?;
+    let nonce_tags = event
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .filter(|parts| parts.first().and_then(Value::as_str) == Some("nonce"))
+        .collect::<Vec<_>>();
+    let valid_nonce = nonce_tags.len() == 1
+        && nonce_tags[0].len() == 2
+        && nonce_tags[0]
+            .get(1)
+            .and_then(Value::as_str)
+            .is_some_and(|nonce| uuid::Uuid::parse_str(nonce).is_ok());
+    if !valid_nonce {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "NIP-98: fresh nonce required",
+        ));
+    }
+    Ok(())
+}
+
+async fn authenticate_identity_handoff(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey), ApiError> {
+    let authenticated = authenticate(state, headers, path, body).await?;
+    require_identity_handoff_nonce(headers)?;
+    Ok(authenticated)
+}
+
+async fn require_owner_or_admin(
+    state: &AppState,
+    tenant: &buzz_core::TenantContext,
+    pubkey: &nostr::PublicKey,
+) -> Result<(), ApiError> {
+    let sender_hex = pubkey.to_hex();
+    let member = state
+        .db
+        .get_relay_member(tenant.community(), &sender_hex)
+        .await
+        .map_err(|error| internal_error(&format!("identity handoff role lookup: {error}")))?;
+    if member
+        .as_ref()
+        .is_some_and(|member| member.role == "owner" || member.role == "admin")
+    {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "identity_handoff_admin_required",
+        ))
+    }
+}
+
+fn parse_identity_handoff_request<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+) -> Result<T, ApiError> {
+    if body.is_empty() || body.len() > IDENTITY_HANDOFF_MAX_BODY_BYTES {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "identity_handoff_invalid_request",
+        ));
+    }
+    serde_json::from_slice(body)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request"))
+}
+
+fn parse_identity_handoff_pubkey(raw: &str) -> Result<nostr::PublicKey, ApiError> {
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "identity_handoff_invalid_request",
+        ));
+    }
+    nostr::PublicKey::from_hex(raw)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request"))
+}
+
+fn validate_link_incarnation_id(link_incarnation_id: &str) -> Result<(), ApiError> {
+    if !(16..=256).contains(&link_incarnation_id.len()) || !link_incarnation_id.is_ascii() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "identity_handoff_invalid_request",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_handoff_mint_request(
+    request: &MintIdentityHandoffRequest,
+) -> Result<nostr::PublicKey, ApiError> {
+    if request.ttl_secs != buzz_db::relay_invite::IDENTITY_HANDOFF_TTL_SECS as u64 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "identity_handoff_ttl_must_be_3600",
+        ));
+    }
+    validate_link_incarnation_id(&request.link_incarnation_id)?;
+    parse_identity_handoff_pubkey(&request.expected_pubkey)
+}
+
+fn valid_identity_handoff_client_marker(marker: Option<&str>) -> bool {
+    marker == Some(IDENTITY_HANDOFF_PROTOCOL)
+}
+
+fn quota_exceeded<K>(
+    cache: &moka::sync::Cache<K, Arc<std::sync::atomic::AtomicU32>>,
+    key: K,
+    limit: u32,
+) -> bool
+where
+    K: std::hash::Hash + Eq + Send + Sync + Clone + 'static,
+{
+    let counter = cache.get_with(key, || Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    counter.fetch_add(1, Ordering::Relaxed) >= limit
+}
+
+fn handoff_id_quota_key(handoff_id: uuid::Uuid) -> [u8; 32] {
+    Sha256::digest(handoff_id.as_bytes()).into()
+}
+
+fn rate_limited(retry_after: Duration) -> IdentityHandoffApiError {
+    IdentityHandoffApiError::RateLimited {
+        retry_after: retry_after.as_secs(),
+        reason: "identity_handoff_rate_limited",
+    }
+}
+
 /// Mint an invite code — `POST /api/invites`, NIP-98 signed by an owner/admin.
 ///
 /// Returns the code, its expiry, and a shareable landing-page URL on the
@@ -338,6 +570,214 @@ pub async fn mint_invite(
     })))
 }
 
+/// Mint a one-hour public-key-bound identity handoff.
+pub async fn mint_identity_handoff(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match mint_identity_handoff_inner(state, headers, body).await {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn mint_identity_handoff_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> IdentityHandoffResult {
+    let (tenant, signer) =
+        authenticate_identity_handoff(&state, &headers, "/api/identity-handoffs", &body).await?;
+    require_owner_or_admin(&state, &tenant, &signer).await?;
+
+    let request: MintIdentityHandoffRequest = parse_identity_handoff_request(&body)?;
+    let expected_pubkey = validate_identity_handoff_mint_request(&request)?;
+    let quota_key = (tenant.community(), expected_pubkey.to_bytes());
+    if quota_exceeded(
+        &state.identity_handoff_mint_rate_limiter,
+        quota_key,
+        IDENTITY_HANDOFF_MINT_RATE_LIMIT,
+    ) {
+        return Err(rate_limited(IDENTITY_HANDOFF_MINT_RATE_WINDOW));
+    }
+
+    let outcome = state
+        .db
+        .mint_identity_handoff(
+            tenant.community(),
+            &expected_pubkey.to_hex(),
+            &request.link_incarnation_id,
+            &signer.to_hex(),
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(_) => {
+                api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request")
+            }
+            error => internal_error(&format!("identity handoff mint: {error}")),
+        })?;
+
+    let buzz_db::relay_invite::MintIdentityHandoffOutcome::Minted(handoff) = outcome else {
+        return Err(api_error(StatusCode::CONFLICT, "identity_handoff_incarnation_revoked").into());
+    };
+    let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
+        "https"
+    } else {
+        "http"
+    };
+
+    tracing::info!(
+        community = %tenant.community(),
+        minted_by = %signer.to_hex(),
+        handoff_id = %handoff.handoff_id,
+        expires_at = %handoff.expires_at,
+        "identity handoff minted"
+    );
+
+    Ok(Json(serde_json::json!({
+        "protocol": IDENTITY_HANDOFF_PROTOCOL,
+        "invite_url": format!("{scheme}://{}/invite#code={}", tenant.host(), handoff.code),
+        "handoff_id": handoff.handoff_id.to_string(),
+        "expires_at": handoff.expires_at.timestamp() as u64,
+    })))
+}
+
+/// Read one identity handoff after reauthorizing its public-key and incarnation binding.
+pub async fn identity_handoff_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match identity_handoff_status_inner(state, headers, body).await {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn identity_handoff_status_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> IdentityHandoffResult {
+    let (tenant, signer) =
+        authenticate_identity_handoff(&state, &headers, "/api/identity-handoffs/status", &body)
+            .await?;
+    require_owner_or_admin(&state, &tenant, &signer).await?;
+
+    let request: IdentityHandoffStatusRequest = parse_identity_handoff_request(&body)?;
+    validate_link_incarnation_id(&request.link_incarnation_id)?;
+    let expected_pubkey = parse_identity_handoff_pubkey(&request.expected_pubkey)?;
+    if request.handoff_id.len() != 36 {
+        return Err(api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request").into());
+    }
+    let handoff_id = uuid::Uuid::parse_str(&request.handoff_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request"))?;
+
+    let pubkey_limited = quota_exceeded(
+        &state.identity_handoff_status_rate_limiter,
+        (
+            tenant.community(),
+            STATUS_KEY_DIMENSION,
+            expected_pubkey.to_bytes(),
+        ),
+        IDENTITY_HANDOFF_STATUS_RATE_LIMIT,
+    );
+    let handoff_limited = quota_exceeded(
+        &state.identity_handoff_status_rate_limiter,
+        (
+            tenant.community(),
+            STATUS_HANDOFF_DIMENSION,
+            handoff_id_quota_key(handoff_id),
+        ),
+        IDENTITY_HANDOFF_STATUS_RATE_LIMIT,
+    );
+    if pubkey_limited || handoff_limited {
+        return Err(rate_limited(IDENTITY_HANDOFF_STATUS_RATE_WINDOW));
+    }
+
+    let state_value = state
+        .db
+        .identity_handoff_status(
+            tenant.community(),
+            handoff_id,
+            &expected_pubkey.to_hex(),
+            &request.link_incarnation_id,
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(_) => {
+                api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request")
+            }
+            error => internal_error(&format!("identity handoff status: {error}")),
+        })?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "identity_handoff_not_found"))?;
+
+    let state_name = match state_value {
+        buzz_db::relay_invite::IdentityHandoffState::Active => "active",
+        buzz_db::relay_invite::IdentityHandoffState::Claimed => "claimed",
+        buzz_db::relay_invite::IdentityHandoffState::Superseded => "superseded",
+        buzz_db::relay_invite::IdentityHandoffState::Invalidated => "invalidated",
+        buzz_db::relay_invite::IdentityHandoffState::Expired => "expired",
+    };
+    Ok(Json(serde_json::json!({ "state": state_name })))
+}
+
+/// Install a durable incarnation fence and invalidate its active identity handoffs.
+pub async fn invalidate_identity_handoffs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    match invalidate_identity_handoffs_inner(state, headers, body).await {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn invalidate_identity_handoffs_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> IdentityHandoffResult {
+    let (tenant, signer) =
+        authenticate_identity_handoff(&state, &headers, "/api/identity-handoffs/invalidate", &body)
+            .await?;
+    require_owner_or_admin(&state, &tenant, &signer).await?;
+
+    let request: InvalidateIdentityHandoffsRequest = parse_identity_handoff_request(&body)?;
+    validate_link_incarnation_id(&request.link_incarnation_id)?;
+    let expected_pubkey = parse_identity_handoff_pubkey(&request.expected_pubkey)?;
+    let invalidation = state
+        .db
+        .invalidate_identity_handoffs(
+            tenant.community(),
+            &expected_pubkey.to_hex(),
+            &request.link_incarnation_id,
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(_) => {
+                api_error(StatusCode::BAD_REQUEST, "identity_handoff_invalid_request")
+            }
+            error => internal_error(&format!("identity handoff invalidation: {error}")),
+        })?;
+
+    tracing::info!(
+        community = %tenant.community(),
+        invalidated_by = %signer.to_hex(),
+        expected_pubkey = %expected_pubkey.to_hex(),
+        fence_created = invalidation.fence_created,
+        invalidated_count = invalidation.invalidated_count,
+        "identity handoffs invalidated"
+    );
+
+    Ok(Json(serde_json::json!({
+        "fence_created": invalidation.fence_created,
+        "invalidated_count": invalidation.invalidated_count,
+    })))
+}
+
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
 ///
@@ -348,21 +788,160 @@ pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> Response {
+    match claim_invite_inner(state, headers, body).await {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn claim_invite_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> IdentityHandoffResult {
     let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
 
-    if claim_rate_limited(&state, tenant.community(), &pubkey) {
+    let parsed_request = serde_json::from_slice::<ClaimInviteRequest>(&body);
+    let is_identity_handoff = parsed_request.as_ref().is_ok_and(|request| {
+        request
+            .code
+            .starts_with(buzz_db::relay_invite::IDENTITY_HANDOFF_PREFIX)
+    });
+    if !is_identity_handoff && claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many invite claim attempts, slow down",
-        ));
+        )
+        .into());
     }
 
-    let request: ClaimInviteRequest = serde_json::from_slice(&body)
+    let request = parsed_request
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
 
     let claimer_hex = pubkey.to_hex();
     let key = invite_token::derive_invite_key(&state.relay_keypair);
+
+    // --- v3 identity-handoff path ---
+    //
+    // Route by exact prefix before the generic paths. A compatible client must
+    // explicitly mark the payload and provide a fresh nonce; legacy clients
+    // get a typed upgrade response without touching handoff or membership state.
+    if request
+        .code
+        .starts_with(buzz_db::relay_invite::IDENTITY_HANDOFF_PREFIX)
+    {
+        if !valid_identity_handoff_client_marker(request.protocol.as_deref()) {
+            return Err(api_error(
+                StatusCode::UPGRADE_REQUIRED,
+                "invite_client_upgrade_required",
+            )
+            .into());
+        }
+        if body.len() > IDENTITY_HANDOFF_MAX_BODY_BYTES
+            || !buzz_db::relay_invite::validate_identity_handoff_code(&request.code)
+        {
+            return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid").into());
+        }
+        require_identity_handoff_nonce(&headers)?;
+
+        let token_hash = buzz_db::relay_invite::hash_identity_handoff_code(&request.code);
+        let claimant_limited = quota_exceeded(
+            &state.identity_handoff_claim_rate_limiter,
+            (
+                tenant.community(),
+                CLAIM_CLAIMANT_DIMENSION,
+                pubkey.to_bytes(),
+            ),
+            IDENTITY_HANDOFF_CLAIM_RATE_LIMIT,
+        );
+        let token_limited = quota_exceeded(
+            &state.identity_handoff_claim_rate_limiter,
+            (tenant.community(), CLAIM_TOKEN_DIMENSION, token_hash),
+            IDENTITY_HANDOFF_CLAIM_RATE_LIMIT,
+        );
+        if claimant_limited || token_limited {
+            return Err(rate_limited(IDENTITY_HANDOFF_CLAIM_RATE_WINDOW));
+        }
+
+        // Policy acceptance is verified before the DB is allowed to compare
+        // identities or mutate either handoff or membership state.
+        if let Some(policy) = &state.config.join_policy {
+            let receipt = request
+                .policy_receipt
+                .as_deref()
+                .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+            invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        }
+
+        let outcome = state
+            .db
+            .claim_identity_handoff(
+                tenant.community(),
+                &token_hash,
+                &claimer_hex,
+                state
+                    .config
+                    .join_policy
+                    .as_ref()
+                    .map(|policy| policy.version.as_str()),
+            )
+            .await
+            .map_err(|error| internal_error(&format!("identity handoff claim: {error}")))?;
+
+        return match outcome {
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::Claimed { membership } => {
+                let added = matches!(
+                    membership,
+                    buzz_db::relay_invite::IdentityHandoffMembershipOutcome::Added
+                );
+                if added {
+                    tracing::info!(
+                        community = %tenant.community(),
+                        member = %claimer_hex,
+                        "relay member added via identity handoff"
+                    );
+                    if let Err(error) =
+                        publish_nip43_member_added(&tenant, &state, &claimer_hex).await
+                    {
+                        tracing::warn!(
+                            "failed to publish NIP-43 member-added delta after identity handoff: {error}"
+                        );
+                    }
+                    if let Err(error) = publish_nip43_membership_list(&tenant, &state).await {
+                        tracing::warn!(
+                            "failed to publish NIP-43 membership list after identity handoff: {error}"
+                        );
+                    }
+                }
+                Ok(Json(serde_json::json!({
+                    "status": if added { "joined" } else { "already_member" },
+                    "community_id": tenant.community().to_string(),
+                    "host": tenant.host(),
+                    "role": "member",
+                })))
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::AlreadyClaimed => {
+                Err(api_error(StatusCode::CONFLICT, "invite_already_claimed").into())
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::IdentityMismatch => {
+                Err(api_error(StatusCode::CONFLICT, "invite_identity_mismatch").into())
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::Expired => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_expired").into())
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::Superseded => {
+                Err(api_error(StatusCode::CONFLICT, "invite_superseded").into())
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::Invalidated => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalidated").into())
+            }
+            buzz_db::relay_invite::IdentityHandoffClaimOutcome::Invalid => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid").into())
+            }
+        };
+    }
 
     // --- v2 database-backed path ---
     //
@@ -431,13 +1010,13 @@ pub async fn claim_invite(
                 })))
             }
             buzz_db::relay_invite::ClaimOutcome::Expired => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
+                Err(api_error(StatusCode::FORBIDDEN, "invite_expired").into())
             }
             buzz_db::relay_invite::ClaimOutcome::Exhausted => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
+                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted").into())
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
-                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid").into())
             }
         };
     }
@@ -531,7 +1110,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT, MAX_INVITE_USES, MIN_INVITE_TTL_SECS};
+    use super::{
+        claim_key_rate_limited, CLAIM_RATE_LIMIT, IDENTITY_HANDOFF_CLAIM_RATE_LIMIT,
+        IDENTITY_HANDOFF_MINT_RATE_LIMIT, IDENTITY_HANDOFF_STATUS_RATE_LIMIT, MAX_INVITE_USES,
+        MIN_INVITE_TTL_SECS,
+    };
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -631,13 +1214,80 @@ mod tests {
         assert!(cache.entry_count() <= capacity);
     }
 
-    fn nip98_auth_header(keys: &Keys, url: &str, body: &[u8]) -> String {
+    #[test]
+    fn identity_handoff_request_contracts_are_strict_and_bounded() {
+        let pubkey = "ab".repeat(32);
+        let incarnation = Uuid::new_v4().to_string();
+
+        let mint = serde_json::json!({
+            "expected_pubkey": pubkey,
+            "link_incarnation_id": incarnation,
+            "ttl_secs": 3600,
+        });
+        let parsed: super::MintIdentityHandoffRequest =
+            serde_json::from_value(mint).expect("valid v3 mint request");
+        super::validate_identity_handoff_mint_request(&parsed).expect("valid v3 mint contract");
+
+        for invalid in [
+            serde_json::json!({
+                "expected_pubkey": "ab".repeat(32),
+                "link_incarnation_id": Uuid::new_v4().to_string(),
+                "ttl_secs": 3599,
+            }),
+            serde_json::json!({
+                "expected_pubkey": "ab".repeat(32),
+                "link_incarnation_id": Uuid::new_v4().to_string(),
+                "ttl_secs": 3600,
+                "unexpected": true,
+            }),
+            serde_json::json!({
+                "expected_pubkey": "not-a-pubkey",
+                "link_incarnation_id": Uuid::new_v4().to_string(),
+                "ttl_secs": 3600,
+            }),
+        ] {
+            let parsed = serde_json::from_value::<super::MintIdentityHandoffRequest>(invalid);
+            assert!(
+                !parsed.as_ref().is_ok_and(|request| {
+                    super::validate_identity_handoff_mint_request(request).is_ok()
+                }),
+                "invalid v3 mint request was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_handoff_client_marker_is_exact() {
+        assert!(super::valid_identity_handoff_client_marker(Some(
+            "identity-handoff-v3"
+        )));
+        for marker in [
+            None,
+            Some(""),
+            Some("identity-handoff-v2"),
+            Some("IDENTITY-HANDOFF-V3"),
+        ] {
+            assert!(!super::valid_identity_handoff_client_marker(marker));
+        }
+    }
+
+    fn nip98_auth_header_with_nonce(
+        keys: &Keys,
+        url: &str,
+        body: &[u8],
+        include_nonce: bool,
+    ) -> String {
         let hash: [u8; 32] = Sha256::digest(body).into();
-        let tags = vec![
+        let mut tags = vec![
             Tag::parse(["u", url]).expect("u tag"),
             Tag::parse(["method", "POST"]).expect("method tag"),
             Tag::parse(["payload", hex::encode(hash).as_str()]).expect("payload tag"),
         ];
+        if include_nonce {
+            tags.push(
+                Tag::parse(["nonce", Uuid::new_v4().to_string().as_str()]).expect("nonce tag"),
+            );
+        }
         let event = EventBuilder::new(Kind::HttpAuth, "")
             .tags(tags)
             .sign_with_keys(keys)
@@ -645,6 +1295,10 @@ mod tests {
         let event_json = serde_json::to_string(&event).expect("serialize NIP-98 event");
         let encoded = base64::engine::general_purpose::STANDARD.encode(event_json.as_bytes());
         format!("Nostr {encoded}")
+    }
+
+    fn nip98_auth_header(keys: &Keys, url: &str, body: &[u8]) -> String {
+        nip98_auth_header_with_nonce(keys, url, body, true)
     }
 
     /// Build a closed-relay (`require_relay_membership = true`) test state with
@@ -721,6 +1375,30 @@ mod tests {
             .expect("response")
     }
 
+    async fn post_json_without_nonce(
+        state: Arc<AppState>,
+        host: &str,
+        path: &str,
+        keys: &Keys,
+        body: String,
+    ) -> axum::response::Response {
+        let url = format!("https://{host}{path}");
+        let auth = nip98_auth_header_with_nonce(keys, &url, body.as_bytes(), false);
+        build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, host)
+                    .header(header::AUTHORIZATION, auth)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
     async fn read_json(response: axum::response::Response) -> Value {
         let bytes = to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -737,6 +1415,39 @@ mod tests {
             .and_then(Value::as_str)
             .expect("minted code")
             .to_string()
+    }
+
+    async fn mint_identity_handoff(
+        state: Arc<AppState>,
+        host: &str,
+        owner: &Keys,
+        expected_pubkey: &str,
+        incarnation: &str,
+    ) -> Value {
+        let response = post_json(
+            state,
+            host,
+            "/api/identity-handoffs",
+            owner,
+            serde_json::json!({
+                "expected_pubkey": expected_pubkey,
+                "link_incarnation_id": incarnation,
+                "ttl_secs": 3600,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json(response).await
+    }
+
+    fn identity_handoff_code(response: &Value) -> String {
+        response
+            .get("invite_url")
+            .and_then(Value::as_str)
+            .and_then(|url| url.split_once("#code="))
+            .map(|(_, code)| code.to_owned())
+            .expect("fragment-held identity handoff code")
     }
 
     async fn event_count(state: &AppState, community: buzz_core::CommunityId, kind: i32) -> i64 {
@@ -892,6 +1603,626 @@ mod tests {
             )
             .await;
             assert_eq!(response.status(), StatusCode::OK, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_routes_enforce_auth_binding_and_terminal_contracts() {
+        let host = format!("identity-handoff-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let admin = Keys::generate();
+        let member = Keys::generate();
+        let expected = Keys::generate();
+        let mismatch = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+        state
+            .db
+            .add_relay_member(community.id, &admin.public_key().to_hex(), "admin", None)
+            .await
+            .expect("seed admin");
+        state
+            .db
+            .add_relay_member(community.id, &member.public_key().to_hex(), "member", None)
+            .await
+            .expect("seed member");
+
+        let incarnation = Uuid::new_v4().to_string();
+        let mint_body = serde_json::json!({
+            "expected_pubkey": expected.public_key().to_hex(),
+            "link_incarnation_id": incarnation,
+            "ttl_secs": 3600,
+        })
+        .to_string();
+        let unauthenticated = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/identity-handoffs")
+                    .header(header::HOST, &host)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(mint_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let no_nonce = post_json_without_nonce(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs",
+            &owner,
+            mint_body.clone(),
+        )
+        .await;
+        assert_eq!(no_nonce.status(), StatusCode::UNAUTHORIZED);
+
+        for unauthorized in [&member, &mismatch] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/identity-handoffs",
+                unauthorized,
+                mint_body.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        let mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &expected.public_key().to_hex(),
+            &incarnation,
+        )
+        .await;
+        assert_eq!(
+            mint.get("protocol").and_then(Value::as_str),
+            Some("identity-handoff-v3")
+        );
+        assert!(mint.get("code").is_none(), "standalone code leaked: {mint}");
+        let invite_url = mint
+            .get("invite_url")
+            .and_then(Value::as_str)
+            .expect("invite URL");
+        assert!(invite_url.starts_with(&format!("https://{host}/invite#code=v3.")));
+        let code = identity_handoff_code(&mint);
+        let handoff_id = mint
+            .get("handoff_id")
+            .and_then(Value::as_str)
+            .expect("handoff id")
+            .to_owned();
+
+        let status_body = serde_json::json!({
+            "handoff_id": handoff_id,
+            "expected_pubkey": expected.public_key().to_hex(),
+            "link_incarnation_id": incarnation,
+        })
+        .to_string();
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/status",
+            &admin,
+            status_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let status = read_json(response).await;
+        assert_eq!(status.get("state").and_then(Value::as_str), Some("active"));
+        assert!(status.get("invite_url").is_none());
+        assert!(status.get("code").is_none());
+
+        let legacy_claim = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &expected,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(legacy_claim.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(
+            read_json(legacy_claim)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_client_upgrade_required")
+        );
+
+        let mismatch_claim = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &mismatch,
+            serde_json::json!({
+                "code": code,
+                "protocol": "identity-handoff-v3",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(mismatch_claim.status(), StatusCode::CONFLICT);
+        let mismatch_error = read_json(mismatch_claim).await;
+        assert_eq!(
+            mismatch_error.get("error").and_then(Value::as_str),
+            Some("invite_identity_mismatch")
+        );
+        assert!(
+            !mismatch_error
+                .to_string()
+                .contains(&expected.public_key().to_hex()),
+            "mismatch response disclosed the bound key"
+        );
+        assert!(!state
+            .db
+            .is_relay_member(community.id, &mismatch.public_key().to_hex())
+            .await
+            .expect("mismatch membership"));
+
+        let matching_claim = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &expected,
+            serde_json::json!({
+                "code": code,
+                "protocol": "identity-handoff-v3",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(matching_claim.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(matching_claim)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/status",
+            &admin,
+            status_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("state")
+                .and_then(Value::as_str),
+            Some("claimed")
+        );
+
+        let existing = Keys::generate();
+        state
+            .db
+            .add_relay_member(
+                community.id,
+                &existing.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("seed pre-existing member");
+        let existing_incarnation = Uuid::new_v4().to_string();
+        let existing_mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &existing.public_key().to_hex(),
+            &existing_incarnation,
+        )
+        .await;
+        let existing_claim = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &existing,
+            serde_json::json!({
+                "code": identity_handoff_code(&existing_mint),
+                "protocol": "identity-handoff-v3",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(existing_claim.status(), StatusCode::OK);
+        assert_eq!(read_json(existing_claim).await["status"], "already_member");
+        let existing_status = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/status",
+            &admin,
+            serde_json::json!({
+                "handoff_id": existing_mint["handoff_id"],
+                "expected_pubkey": existing.public_key().to_hex(),
+                "link_incarnation_id": existing_incarnation,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(existing_status.status(), StatusCode::OK);
+        assert_eq!(read_json(existing_status).await["state"], "claimed");
+
+        let pending = Keys::generate();
+        let pending_incarnation = Uuid::new_v4().to_string();
+        let pending_mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &pending.public_key().to_hex(),
+            &pending_incarnation,
+        )
+        .await;
+        let pending_code = identity_handoff_code(&pending_mint);
+        let invalidate_body = serde_json::json!({
+            "expected_pubkey": pending.public_key().to_hex(),
+            "link_incarnation_id": pending_incarnation,
+        })
+        .to_string();
+        let first = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/invalidate",
+            &owner,
+            invalidate_body.clone(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = read_json(first).await;
+        assert_eq!(first["fence_created"], true);
+        assert_eq!(first["invalidated_count"], 1);
+
+        let second = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/invalidate",
+            &owner,
+            invalidate_body,
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = read_json(second).await;
+        assert_eq!(second["fence_created"], false);
+        assert_eq!(second["invalidated_count"], 0);
+
+        let invalidated_claim = post_json(
+            state,
+            &host,
+            "/api/invites/claim",
+            &pending,
+            serde_json::json!({
+                "code": pending_code,
+                "protocol": "identity-handoff-v3",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(invalidated_claim.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(invalidated_claim)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_invalidated")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_policy_receipt_precedes_identity_comparison() {
+        let host = format!(
+            "identity-handoff-policy-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let expected = Keys::generate();
+        let mismatch = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        let policy_version = "a".repeat(64);
+        config.join_policy = Some(crate::config::JoinPolicyConfig {
+            terms_markdown: Some("# Terms".to_owned()),
+            privacy_markdown: None,
+            age_attestation_required: false,
+            version: policy_version.clone(),
+        });
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let incarnation = Uuid::new_v4().to_string();
+        let mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &expected.public_key().to_hex(),
+            &incarnation,
+        )
+        .await;
+        let code = identity_handoff_code(&mint);
+        let handoff_id = mint["handoff_id"].as_str().expect("handoff id");
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let wrong_code_receipt =
+            crate::invite_token::mint_policy_acceptance(&key, "v3.wrong-code", &policy_version);
+        let stale_receipt =
+            crate::invite_token::mint_policy_acceptance(&key, &code, &"b".repeat(64));
+
+        for receipt in [None, Some(wrong_code_receipt), Some(stale_receipt)] {
+            let mut body = serde_json::json!({
+                "code": code,
+                "protocol": "identity-handoff-v3",
+            });
+            if let Some(receipt) = receipt {
+                body["policy_receipt"] = Value::String(receipt);
+            }
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &mismatch,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                read_json(response)
+                    .await
+                    .get("error")
+                    .and_then(Value::as_str),
+                Some("join_policy_required")
+            );
+        }
+
+        let status = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/status",
+            &owner,
+            serde_json::json!({
+                "handoff_id": handoff_id,
+                "expected_pubkey": expected.public_key().to_hex(),
+                "link_incarnation_id": incarnation,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(read_json(status).await["state"], "active");
+
+        let valid_receipt =
+            crate::invite_token::mint_policy_acceptance(&key, &code, &policy_version);
+        let response = post_json(
+            state,
+            &host,
+            "/api/invites/claim",
+            &mismatch,
+            serde_json::json!({
+                "code": code,
+                "protocol": "identity-handoff-v3",
+                "policy_receipt": valid_receipt,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            read_json(response).await["error"],
+            "invite_identity_mismatch"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_endpoint_quotas_are_typed_and_dimensioned() {
+        let host = format!("identity-handoff-quota-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let expected = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let incarnation = Uuid::new_v4().to_string();
+        for _ in 0..IDENTITY_HANDOFF_MINT_RATE_LIMIT {
+            mint_identity_handoff(
+                state.clone(),
+                &host,
+                &owner,
+                &expected.public_key().to_hex(),
+                &incarnation,
+            )
+            .await;
+        }
+        let mint_limited = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs",
+            &owner,
+            serde_json::json!({
+                "expected_pubkey": expected.public_key().to_hex(),
+                "link_incarnation_id": incarnation,
+                "ttl_secs": 3600,
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(mint_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            mint_limited
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("3600")
+        );
+        assert_eq!(
+            read_json(mint_limited).await["error"],
+            "identity_handoff_rate_limited"
+        );
+
+        let status_expected = Keys::generate();
+        let status_incarnation = Uuid::new_v4().to_string();
+        let status_mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &status_expected.public_key().to_hex(),
+            &status_incarnation,
+        )
+        .await;
+        let status_body = serde_json::json!({
+            "handoff_id": status_mint["handoff_id"],
+            "expected_pubkey": status_expected.public_key().to_hex(),
+            "link_incarnation_id": status_incarnation,
+        })
+        .to_string();
+        for _ in 0..IDENTITY_HANDOFF_STATUS_RATE_LIMIT {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/identity-handoffs/status",
+                &owner,
+                status_body.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let status_limited = post_json(
+            state.clone(),
+            &host,
+            "/api/identity-handoffs/status",
+            &owner,
+            status_body,
+        )
+        .await;
+        assert_eq!(status_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            status_limited
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+
+        let token_expected = Keys::generate();
+        let token_mint = mint_identity_handoff(
+            state.clone(),
+            &host,
+            &owner,
+            &token_expected.public_key().to_hex(),
+            &Uuid::new_v4().to_string(),
+        )
+        .await;
+        let token_code = identity_handoff_code(&token_mint);
+        for _ in 0..IDENTITY_HANDOFF_CLAIM_RATE_LIMIT {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &Keys::generate(),
+                serde_json::json!({
+                    "code": token_code,
+                    "protocol": "identity-handoff-v3",
+                })
+                .to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        let token_limited = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &Keys::generate(),
+            serde_json::json!({
+                "code": token_code,
+                "protocol": "identity-handoff-v3",
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(token_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            token_limited
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("600")
+        );
+
+        let repeated_claimant = Keys::generate();
+        for attempt in 0..=IDENTITY_HANDOFF_CLAIM_RATE_LIMIT {
+            let bound = Keys::generate();
+            let mint = mint_identity_handoff(
+                state.clone(),
+                &host,
+                &owner,
+                &bound.public_key().to_hex(),
+                &Uuid::new_v4().to_string(),
+            )
+            .await;
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &repeated_claimant,
+                serde_json::json!({
+                    "code": identity_handoff_code(&mint),
+                    "protocol": "identity-handoff-v3",
+                })
+                .to_string(),
+            )
+            .await;
+            if attempt < IDENTITY_HANDOFF_CLAIM_RATE_LIMIT {
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(
+                    read_json(response).await["error"],
+                    "identity_handoff_rate_limited"
+                );
+            }
         }
     }
 
@@ -1564,6 +2895,109 @@ mod tests {
         }
     }
 
+    struct UnavailableReplayGuard;
+
+    impl buzz_auth::Nip98ReplayGuard for UnavailableReplayGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            _scope: &'a str,
+            _event_id: &'a EventId,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Err(buzz_auth::AuthError::Internal(
+                    "test replay storage unavailable".to_owned(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_management_rejects_replay_tampering_and_guard_outage() {
+        let host = format!("identity-handoff-auth-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let expected = Keys::generate();
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let mut state_owned =
+            Arc::try_unwrap(state_arc).unwrap_or_else(|_| panic!("sole owner of AppState"));
+        state_owned.nip98_replay = Arc::new(SeenOnceReplayGuard::new());
+        let state = Arc::new(state_owned);
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let body = serde_json::json!({
+            "expected_pubkey": expected.public_key().to_hex(),
+            "link_incarnation_id": Uuid::new_v4().to_string(),
+            "ttl_secs": 3600,
+        })
+        .to_string();
+        let path = "/api/identity-handoffs";
+        let url = format!("https://{host}{path}");
+        let auth = nip98_auth_header(&owner, &url, body.as_bytes());
+        let send = |state: Arc<AppState>, auth: String, body: String| {
+            let host = host.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header(header::HOST, host)
+                            .header(header::AUTHORIZATION, auth)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response")
+            }
+        };
+
+        let first = send(state.clone(), auth.clone(), body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let replay = send(state.clone(), auth, body.clone()).await;
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(read_json(replay).await["error"], "NIP-98: replay detected");
+
+        let tamper_auth = nip98_auth_header(&owner, &url, body.as_bytes());
+        let mut tampered: Value = serde_json::from_str(&body).expect("mint JSON");
+        tampered["ttl_secs"] = Value::from(3599);
+        let tampered = send(state.clone(), tamper_auth, tampered.to_string()).await;
+        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_path_auth = nip98_auth_header(
+            &owner,
+            &format!("https://{host}/api/identity-handoffs/status"),
+            body.as_bytes(),
+        );
+        let wrong_path = send(state.clone(), wrong_path_auth, body.clone()).await;
+        assert_eq!(wrong_path.status(), StatusCode::UNAUTHORIZED);
+
+        let mut unavailable = (*state).clone();
+        unavailable.nip98_replay = Arc::new(UnavailableReplayGuard);
+        let unavailable = Arc::new(unavailable);
+        let response = post_json(unavailable, &host, path, &owner, body).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            read_json(response).await["error"],
+            "NIP-98: replay check unavailable"
+        );
+    }
+
     /// Endpoint-level proof that a replayed NIP-98 auth event on a claim POST
     /// is rejected — the first claim succeeds, but reusing the exact same
     /// Authorization header (same signed NIP-98 event id) is rejected as
@@ -1697,6 +3131,10 @@ mod tests {
 
         let over_limit = post_json(state, &host, "/api/invites/claim", &joiner, body).await;
         assert_eq!(over_limit.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            over_limit.headers().get(header::RETRY_AFTER).is_none(),
+            "generic v1/v2 rate-limit headers are a compatibility contract"
+        );
         let json = read_json(over_limit).await;
         assert_eq!(
             json.get("error").and_then(Value::as_str),

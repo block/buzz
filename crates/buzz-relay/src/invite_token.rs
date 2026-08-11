@@ -300,6 +300,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_verifier_cannot_redeem_v3_identity_handoffs() {
+        let code = buzz_db::relay_invite::encode_identity_handoff_code(
+            &[7_u8; buzz_db::relay_invite::IDENTITY_HANDOFF_SECRET_LEN],
+        );
+        assert_eq!(
+            verify_invite(&test_key(), community(), &code),
+            Err(InviteError::Malformed),
+            "an old relay must reject the distinct v3 namespace instead of treating it as a generic invite"
+        );
+    }
+
+    #[test]
     fn ttl_is_capped() {
         let key = test_key();
         let (_, expires_at) = mint_invite(&key, community(), u64::MAX);
