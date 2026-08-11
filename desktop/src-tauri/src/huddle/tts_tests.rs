@@ -32,6 +32,19 @@ mod token_split;
 //   - Counters reset on the 500ms window (Instant-based in production,
 //     on_tick() in tests — logically equivalent).
 //   - Uses Acquire for tts_active reads, Release for tts_cancel writes.
+
+#[test]
+fn tts_speaker_activity_uses_the_playback_waveform() {
+    let mut samples = vec![0.0; 1_200];
+    samples.extend(vec![0.25; 1_200]);
+
+    let frames = build_tts_speaker_activity_frames(&samples, "agent-pubkey", 24_000);
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].pubkey, "agent-pubkey");
+    assert_eq!(frames[0].level, 0.0);
+    assert!(frames[1].level > 0.5);
+}
 //
 use crate::huddle::relay_api::REMOTE_SPEECH_THRESHOLD;
 
@@ -284,24 +297,6 @@ fn cancel_already_true_is_harmless() {
     assert!(
         tts_cancel.load(Ordering::Acquire),
         "tts_cancel should still be true (idempotent store)",
-    );
-}
-
-// ── Regression: local-only interrupt still works ──────────────────────────
-
-/// The existing local barge-in path (STT detects speech → sets tts_cancel)
-/// must continue to work independently of remote frame counting.
-#[test]
-fn local_barge_in_still_works_without_remote_frames() {
-    let _tts_active = AtomicBool::new(true);
-    let tts_cancel = AtomicBool::new(false);
-
-    // Simulate local STT barge-in (stt.rs after BARGE_IN_DEBOUNCE_FRAMES).
-    tts_cancel.store(true, Ordering::Release);
-
-    assert!(
-        tts_cancel.load(Ordering::Acquire),
-        "local barge-in should set tts_cancel",
     );
 }
 

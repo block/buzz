@@ -54,10 +54,10 @@ struct App {
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
-    /// first successful `session/new` discovery call. When discovery fails (e.g.
-    /// auth missing or a transient network error) the cell is intentionally left
-    /// empty so the next `session/new` call retries — a transient failure never
-    /// pins the degraded fallback catalog for the process lifetime.
+    /// first successful `session/new` discovery call. Failed discovery is never
+    /// cached: static-token authentication errors reject session creation, while
+    /// OAuth authentication and non-auth errors use the configured model for that
+    /// response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
@@ -97,14 +97,26 @@ struct Session {
     /// Session-cumulative input tokens across all turns. Sent in the
     /// `_goose/unstable/session/update` usage notification so buzz-acp's
     /// `UsageTracker` can compute per-turn deltas symmetrically with goose.
-    accumulated_input_tokens: u64,
+    /// `TurnIOState`: `Unseen` before any turn reports; `Exact(n)` while running;
+    /// `Poisoned` if any turn's sum overflowed — permanently poisons the session.
+    accumulated_input_tokens: crate::types::TurnIOState,
     /// Session-cumulative output tokens across all turns.
-    accumulated_output_tokens: u64,
+    /// Same `Unseen`/`Exact(n)`/`Poisoned` contract as `accumulated_input_tokens`.
+    accumulated_output_tokens: crate::types::TurnIOState,
     /// Session-cumulative cache-served input tokens across all turns — a subset
-    /// of `accumulated_input_tokens`, not an addition to it. Emitted alongside
-    /// it so a consumer can price the cached slice at the provider's discounted
-    /// rate instead of assuming every input token cost full price.
-    accumulated_cached_input_tokens: u64,
+    /// of `accumulated_input_tokens`, not an addition to it. Tri-state:
+    ///
+    /// - `Unseen`: no turn has ever reported this category.
+    /// - `Exact(n)`: every usage-bearing response in every turn reported this
+    ///   category; `n` is the cumulative sum.
+    /// - `Unknown`: at least one usage-bearing response ever omitted the
+    ///   category — permanently poisoned for this session.
+    accumulated_cached_input_tokens: crate::types::CacheTotalState,
+    /// Session-cumulative cache-written input tokens across all turns — also a
+    /// subset of `accumulated_input_tokens`, not an addition to it.
+    /// Same `Unseen`/`Exact`/`Unknown` tri-state contract as
+    /// `accumulated_cached_input_tokens`.
+    accumulated_cache_write_tokens: crate::types::CacheTotalState,
     /// Session-cumulative total-token state across all turns.
     ///
     /// Mirrors the per-turn `TurnTotalState` tri-state: starts `Unseen`,
@@ -135,6 +147,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
+    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
+        .interactive_login()
+        .await
+}
+
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
 /// provider and persist the result, then exit. Today this supports Databricks
 /// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
@@ -145,18 +163,7 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         Some("databricks" | "databricks_v2" | "databricks-v2") => {
             let host = std::env::var("DATABRICKS_HOST")
                 .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
-            let pkce = auth::PkceOAuthConfig {
-                discovery_url: format!(
-                    "{}/oidc/.well-known/oauth-authorization-server",
-                    host.trim_end_matches('/')
-                ),
-                client_id: "databricks-cli".into(),
-                scopes: vec!["all-apis".into(), "offline_access".into()],
-                cache_namespace: "databricks".into(),
-                cache_dir_override: None,
-            };
-            let src = auth::PkceOAuthTokenSource::new(pkce)?;
-            src.interactive_login().await?;
+            authenticate_databricks(&host).await?;
             eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
             Ok(())
         }
@@ -317,26 +324,27 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
 ///
 /// Tries to use a previously-cached successful discovery result. If the cache is empty,
 /// runs `discover` and — on success — populates the cache for future calls. On failure
-/// the cell is intentionally left empty so the next session retries; the provider-aware
-/// fallback is returned for the immediate response only.
+/// the error is returned and the cell is intentionally left empty so the next session retries.
 ///
 /// Extracted from `session_new` so that tests can drive this path with an injected
 /// discovery future without requiring a full `App` / transport stack.
 async fn resolve_models_catalog(
     cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
-    provider: crate::config::Provider,
-    model: &str,
     discover: impl std::future::Future<Output = Result<Vec<ModelEntry>, AgentError>>,
-) -> Vec<ModelEntry> {
-    match cache.get_or_try_init(|| discover).await {
-        Ok(cached) => cached.clone(),
-        Err(e) => {
-            tracing::warn!(
-                "model catalog discovery failed: {e}; using fallback (will retry next session)"
-            );
-            crate::catalog::discovery_failure_fallback(provider, model)
-        }
-    }
+) -> Result<Vec<ModelEntry>, AgentError> {
+    cache.get_or_try_init(|| discover).await.cloned()
+}
+
+/// Return the configured model as a one-entry catalog for this response.
+///
+/// This value is never written to `models_cache`; failed discovery must be retried by
+/// the next session rather than pinning degraded state for the process lifetime.
+fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
+    let model = model.trim().to_string();
+    vec![ModelEntry {
+        id: model.clone(),
+        name: model,
+    }]
 }
 
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
@@ -400,6 +408,50 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
         Arc::from(prompt)
     };
+    // Resolve the model catalog before spawning MCP servers or registering a
+    // session. A configured static credential cannot recover interactively, so
+    // its authentication failure rejects before allocation. OAuth authentication
+    // failures and other catalog failures use only the configured model for this
+    // response, without caching, so session/prompt can run the existing PKCE flow.
+    let available_models: Vec<Value> = {
+        use crate::config::Provider;
+        match app.cfg.provider {
+            Provider::Databricks | Provider::DatabricksV2 => {
+                let models = match resolve_models_catalog(
+                    &app.models_cache,
+                    discover_databricks_models(&app.cfg),
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
+                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
+                            .await;
+                    }
+                    Err(error @ AgentError::LlmAuth(_)) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks OAuth model catalog unavailable; using configured model"
+                        );
+                        configured_model_fallback(&app.cfg.model)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks model catalog unavailable; using configured model"
+                        );
+                        configured_model_fallback(&app.cfg.model)
+                    }
+                };
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
+        }
+    };
+
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
         Err(e) => return reject(wire_tx, id, e.json_rpc_code(), &e.to_string()).await,
@@ -437,43 +489,14 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_history_bytes: None,
             effective_system_prompt,
             effective_model: None,
-            accumulated_input_tokens: 0,
-            accumulated_output_tokens: 0,
-            accumulated_cached_input_tokens: 0,
+            accumulated_input_tokens: crate::types::TurnIOState::Unseen,
+            accumulated_output_tokens: crate::types::TurnIOState::Unseen,
+            accumulated_cached_input_tokens: crate::types::CacheTotalState::Unseen,
+            accumulated_cache_write_tokens: crate::types::CacheTotalState::Unseen,
             accumulated_total_state: crate::types::TurnTotalState::Unseen,
         },
     );
     drop(sessions);
-
-    // Build a models catalog for the `session/new` response. For Databricks
-    // providers this advertises available models so the desktop ModelPicker and
-    // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
-    // report only the configured model — live switching on those providers
-    // effectively requires respawn.
-    //
-    // `models_cache` caches only a successful discovery result (`get_or_try_init`
-    // leaves the cell empty on error so the next `session/new` call retries). On
-    // discovery failure the fallback is used for the immediate response without
-    // being written to the cell.
-    let available_models: Vec<Value> = {
-        use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = resolve_models_catalog(
-                    &app.models_cache,
-                    app.cfg.provider,
-                    &app.cfg.model,
-                    discover_databricks_models(&app.cfg),
-                )
-                .await;
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
-            }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
-        }
-    };
 
     wire::send(
         wire_tx,
@@ -658,6 +681,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         effective_model_override,
         run_id,
         mut steer_rx,
+        usage_baseline,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -685,10 +709,20 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let effective_model_str = effective_model_override
         .as_deref()
         .unwrap_or(&app.cfg.model);
-    let mut turn_input_tokens: Option<u64> = None;
-    let mut turn_output_tokens: Option<u64> = None;
-    let mut turn_cached_input_tokens: Option<u64> = None;
+    let mut turn_input_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
+    let mut turn_output_tokens: crate::types::TurnIOState = crate::types::TurnIOState::Unseen;
+    let mut turn_cached_input_tokens: crate::types::CacheTotalState =
+        crate::types::CacheTotalState::Unseen;
+    let mut turn_cache_write_tokens: crate::types::CacheTotalState =
+        crate::types::CacheTotalState::Unseen;
     let mut turn_total_state = crate::types::TurnTotalState::Unseen;
+    // Per-turn billing identity accumulator — three-state:
+    //   None          = no usage-bearing response seen yet (initial)
+    //   Some(Some(pi))= all usage-bearing responses carry the same proven identity
+    //   Some(None)    = poisoned (mixed identities, unproven response, etc.)
+    // Not stored in Session (not session-cumulative); used only for the final
+    // end-of-turn wire emission.
+    let mut turn_pricing_identity: Option<Option<crate::types::PricingIdentity>> = None;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         effective_model: effective_model_str,
@@ -703,12 +737,16 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         history: &mut history,
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
+        run_id,
         last_request_input_tokens: &mut last_request_input_tokens,
         last_request_history_bytes: &mut last_request_history_bytes,
         turn_input_tokens: &mut turn_input_tokens,
         turn_output_tokens: &mut turn_output_tokens,
         turn_cached_input_tokens: &mut turn_cached_input_tokens,
+        turn_cache_write_tokens: &mut turn_cache_write_tokens,
         turn_total_state: &mut turn_total_state,
+        turn_pricing_identity: &mut turn_pricing_identity,
+        usage_baseline,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -731,19 +769,29 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     // Only emit when at least one token count was observed — a turn with no
     // provider response (validation failure, pre-response cancellation) carries
     // no information and must not produce a kind 44200 record per NIP-AM.
-    if turn_input_tokens.is_some() || turn_output_tokens.is_some() {
+    if !matches!(turn_input_tokens, crate::types::TurnIOState::Unseen)
+        || !matches!(turn_output_tokens, crate::types::TurnIOState::Unseen)
+    {
         let accumulated = {
             let mut sessions = app.sessions.lock().await;
             if let Some(s) = sessions.get_mut(&sid) {
-                s.accumulated_input_tokens = s
-                    .accumulated_input_tokens
-                    .saturating_add(turn_input_tokens.unwrap_or(0));
+                // merge_session: Poisoned poisons permanently; Exact sums with
+                // overflow-check → Poisoned on wrap; Unseen leaves unchanged.
+                s.accumulated_input_tokens =
+                    s.accumulated_input_tokens.merge_session(turn_input_tokens);
                 s.accumulated_output_tokens = s
                     .accumulated_output_tokens
-                    .saturating_add(turn_output_tokens.unwrap_or(0));
+                    .merge_session(turn_output_tokens);
+                // D1 tri-state merge: merge_session propagates Unknown when
+                // the turn was poisoned (any usage-bearing round omitted the
+                // category), and is a no-op when the turn was Unseen (no
+                // usage-bearing response at all).
                 s.accumulated_cached_input_tokens = s
                     .accumulated_cached_input_tokens
-                    .saturating_add(turn_cached_input_tokens.unwrap_or(0));
+                    .merge_session(turn_cached_input_tokens);
+                s.accumulated_cache_write_tokens = s
+                    .accumulated_cache_write_tokens
+                    .merge_session(turn_cache_write_tokens);
                 // Fold the per-turn total state into the session cumulative.
                 // Unknown poisons the session permanently; Exact adds to running sum;
                 // Unseen (turn emitted no usage) leaves the cumulative unchanged.
@@ -755,6 +803,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                     s.accumulated_input_tokens,
                     s.accumulated_output_tokens,
                     s.accumulated_cached_input_tokens,
+                    s.accumulated_cache_write_tokens,
                     s.accumulated_total_state,
                 ))
             } else {
@@ -763,31 +812,29 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 None
             }
         };
-        if let Some((accumulated_in, accumulated_out, accumulated_cached, accumulated_total)) =
-            accumulated
+        if let Some((
+            accumulated_in,
+            accumulated_out,
+            accumulated_cached,
+            accumulated_written,
+            accumulated_total,
+        )) = accumulated
         {
-            // Build the usage_update payload. `accumulatedTotalTokens` is only
-            // included when the cumulative is exactly known — never when Unseen
-            // (no total ever observed) or Unknown (at least one turn lacked a
-            // total). A goose consumer that doesn't recognise the field ignores it.
-            let mut update = serde_json::json!({
-                "sessionUpdate": "usage_update",
-                // used: total tokens as a context-usage proxy;
-                // contextLimit: 0 (buzz-agent has no context limit tracking).
-                "used": accumulated_in.saturating_add(accumulated_out),
-                "contextLimit": 0u64,
-                "accumulatedInputTokens": accumulated_in,
-                "accumulatedOutputTokens": accumulated_out,
-                // A subset of accumulatedInputTokens, not an addition to
-                // it. Extends goose's usage_update shape; a consumer that
-                // does not know the field ignores it and prices exactly as
-                // it did before.
-                "accumulatedCachedInputTokens": accumulated_cached,
-                "model": effective_model_str,
-            });
-            if let crate::types::TurnTotalState::Exact(total) = accumulated_total {
-                update["accumulatedTotalTokens"] = serde_json::json!(total);
-            }
+            // Same builder the run loop uses for its per-round reports, so the
+            // final notification is shape-identical to the ones that preceded
+            // it and a consumer taking the high-water mark lands on this one.
+            let update = wire::usage_update_payload(
+                accumulated_in.exact_value(),
+                accumulated_out.exact_value(),
+                accumulated_cached.exact_value(),
+                accumulated_written.exact_value(),
+                accumulated_total,
+                effective_model_str,
+                // Pass the proven per-turn identity if consistent; absent otherwise.
+                turn_pricing_identity
+                    .as_ref()
+                    .and_then(|inner| inner.as_ref()),
+            );
             wire::send(&wire_tx, goose_session_update(&sid, update)).await;
         }
     }
@@ -821,6 +868,7 @@ async fn acquire_session(
         Option<String>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+        crate::types::SessionUsageBaseline,
     ),
     &'static str,
 > {
@@ -829,6 +877,13 @@ async fn acquire_session(
     if s.busy {
         return Err("prompt already in flight");
     }
+    // Generate the run id before mutating session state. On RNG failure we reject
+    // the prompt cleanly: the session stays idle and the caller can retry. Generating
+    // after `s.busy = true` with `?` would wedge the session permanently busy.
+    let run_id = format!(
+        "run_{}",
+        session_token().map_err(|_| "rng failure; retry prompt")?
+    );
     s.busy = true;
     let (tx, rx) = watch::channel(false);
     s.cancel_tx = tx;
@@ -838,7 +893,6 @@ async fn acquire_session(
     // Fresh run id + steer channel for this turn. The run id lets steer-capable
     // clients target *this* turn (rejecting steers aimed at a turn that already
     // ended); the channel carries mid-turn injections to the run loop.
-    let run_id = format!("run_{}", session_token().unwrap_or_else(|_| "x".into()));
     s.active_run_id = Some(run_id.clone());
     let (steer_tx, steer_rx) = mpsc::unbounded_channel();
     s.steer_tx = Some(steer_tx);
@@ -857,6 +911,18 @@ async fn acquire_session(
         effective_model,
         run_id,
         steer_rx,
+        // Snapshot rather than a handle: the run loop reports cumulative usage
+        // after every LLM round, and taking the sessions lock on each of those
+        // would serialise concurrent sessions behind one another's provider
+        // round-trips. Nothing else advances these counters while this turn
+        // holds `busy`, so the snapshot cannot go stale under it.
+        crate::types::SessionUsageBaseline {
+            input_tokens: s.accumulated_input_tokens,
+            output_tokens: s.accumulated_output_tokens,
+            cached_input_tokens: s.accumulated_cached_input_tokens,
+            cache_write_tokens: s.accumulated_cache_write_tokens,
+            total_state: s.accumulated_total_state,
+        },
     ))
 }
 
@@ -868,8 +934,7 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::{discovery_failure_fallback, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
-    use crate::config::Provider;
+    use crate::catalog::ModelEntry;
     use crate::types::AgentError;
 
     /// Regression: a discovery error must not pin the models_cache for the process lifetime.
@@ -882,23 +947,14 @@ mod tests {
     #[tokio::test]
     async fn models_cache_does_not_pin_on_discovery_error() {
         let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
-        let provider = Provider::DatabricksV2;
-        let model = "my-configured-model";
 
-        // First call — discovery fails. Cell must remain empty; fallback returned.
-        let first = crate::resolve_models_catalog(&cache, provider, model, async {
-            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("transient failure".into()))
+        // First call — discovery failure is surfaced and leaves the cell empty.
+        let error = crate::resolve_models_catalog(&cache, async {
+            Err::<Vec<ModelEntry>, AgentError>(AgentError::Llm("transient failure".into()))
         })
-        .await;
-        assert!(
-            cache.get().is_none(),
-            "cell must be empty after a discovery error — next session must retry"
-        );
-        let expected_fallback = discovery_failure_fallback(provider, model);
-        assert_eq!(
-            first, expected_fallback,
-            "error path must return the provider-aware fallback"
-        );
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AgentError::Llm(_)));
 
         // Second call — discovery succeeds. Cell is now populated and returned.
         let discovered = vec![ModelEntry {
@@ -906,10 +962,11 @@ mod tests {
             name: "databricks-meta-llama-3-1-70b-instruct".into(),
         }];
         let discovered_clone = discovered.clone();
-        let second = crate::resolve_models_catalog(&cache, provider, model, async move {
+        let second = crate::resolve_models_catalog(&cache, async move {
             Ok::<Vec<ModelEntry>, AgentError>(discovered_clone)
         })
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             second, discovered,
             "second call must return the discovered catalog"
@@ -925,78 +982,40 @@ mod tests {
         );
     }
 
-    /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
-    /// on discovery failure (Wes W1). This test calls `discovery_failure_fallback` directly —
-    /// the same helper used by `session_new` — and verifies the split behavior. It FAILS if
-    /// the arm is un-split (i.e., if both providers return the v2 catalog on failure).
-    #[test]
-    fn databricks_discovery_failure_fallback_legacy_returns_configured_model_only() {
-        let configured = "my-serving-endpoint";
-        let result = discovery_failure_fallback(Provider::Databricks, configured);
+    #[tokio::test]
+    async fn models_catalog_does_not_cache_oauth_auth_fallback() {
+        let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
+        let error = crate::resolve_models_catalog(&cache, async {
+            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("sign in again".into()))
+        })
+        .await
+        .unwrap_err();
 
-        // Legacy Databricks must advertise exactly the configured model — nothing more.
-        assert_eq!(
-            result.len(),
-            1,
-            "legacy Databricks fallback must contain exactly one entry, got: {result:?}"
-        );
-        assert_eq!(
-            result[0].id, configured,
-            "legacy Databricks fallback must be the configured model"
-        );
+        assert!(matches!(error, AgentError::LlmAuth(_)));
+        assert!(cache.get().is_none());
 
-        // Crucially: must NOT contain any DATABRICKS_V2_KNOWN_MODELS entry.
-        let v2_ids: Vec<&str> = DATABRICKS_V2_KNOWN_MODELS.to_vec();
-        for id in &result {
-            assert!(
-                !v2_ids.contains(&id.id.as_str()),
-                "legacy Databricks fallback must not include v2 ID '{}' — that endpoint \
-                 may not be served by /serving-endpoints/{{model}}/invocations",
-                id.id
-            );
-        }
+        let discovered = vec![ModelEntry {
+            id: "authenticated-model".into(),
+            name: "authenticated-model".into(),
+        }];
+        let result = crate::resolve_models_catalog(&cache, async {
+            Ok::<Vec<ModelEntry>, AgentError>(discovered.clone())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, discovered);
+        assert_eq!(cache.get(), Some(&discovered));
     }
 
     #[test]
-    fn databricks_discovery_failure_fallback_v2_returns_known_models_catalog() {
-        let configured = "my-configured-model";
-        let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
-
-        // DatabricksV2 must return the full DATABRICKS_V2_KNOWN_MODELS list,
-        // plus the configured model so the picker can still represent the model
-        // the agent is actually running.
+    fn configured_model_fallback_is_trimmed_and_singular() {
         assert_eq!(
-            result.len(),
-            DATABRICKS_V2_KNOWN_MODELS.len() + 1,
-            "DatabricksV2 fallback must return all known models plus the configured model"
-        );
-        let result_ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
-        for known_id in DATABRICKS_V2_KNOWN_MODELS {
-            assert!(
-                result_ids.contains(known_id),
-                "DatabricksV2 fallback must include known model '{known_id}'"
-            );
-        }
-        assert!(
-            result_ids.contains(&configured),
-            "DatabricksV2 fallback must include the configured model"
-        );
-    }
-
-    #[test]
-    fn databricks_discovery_failure_fallback_split_verified() {
-        // This test FAILS if the v1/v2 arms are merged back into one — it directly verifies
-        // that the two providers' error-path behavior diverges (Wes W1 protection).
-        let v1 = discovery_failure_fallback(Provider::Databricks, "my-endpoint");
-        let v2 = discovery_failure_fallback(Provider::DatabricksV2, "my-endpoint");
-
-        let v1_ids: Vec<&str> = v1.iter().map(|m| m.id.as_str()).collect();
-        let v2_ids: Vec<&str> = v2.iter().map(|m| m.id.as_str()).collect();
-
-        assert_ne!(
-            v1_ids, v2_ids,
-            "Provider::Databricks and Provider::DatabricksV2 must return different \
-             fallback catalogs — if they are equal, the W1 arm split has been reverted"
+            crate::configured_model_fallback("  configured-model  "),
+            vec![ModelEntry {
+                id: "configured-model".into(),
+                name: "configured-model".into(),
+            }]
         );
     }
 }

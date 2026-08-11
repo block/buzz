@@ -5,6 +5,7 @@ import {
   installMockBridge,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
 async function expectHomeView(page: import("@playwright/test").Page) {
@@ -585,6 +586,78 @@ test("renders emoji avatars with a static background layer", async ({
   );
 });
 
+test("offers emoji search and skin-tone controls for profile avatars", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+
+  const picker = page.locator("em-emoji-picker");
+  const searchInput = picker.locator("input[type='search']");
+  await expect(searchInput).toBeVisible();
+  await expectEmojiMartStylesInstalled(picker);
+  await expect(page.getByTestId("profile-avatar-emoji-picker")).toHaveCSS(
+    "height",
+    "384px",
+  );
+
+  const hasSkinToneControl = await picker.evaluate((element) => {
+    const controls = element.shadowRoot?.querySelectorAll("button") ?? [];
+    return Array.from(controls).some((button) =>
+      /skin tone/i.test(button.getAttribute("aria-label") ?? ""),
+    );
+  });
+  expect(hasSkinToneControl).toBe(true);
+
+  const controlColors = await picker.evaluate((element) => {
+    const root = element.shadowRoot?.querySelector<HTMLElement>("#root");
+    const input = element.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    const toneControl =
+      element.shadowRoot?.querySelector<HTMLElement>(".search + .flex");
+    if (!root || !input || !toneControl) {
+      throw new Error("Profile emoji picker controls did not render.");
+    }
+    return {
+      input: getComputedStyle(input).backgroundColor,
+      picker: getComputedStyle(root).backgroundColor,
+      tone: getComputedStyle(toneControl).backgroundColor,
+    };
+  });
+  expect(controlColors.input).not.toBe(controlColors.picker);
+  expect(controlColors.tone).not.toBe(controlColors.picker);
+
+  const controlHeights = await picker.evaluate((element) => {
+    const input = element.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    const toneControl =
+      element.shadowRoot?.querySelector<HTMLElement>(".search + .flex");
+    const toneButton =
+      element.shadowRoot?.querySelector<HTMLElement>(".skin-tone-button");
+    if (!input || !toneControl || !toneButton) {
+      throw new Error("Profile emoji picker controls did not render.");
+    }
+    input.focus();
+    return {
+      inputHeight: input.getBoundingClientRect().height,
+      inputShadow: getComputedStyle(input).boxShadow,
+      toneButtonBorder: getComputedStyle(toneButton).borderTopWidth,
+      toneButtonShadow: getComputedStyle(toneButton).boxShadow,
+      toneHeight: toneControl.getBoundingClientRect().height,
+    };
+  });
+  expect(controlHeights.inputHeight).toBe(48);
+  expect(controlHeights.toneHeight).toBe(48);
+  expect(controlHeights.inputShadow).toMatch(/inset$/);
+  expect(controlHeights.toneButtonBorder).toBe("0px");
+  expect(controlHeights.toneButtonShadow).toBe("none");
+});
+
 test("reveals emoji background colors only after choosing an emoji", async ({
   page,
 }) => {
@@ -1139,6 +1212,13 @@ test("renders settings in the app shell with a back button", async ({
   await expect(page.getByTestId("settings-back-to-app")).toBeVisible();
   await expect(page.getByPlaceholder("Search everything")).toHaveCount(0);
   await expect(page.getByText("Personal", { exact: true })).toBeVisible();
+  const personalGroup = page
+    .getByTestId("settings-nav-channel-templates")
+    .locator("xpath=ancestor::*[@data-sidebar='group']");
+  await expect(personalGroup).toContainText("Personal");
+  await expect(
+    page.getByTestId("settings-nav-channel-templates"),
+  ).toContainText("Channel templates");
   await expect(page.getByTestId("settings-nav-profile")).toHaveAttribute(
     "aria-pressed",
     "true",

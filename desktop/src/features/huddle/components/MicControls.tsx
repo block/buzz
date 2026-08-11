@@ -13,18 +13,20 @@ import {
   PopoverTrigger,
 } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { AudioInputDevice } from "../lib/useAudioDevices";
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
 
 type MicControlsProps = {
+  /** Compact split-button treatment for the sidebar huddle card. */
+  compact?: boolean;
   isMuted: boolean;
   onToggleMute: () => void;
   isPttMode: boolean;
-  pttActive: boolean;
   micConnected: boolean;
   micLevel: number;
   onSelectVoiceInputMode: (mode: VoiceInputMode) => void | Promise<void>;
-  audioDevices: MediaDeviceInfo[];
+  audioDevices: AudioInputDevice[];
   selectedDeviceId: string;
   onSelectDevice: (id: string) => void;
   micGain: number;
@@ -34,6 +36,10 @@ type MicControlsProps = {
 const splitIconButtonClass = "h-12 w-auto shrink-0 rounded-r-none px-4 py-4";
 const splitChevronButtonClass =
   "buzz-huddle-split-chevron group h-12 w-auto shrink-0 rounded-l-none px-2 py-4";
+const mutedHuddleControlClass =
+  "bg-destructive/35 text-destructive shadow-none hover:bg-destructive/45 hover:text-destructive";
+const compactMutedHuddleControlClass =
+  "bg-destructive/15 text-destructive shadow-none hover:bg-destructive/20 hover:text-destructive";
 const MIC_PERMISSION_SETTINGS_URL =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";
 
@@ -86,10 +92,10 @@ function usePrefersReducedMotion(): boolean {
 }
 
 export function MicControls({
+  compact = false,
   isMuted,
   onToggleMute,
   isPttMode,
-  pttActive,
   micConnected,
   micLevel,
   onSelectVoiceInputMode,
@@ -100,10 +106,11 @@ export function MicControls({
   onGainChange,
 }: MicControlsProps) {
   const micUnavailable = !micConnected;
-  const showMicMeter = micConnected && !isMuted;
   const isMac = isMacPlatform();
   const prefersReducedMotion = usePrefersReducedMotion();
   const pushToTalkShortcut = isMac ? "⌃Space" : "Ctrl+Space";
+  const isEffectivelyMuted = isMuted;
+  const showMicMeter = micConnected && !isEffectivelyMuted;
   const barHeights: [number, number, number] = prefersReducedMotion
     ? MIC_METER_IDLE_HEIGHTS
     : micMeterHeights(showMicMeter ? micLevel : 0);
@@ -111,22 +118,32 @@ export function MicControls({
 
   const micButtonLabel = micUnavailable
     ? "Microphone unavailable"
-    : isMuted
+    : isEffectivelyMuted
       ? "Unmute microphone"
-      : isPttMode
-        ? "Force mute (overrides PTT)"
-        : "Mute microphone";
+      : "Mute microphone";
+  const micTooltip = micUnavailable
+    ? "Microphone unavailable. Check app permissions or input device."
+    : micButtonLabel;
+  const iconButtonClass = compact
+    ? "h-8 w-8 shrink-0 rounded-l-md rounded-r-none px-0 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
+    : splitIconButtonClass;
+  const chevronButtonClass = compact
+    ? "buzz-huddle-split-chevron group h-8 w-5 shrink-0 rounded-l-none rounded-r-md border-l border-sidebar-border/80 px-0.5 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
+    : splitChevronButtonClass;
+  const mutedMicClass =
+    isEffectivelyMuted || micUnavailable
+      ? compact
+        ? compactMutedHuddleControlClass
+        : mutedHuddleControlClass
+      : null;
 
   return (
     <Popover>
       <div
         className={cn(
           "flex items-center rounded-md",
-          isPttMode &&
-            pttActive &&
-            !isMuted &&
-            micConnected &&
-            "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
+          compact &&
+            "overflow-hidden border border-sidebar-border/80 bg-transparent text-sidebar-foreground/70 shadow-none",
         )}
       >
         <Tooltip>
@@ -134,19 +151,26 @@ export function MicControls({
             <Button
               aria-disabled={micUnavailable}
               aria-label={micButtonLabel}
-              aria-pressed={micConnected ? isMuted : true}
+              aria-pressed={micConnected ? isEffectivelyMuted : true}
               className={cn(
-                splitIconButtonClass,
-                !isMuted && !micUnavailable && "buzz-huddle-split-main",
+                iconButtonClass,
+                mutedMicClass,
+                !isEffectivelyMuted &&
+                  !micUnavailable &&
+                  "buzz-huddle-split-main",
               )}
               onClick={() => {
                 if (!micConnected) return;
                 onToggleMute();
               }}
               size="icon"
-              variant={isMuted || micUnavailable ? "destructive" : "secondary"}
+              variant={
+                compact || isEffectivelyMuted || micUnavailable
+                  ? "ghost"
+                  : "secondary"
+              }
             >
-              {isMuted || micUnavailable ? (
+              {isEffectivelyMuted || micUnavailable ? (
                 <MicOff className="h-4 w-4" />
               ) : (
                 <Mic className="h-4 w-4" />
@@ -154,19 +178,26 @@ export function MicControls({
             </Button>
           </TooltipTrigger>
           <TooltipContent className="buzz-huddle-tooltip" side="top">
-            {micUnavailable
-              ? "Microphone unavailable. Check app permissions or input device."
-              : micButtonLabel}
+            {isPttMode && !micUnavailable && isEffectivelyMuted ? (
+              <span className="flex items-center gap-1.5">
+                <span>Click to unmute or hold</span>
+                <kbd className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
+                  {pushToTalkShortcut}
+                </kbd>
+              </span>
+            ) : (
+              micTooltip
+            )}
           </TooltipContent>
         </Tooltip>
         <PopoverTrigger asChild>
           <Button
             aria-label="Audio settings"
-            className={splitChevronButtonClass}
+            className={chevronButtonClass}
             size="icon"
-            variant="secondary"
+            variant={compact ? "ghost" : "secondary"}
           >
-            {showMicMeter ? (
+            {showMicMeter && !compact ? (
               <span
                 aria-hidden="true"
                 className="relative flex h-5 w-5 items-center justify-center"
@@ -217,7 +248,7 @@ export function MicControls({
                 className={cn("h-3 w-3 shrink-0", !isPttMode && "invisible")}
               />
               <span className="font-medium">Push to Talk</span>
-              <kbd className="ml-auto rounded border border-foreground/10 px-1.5 py-0.5 text-2xs font-medium text-foreground/60">
+              <kbd className="ml-auto rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs font-medium text-muted-foreground">
                 {pushToTalkShortcut}
               </kbd>
             </button>
@@ -367,11 +398,11 @@ export function SpeakerControls({
           aria-pressed={!ttsEnabled}
           className={cn(
             splitIconButtonClass,
-            ttsEnabled && "buzz-huddle-split-main",
+            ttsEnabled ? "buzz-huddle-split-main" : mutedHuddleControlClass,
           )}
           onClick={onToggleTts}
           size="icon"
-          variant={ttsEnabled ? "secondary" : "destructive"}
+          variant={ttsEnabled ? "secondary" : "ghost"}
         >
           {ttsEnabled ? (
             <Volume2 className="h-4 w-4" />

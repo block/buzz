@@ -261,8 +261,12 @@ pub async fn cmd_create_repo(
         channel,
     )?;
     let event = client.sign_event(builder)?;
+    let owner = event.pubkey.to_hex();
     let resp = client.submit_event(event).await?;
-    println!("{resp}");
+    // `link` renders as a rich preview card in Buzz Desktop when included in
+    // a chat message — agents announce repos with it (see base_prompt.md).
+    let link = crate::links::repo_link(&owner, repo_id);
+    crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
 

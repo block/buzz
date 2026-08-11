@@ -7,12 +7,17 @@
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
 //! - PKCE cache hit: returned from disk without a network round-trip.
-//! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)` — the
-//!   caller degrades gracefully; no browser, no hang.
+//! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)`.
+//!
+//! This helper never opens a browser. Callers choose whether to reject, degrade,
+//! or start a separate interactive authentication flow.
+
+use std::sync::Arc;
 
 use reqwest::Client;
 
 use crate::{
+    auth::TokenSource,
     config::{Config, Provider},
     llm::build_token_source,
     types::AgentError,
@@ -26,57 +31,22 @@ pub struct ModelEntry {
     pub name: String,
 }
 
-/// Known Databricks AI Gateway v2 models — used as a fallback when the
-/// `api/ai-gateway/v2/endpoints` call returns an empty list.
+/// Known Databricks AI Gateway v2 models — used only when an authenticated
+/// `api/ai-gateway/v2/endpoints` call succeeds with an empty list.
 /// Mirrors goose's `DATABRICKS_V2_KNOWN_MODELS`.
 pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
     &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
 
-/// Returns the discovery-failure fallback catalog for a Databricks provider.
-///
-/// This is the list of models advertised by `session/new` when
-/// `discover_databricks_models` returns an error (e.g., no token available).
-///
-/// - `DatabricksV2` falls back to the configured model plus
-///   [`DATABRICKS_V2_KNOWN_MODELS`] so the model-picker is always populated for
-///   AI Gateway v2 users. The configured model leads: without it a fallback
-///   catalog can omit the very model the agent is running, leaving the picker
-///   unable to represent the current selection.
-/// - Legacy `Databricks` falls back to only the configured model — the
-///   `DATABRICKS_V2_KNOWN_MODELS` IDs are AI Gateway v2 endpoints that the
-///   `/serving-endpoints/{model}/invocations` API may not serve.
-///
-/// Extracting this as a pure function makes the split testable without
-/// spawning an async runtime or making network calls.
-pub fn discovery_failure_fallback(provider: Provider, configured_model: &str) -> Vec<ModelEntry> {
-    // `resolve_model` does not trim, so a padded `DATABRICKS_MODEL` reaches here:
-    // normalize once, or the dedupe below misses and the picker lists the model
-    // twice (once padded, once from the known slate).
-    let configured_model = configured_model.trim();
-    let configured = ModelEntry {
-        id: configured_model.to_string(),
-        name: configured_model.to_string(),
-    };
-    match provider {
-        Provider::DatabricksV2 => {
-            let mut entries = Vec::with_capacity(DATABRICKS_V2_KNOWN_MODELS.len() + 1);
-            if !configured_model.is_empty() {
-                entries.push(configured);
-            }
-            entries.extend(
-                DATABRICKS_V2_KNOWN_MODELS
-                    .iter()
-                    .filter(|id| **id != configured_model)
-                    .map(|id| ModelEntry {
-                        id: id.to_string(),
-                        name: id.to_string(),
-                    }),
-            );
-            entries
-        }
-        Provider::Databricks => vec![configured],
-        _ => vec![configured],
-    }
+const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
+
+fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
+    DATABRICKS_V2_KNOWN_MODELS
+        .iter()
+        .map(|id| ModelEntry {
+            id: id.to_string(),
+            name: format!("{id}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}"),
+        })
+        .collect()
 }
 
 /// Heuristic: `true` when a v2 AI Gateway endpoint name looks like it serves
@@ -109,23 +79,47 @@ pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
 ///
 /// Returns a non-empty `Vec<ModelEntry>` on success. Returns
 /// `Err(AgentError::LlmAuth)` when no token is available (no static token,
-/// no PKCE cache) — callers should degrade gracefully rather than hanging.
+/// no PKCE cache). The helper itself never starts interactive authentication.
 ///
 /// # Panics
 /// Never panics.
 pub async fn discover_databricks_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
-    let token_source = build_token_source(cfg)?;
-    let bearer = token_source.bearer_no_browser().await?;
+    discover_databricks_models_with_token_source(cfg, build_token_source(cfg)?).await
+}
 
+async fn discover_databricks_models_with_token_source(
+    cfg: &Config,
+    token_source: Arc<dyn TokenSource>,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let mut bearer = token_source.bearer_no_browser().await?;
     let http = Client::new();
     let host = cfg.base_url.trim_end_matches('/');
+    let mut refreshed = false;
 
-    match cfg.provider {
-        Provider::Databricks => fetch_v1_models(&http, host, &bearer).await,
-        Provider::DatabricksV2 => fetch_v2_models(&http, host, &bearer).await,
-        _ => Err(AgentError::InvalidParams(
-            "discover_databricks_models called for non-Databricks provider".into(),
-        )),
+    loop {
+        let result = match cfg.provider {
+            Provider::Databricks => fetch_v1_models(&http, host, &bearer).await,
+            Provider::DatabricksV2 => fetch_v2_models(&http, host, &bearer).await,
+            _ => {
+                return Err(AgentError::InvalidParams(
+                    "discover_databricks_models called for non-Databricks provider".into(),
+                ));
+            }
+        };
+
+        match result {
+            Err(AgentError::LlmAuth(_)) if !refreshed => {
+                refreshed = true;
+                let fresh = token_source.refresh_now(&bearer).await?;
+                if fresh == bearer {
+                    return Err(AgentError::LlmAuth(
+                        "Databricks rejected the configured credential".into(),
+                    ));
+                }
+                bearer = fresh;
+            }
+            result => return result,
+        }
     }
 }
 
@@ -149,6 +143,11 @@ async fn fetch_v1_models(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            return Err(AgentError::LlmAuth(format!(
+                "Databricks model discovery HTTP {status}"
+            )));
+        }
         return Err(AgentError::Llm(format!(
             "Databricks model discovery HTTP {status}: {body}"
         )));
@@ -264,6 +263,11 @@ async fn fetch_v2_models(
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 401 {
+                return Err(AgentError::LlmAuth(format!(
+                    "Databricks v2 model discovery HTTP {status}"
+                )));
+            }
             return Err(AgentError::Llm(format!(
                 "Databricks v2 model discovery HTTP {status}: {body}"
             )));
@@ -286,13 +290,7 @@ async fn fetch_v2_models(
 
     // Fall back to known-model list if the API returned nothing.
     if all_endpoints.is_empty() {
-        return Ok(DATABRICKS_V2_KNOWN_MODELS
-            .iter()
-            .map(|id| ModelEntry {
-                id: id.to_string(),
-                name: id.to_string(),
-            })
-            .collect());
+        return Ok(authenticated_empty_v2_catalog());
     }
 
     sort_v2_endpoints_newest_first(&mut all_endpoints);
@@ -396,6 +394,77 @@ pub(crate) fn parse_v2_endpoints_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RefreshingTestTokenSource {
+        refreshes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TokenSource for RefreshingTestTokenSource {
+        async fn bearer(&self) -> Result<String, AgentError> {
+            Ok("rejected".into())
+        }
+
+        async fn refresh_now(&self, rejected: &str) -> Result<String, AgentError> {
+            assert_eq!(rejected, "rejected");
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Ok("fresh".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_refreshes_rejected_bearer_once_then_retries_successfully() {
+        use axum::{
+            extract::Query,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Json, Router,
+        };
+        use std::collections::HashMap;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_route = requests.clone();
+        let app = Router::new().route(
+            "/api/ai-gateway/v2/endpoints",
+            get(
+                move |headers: HeaderMap, Query(_query): Query<HashMap<String, String>>| {
+                    let requests = requests_for_route.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        match headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                        {
+                            Some("Bearer fresh") => Ok(Json(serde_json::json!({
+                                "endpoints": [{"name": "discovered-model"}],
+                                "next_page_token": null,
+                            }))),
+                            _ => Err((StatusCode::UNAUTHORIZED, "rejected")),
+                        }
+                    }
+                },
+            ),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let source = Arc::new(RefreshingTestTokenSource {
+            refreshes: AtomicUsize::new(0),
+        });
+        let cfg = Config::for_discovery(Provider::DatabricksV2, String::new(), host);
+        let models = discover_databricks_models_with_token_source(&cfg, source.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(models[0].id, "discovered-model");
+        assert_eq!(source.refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn v1_parse_filters_ready_chat_endpoints() {
@@ -575,6 +644,17 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_empty_v2_catalog_marks_fallback_provenance() {
+        let models = authenticated_empty_v2_catalog();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+
+        assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS);
+        assert!(models.iter().all(|model| {
+            model.name == format!("{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}", model.id)
+        }));
+    }
+
+    #[test]
     fn is_chat_capable_endpoint_keeps_unrecognised_names() {
         // Prefer including over silently dropping — an unknown family is kept.
         assert!(is_chat_capable_endpoint("databricks-glm-5-2"));
@@ -584,48 +664,5 @@ mod tests {
         assert!(!is_chat_capable_endpoint("databricks-bge-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-gte-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-qwen3-embedding-0-6b"));
-    }
-
-    #[test]
-    fn v2_discovery_failure_fallback_leads_with_configured_model() {
-        let result = discovery_failure_fallback(Provider::DatabricksV2, "databricks-claude-opus-5");
-        let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
-
-        // The running model must be representable in the picker even when
-        // discovery failed, so it leads the fallback catalog.
-        assert_eq!(ids.first(), Some(&"databricks-claude-opus-5"));
-        for known in DATABRICKS_V2_KNOWN_MODELS {
-            assert!(ids.contains(known), "fallback must retain '{known}'");
-        }
-    }
-
-    #[test]
-    fn v2_discovery_failure_fallback_does_not_duplicate_configured_model() {
-        let configured = DATABRICKS_V2_KNOWN_MODELS[0];
-        let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
-        let occurrences = result.iter().filter(|m| m.id == configured).count();
-        assert_eq!(occurrences, 1, "got: {result:?}");
-        assert_eq!(result.len(), DATABRICKS_V2_KNOWN_MODELS.len());
-    }
-
-    #[test]
-    fn v2_discovery_failure_fallback_tolerates_blank_configured_model() {
-        for configured in ["", "   "] {
-            let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
-            let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
-            assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS.to_vec());
-        }
-    }
-
-    #[test]
-    fn v2_discovery_failure_fallback_dedupes_a_padded_configured_model() {
-        // `DATABRICKS_MODEL=" databricks-gpt-5-5 "` reaches here untrimmed, and an
-        // untrimmed comparison would list the model twice — once padded, once from
-        // the known slate.
-        let configured = DATABRICKS_V2_KNOWN_MODELS[0];
-        let result =
-            discovery_failure_fallback(Provider::DatabricksV2, &format!("  {configured} "));
-        let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS.to_vec());
     }
 }

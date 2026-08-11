@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { clearDraftEntry } from "@/features/messages/lib/useDrafts";
+import { deleteDraftEntry } from "@/features/messages/lib/useDrafts";
 import {
   useActiveDraftCount,
   useDraftViewItems,
@@ -62,7 +62,7 @@ export function useHomeDrafts({
 
   const deleteDraft = React.useCallback(
     (draftKey: string) => {
-      clearDraftEntry(draftKey);
+      deleteDraftEntry(draftKey);
       if (selectedKey === draftKey) {
         setSelectedKey(null);
       }

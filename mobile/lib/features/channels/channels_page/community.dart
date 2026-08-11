@@ -422,7 +422,7 @@ Future<void> _confirmRemoveCommunity(
   Community community, {
   required bool closeSheetAfterRemoval,
 }) async {
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showBuzzDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog.adaptive(
       title: const Text('Remove community?'),
@@ -471,37 +471,44 @@ class _CommunityIndicator extends ConsumerWidget {
     final activeAsync = ref.watch(activeCommunityProvider);
 
     final activeCommunity = activeAsync.value;
-    final name = activeCommunity?.name;
 
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _CommunityAvatar(name: name, relayUrl: activeCommunity?.relayUrl),
-          const SizedBox(width: _kTopSectionLabelGap),
-          if (name != null)
-            Flexible(
-              child: Text(
-                name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            )
-          else
-            Text(
-              'Community',
+      child: _CommunityAvatar(
+        name: activeCommunity?.name,
+        relayUrl: activeCommunity?.relayUrl,
+      ),
+    );
+  }
+}
+
+class _CommunityHeaderTitle extends ConsumerWidget {
+  final TextStyle? style;
+  final VoidCallback onTap;
+
+  const _CommunityHeaderTitle({required this.onTap, this.style});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final name = ref.watch(activeCommunityProvider).value?.name;
+    final title = name?.trim();
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox.expand(
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: Grid.xxs),
+            child: Text(
+              title == null || title.isEmpty ? 'Community' : title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: context.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+              style: style,
             ),
-        ],
+          ),
+        ),
       ),
     );
   }

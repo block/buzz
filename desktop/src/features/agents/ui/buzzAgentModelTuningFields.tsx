@@ -9,14 +9,13 @@ import * as React from "react";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import type { NumericDescriptor } from "../lib/agentConfigCore";
+import { numericTuningPlaceholder } from "../lib/agentConfigCore";
 import {
   AgentDropdownSelect,
   type AgentDropdownOption,
 } from "./agentConfigControls";
 import {
-  BUZZ_AGENT_MAX_CONTEXT_TOKENS,
-  BUZZ_AGENT_MAX_OUTPUT_TOKENS,
-  BUZZ_AGENT_MAX_ROUNDS,
   BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
   getProviderEffortConfig,
@@ -201,6 +200,98 @@ export function useEffortAutoClear({
   }, [effortValid, currentEffort]);
 }
 
+export type { NumericDescriptor };
+
+const NUMERIC_KIND_LABELS: Record<NumericDescriptor["kind"], string> = {
+  maxOutputTokens: "Max output tokens",
+  contextLimit: "Context limit",
+  maxRounds: "Max rounds",
+};
+
+const NUMERIC_KIND_DESCRIPTIONS: Record<NumericDescriptor["kind"], string> = {
+  maxOutputTokens:
+    "Maximum tokens the LLM may generate per response. Leave blank to inherit.",
+  contextLimit:
+    "Maximum context window tokens tracked before a handoff. Leave blank to inherit.",
+  maxRounds:
+    "Maximum LLM + tool-call rounds per turn. 0 = unlimited. Leave blank to inherit.",
+};
+
+const NUMERIC_KIND_TEST_IDS: Record<NumericDescriptor["kind"], string> = {
+  maxOutputTokens: "numeric-max-output-tokens-input",
+  contextLimit: "numeric-context-limit-input",
+  maxRounds: "numeric-max-rounds-input",
+};
+
+/**
+ * Input `min` attribute per numeric kind.
+ *
+ * - `maxOutputTokens` / `contextLimit`: minimum 1 — the buzz-agent runtime
+ *   rejects 0 for these fields (crates/buzz-agent/src/config.rs:921-928).
+ * - `maxRounds`: 0 is valid (means unlimited).
+ */
+export const NUMERIC_KIND_MIN: Record<NumericDescriptor["kind"], number> = {
+  maxOutputTokens: 1,
+  contextLimit: 1,
+  maxRounds: 0,
+};
+
+/**
+ * Descriptor-driven numeric tuning inputs.
+ *
+ * Renders a grid of number inputs for every numeric descriptor in `descriptors`.
+ * Label and help text are keyed by descriptor kind — the same copy renders on
+ * both the global defaults surface and per-agent dialogs.
+ */
+export function NumericTuningFields({
+  descriptors,
+  envVars,
+  inheritedEnvVars,
+  onEnvVarChange,
+}: {
+  /** Numeric descriptors to render. Empty array → renders nothing. */
+  descriptors: NumericDescriptor[];
+  envVars: EnvVarsValue;
+  inheritedEnvVars: EnvVarsValue;
+  onEnvVarChange: (key: string, value: string) => void;
+}) {
+  if (descriptors.length === 0) return null;
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {descriptors.map((d) => {
+        const key = d.currentPersistence.key;
+        const label = NUMERIC_KIND_LABELS[d.kind];
+        const description = NUMERIC_KIND_DESCRIPTIONS[d.kind];
+        const testId = NUMERIC_KIND_TEST_IDS[d.kind];
+        const inheritedVal = inheritedEnvVars[key];
+        return (
+          <div className="space-y-1.5" key={key}>
+            <label className="text-sm font-medium" htmlFor={testId}>
+              {label}
+            </label>
+            <Input
+              aria-describedby={`help-${testId}`}
+              autoComplete="off"
+              data-testid={testId}
+              id={testId}
+              inputMode="numeric"
+              min={NUMERIC_KIND_MIN[d.kind]}
+              onChange={(event) => onEnvVarChange(key, event.target.value)}
+              placeholder={numericTuningPlaceholder(inheritedVal)}
+              step="1"
+              type="number"
+              value={envVars[key] ?? ""}
+            />
+            <p className="text-xs text-muted-foreground" id={`help-${testId}`}>
+              {description}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function BuzzAgentModelTuningFields({
   envVars,
   inheritedEnvVars,
@@ -255,105 +346,6 @@ export function BuzzAgentModelTuningFields({
           >
             Controls how much reasoning effort the LLM applies per turn. Leave
             blank to inherit from the global or persona default.
-          </p>
-        </div>
-
-        {/* Max Rounds */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium" htmlFor="ba-max-rounds">
-            Max rounds
-          </label>
-          <Input
-            aria-describedby="help-ba-max-rounds"
-            autoComplete="off"
-            data-testid="ba-max-rounds-input"
-            id="ba-max-rounds"
-            inputMode="numeric"
-            min="0"
-            onChange={(event) =>
-              onEnvVarChange(BUZZ_AGENT_MAX_ROUNDS, event.target.value)
-            }
-            placeholder={
-              inheritedEnvVars[BUZZ_AGENT_MAX_ROUNDS]
-                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_ROUNDS]})`
-                : "Inherit (agent default)"
-            }
-            step="1"
-            type="number"
-            value={envVars[BUZZ_AGENT_MAX_ROUNDS] ?? ""}
-          />
-          <p className="text-xs text-muted-foreground" id="help-ba-max-rounds">
-            Maximum LLM + tool-call rounds per turn. 0 = unlimited. Leave blank
-            to inherit.
-          </p>
-        </div>
-
-        {/* Max Output Tokens */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium" htmlFor="ba-max-output-tokens">
-            Max output tokens
-          </label>
-          <Input
-            aria-describedby="help-ba-max-output-tokens"
-            autoComplete="off"
-            data-testid="ba-max-output-tokens-input"
-            id="ba-max-output-tokens"
-            inputMode="numeric"
-            min="1"
-            onChange={(event) =>
-              onEnvVarChange(BUZZ_AGENT_MAX_OUTPUT_TOKENS, event.target.value)
-            }
-            placeholder={
-              inheritedEnvVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS]
-                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS]})`
-                : "Inherit (agent default)"
-            }
-            step="1"
-            type="number"
-            value={envVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS] ?? ""}
-          />
-          <p
-            className="text-xs text-muted-foreground"
-            id="help-ba-max-output-tokens"
-          >
-            Maximum tokens the LLM may generate per response. Leave blank to
-            inherit.
-          </p>
-        </div>
-
-        {/* Context Limit */}
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium"
-            htmlFor="ba-max-context-tokens"
-          >
-            Context limit
-          </label>
-          <Input
-            aria-describedby="help-ba-max-context-tokens"
-            autoComplete="off"
-            data-testid="ba-max-context-tokens-input"
-            id="ba-max-context-tokens"
-            inputMode="numeric"
-            min="1"
-            onChange={(event) =>
-              onEnvVarChange(BUZZ_AGENT_MAX_CONTEXT_TOKENS, event.target.value)
-            }
-            placeholder={
-              inheritedEnvVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS]
-                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS]})`
-                : "Inherit (agent default)"
-            }
-            step="1"
-            type="number"
-            value={envVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS] ?? ""}
-          />
-          <p
-            className="text-xs text-muted-foreground"
-            id="help-ba-max-context-tokens"
-          >
-            Maximum context window tokens buzz-agent tracks before a handoff.
-            Leave blank to inherit.
           </p>
         </div>
       </div>

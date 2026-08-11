@@ -77,7 +77,12 @@ export function AgentIdentityCard({
             {modelLabel}
           </span>
         ) : null}
-        {statusBadge}
+        {/* pointer-events-auto: the overlay button above has pointer-events-none
+            on this container, but the status badge itself (a sibling of the button
+            in z-order) needs hover so the restart diff tooltip can fire. */}
+        {statusBadge ? (
+          <div className="pointer-events-auto">{statusBadge}</div>
+        ) : null}
       </div>
     </div>
   );

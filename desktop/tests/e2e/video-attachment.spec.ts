@@ -183,7 +183,7 @@ async function openReviewWithPostedTimecode(
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
     page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
   ).toBeVisible();
@@ -238,7 +238,7 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
   const composerPoster = composer.getByAltText("Video attachment bbbb");
@@ -624,12 +624,20 @@ test("video upload previews use poster frames and inline videos open review mode
   // must not remount the review dialog or wipe an in-progress comment draft.
   await commentBox.click();
   await commentBox.fill("Second pass note");
+  const commentEditor = await commentBox.elementHandle();
+  if (!commentEditor) {
+    throw new Error("Expected the review comment editor to be mounted.");
+  }
   await emitMockMessage(page, "general", "Unrelated chatter mid-review");
-  await expect(
-    page
-      .getByTestId("message-row")
-      .filter({ hasText: "Unrelated chatter mid-review" }),
-  ).toHaveCount(1);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  expect(await commentEditor.evaluate((element) => element.isConnected)).toBe(
+    true,
+  );
   await expect(commentBox).toHaveText("Second pass note");
   await expect(commentBox).toBeFocused();
   await expect(page.getByTestId("video-review-composer-timecode")).toHaveText(
@@ -746,6 +754,14 @@ test("video upload previews use poster frames and inline videos open review mode
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
 
+  // Re-open the channel so the thread summary is sourced from the persisted
+  // mock history instead of depending on whether the background timeline row
+  // stayed mounted while the modal handled live comment updates.
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
   const videoSummaryRow = page.locator(
     `[data-thread-head-id="${videoMessageId}"]`,
   );
@@ -771,6 +787,103 @@ test("video upload previews use poster frames and inline videos open review mode
   ).toContainText("Color pass looks right");
 });
 
+test("inline video hover reveals a timeline without a second play control", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${VIDEO_URL}`,
+        "m video/mp4",
+        `x ${VIDEO_SHA}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename launch-demo.mp4",
+      ],
+    ],
+  });
+
+  const player = page.getByTestId("video-player").last();
+  const video = player.locator("video");
+  const surface = video.locator("..");
+  const centerPlayback = player.getByTestId("video-inline-center-playback");
+  const centerIcon = player.getByTestId("video-inline-center-icon");
+  const controls = player.getByTestId("video-inline-controls");
+
+  await expect(centerPlayback).toHaveAttribute("aria-label", "Play video");
+  await expect(
+    controls.getByRole("button", { name: /^(?:Play|Pause) video$/ }),
+  ).toHaveCount(0);
+  await expect(
+    player.getByRole("button", { name: "Open video review" }),
+  ).toBeVisible();
+  await expect(player.getByTestId("video-inline-duration")).toHaveText("00:12");
+
+  await video.evaluate((element) => {
+    element.currentTime = 6.25;
+    element.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect
+    .poll(() =>
+      player
+        .getByTestId("video-inline-progress-fill")
+        .evaluate((element) => element.style.width),
+    )
+    .toBe("50%");
+
+  const restingControlsBox = await controls.boundingBox();
+  const restingIconTransform = await centerIcon.evaluate(
+    (element) => window.getComputedStyle(element).transform,
+  );
+  expect(restingControlsBox).not.toBeNull();
+  await expect(controls).toHaveCSS("opacity", "0");
+  await surface.hover();
+  await expect(controls).toHaveCSS("opacity", "1");
+  const hoveredControlsBox = await controls.boundingBox();
+  expect(hoveredControlsBox).not.toBeNull();
+  expect(
+    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+  ).toBeLessThan(0.5);
+  await expect
+    .poll(() =>
+      centerIcon.evaluate(
+        (element) => window.getComputedStyle(element).transform,
+      ),
+    )
+    .toBe(restingIconTransform);
+
+  await centerPlayback.click();
+  await expect
+    .poll(() => video.evaluate((element) => element.paused))
+    .toBe(false);
+  await expect(centerPlayback).toHaveAttribute("aria-label", "Pause video");
+  await page.mouse.move(0, 0);
+  await expect(centerPlayback).toHaveCSS("opacity", "0");
+  await surface.hover();
+  await expect(centerPlayback).toHaveCSS("opacity", "1");
+  await expect(centerPlayback).toHaveCSS("transition-property", "opacity");
+  await expect(centerPlayback).toHaveCSS("transition-duration", "0.15s");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(centerPlayback).toHaveCSS("transition-property", "none");
+  await expect(controls).toHaveCSS("transition-property", "none");
+
+  await centerPlayback.click();
+  await expect
+    .poll(() => video.evaluate((element) => element.paused))
+    .toBe(true);
+});
+
 test("video replies in threads open the review comments view", async ({
   page,
 }) => {
@@ -791,6 +904,19 @@ test("video replies in threads open the review comments view", async ({
     "general",
     `![video](${VIDEO_URL})`,
     {
+      extraTags: [
+        [
+          "imeta",
+          `url ${VIDEO_URL}`,
+          "m video/mp4",
+          `x ${VIDEO_SHA}`,
+          "size 987654",
+          "dim 160x80",
+          "duration 12.5",
+          `image ${POSTER_DATA_URL}`,
+          "filename launch-demo.mp4",
+        ],
+      ],
       parentEventId: root.id,
     },
   )) as { id: string };
@@ -808,9 +934,73 @@ test("video replies in threads open the review comments view", async ({
     name: "Open video review",
   });
   await expect(reviewButton).toBeVisible();
-  await reviewButton.click();
+  const nestedVideoSummary = threadReplies.locator(
+    `[data-thread-head-id="${videoReply.id}"]`,
+  );
+  await expect(nestedVideoSummary).toBeVisible();
+  await expect(threadReplies.locator("video")).toHaveAttribute(
+    "preload",
+    "metadata",
+  );
+  await nestedVideoSummary.click();
+  const outsideTimecode = threadReplies.getByRole("button", {
+    name: "Jump to 00:01",
+  });
+  await expect(outsideTimecode).toBeVisible();
+  await expect(outsideTimecode).toHaveAttribute(
+    "data-testid",
+    "video-review-comment-timecode",
+  );
+  const outsideTimecodeStyles = await outsideTimecode.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      backgroundColor: styles.backgroundColor,
+      borderRadius: styles.borderRadius,
+      fontFamily: styles.fontFamily,
+      height: styles.height,
+      paddingLeft: styles.paddingLeft,
+      paddingRight: styles.paddingRight,
+    };
+  });
+  expect(outsideTimecodeStyles.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  await outsideTimecode.click();
 
   const reviewDialog = page.getByTestId("video-review-dialog");
+  const reviewVideo = reviewDialog.locator("video");
+  const posterPreview = reviewDialog.getByTestId("video-review-poster-preview");
+  await expect(posterPreview).toBeVisible();
+  await expect(posterPreview).toHaveAttribute("src", POSTER_DATA_URL);
+  await expect(
+    reviewDialog.getByTestId("video-review-comments-panel"),
+  ).toHaveCSS("background-color", "oklch(0.145 0 0)");
+  const modalTimecode = reviewDialog
+    .getByRole("button", { name: "Jump to 00:01" })
+    .first();
+  await expect(modalTimecode).toBeVisible();
+  const modalTimecodeStyles = await modalTimecode.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      borderRadius: styles.borderRadius,
+      fontFamily: styles.fontFamily,
+      height: styles.height,
+      paddingLeft: styles.paddingLeft,
+      paddingRight: styles.paddingRight,
+    };
+  });
+  expect(outsideTimecodeStyles).toMatchObject(modalTimecodeStyles);
+  await expect(reviewVideo).toHaveAttribute("preload", "auto");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).paused),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).currentTime),
+    )
+    .toBe(1);
+  await reviewVideo.dispatchEvent("loadeddata");
+  await expect(posterPreview).toHaveCount(0);
   await expect(
     reviewDialog.getByTestId("video-review-comments-panel"),
   ).toBeVisible();
@@ -818,6 +1008,76 @@ test("video replies in threads open the review comments view", async ({
   await expect(reviewDialog.getByTestId("video-review-comments")).toContainText(
     "Tighten this transition.",
   );
+});
+
+test("message timecodes deterministically open the first attached video", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const videoMessage = (await emitMockMessage(
+    page,
+    "general",
+    `![first video](${VIDEO_URL})\n\n![second video](${PORTRAIT_VIDEO_URL})`,
+    {
+      extraTags: [
+        [
+          "imeta",
+          `url ${VIDEO_URL}`,
+          "m video/mp4",
+          `x ${VIDEO_SHA}`,
+          "dim 160x80",
+          "duration 12.5",
+          "filename first-cut.mp4",
+        ],
+        [
+          "imeta",
+          `url ${PORTRAIT_VIDEO_URL}`,
+          "m video/mp4",
+          `x ${PORTRAIT_VIDEO_SHA}`,
+          "dim 80x160",
+          "duration 12.5",
+          "filename second-cut.mp4",
+        ],
+      ],
+    },
+  )) as { id: string };
+  await emitMockMessage(page, "general", "[00:01] Check this frame.", {
+    parentEventId: videoMessage.id,
+  });
+
+  const threadSummary = page.locator(
+    `[data-thread-head-id="${videoMessage.id}"]`,
+  );
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  const inlineVideos = threadHead.locator("video");
+  await expect(inlineVideos).toHaveCount(2);
+  const firstVideoSrc = await inlineVideos.nth(0).getAttribute("src");
+  const secondVideoSrc = await inlineVideos.nth(1).getAttribute("src");
+  expect(firstVideoSrc).toBeTruthy();
+  expect(firstVideoSrc).not.toBe(secondVideoSrc);
+
+  await threadPanel
+    .getByTestId("message-thread-replies")
+    .getByRole("button", { name: "Jump to 00:01" })
+    .click();
+
+  const reviewVideo = page.getByTestId("video-review-dialog").locator("video");
+  await expect(reviewVideo).toHaveAttribute("src", firstVideoSrc ?? "");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).currentTime),
+    )
+    .toBe(1);
 });
 
 test("narrow inline videos hide playback speed control", async ({ page }) => {

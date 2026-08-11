@@ -28,12 +28,13 @@ use buzz_core::kind::{
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -48,6 +49,55 @@ use crate::conformance::{
     self as conf, channel_label, claimed_community_from_event, emit, msg_id_label,
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
+
+fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("emoji") {
+            continue;
+        }
+        let shortcode = parts.get(1).ok_or_else(|| {
+            IngestError::Rejected("invalid: emoji tag must include a shortcode".into())
+        })?;
+        buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+            .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
+    let emoji_char_count = emoji.chars().count();
+    if emoji_char_count <= 64 {
+        return Ok(());
+    }
+
+    let Some(shortcode) = emoji
+        .strip_prefix(':')
+        .and_then(|value| value.strip_suffix(':'))
+    else {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    };
+    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    if shortcode != normalized {
+        return Err(IngestError::Rejected(
+            "invalid: long custom emoji reaction shortcode must be canonical lowercase".into(),
+        ));
+    }
+    let has_matching_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("emoji")
+            && parts.get(1).is_some_and(|value| value == shortcode)
+    });
+    if !has_matching_tag || emoji_char_count > buzz_sdk::MAX_CUSTOM_EMOJI_REACTION_LEN {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    }
+    Ok(())
+}
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
@@ -162,6 +212,72 @@ pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
     .increment(1);
 }
 
+fn valid_link_preview_text(value: &str, max: usize, allow_newlines: bool) -> bool {
+    value.len() <= max
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !(allow_newlines && character == '\n'))
+}
+
+fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(), String> {
+    const MAX_SNAPSHOTS: usize = 8;
+    const MAX_TITLE: usize = 300;
+    const MAX_SITE: usize = 100;
+    const MAX_DESCRIPTION: usize = 1000;
+
+    let mut count = 0;
+    let mut suppressed = false;
+    let mut seen = std::collections::HashSet::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("link-preview") {
+            continue;
+        }
+        count += 1;
+        if parts == ["link-preview", "none"] {
+            if count > 1 {
+                return Err("link-preview suppression cannot include snapshots".into());
+            }
+            suppressed = true;
+            continue;
+        }
+        if suppressed
+            || count > MAX_SNAPSHOTS
+            || parts.len() != 11
+            || parts[1] != "snapshot"
+            || parts[2] != "1"
+        {
+            return Err("invalid link-preview snapshot tag".into());
+        }
+        let canonical =
+            url::Url::parse(&parts[3]).map_err(|_| "invalid link-preview canonical URL")?;
+        if canonical.scheme() != "https"
+            || !canonical.username().is_empty()
+            || canonical.password().is_some()
+            || canonical.fragment().is_some()
+            || !seen.insert(parts[3].clone())
+            || !event.content.contains(&parts[3])
+        {
+            return Err("invalid link-preview canonical URL".into());
+        }
+        for (value, max, allow_newlines) in [
+            (&parts[4], MAX_TITLE, false),
+            (&parts[5], MAX_SITE, false),
+            (&parts[6], MAX_DESCRIPTION, true),
+        ] {
+            if !valid_link_preview_text(value, max, allow_newlines) {
+                return Err("invalid link-preview snapshot text".into());
+            }
+        }
+        if !super::imeta::validate_local_image_media_pair(&parts[7], &parts[8], media_base_url)
+            || !super::imeta::validate_local_image_media_pair(&parts[9], &parts[10], media_base_url)
+        {
+            return Err("link-preview media must reference matching local image blobs".into());
+        }
+    }
+    Ok(())
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -214,7 +330,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -427,6 +543,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
             | KIND_MANAGED_AGENT
+            | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
@@ -2596,6 +2713,13 @@ async fn ingest_event_inner(
         });
     }
 
+    let tenant_media_base =
+        crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+    if kind_u32 == KIND_STREAM_MESSAGE {
+        validate_link_preview_tags(&event, &tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     let imeta_tags: Vec<Vec<String>> = event
         .tags
         .iter()
@@ -2603,8 +2727,6 @@ async fn ingest_event_inner(
         .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
         .collect();
     if !imeta_tags.is_empty() {
-        let tenant_media_base =
-            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
@@ -2632,6 +2754,10 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected(
             "invalid: kind:0 content must be valid JSON".into(),
         ));
+    }
+
+    if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
+        validate_custom_emoji_tags(&event)?;
     }
 
     // Resolve the target reference, then use one DB transaction to upsert the
@@ -2672,17 +2798,7 @@ async fn ingest_event_inner(
             &event.content
         };
 
-        // Mirror the SDK's 64-character emoji limit server-side so raw clients
-        // cannot bypass it. Uses chars().count() (not byte len) to match the
-        // SDK's check_emoji_len, which also counts Unicode characters.
-        const MAX_REACTION_EMOJI_CHARS: usize = 64;
-        let emoji_char_count = emoji.chars().count();
-        if emoji_char_count > MAX_REACTION_EMOJI_CHARS {
-            return Err(IngestError::Rejected(format!(
-                "invalid: reaction emoji exceeds {} characters (got {})",
-                MAX_REACTION_EMOJI_CHARS, emoji_char_count
-            )));
-        }
+        validate_reaction_emoji(&event, emoji)?;
 
         // Atomically upsert the reaction row with this kind:7 event id, then store
         // the event in the same transaction. Ordering is load-bearing: active
@@ -2915,6 +3031,84 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn reaction_validation_accepts_wrapped_max_shortcode() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(validate_reaction_emoji(&event, &event.content).is_ok());
+    }
+
+    #[test]
+    fn reaction_validation_rejects_mixed_case_max_shortcode() {
+        let shortcode = "Ab".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN / 2);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn reaction_validation_rejects_case_mismatched_tag() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let uppercase_shortcode = shortcode.to_uppercase();
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([nostr::Tag::parse([
+                "emoji",
+                &uppercase_shortcode,
+                "https://example.com/max.png",
+            ])
+            .expect("emoji tag")])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn emoji_set_validation_enforces_shortcode_boundary() {
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let valid_event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &max_shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign valid emoji set");
+        assert!(validate_custom_emoji_tags(&valid_event).is_ok());
+
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        let event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/long.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign emoji set");
+
+        assert!(matches!(
+            validate_custom_emoji_tags(&event),
+            Err(IngestError::Rejected(message)) if message.contains("exceeds 64 bytes")
+        ));
+    }
 
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
@@ -3217,6 +3411,17 @@ mod tests {
     }
 
     #[test]
+    fn private_managed_agent_kind_is_owner_scoped_global_user_data() {
+        let event = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PRIVATE_MANAGED_AGENT, &event),
+            Ok(Scope::UsersWrite)
+        );
+        assert!(is_global_only_kind(KIND_PRIVATE_MANAGED_AGENT));
+        assert!(!requires_h_channel_scope(KIND_PRIVATE_MANAGED_AGENT));
+    }
+
+    #[test]
     fn ephemeral_kinds_not_in_scope_allowlist() {
         assert!(required_scope_for_kind(KIND_PRESENCE_UPDATE, &make_dummy_event()).is_err());
     }
@@ -3496,6 +3701,109 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    #[test]
+    fn link_preview_suppression_accepts_blanket_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"]],
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_duplicate_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"], &["link-preview", "none"]],
+        );
+
+        assert_eq!(
+            validate_link_preview_tags(&event, "https://media.example.com"),
+            Err("link-preview suppression cannot include snapshots".into())
+        );
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_mixed_snapshot_tags_in_either_order() {
+        let snapshot = [
+            "link-preview",
+            "snapshot",
+            "1",
+            "https://example.com",
+            "Example",
+            "Example",
+            "Description",
+            "",
+            "",
+            "",
+            "",
+        ];
+        for tags in [
+            vec![&["link-preview", "none"][..], &snapshot[..]],
+            vec![&snapshot[..], &["link-preview", "none"][..]],
+        ] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, "https://example.com", &tags);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    fn make_link_preview_event(title: &str, site: &str, description: &str) -> Event {
+        make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&[
+                "link-preview",
+                "snapshot",
+                "1",
+                "https://example.com",
+                title,
+                site,
+                description,
+                "",
+                "",
+                "",
+                "",
+            ]],
+        )
+    }
+
+    #[test]
+    fn link_preview_snapshot_accepts_description_newlines() {
+        let event = make_link_preview_event(
+            "Example title",
+            "Example site",
+            "First paragraph\n\nSecond paragraph",
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_title_and_site_newlines() {
+        for (title, site) in [
+            ("Example\ntitle", "Example site"),
+            ("Example title", "Example\nsite"),
+        ] {
+            let event = make_link_preview_event(title, site, "Description");
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_non_newline_controls_in_all_text_fields() {
+        for (title, site, description) in [
+            ("Example\ttitle", "Example site", "Description"),
+            ("Example title", "Example\rsite", "Description"),
+            ("Example title", "Example site", "Unsafe\tdescription"),
+        ] {
+            let event = make_link_preview_event(title, site, description);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
     }
 
     fn make_dummy_event() -> Event {

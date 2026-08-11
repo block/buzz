@@ -19,6 +19,10 @@ import {
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
+  useAppFocused,
+  useFocusedRefetchInterval,
+} from "@/shared/lib/useDocumentVisible";
+import {
   createManagedAgent,
   deleteManagedAgent,
   deleteCustomHarness,
@@ -33,6 +37,7 @@ import {
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
+  invokeTauri,
   listManagedAgents,
   listRelayAgents,
   saveCustomHarness,
@@ -321,6 +326,7 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
+  const refetchInterval = useFocusedRefetchInterval(5 * 60_000);
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
@@ -333,19 +339,21 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     // the `agents-data-changed` event fires only for local persona/team/managed
     // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
     // keep polling but at a relaxed cadence and pause it while backgrounded.
-    refetchInterval: 5 * 60_000,
-    refetchIntervalInBackground: false,
+    refetchInterval,
+    refetchOnWindowFocus: true,
     enabled: options?.enabled,
   });
 }
 
 export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
+  const appFocused = useAppFocused();
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: managedAgentsQueryKey,
     queryFn: listManagedAgents,
     staleTime: 5_000,
     refetchInterval: (query) => {
+      if (!appFocused) return false;
       const agents = query.state.data as ManagedAgent[] | undefined;
       // Only local "running" agents need polling: process state can change
       // with no relay event to signal it, so this poll is the only liveness
@@ -356,6 +364,7 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         ? 5_000
         : false;
     },
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -647,6 +656,12 @@ export function useAttachManagedAgentToChannelMutation(
           pubkey: result.agent.pubkey,
         }),
       );
+      void invokeTauri("sync_agents_to_active_huddle", {
+        channelId: effectiveChannelId,
+        agentPubkeys: [result.agent.pubkey],
+      }).catch((error) => {
+        console.warn("Could not sync attached agent into Huddle:", error);
+      });
     },
     onSettled: (_data, _err, variables) => {
       // Invalidate the effective channel (the one the server actually mutated)
@@ -888,13 +903,15 @@ export function useManagedAgentLogQuery(
   pubkey: string | null,
   lineCount = 120,
 ) {
+  const refetchInterval = useFocusedRefetchInterval(pubkey ? 30_000 : false);
   return useQuery({
     queryKey: ["managed-agent-log", pubkey, lineCount],
     queryFn: () => getManagedAgentLog(pubkey as string, lineCount),
     enabled: pubkey !== null,
     retry: false,
     staleTime: 3_000,
-    refetchInterval: pubkey ? 30_000 : false,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -902,12 +919,14 @@ export const agentConfigSurfaceQueryKey = (pubkey: string) =>
   ["agent-config-surface", pubkey] as const;
 
 export function useAgentConfigSurface(pubkey: string | null) {
+  const refetchInterval = useFocusedRefetchInterval(30_000);
   return useQuery({
     queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
     queryFn: () => getAgentConfigSurface(pubkey ?? ""),
     enabled: !!pubkey,
     staleTime: 10_000,
-    refetchInterval: 30_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -939,7 +958,6 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
-
 /**
  * Query safely displayable baked build env entries. The backend masks secrets,
  * so this is only used for inherited provider/model/effort labels.

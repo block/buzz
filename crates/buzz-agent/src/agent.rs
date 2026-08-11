@@ -3,23 +3,66 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
-use crate::handoff::HandoffOutcome;
+use crate::config::{
+    pricing_authority, Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
+use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent, TurnTotalState,
+    AgentError, CacheTotalState, ContentBlock, HistoryItem, PricingIdentity, ProviderStop,
+    SessionUsageBaseline, StopReason, ToolCall, ToolResult, ToolResultContent, TurnIOState,
+    TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Model-visible feedback after the provider truncates an assistant response at
+/// its output-token limit. This is a user message rather than a synthetic tool
+/// result because truncation can happen without a tool call (and an unpaired
+/// tool result is invalid on every provider wire format).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
+
+/// A provider can repeatedly spend its entire output allowance without making
+/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
+/// finite so a persistently truncating model eventually surfaces `max_tokens`.
+const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
+
+/// Remove image blocks that the provider has explicitly rejected while keeping
+/// their surrounding tool result (and therefore the tool-call/result pairing)
+/// intact. Returns the number of images removed; zero means the provider error
+/// cannot be safely recovered by mutating history.
+fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
+    let mut replaced = 0;
+    for item in history {
+        let HistoryItem::ToolResult(result) = item else {
+            continue;
+        };
+        let before = result.content.len();
+        result
+            .content
+            .retain(|content| !matches!(content, ToolResultContent::Image { .. }));
+        let removed = before - result.content.len();
+        if removed > 0 {
+            replaced += removed;
+            result.is_error = true;
+            result.content.push(ToolResultContent::Text(
+                UNSUPPORTED_IMAGE_TOOL_MESSAGE.to_string(),
+            ));
+        }
+    }
+    replaced
+}
 
 /// Maximum reply reminders emitted per prompt when `require_reply` is on.
 ///
@@ -116,6 +159,12 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
+    /// ACP v2 session identifier for this prompt turn. Used to derive
+    /// per-message `messageId` values that are unique within the ACP session.
+    /// Distinct from `session_id` (which is the ACP session); this is a
+    /// per-`session/prompt` random token so that IDs from one prompt invocation
+    /// never collide with those from another even within the same session.
+    pub run_id: String,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -129,16 +178,38 @@ pub struct RunCtx<'a> {
     /// preserved in lockstep with `last_request_input_tokens`.
     pub last_request_history_bytes: &'a mut Option<usize>,
     /// Accumulated input tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_input_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_input_tokens: &'a mut TurnIOState,
     /// Accumulated output tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_output_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_output_tokens: &'a mut TurnIOState,
     /// The cache-served subset of `turn_input_tokens`, accumulated across all
-    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
     /// Consumers price this slice at the provider's cached rate; without it
     /// every round of a growing conversation is billed at full price.
-    pub turn_cached_input_tokens: &'a mut Option<u64>,
+    ///
+    /// `CacheTotalState` enforces the D1 rule: any usage-bearing round that
+    /// omits this category poisons the accumulator permanently for the turn.
+    pub turn_cached_input_tokens: &'a mut CacheTotalState,
+    /// The cache-written subset of `turn_input_tokens`, accumulated across all
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
+    /// Consumers need this to price cache-creation at the provider's write rate
+    /// (distinct from both the standard input rate and the cached-read rate).
+    ///
+    /// Same D1 tri-state contract as `turn_cached_input_tokens`.
+    pub turn_cache_write_tokens: &'a mut CacheTotalState,
+    /// Per-turn billing identity accumulator.
+    ///
+    /// - `None`: no usage-bearing response observed yet this turn (initial state).
+    /// - `Some(Some(pi))`: all usage-bearing responses so far carry the same
+    ///   proven identity `pi`. If a subsequent response carries a different or
+    ///   unproven identity, this transitions to `Some(None)` (poisoned).
+    /// - `Some(None)`: poisoned — mixed identities, unproven response, mesh
+    ///   retry across models, or no identity derived. Never heals within the turn.
+    ///
+    /// Reset to `None` at turn start in `run()`. The wire payload emits the
+    /// proven identity when `Some(Some(pi))`, omits it otherwise.
+    pub turn_pricing_identity: &'a mut Option<Option<PricingIdentity>>,
     /// Tri-state total-token accumulator for this turn.
     ///
     /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
@@ -150,9 +221,90 @@ pub struct RunCtx<'a> {
     /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
     /// total by summing input+output — that is the UI display approximation only.
     pub turn_total_state: &'a mut TurnTotalState,
+    /// Session-cumulative counters as they stood when this turn began. Added to
+    /// the `turn_*` accumulators above to report a cumulative figure mid-turn;
+    /// the session's own copy is only advanced once, after the turn returns.
+    pub usage_baseline: SessionUsageBaseline,
+}
+
+/// Fold one round's proven identity into the per-turn identity accumulator.
+///
+/// Accumulator tri-state (NIP-AM §pricingIdentity):
+/// - `None`: no usage-bearing round observed yet this turn.
+/// - `Some(Some(pi))`: every usage-bearing round so far carries the same
+///   proven identity `pi`.
+/// - `Some(None)`: poisoned — mixed identities or unproven round seen.
+///   Never heals within the turn.
+///
+/// `round`: `Some(pi)` when this round's `(base_url, request_model)` resolve
+/// to a proven identity; `None` when the endpoint is unallowlisted or the
+/// model is unknown.
+#[inline]
+fn fold_pricing_identity(
+    acc: Option<Option<PricingIdentity>>,
+    round: Option<PricingIdentity>,
+) -> Option<Option<PricingIdentity>> {
+    match acc {
+        // First usage-bearing round: record whatever was derived.
+        None => Some(round),
+        // Already consistent: keep only if this round matches exactly.
+        Some(Some(ref existing)) => {
+            if Some(existing) == round.as_ref() {
+                Some(round)
+            } else {
+                // Mismatch (different model, different authority,
+                // or this round had no proven identity) → poison.
+                Some(None)
+            }
+        }
+        // Already poisoned: stays poisoned forever this turn.
+        poisoned @ Some(None) => poisoned,
+    }
 }
 
 impl RunCtx<'_> {
+    /// Send a session-cumulative `usage_update` reflecting everything observed
+    /// up to and including the most recent LLM response.
+    ///
+    /// The figure is the turn-start baseline plus this turn's running
+    /// accumulators, which is exactly what `session/prompt` will fold into the
+    /// session once the turn returns — so a mid-turn notification and the
+    /// end-of-turn one agree, and a turn that never returns has still reported
+    /// everything but its final in-flight request.
+    async fn emit_usage_update(&self) {
+        let base = self.usage_baseline;
+        // Combine session baseline CacheTotalState with the per-turn delta:
+        // merge_session produces Exact when both sides are Exact, Unknown when
+        // either is Unknown, and leaves Unseen when both sides are Unseen.
+        let cached_total = base
+            .cached_input_tokens
+            .merge_session(*self.turn_cached_input_tokens);
+        let write_total = base
+            .cache_write_tokens
+            .merge_session(*self.turn_cache_write_tokens);
+        let payload = wire::usage_update_payload(
+            base.input_tokens
+                .merge_session(*self.turn_input_tokens)
+                .exact_value(),
+            base.output_tokens
+                .merge_session(*self.turn_output_tokens)
+                .exact_value(),
+            cached_total.exact_value(),
+            write_total.exact_value(),
+            base.total_state.merge_session(*self.turn_total_state),
+            self.effective_model,
+            // Extract the proven identity if this turn is consistent so far.
+            self.turn_pricing_identity
+                .as_ref()
+                .and_then(|inner| inner.as_ref()),
+        );
+        wire::send(
+            self.wire,
+            wire::goose_session_update(self.session_id, payload),
+        )
+        .await;
+    }
+
     pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
         let user_text = prompt_to_text(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
@@ -166,10 +318,20 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         // Reset per-turn token accumulators for this prompt.
-        *self.turn_input_tokens = None;
-        *self.turn_output_tokens = None;
-        *self.turn_cached_input_tokens = None;
+        *self.turn_input_tokens = TurnIOState::Unseen;
+        *self.turn_output_tokens = TurnIOState::Unseen;
+        *self.turn_cached_input_tokens = CacheTotalState::Unseen;
+        *self.turn_cache_write_tokens = CacheTotalState::Unseen;
+        *self.turn_pricing_identity = None;
         *self.turn_total_state = TurnTotalState::Unseen;
+        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
+        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
+        // `session/prompt` turn rather than per session lifetime. A
+        // long-lived session legitimately needs unbounded handoffs across
+        // prompts; the cap only exists to stop runaway within a single turn.
+        // The session-cumulative `handoff_count` (used in log lines) is not
+        // reset: it reflects total compactions since session start.
+        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -184,6 +346,14 @@ impl RunCtx<'_> {
         // successful publish. See `is_buzz_reply_call`.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
+        // Per-`run()` reactive context-recovery budget. Per-turn, not
+        // per-session: a fresh prompt deserves a fresh chance to recover, and
+        // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
+        let mut context_recoveries = 0u32;
+        // Per-run output-truncation recovery budget. Unlike context recovery,
+        // these successful provider requests consume a real round and are not
+        // refunded; this counter only bounds the default-unlimited case.
+        let mut max_tokens_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -196,7 +366,7 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff().await {
+            match self.maybe_handoff(&mut handoff_attempts).await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
                 // longer describes the (now much smaller) history. Clear both
@@ -218,10 +388,11 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response = tokio::select! {
+            let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
+                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -244,7 +415,78 @@ impl RunCtx<'_> {
                     }
                 } => unreachable!(),
             };
-
+            let response = match response_result {
+                Ok(response) => response,
+                Err(AgentError::UnsupportedImageInput(detail)) => {
+                    let removed = replace_unsupported_images(self.history);
+                    if removed == 0 {
+                        return Err(AgentError::UnsupportedImageInput(detail));
+                    }
+                    tracing::warn!(
+                        model = self.effective_model,
+                        removed_images = removed,
+                        "provider rejected image input; removed images from history and continuing turn"
+                    );
+                    continue;
+                }
+                // Reactive context recovery. A context-window 400 is the only
+                // ground-truth signal that history must shrink, and it arrives
+                // exactly when the proactive gate cannot act: a failed request
+                // reports no usage, so `last_request_input_tokens` stays frozen
+                // at the last SUCCESSFUL (sub-threshold) reading and
+                // `should_handoff()` returns false forever. Without this arm the
+                // error propagates out of `run()`, the in-memory session keeps
+                // the same oversized history, and every later prompt in that
+                // session fails the same way — a stick that persists across
+                // turns for the life of the session. (Restarting the agent DOES
+                // clear it: history lives only in the in-memory session map, so
+                // a restart is the manual workaround, not an exception to it.)
+                //
+                // Retried in-loop rather than returned so the recovered context
+                // continues the turn the user is waiting on.
+                Err(AgentError::LlmContextExceeded(e)) => {
+                    match self
+                        .recover_from_context_overflow(&mut context_recoveries)
+                        .await
+                    {
+                        ContextRecovery::Recovered => {
+                            // Refund the round the rejected request consumed.
+                            // `round` is incremented before `complete()`, so
+                            // without this a finite `max_rounds` is spent by a
+                            // request the provider refused to serve: the loop
+                            // would re-enter, hit the cap at the top, and return
+                            // `MaxTurnRequests` having destroyed history and
+                            // never asked the model again — a worse outcome than
+                            // the error it replaced.
+                            //
+                            // This cannot become an unbounded amnesty: refunds
+                            // happen only on a *successful* recovery, and
+                            // recoveries are independently capped by
+                            // `MAX_CONTEXT_RECOVERIES_PER_RUN`, so at most that
+                            // many rounds can ever be refunded in one turn. An
+                            // ordinary round is never refunded.
+                            round = round.saturating_sub(1);
+                            // Same reset as the proactive path (see
+                            // `HandoffOutcome::Performed` above): the frozen
+                            // token reading describes history that no longer
+                            // exists. Clearing it is what lets the gate work
+                            // again on later rounds.
+                            *self.last_request_input_tokens = None;
+                            *self.last_request_history_bytes = None;
+                            continue;
+                        }
+                        ContextRecovery::Cancelled => return Ok(StopReason::Cancelled),
+                        // No rescue left. Surface the provider's own error
+                        // rather than a synthetic one: it names the model and
+                        // the offending sizes, and a visible failure is the
+                        // point — the alternative is retrying forever.
+                        ContextRecovery::Exhausted => {
+                            return Err(AgentError::LlmContextExceeded(e))
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             // Record provider-reported input usage so the next loop iteration's
             // handoff gate can compare it against the token budget. We capture
             // it together with the history byte size AT THIS MOMENT — which is
@@ -258,7 +500,17 @@ impl RunCtx<'_> {
             // a response omits usage (`None`) rather than clobbering — a
             // one-off missing field shouldn't blind the gate or zero the
             // growth baseline.
-            if let Some(tokens) = response.input_tokens {
+            if response.input_tokens_overflowed {
+                // The Anthropic-style inclusive sum (input_tokens +
+                // cache_read_input_tokens + cache_creation_input_tokens)
+                // overflowed u64::MAX during parsing. Permanently poison the
+                // turn accumulator so wire emission omits this value and ACP
+                // marks the delta unreliable. Do NOT update
+                // last_request_input_tokens — freeze the context-gate
+                // baseline at its prior reading rather than poisoning it with
+                // a clamped value, exactly as the absent-usage path does.
+                *self.turn_input_tokens = TurnIOState::Poisoned;
+            } else if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
                 *self.last_request_history_bytes = Some(
                     self.history
@@ -267,29 +519,30 @@ impl RunCtx<'_> {
                         .sum(),
                 );
                 // Accumulate per-turn input tokens for NIP-AM metric publishing.
-                *self.turn_input_tokens =
-                    Some(self.turn_input_tokens.unwrap_or(0).saturating_add(tokens));
+                // fold_round uses checked_add; overflow permanently poisons the
+                // turn accumulator (and, via merge_session, the session cumulative).
+                *self.turn_input_tokens = self.turn_input_tokens.fold_round(tokens);
             }
             // Accumulate per-turn output tokens for NIP-AM metric publishing.
             if let Some(out) = response.output_tokens {
-                *self.turn_output_tokens =
-                    Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
+                *self.turn_output_tokens = self.turn_output_tokens.fold_round(out);
             }
-            // Accumulate the cache-served subset of this turn's input. Tracked
-            // separately from `turn_input_tokens` rather than subtracted from
-            // it: the input total must stay inclusive for the handoff gate,
-            // which cares how much context was sent, not what it cost.
-            if let Some(cached) = response.cached_input_tokens {
-                *self.turn_cached_input_tokens = Some(
-                    self.turn_cached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(cached),
-                );
-            }
-            // Fold the provider-reported total into the turn tri-state, but only
-            // when this response was usage-bearing (had input or output tokens).
-            // A response with no usage at all is not evidence of a missing total
-            // and must not poison the accumulator.
+            // Fold the provider-reported total, cache subsets, and billing
+            // identity — only when this response was usage-bearing (had input
+            // or output tokens).  A response with no usage at all is not
+            // evidence of a missing cache field or total and must not poison
+            // either accumulator.
+            //
+            // `input_tokens_overflowed` counts as usage-bearing: the provider
+            // reported an input total (which overflowed) so cache fields and
+            // the total are meaningful and must be folded.
+            //
+            // D1: absent cache field on a usage-bearing round permanently
+            // poisons the turn accumulator.  Some(0) stays Exact(0) (explicit
+            // zero is distinct from absent).  Cache-read and cache-write are
+            // tracked separately from `turn_input_tokens` rather than
+            // subtracted from it: the input total must stay inclusive for the
+            // handoff gate, which cares how much context was sent, not cost.
             //
             // Shape assumption: documented OpenAI-compatible responses that carry
             // `total_tokens` always co-report at least one of `prompt_tokens` /
@@ -297,10 +550,81 @@ impl RunCtx<'_> {
             // with neither category is therefore not a supported shape and would
             // be silently ignored here. If that shape is ever encountered, extend
             // this gate rather than representing absent categories as zero.
-            if response.input_tokens.is_some() || response.output_tokens.is_some() {
+            if response.input_tokens.is_some()
+                || response.input_tokens_overflowed
+                || response.output_tokens.is_some()
+            {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+                // Cache-read: the cache-served subset of input tokens.
+                *self.turn_cached_input_tokens = self
+                    .turn_cached_input_tokens
+                    .fold(response.cached_input_tokens);
+                // Cache-write: the cache-creation subset of input tokens.
+                *self.turn_cache_write_tokens = self
+                    .turn_cache_write_tokens
+                    .fold(response.cache_write_tokens);
+
+                // Derive billing identity for this round and fold it into the
+                // per-turn accumulator.  Rules (NIP-AM §pricingIdentity):
+                //
+                // 1. Attempt to derive identity from (base_url, request_model).
+                //    - base_url must canonically match an official allowlisted host.
+                //    - request_model must be Some (mesh-auto with unknown model
+                //      cannot prove identity).
+                // 2. Fold the round identity into the turn accumulator:
+                //    - Unseen (None): record this round's identity (or poison if None).
+                //    - Consistent: if it matches, keep; otherwise poison.
+                //    - Poisoned: stays poisoned forever this turn.
+                {
+                    let round_identity: Option<PricingIdentity> =
+                        response.request_model.as_deref().and_then(|model| {
+                            pricing_authority(&self.cfg.base_url).map(|auth| PricingIdentity {
+                                authority: auth.to_string(),
+                                model: model.to_string(),
+                                cache_class: None, // no cache-class derivation yet
+                            })
+                        });
+
+                    *self.turn_pricing_identity =
+                        fold_pricing_identity(self.turn_pricing_identity.take(), round_identity);
+                }
+
+                // Report what the turn has burned SO FAR, before running the
+                // next round. A turn is many provider round-trips over many
+                // minutes, and until this point the only report was the one
+                // `session/prompt` sends after the turn returns — so a turn
+                // that was cancelled, timed out, or whose process was killed
+                // reported nothing at all, and its tokens (already billed)
+                // existed only in this stack frame. Reporting per round bounds
+                // the loss to the single request in flight.
+                //
+                // Emitting more than one `usage_update` per turn is expected by
+                // the consumer: buzz-acp's UsageTracker advances its committed
+                // baseline only when the turn's metric is published, so every
+                // notification within a turn measures from the same frozen
+                // baseline and the last one seen is the turn's true total.
+                // goose behaves the same way, which is why the tracker was
+                // written to tolerate it.
+                self.emit_usage_update().await;
             }
 
+            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
+            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
+            // that belong to the same logical message must share the same ID, and
+            // IDs must be unique per message within the ACP session.
+            //
+            // A provider round produces at most one thought and one assistant
+            // message (the parsers collapse all provider output into one
+            // LlmResponse.reasoning string and one LlmResponse.text string).
+            // These are two *distinct* logical messages, so they get distinct IDs.
+            //
+            // `run_id` is a fresh random token per `session/prompt` invocation,
+            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
+            // unique within the ACP session even across multiple prompts.
+            //
+            // ACP v1 allows the field, so this is a backwards-safe addition.
+            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
+            let message_msg_id = format!("{}-message-{round}", self.run_id);
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -308,6 +632,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
+                            "messageId": &thought_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -322,11 +647,43 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
+                            "messageId": &message_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),
                 )
                 .await;
+            }
+
+            // `max_tokens` describes a truncated assistant response, not turn
+            // completion. Never execute tool calls from it: although one may
+            // parse as valid, a later call (or surrounding instructions) may
+            // have been cut off. Replay only the text, with no tool calls, so
+            // the history remains valid without fabricated tool results; then
+            // add actionable user-role feedback and ask the model to continue.
+            if response.stop == ProviderStop::MaxTokens {
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                    tracing::warn!(
+                        recoveries = max_tokens_recoveries,
+                        "provider repeatedly hit output token limit; recovery budget exhausted"
+                    );
+                    return Ok(StopReason::MaxTokens);
+                }
+                max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
+                tracing::warn!(
+                    recovery = max_tokens_recoveries,
+                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
+                    discarded_tool_calls = response.tool_calls.len(),
+                    "provider hit output token limit; asking model to continue in smaller steps"
+                );
+                self.history
+                    .push(HistoryItem::User(MAX_TOKENS_RECOVERY_MESSAGE.to_string()));
+                continue;
             }
 
             if response.tool_calls.is_empty() {
@@ -897,6 +1254,66 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `truncate_history` cannot serve as the context-window fallback: it is
+    /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
+    /// limiter) while the thing the fallback must defend is a TOKEN window
+    /// (`max_context_tokens`, default 200k). A history large enough to blow a
+    /// 200k-token window is nowhere near 16 MiB, so at the default budget the
+    /// fallback evicts nothing at all — which is why the `Skipped ->
+    /// truncate_history` path left the agent permanently stuck and the reactive
+    /// ladder had to be built instead.
+    ///
+    /// The negative assertion is paired with a positive control (same helper,
+    /// same fixture, budget set to the window instead) so that "evicted
+    /// nothing" is a real observation about the unit mismatch rather than a
+    /// blind probe that could never evict.
+    #[test]
+    fn truncate_history_is_a_noop_at_context_window_scale() {
+        // ~800 KB of history. At any real bytes/token density (densest real
+        // content is ~1.4 B/tok, typical prose ~3-4) this is >= 200k tokens,
+        // i.e. already over a 200k window.
+        let mut history: Vec<HistoryItem> = Vec::new();
+        for i in 0..400 {
+            history.push(HistoryItem::User(format!("q{i} {}", "x".repeat(1000))));
+            history.push(HistoryItem::Assistant {
+                text: format!("a{i} {}", "y".repeat(1000)),
+                tool_calls: vec![],
+                reasoning_details: None,
+            });
+        }
+        let total: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        let pressure: usize = history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum();
+        assert!(
+            total > 800_000,
+            "fixture must be big enough to exceed a 200k-token window, got {total}"
+        );
+
+        // NEGATIVE: the real configured default budget.
+        let default_budget = 16 * 1024 * 1024;
+        let mut under_default = history.clone();
+        truncate_history(&mut under_default, default_budget);
+        assert_eq!(
+            under_default.len(),
+            history.len(),
+            "16 MiB byte budget evicted nothing from a {total}-byte history \
+             (pressure {pressure}) that already exceeds a 200k-token window"
+        );
+
+        // POSITIVE CONTROL: same helper, same fixture, budget set to the
+        // window instead. If this also evicted nothing the assertion above
+        // would prove nothing about the unit mismatch -- it would just mean
+        // the probe is blind.
+        let mut under_window = history.clone();
+        truncate_history(&mut under_window, 200_000);
+        assert!(
+            under_window.len() < history.len(),
+            "positive control must evict: probe is blind otherwise"
+        );
+    }
+
     /// The shapes the guard must recognize as a publish attempt. Callers apply
     /// the registry checks first; these cover the name suffix and command text.
     #[test]
@@ -1028,6 +1445,47 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_images_become_recoverable_tool_errors() {
+        let mut history = vec![
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call-image".into(),
+                    name: "dev__view_image".into(),
+                    arguments: json!({ "source": "spec.png" }),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call-image".into(),
+                content: vec![
+                    ToolResultContent::Text("10x10 image from spec.png".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(replace_unsupported_images(&mut history), 1);
+        let HistoryItem::ToolResult(result) = &history[1] else {
+            panic!("tool result must stay paired with the assistant tool call");
+        };
+        assert_eq!(result.provider_id, "call-image");
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .iter()
+            .all(|content| !matches!(content, ToolResultContent::Image { .. })));
+        assert!(result.text().contains("does not support image input"));
+        assert!(result.text().contains("10x10 image from spec.png"));
+        assert_eq!(replace_unsupported_images(&mut history), 0);
+    }
+
+    #[test]
     fn truncate_history_noop_when_under_budget() {
         let mut history = vec![
             HistoryItem::User("hi".into()),
@@ -1043,6 +1501,101 @@ mod tests {
             history.len(),
             original_len,
             "under budget must not evict anything"
+        );
+    }
+
+    // ── fold_pricing_identity: turn discipline ────────────────────────────────
+
+    fn pi(authority: &str, model: &str) -> PricingIdentity {
+        PricingIdentity {
+            authority: authority.to_string(),
+            model: model.to_string(),
+            cache_class: None,
+        }
+    }
+
+    /// Case 1: two usage-bearing rounds with different proven identities in one
+    /// turn must poison the accumulator.  The wire payload omits `pricingIdentity`
+    /// when `Some(None)`.
+    #[test]
+    fn fold_pricing_identity_mismatch_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-opus-4-5"));
+        let round_b = Some(pi("api.openai.com", "gpt-4o"));
+
+        // Start: unseen.
+        let acc = None;
+        // After round A: consistent — Some(Some(claude-opus-4-5)).
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one round must be consistent"
+        );
+        // After round B (different authority + model): poisoned.
+        let acc = fold_pricing_identity(acc, round_b);
+        assert_eq!(
+            acc,
+            Some(None),
+            "different proven identities in one turn must poison"
+        );
+    }
+
+    /// Case 2: proven identity followed by a usage-bearing round with no proven
+    /// identity (request_model absent or non-allowlisted endpoint) must poison.
+    /// An unpaired cumulative snapshot also produces round=None (no model known)
+    /// and hits this same path — case 4 collapses into case 2.
+    #[test]
+    fn fold_pricing_identity_unproven_round_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-3-7-sonnet"));
+        let round_unproven: Option<PricingIdentity> = None; // absent request_model or custom endpoint
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one proven round must be consistent"
+        );
+        let acc = fold_pricing_identity(acc, round_unproven);
+        assert_eq!(
+            acc,
+            Some(None),
+            "an unproven round after a proven round must poison (no-model / custom-endpoint path)"
+        );
+    }
+
+    /// Case 3: a poisoned accumulator must not heal, even if a later round
+    /// carries an identity matching the original.
+    #[test]
+    fn fold_pricing_identity_poisoned_never_heals() {
+        let round_a = Some(pi("api.openai.com", "gpt-4o"));
+        let round_unproven: Option<PricingIdentity> = None;
+        let round_a_again = Some(pi("api.openai.com", "gpt-4o")); // identical to round_a
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        let acc = fold_pricing_identity(acc, round_unproven); // poisons
+        assert_eq!(acc, Some(None), "must be poisoned before heal attempt");
+        let acc = fold_pricing_identity(acc, round_a_again); // must not heal
+        assert_eq!(
+            acc,
+            Some(None),
+            "poisoned accumulator must stay poisoned even when the next round matches the original identity"
+        );
+    }
+
+    /// Baseline: a turn where every round carries the same proven identity
+    /// stays consistent and emits the identity on the wire.
+    #[test]
+    fn fold_pricing_identity_consistent_rounds_stay_proven() {
+        let identity = pi("api.openrouter.ai", "meta-llama/llama-4-scout");
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        assert_eq!(
+            acc,
+            Some(Some(identity)),
+            "three identical rounds must remain consistently proven"
         );
     }
 }

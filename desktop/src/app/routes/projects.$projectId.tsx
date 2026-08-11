@@ -19,13 +19,16 @@ export const Route = createFileRoute("/projects/$projectId")({
         ? search.pullRequestId
         : undefined,
     issueId: typeof search.issueId === "string" ? search.issueId : undefined,
+    repositoryId:
+      typeof search.repositoryId === "string" ? search.repositoryId : undefined,
   }),
 });
 
 function ProjectDetailRouteComponent() {
   usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
-  const { commitHash, pullRequestId, issueId } = Route.useSearch();
+  const { commitHash, pullRequestId, issueId, repositoryId } =
+    Route.useSearch();
 
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
@@ -34,6 +37,7 @@ function ProjectDetailRouteComponent() {
         issueId={issueId}
         projectId={projectId}
         pullRequestId={pullRequestId}
+        repositoryId={repositoryId}
       />
     </React.Suspense>
   );

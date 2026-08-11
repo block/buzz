@@ -1,6 +1,6 @@
 part of '../channel_detail_page.dart';
 
-class _SystemMessageRow extends ConsumerWidget {
+class _SystemMessageRow extends HookConsumerWidget {
   final TimelineMessage message;
   final List<TimelineMessage>? groupedMessages;
   final String channelId;
@@ -21,18 +21,25 @@ class _SystemMessageRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final spotlightKey = useMemoized(() => GlobalKey());
     final systemEvent = message.systemEvent;
     if (systemEvent == null) return const SizedBox.shrink();
 
     final userCache = ref.watch(userCacheProvider);
     final sourceMessages = groupedMessages ?? [message];
     final groupedMembership = _membershipDisplayEvent(sourceMessages);
-    final channelCreator = systemEvent.type == SystemEventType.channelCreated
-        ? systemEvent.actorPubkey?.trim()
-        : null;
+    final messageStyleAction = switch (systemEvent.type) {
+      SystemEventType.channelCreated => 'created this channel',
+      SystemEventType.huddleStarted => 'started a huddle',
+      SystemEventType.huddleEnded => 'ended the huddle',
+      _ => null,
+    };
+    final messageStyleActor = messageStyleAction == null
+        ? null
+        : systemEvent.actorPubkey?.trim();
     final usesMessageStyleLayout =
         groupedMembership != null ||
-        (channelCreator != null && channelCreator.isNotEmpty);
+        (messageStyleActor != null && messageStyleActor.isNotEmpty);
 
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
@@ -71,65 +78,92 @@ class _SystemMessageRow extends ConsumerWidget {
       }
     }
 
+    void openReactionPopover(Rect anchorRect) {
+      final spotlightRenderObject = spotlightKey.currentContext
+          ?.findRenderObject();
+      final spotlightRect =
+          spotlightRenderObject is RenderBox && spotlightRenderObject.hasSize
+          ? spotlightRenderObject.localToGlobal(Offset.zero) &
+                spotlightRenderObject.size
+          : anchorRect;
+      showMessageActions(
+        context: context,
+        ref: ref,
+        message: message,
+        channelId: channelId,
+        canManageMessage: false,
+        allMessages: null,
+        currentPubkey: currentPubkey,
+        isMember: isMember,
+        isArchived: isArchived,
+        anchorRect: spotlightRect,
+        popoverSpotlightPadding: EdgeInsets.fromLTRB(
+          Grid.xxs,
+          Grid.xxs,
+          Grid.xxs,
+          reactions.isEmpty ? Grid.xxs : Grid.quarter,
+        ),
+      );
+    }
+
     return Material(
       color: Colors.transparent,
       borderRadius: BorderRadius.circular(Radii.md),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
+      child: MessageLongPressInkWell(
         key: ValueKey('system-message-row-${message.id}'),
+        onLongPress: openReactionPopover,
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
-        onLongPress: () => showMessageActions(
-          context: context,
-          ref: ref,
-          message: message,
-          channelId: channelId,
-          canManageMessage: false,
-          allMessages: null,
-          currentPubkey: currentPubkey,
-          isMember: isMember,
-          isArchived: isArchived,
-        ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          padding: EdgeInsets.only(
+            top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
+            bottom: usesMessageStyleLayout ? 0 : Grid.xxs,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (groupedMembership != null)
-                _MembershipSystemMessageContent(
-                  event: groupedMembership,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                )
-              else if (channelCreator != null && channelCreator.isNotEmpty)
-                _MessageStyleSystemMessageContent(
-                  displayPubkey: channelCreator,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                  actionSpans: const [TextSpan(text: 'created this channel')],
-                )
-              else
-                Row(
-                  children: [
-                    _systemEventAvatar(context, systemEvent, userCache),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
-                      child: Text(
-                        systemEvent.describe(resolveLabel),
-                        style: systemMessageBodyTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
+              KeyedSubtree(
+                key: spotlightKey,
+                child: groupedMembership != null
+                    ? _MembershipSystemMessageContent(
+                        event: groupedMembership,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                      )
+                    : messageStyleActor != null &&
+                          messageStyleActor.isNotEmpty &&
+                          messageStyleAction != null
+                    ? _MessageStyleSystemMessageContent(
+                        displayPubkey: messageStyleActor,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                        actionSpans: [TextSpan(text: messageStyleAction)],
+                      )
+                    : Row(
+                        children: [
+                          _systemEventAvatar(context, systemEvent, userCache),
+                          const SizedBox(width: Grid.xxs),
+                          Expanded(
+                            child: Text(
+                              systemEvent.describe(resolveLabel),
+                              style: systemMessageBodyTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          _messageTimestamp(
+                            context,
+                            message.createdAt,
+                            key: ValueKey(
+                              'system-message-timestamp-${message.id}',
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    _messageTimestamp(
-                      context,
-                      message.createdAt,
-                      key: ValueKey('system-message-timestamp-${message.id}'),
-                    ),
-                  ],
-                ),
+              ),
               if (reactions.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.only(
@@ -333,10 +367,14 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _UserAvatar(
-          profile: userCache[displayPubkey.toLowerCase()],
-          pubkey: displayPubkey,
-          size: messageAvatarSize,
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showUserProfileSheet(context, displayPubkey),
+          child: _UserAvatar(
+            profile: userCache[displayPubkey.toLowerCase()],
+            pubkey: displayPubkey,
+            size: messageAvatarSize,
+          ),
         ),
         const SizedBox(width: messageAvatarContentGap),
         Expanded(
@@ -441,12 +479,23 @@ Widget _systemEventAvatar(
       height: 20,
       child: Stack(
         children: [
-          SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+            child: SmallAvatar(
+              pubkey: event.actorPubkey!,
+              userCache: userCache,
+            ),
+          ),
           Positioned(
             left: 12,
-            child: SmallAvatar(
-              pubkey: event.targetPubkey!,
-              userCache: userCache,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showUserProfileSheet(context, event.targetPubkey!),
+              child: SmallAvatar(
+                pubkey: event.targetPubkey!,
+                userCache: userCache,
+              ),
             ),
           ),
         ],
@@ -455,7 +504,11 @@ Widget _systemEventAvatar(
   }
 
   if (event.actorPubkey != null) {
-    return SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+      child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+    );
   }
 
   // Fallback: generic icon when no actor is available.

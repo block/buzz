@@ -252,7 +252,7 @@ class _CameraCaptureButton extends StatelessWidget {
       button: true,
       label: 'Take photo',
       child: GestureDetector(
-        onTap: isPressed ? null : onTap,
+        onTap: isPressed ? null : () => _runComposerAction(onTap),
         child: AnimatedScale(
           scale: isPressed ? 0.92 : 1,
           duration: duration,
@@ -290,7 +290,7 @@ class _CameraCloseButton extends StatelessWidget {
     return SizedBox.square(
       dimension: emphasized ? _cameraBackSize : 36,
       child: IconButton(
-        onPressed: onTap,
+        onPressed: () => _runComposerAction(onTap),
         tooltip: 'Back to attachment options',
         padding: EdgeInsets.zero,
         style: IconButton.styleFrom(

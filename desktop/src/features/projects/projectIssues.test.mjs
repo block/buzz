@@ -6,6 +6,7 @@ import {
   eventToProjectIssue,
   getAllTags,
   getTag,
+  nextProjectIssueCommentCreatedAt,
   PROJECT_ISSUE_STATUS,
 } from "./projectIssues.mjs";
 
@@ -125,6 +126,31 @@ test("preserves root and comment tags for rich content rendering", () => {
   assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
 });
 
+test("parses public and private-safe issue provenance", () => {
+  const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+  const publicIssue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["h", channelId],
+      ],
+    }),
+  );
+  const privateIssue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["buzz-origin-agent", "Builder"],
+      ],
+    }),
+  );
+
+  assert.equal(publicIssue.channelId, channelId);
+  assert.equal(publicIssue.originAgentName, null);
+  assert.equal(privateIssue.channelId, null);
+  assert.equal(privateIssue.originAgentName, "Builder");
+});
+
 test("builds repository-scoped issue creation tags", () => {
   assert.deepEqual(
     buildGitIssueTags({
@@ -138,4 +164,40 @@ test("builds repository-scoped issue creation tags", () => {
       ["subject", "Fix the broken workflow"],
     ],
   );
+});
+
+test("orders consecutive issue comments across whole-second timestamps", () => {
+  const issue = eventToProjectIssue(
+    issueEvent(),
+    [],
+    [
+      {
+        id: "comment-1",
+        kind: 1,
+        pubkey: AUTHOR,
+        created_at: 200,
+        content: "First",
+        tags: [["e", "e".repeat(64), "", "root"]],
+      },
+      {
+        id: "comment-2",
+        kind: 1,
+        pubkey: AUTHOR,
+        created_at: 201,
+        content: "Second",
+        tags: [["e", "e".repeat(64), "", "root"]],
+      },
+      {
+        id: "attacker-comment",
+        kind: 1,
+        pubkey: ATTACKER,
+        created_at: 10_000,
+        content: "Future",
+        tags: [["e", "e".repeat(64), "", "root"]],
+      },
+    ],
+  );
+
+  assert.equal(nextProjectIssueCommentCreatedAt(issue, 200, AUTHOR), 202);
+  assert.equal(nextProjectIssueCommentCreatedAt(issue, 300, AUTHOR), 300);
 });

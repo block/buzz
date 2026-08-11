@@ -62,8 +62,6 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
-  // never omits the key.
   channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
@@ -118,6 +116,8 @@ type RawRelayAgent = {
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
+
+import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
@@ -143,6 +143,7 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
+  restart_diff?: RawRestartDiffEntry[];
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -158,8 +159,7 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
-  // Optional: pre-feature mock fixtures may omit these. Mapped to
-  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -188,6 +188,9 @@ export type RawAcpRuntimeCatalogEntry = {
   model_env_var?: string | null;
   provider_env_var?: string | null;
   thinking_env_var?: string | null;
+  max_tokens_env_var?: string | null;
+  context_limit_env_var?: string | null;
+  max_rounds_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
@@ -199,11 +202,9 @@ export type RawAcpRuntimeCatalogEntry = {
   auth_status: AuthStatus;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
-  /**
-   * Definition-level env vars for `source: custom` entries.
-   * Omitted/absent for builtin and preset — skipped in Rust serialization when empty.
-   */
+  /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
   definition_env?: Record<string, string>;
+  max_parallelism?: number;
 };
 
 export type {
@@ -548,6 +549,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  linkPreviewTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -558,6 +560,7 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      linkPreviewTags,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -596,11 +599,11 @@ export async function uploadMedia(
     isTemp,
   });
 }
-
-export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
-  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", {});
+export async function pickAndUploadMedia(
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  return invokeTauri<BlobDescriptor[]>("pick_and_upload_media", { progressId });
 }
-
 export async function uploadMediaBytes(
   data: number[],
   filename?: string,
@@ -614,23 +617,7 @@ export async function uploadMediaBytes(
   });
 }
 
-export async function editMessage(
-  channelId: string,
-  eventId: string,
-  content: string,
-  mediaTags?: string[][],
-  emojiTags?: string[][],
-  mentionPubkeys?: string[],
-): Promise<void> {
-  await invokeTauri("edit_message", {
-    channelId,
-    eventId,
-    content,
-    mediaTags: mediaTags ?? [],
-    emojiTags: emojiTags ?? [],
-    mentionPubkeys: mentionPubkeys ?? null,
-  });
-}
+export { editMessage } from "@/shared/api/editMessage";
 
 export async function deleteMessage(
   channelId: string,
@@ -707,11 +694,11 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
     modelSource: agent.model_source ?? null,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
+    restartDiff: agent.restart_diff ?? [],
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -727,8 +714,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
-    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
-    // Real agent records always include them (defaulted server-side).
     respondTo: agent.respond_to ?? "owner-only",
     respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
@@ -749,6 +734,9 @@ export function fromRawAcpRuntimeCatalogEntry(
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
+    maxTokensEnvVar: entry.max_tokens_env_var ?? null,
+    contextLimitEnvVar: entry.context_limit_env_var ?? null,
+    maxRoundsEnvVar: entry.max_rounds_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
@@ -758,9 +746,10 @@ export function fromRawAcpRuntimeCatalogEntry(
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
-    // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
-    // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
     definitionEnv: entry.definition_env ?? {},
+    ...(entry.max_parallelism !== undefined && {
+      maxParallelism: entry.max_parallelism,
+    }),
   };
 }
 
@@ -1024,9 +1013,8 @@ export type RuntimeFileConfigSubset = {
 };
 
 /**
- * Get the file-layer config for a runtime so dialogs can show
- * "Set in goose config" instead of surfacing a false required-field marker.
- * Returns `null` when the runtime has no config file or it cannot be parsed.
+ * Get the file-layer config for a runtime so dialogs can show "Set in goose config" instead of
+ * surfacing a false required-field marker. Returns `null` when unavailable or unparseable.
  */
 export async function getRuntimeFileConfig(
   runtimeId: string,
@@ -1040,13 +1028,9 @@ export async function getRuntimeFileConfig(
 }
 
 /**
- * Return the key names of all non-empty baked build env vars.
- *
- * Internal (Block) builds bake provider credentials into the binary at compile
- * time. This returns the *key names only* — never the values — so dialogs can
- * treat them as satisfied without exposing secrets to the frontend.
- *
- * OSS builds return an empty array (no baked env).
+ * Return the key names of all non-empty baked build env vars. Internal (Block) builds bake
+ * provider credentials into the binary at compile time; this returns *key names only* (never
+ * values) so dialogs treat them as satisfied without exposing secrets. OSS builds return [].
  */
 export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
@@ -1127,8 +1111,6 @@ export async function nip44DecryptFromSelf(
 ): Promise<string> {
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
 
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");

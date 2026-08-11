@@ -881,6 +881,16 @@ impl AcpClient {
         self.goose_usage.take()
     }
 
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
+    }
+
     /// Install a per-turn steer request channel for goose-native
     /// non-cancelling mid-turn delivery.
     ///
@@ -1607,7 +1617,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1619,7 +1631,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1849,8 +1863,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -3789,7 +3803,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3850,7 +3864,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -4034,7 +4048,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -4066,7 +4080,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4171,7 +4185,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4228,7 +4242,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4306,8 +4320,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.

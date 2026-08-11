@@ -16,6 +16,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
+import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type InboxDisplayMessage = InboxContextMessage & {
@@ -31,6 +32,7 @@ type InboxMessageRowProps = {
   isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
+  onEdit?: (message: InboxDisplayMessage) => void;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -48,6 +50,7 @@ export function InboxMessageRow({
   isFirst = false,
   isFocusHighlightVisible,
   message,
+  onEdit,
   onSelectReplyTarget,
   onToggleReaction,
   showUnreadBoundary = false,
@@ -116,7 +119,7 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {canReply || canToggleReactions ? (
+        {canReply || canToggleReactions || onEdit ? (
           <div
             className={cn(
               "absolute right-2 top-1 z-10",
@@ -126,6 +129,7 @@ export function InboxMessageRow({
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
+              onEdit={onEdit ? () => onEdit(message) : undefined}
               onReactionSelect={
                 canToggleReactions ? handleReactionSelect : undefined
               }
@@ -212,6 +216,10 @@ export function InboxMessageRow({
                 isKnownAgentPubkey,
               )}
               content={message.content}
+              messageId={message.id}
+              linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                timelineMessage.tags,
+              )}
               customEmoji={customEmoji}
               mentionNames={message.mentionNames}
               mentionPubkeysByName={message.mentionPubkeysByName}
