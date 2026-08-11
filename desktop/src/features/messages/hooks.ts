@@ -17,6 +17,7 @@ import {
 import {
   projectChannelWindowMessages,
   refreshChannelWindowMessages,
+  shouldRefreshChannelWindowAfterSubscribe,
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
@@ -373,6 +374,9 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
+        if (!shouldRefreshChannelWindowAfterSubscribe(queryClient, channelId)) {
+          return;
+        }
         void refreshNewestWindow().catch((error) => {
           if (!isDisposed) {
             console.error(
@@ -394,7 +398,7 @@ export function useChannelSubscription(channel: Channel | null) {
         void cleanup();
       }
     };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, queryClient]);
 }
 
 export function useSendMessageMutation(
