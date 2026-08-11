@@ -946,6 +946,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-backend-hermes"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "buzz-backend-kubernetes"
 version = "0.1.0"
 dependencies = [

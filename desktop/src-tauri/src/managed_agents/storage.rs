@@ -8,9 +8,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
-use crate::managed_agents::{
-    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
-};
+use crate::managed_agents::{ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt};
 use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
@@ -262,6 +260,9 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
+    // Duplicate Hermes scopes are retained for in-app recovery. The first
+    // persisted record is the explicit lifecycle owner; create rejects new
+    // collisions and delete can remove later conflicting records safely.
     hydrate_keys(&mut records);
     Ok(records)
 }

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use super::{BackendKind, ManagedAgentRecord};
+
 const STDERR_CAP: usize = 65536;
 /// Provider responses should be small JSON objects. Cap stdout to prevent a
 /// buggy or malicious provider from OOM-ing the desktop process.
@@ -511,6 +513,33 @@ pub fn provider_deploy(
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
 ) -> Result<String, String> {
+    provider_operation(binary, "deploy", Some(agent), provider_config)
+}
+
+/// Stop a provider-managed agent through the provider's optional lifecycle
+/// extension. Native Hermes gateways are supervised on their remote host and
+/// cannot be stopped by the local-process path or ACP's `!shutdown` contract.
+pub fn provider_stop(
+    binary: &Path,
+    provider_config: &serde_json::Value,
+) -> Result<String, String> {
+    provider_operation(binary, "stop", None, provider_config)
+}
+
+/// Remove the provider-owned remote Buzz environment after stopping Hermes.
+pub fn provider_cleanup(
+    binary: &Path,
+    provider_config: &serde_json::Value,
+) -> Result<String, String> {
+    provider_operation(binary, "cleanup", None, provider_config)
+}
+
+fn provider_operation(
+    binary: &Path,
+    operation: &str,
+    agent: Option<&serde_json::Value>,
+    provider_config: &serde_json::Value,
+) -> Result<String, String> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
     let info_request = serde_json::json!({
         "op": "info",
@@ -519,17 +548,151 @@ pub fn provider_deploy(
     let info = invoke_provider(&staged, &info_request, Duration::from_secs(10))?;
     validate_provider_info(&info)?;
 
-    let request = serde_json::json!({
-        "op": "deploy",
+    let mut request = serde_json::json!({
+        "op": operation,
         "request_id": uuid::Uuid::new_v4().to_string(),
-        "agent": agent,
         "provider_config": provider_config,
     });
+    if let Some(agent) = agent {
+        request["agent"] = agent.clone();
+    }
     let resp = invoke_provider(&staged, &request, Duration::from_secs(600))?;
     resp["agent_id"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".to_string())
+        .ok_or_else(|| format!("{operation} response missing agent_id"))
+}
+
+fn canonical_remote_path(path: &str, user: &str) -> String {
+    let mut path = path.trim().replace('\\', "/");
+    if !user.is_empty() {
+        for root in [format!("/Users/{user}"), format!("/home/{user}")] {
+            if path == root {
+                path = "~".to_string();
+                break;
+            }
+            if let Some(rest) = path.strip_prefix(&(root.clone() + "/")) {
+                path = format!("~/{rest}");
+                break;
+            }
+        }
+    } else {
+        for root in ["/Users/", "/home/"] {
+            if let Some(rest) = path.strip_prefix(root) {
+                path = match rest.split_once('/') {
+                    Some((_, suffix)) => format!("~/{suffix}"),
+                    None => "~".to_string(),
+                };
+                break;
+            }
+        }
+    }
+    let tilde = path == "~" || path.starts_with("~/");
+    let absolute = path.starts_with('/');
+    let normalized_input = if tilde {
+        path.strip_prefix("~/")
+            .or_else(|| path.strip_prefix('~'))
+            .unwrap_or(&path)
+    } else {
+        path.as_str()
+    };
+    let mut parts = Vec::new();
+    for part in normalized_input.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    let joined = parts.join("/");
+    if tilde {
+        if joined.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{joined}")
+        }
+    } else if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+/// Return the canonical lifecycle scope for a native Hermes provider.
+///
+/// One supervised Hermes unit owns one identity. Optional provider settings
+/// such as channels and model do not create a second lifecycle scope. The
+/// effective profile path follows the remote script's default/empty-profile
+/// rules, so explicit and implicit default paths collide as intended.
+pub fn hermes_provider_lifecycle_scope(
+    backend: &BackendKind,
+) -> Option<(String, String, String)> {
+    let BackendKind::Provider { id, config } = backend else {
+        return None;
+    };
+    if id != "hermes" {
+        return None;
+    }
+    let component = |key: &str| {
+        config
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let user = component("user");
+    let profile = component("profile");
+    let profile_name = if profile.is_empty() || profile == "default" {
+        "default"
+    } else {
+        profile.as_str()
+    };
+    let home = {
+        let value = component("home");
+        if value.is_empty() {
+            "~/.hermes".to_string()
+        } else {
+            value
+        }
+    };
+    let configured_profile_home = component("profile_home");
+    let effective_profile_home = if configured_profile_home.is_empty() {
+        if profile_name == "default" {
+            home.clone()
+        } else {
+            format!("{home}/profiles/{profile_name}")
+        }
+    } else {
+        configured_profile_home
+    };
+    // The provider requires an explicit SSH user before any operation. Do not
+    // include it in the scope key: this conservatively treats equivalent
+    // `~` paths on one host as one lifecycle scope even for legacy records that
+    // predate the required-user validation.
+    Some((
+        component("host").to_ascii_lowercase(),
+        component("unit"),
+        canonical_remote_path(&effective_profile_home, &user),
+    ))
+}
+
+/// The first persisted record is the explicit owner of a duplicate scope.
+/// This recovery rule lets Desktop delete later conflicting records without
+/// stopping or cleaning the owner's gateway; normal creation still rejects a
+/// new collision.
+pub fn hermes_provider_scope_owner(
+    records: &[ManagedAgentRecord],
+    pubkey: &str,
+) -> Option<String> {
+    let target = records.iter().find(|record| record.pubkey == pubkey)?;
+    let scope = hermes_provider_lifecycle_scope(&target.backend)?;
+    records
+        .iter()
+        .find(|record| hermes_provider_lifecycle_scope(&record.backend).as_ref() == Some(&scope))
+        .map(|record| record.pubkey.clone())
 }
 
 /// Validate provider_config: flat object, scalar values, no secret-like keys.

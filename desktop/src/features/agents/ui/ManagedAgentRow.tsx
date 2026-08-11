@@ -9,6 +9,7 @@ import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { managedAgentRuntimeLabel } from "@/features/agents/lib/managedAgentRuntimeLabel";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
@@ -405,7 +406,7 @@ function RuntimeBlock({
     <div className="space-y-1 lg:pt-0.5">
       <SubsectionLabel className="lg:hidden">Runtime</SubsectionLabel>
       <p className="truncate font-mono text-xs text-foreground">
-        {agent.agentCommand}
+        {managedAgentRuntimeLabel(agent)}
       </p>
       {runtimeSource || agent.model ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
