@@ -70,7 +70,8 @@ export function RunOnSummarySection({
       </p>
       {summary.location === "local" ? null : (
         <p className="text-xs text-muted-foreground">
-          Saved changes don&apos;t reach a deployed agent until you redeploy it.
+          Redeploy sends saved changes to the provider. A running agent keeps
+          its current configuration until it next restarts.
         </p>
       )}
     </div>

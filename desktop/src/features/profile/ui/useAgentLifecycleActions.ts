@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   isManagedAgentActive,
   redeployManagedAgentWithRules,
+  REDEPLOY_SENT_NOTICE,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
@@ -88,11 +89,13 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      await redeployManagedAgentWithRules({
+      const result = await redeployManagedAgentWithRules({
         agent: managedAgent,
         redeployManagedAgent,
       });
-      toast.success(`Redeployed ${managedAgent.name}.`);
+      // Never "Redeployed" — the provider's answer proves delivery, not that
+      // the running agent picked the settings up. See REDEPLOY_SENT_NOTICE.
+      toast.success(result.noticeMessage ?? REDEPLOY_SENT_NOTICE);
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Agent redeploy failed.",
