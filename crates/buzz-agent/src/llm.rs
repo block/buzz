@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
-use tokio::time::Instant;
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
@@ -25,58 +23,10 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
-const MESH_VIRTUAL_MODEL_ID: &str = "mesh";
-const MESH_AUTO_MODEL_ID: &str = "auto";
-const MESH_AUTO_CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-const MESH_AUTO_CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const MESH_AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
-const MESH_AUTO_ENABLE_OBSERVATIONS: u8 = 2;
-const MESH_MOA_UNAVAILABLE_MESSAGE: &str = "MoA requires ≥2 models available in the mesh";
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
 type OpenAiParse = fn(Value) -> Result<LlmResponse, AgentError>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MeshCatalogObservation {
-    Available,
-    Unavailable,
-    Unknown,
-}
-
-fn mesh_catalog_supports_collective(catalog: &Value) -> Option<bool> {
-    let models = catalog.get("data").and_then(Value::as_array)?;
-    let mut has_virtual_mesh = false;
-    let mut physical_models = BTreeSet::new();
-    for id in models
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        if id == MESH_VIRTUAL_MODEL_ID {
-            has_virtual_mesh = true;
-        } else if id != MESH_AUTO_MODEL_ID {
-            physical_models.insert(id.replace("@main", ""));
-        }
-    }
-    Some(has_virtual_mesh && physical_models.len() >= 2)
-}
-
-fn looks_like_unstructured_tool_call(text: &str) -> bool {
-    let text = text.trim_start().to_ascii_lowercase();
-    text.starts_with("<|tool_call")
-        || text.starts_with("<tool_call")
-        || text.starts_with("[tool_call]")
-}
-
-#[derive(Debug, Default)]
-struct MeshAutoState {
-    last_checked: Option<Instant>,
-    consecutive_available: u8,
-    collective_enabled: bool,
-    cooldown_until: Option<Instant>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabricksV2Route {
@@ -92,10 +42,6 @@ pub struct Llm {
     /// == Auto`. Subsequent OpenAI calls then go straight to Responses
     /// for the lifetime of the process.
     auto_upgraded: AtomicBool,
-    /// Hysteretic view of whether mesh-llm currently advertises its virtual
-    /// Mixture-of-Agents model. A TTL, confirmation count, and failure cooldown
-    /// let long-running agents adapt without bouncing as peers briefly flap.
-    mesh_auto_state: Mutex<MeshAutoState>,
     /// Bearer-token source for OpenAI-family requests. Static for OpenAI
     /// (the `OPENAI_COMPAT_API_KEY` env var) and Databricks-with-token
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
@@ -125,7 +71,6 @@ impl Llm {
         Ok(Self {
             http,
             auto_upgraded: AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         })
     }
@@ -162,37 +107,24 @@ impl Llm {
                     .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
-                self.openai_request(
-                    cfg,
-                    effective_model,
-                    !tools.is_empty(),
-                    |use_responses, request_model| {
-                        // Normalize effort for model-specific availability. Startup no longer rejects
-                        // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
-                        // models, and still applies corrections like none→minimal on the gpt-5 base.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
-                        if use_responses {
-                            (
-                                responses_body(
-                                    cfg,
-                                    system_prompt,
-                                    history,
-                                    tools,
-                                    request_model,
-                                    e,
-                                ),
-                                parse_responses as OpenAiParse,
-                            )
-                        } else {
-                            (
-                                openai_body(cfg, system_prompt, history, tools, request_model, e),
-                                parse_openai as OpenAiParse,
-                            )
-                        }
-                    },
-                )
+                self.openai_request(cfg, effective_model, |use_responses, request_model| {
+                    // Normalize effort for model-specific availability. Startup no longer rejects
+                    // `max` for pure OpenAI/Databricks; this per-model table is the single authority
+                    // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                    // models, and still applies corrections like none→minimal on the gpt-5 base.
+                    let e = effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
+                    if use_responses {
+                        (
+                            responses_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_responses as OpenAiParse,
+                        )
+                    } else {
+                        (
+                            openai_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_openai as OpenAiParse,
+                        )
+                    }
+                })
                 .await
             }
             Provider::DatabricksV2 => {
@@ -316,37 +248,32 @@ impl Llm {
                 }
                 Provider::OpenAi | Provider::Databricks => {
                     let r = self
-                        .openai_request(
-                            cfg,
-                            effective_model,
-                            false,
-                            |use_responses, request_model| {
-                                if use_responses {
-                                    (
-                                        json!({
-                                            "model": request_model,
-                                            "max_output_tokens": max_output_tokens,
-                                            "instructions": system_prompt,
-                                            "input": user_prompt,
-                                        }),
-                                        parse_responses as OpenAiParse,
-                                    )
-                                } else {
-                                    (
-                                        json!({
-                                            "model": request_model,
-                                            "stream": false,
-                                            "max_completion_tokens": max_output_tokens,
-                                            "messages": [
-                                                { "role": "system", "content": system_prompt },
-                                                { "role": "user", "content": user_prompt },
-                                            ],
-                                        }),
-                                        parse_openai as OpenAiParse,
-                                    )
-                                }
-                            },
-                        )
+                        .openai_request(cfg, effective_model, |use_responses, request_model| {
+                            if use_responses {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "max_output_tokens": max_output_tokens,
+                                        "instructions": system_prompt,
+                                        "input": user_prompt,
+                                    }),
+                                    parse_responses as OpenAiParse,
+                                )
+                            } else {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "stream": false,
+                                        "max_completion_tokens": max_output_tokens,
+                                        "messages": [
+                                            { "role": "system", "content": system_prompt },
+                                            { "role": "user", "content": user_prompt },
+                                        ],
+                                    }),
+                                    parse_openai as OpenAiParse,
+                                )
+                            }
+                        })
                         .await?;
                     Ok(r.text)
                 }
@@ -407,7 +334,7 @@ impl Llm {
 
     async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
+        post(&self.http, &url, body, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -415,196 +342,21 @@ impl Llm {
         .map_err(PostError::into_agent)
     }
 
-    /// OpenAI dispatch with Buzz's relay-mesh `auto` policy layered over the
-    /// normal endpoint selection. When enabled, a live virtual `mesh` model is
-    /// preferred; if the mesh contracts between discovery and inference, retry
-    /// the same request once through the router's ordinary `auto` model.
+    /// OpenAI dispatch. The configured model is sent as given: callers that
+    /// route through a mesh (Buzz shared compute) resolve their own model name
+    /// before spawning the agent, so nothing here needs to know about meshes.
     async fn openai_request<F>(
         &self,
         cfg: &Config,
         effective_model: &str,
-        tools_supplied: bool,
         mut build: F,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
     {
-        let request_model = self.resolve_openai_model(cfg, effective_model).await;
-        let adaptive_mesh =
-            effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
-
-        let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build)
-            .await;
-        match first {
-            Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    provider_message = detail,
-                    "relay-mesh auto: collective request failed; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response)
-                if adaptive_mesh
-                    && tools_supplied
-                    && response.tool_calls.is_empty()
-                    && looks_like_unstructured_tool_call(&response.text) =>
-            {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response) => Ok(response),
-            Err(error) => Err(error.into_agent()),
-        }
-    }
-
-    async fn cool_down_collective(&self) {
-        let now = Instant::now();
-        let mut state = self.mesh_auto_state.lock().await;
-        state.last_checked = Some(now);
-        state.consecutive_available = 0;
-        state.collective_enabled = false;
-        state.cooldown_until = Some(now + MESH_AUTO_COOLDOWN);
-    }
-
-    /// Resolve the model for one OpenAI-family request. Explicit model choices
-    /// are never changed. Relay-mesh `auto` dynamically follows the short-lived
-    /// `/models` catalog so long-running agents can adopt or leave MoA without
-    /// being restarted.
-    async fn resolve_openai_model(&self, cfg: &Config, effective_model: &str) -> String {
-        if cfg.provider != Provider::OpenAi
-            || !cfg.prefer_mesh_for_auto
-            || effective_model != MESH_AUTO_MODEL_ID
-        {
-            return effective_model.to_string();
-        }
-
-        let mut state = self.mesh_auto_state.lock().await;
-        let now = Instant::now();
-        if let Some(cooldown_until) = state.cooldown_until {
-            if now < cooldown_until {
-                return MESH_AUTO_MODEL_ID.to_string();
-            }
-            state.cooldown_until = None;
-        }
-        if state
-            .last_checked
-            .is_some_and(|checked_at| checked_at.elapsed() < MESH_AUTO_CATALOG_TTL)
-        {
-            return if state.collective_enabled {
-                MESH_VIRTUAL_MODEL_ID.to_string()
-            } else {
-                MESH_AUTO_MODEL_ID.to_string()
-            };
-        }
-
-        let observation = self.observe_mesh_virtual_model(cfg).await;
-        let checked_at = Instant::now();
-        state.last_checked = Some(checked_at);
-        match observation {
-            MeshCatalogObservation::Available => {
-                state.consecutive_available = state.consecutive_available.saturating_add(1);
-                if state.consecutive_available >= MESH_AUTO_ENABLE_OBSERVATIONS {
-                    state.collective_enabled = true;
-                }
-            }
-            MeshCatalogObservation::Unavailable => {
-                if state.collective_enabled {
-                    state.cooldown_until = Some(checked_at + MESH_AUTO_COOLDOWN);
-                }
-                state.consecutive_available = 0;
-                state.collective_enabled = false;
-            }
-            // A failed catalog check is not evidence that a previously stable
-            // mesh disappeared. Preserve the last confirmed state; inference
-            // itself remains authoritative and has the narrow 503 fallback.
-            MeshCatalogObservation::Unknown => {}
-        }
-        let request_model = if state.collective_enabled {
-            MESH_VIRTUAL_MODEL_ID
-        } else {
-            MESH_AUTO_MODEL_ID
-        };
-        tracing::debug!(
-            configured_model = effective_model,
-            request_model,
-            "relay-mesh auto: resolved request model from live catalog"
-        );
-        request_model.to_string()
-    }
-
-    async fn observe_mesh_virtual_model(&self, cfg: &Config) -> MeshCatalogObservation {
-        let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-        let bearer = match self.auth.bearer().await {
-            Ok(bearer) => bearer,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog auth unavailable; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        let response = match self
-            .http
-            .get(&url)
-            .bearer_auth(bearer)
-            .timeout(MESH_AUTO_CATALOG_TIMEOUT)
-            .send()
+        self.openai_request_for_model(cfg, effective_model, &mut build)
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog probe failed; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        if !response.status().is_success() {
-            tracing::debug!(
-                status = %response.status(),
-                "relay-mesh auto: catalog probe was not successful; preserving last confirmed route"
-            );
-            return MeshCatalogObservation::Unknown;
-        }
-        match response.json::<Value>().await {
-            Ok(catalog) => {
-                let Some(available) = mesh_catalog_supports_collective(&catalog) else {
-                    tracing::debug!(
-                        "relay-mesh auto: catalog response has no data array; preserving last confirmed route"
-                    );
-                    return MeshCatalogObservation::Unknown;
-                };
-                if available {
-                    MeshCatalogObservation::Available
-                } else {
-                    MeshCatalogObservation::Unavailable
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: invalid catalog response; preserving last confirmed route"
-                );
-                MeshCatalogObservation::Unknown
-            }
-        }
+            .map_err(PostError::into_agent)
     }
 
     /// Dispatch one OpenAI request for an already-resolved model. Endpoint
@@ -721,14 +473,9 @@ impl Llm {
         let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
         let mut refreshed = false;
         loop {
-            match post(
-                &self.http,
-                &url,
-                body_ref,
-                effective_model == MESH_VIRTUAL_MODEL_ID,
-                cfg.llm_timeout,
-                |r| r.bearer_auth(&bearer),
-            )
+            match post(&self.http, &url, body_ref, cfg.llm_timeout, |r| {
+                r.bearer_auth(&bearer)
+            })
             .await
             {
                 Err(PostError::Agent(AgentError::LlmAuth(_))) if !refreshed => {
@@ -2069,23 +1816,16 @@ fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str)
     ))
 }
 
-/// Internal HTTP failure that preserves a mesh-specific MoA failure as a
-/// typed signal. This covers both pre-inference eligibility rejection and a
-/// structured `moa_failure` from workers/reducers. It is consumed inside
-/// `openai_request`: an adaptive `auto` call falls back once, while an explicit
-/// `mesh` call is surfaced as the ordinary LLM error callers already
-/// understand.
+/// Internal HTTP failure wrapper for the OpenAI-family `post` helper.
 #[derive(Debug)]
 enum PostError {
     Agent(AgentError),
-    MeshFallback(String),
 }
 
 impl PostError {
     fn into_agent(self) -> AgentError {
         match self {
             Self::Agent(error) => error,
-            Self::MeshFallback(detail) => AgentError::Llm(detail),
         }
     }
 }
@@ -2096,37 +1836,10 @@ impl From<AgentError> for PostError {
     }
 }
 
-fn is_mesh_moa_unavailable_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some(MESH_MOA_UNAVAILABLE_MESSAGE)
-}
-
-fn is_mesh_moa_failure_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/type")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("moa_failure")
-}
-
 async fn post<F>(
     http: &Client,
     url: &str,
     body: &Value,
-    detect_mesh_fallback: bool,
     base_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
@@ -2190,13 +1903,6 @@ where
         }
         if status.is_server_error() || status == 429 || status.as_u16() == 499 {
             let body = read_error_body(resp).await;
-            let mesh_fallback = detect_mesh_fallback
-                && (status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    && is_mesh_moa_unavailable_body(&body)
-                    || status.is_server_error() && is_mesh_moa_failure_body(&body));
-            if mesh_fallback {
-                return Err(PostError::MeshFallback(format!("{status}: {body}")));
-            }
             if attempt + 1 < MAX_RETRIES {
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -2905,7 +2611,6 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
-            prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
@@ -2940,24 +2645,6 @@ mod tests {
                         "type": "server_error",
                         "code": "service_unavailable",
                     }
-                }),
-            }
-        }
-
-        fn moa_failure(status: u16, code: &str, message: &str) -> Self {
-            Self {
-                status,
-                body: json!({
-                    "choices": [{
-                        "finish_reason": "error",
-                        "message": { "content": message, "role": "assistant" },
-                    }],
-                    "error": {
-                        "message": message,
-                        "type": "moa_failure",
-                        "code": code,
-                    },
-                    "model": "mesh",
                 }),
             }
         }
@@ -3049,16 +2736,6 @@ mod tests {
         (base_url, captured)
     }
 
-    fn model_catalog(ids: &[&str]) -> Value {
-        json!({
-            "object": "list",
-            "data": ids
-                .iter()
-                .map(|id| json!({ "id": id, "object": "model" }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
     fn chat_response(text: &str) -> Value {
         json!({
             "choices": [{
@@ -3083,43 +2760,6 @@ mod tests {
         .await
     }
 
-    async fn complete_model_with_tool(
-        llm: &Llm,
-        cfg: &Config,
-        model: &str,
-    ) -> Result<LlmResponse, AgentError> {
-        llm.complete(
-            cfg,
-            "system",
-            &[HistoryItem::User("add two numbers".into())],
-            &[ToolDef {
-                name: "add_numbers".into(),
-                description: "Add two numbers".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "number"},
-                        "b": {"type": "number"}
-                    },
-                    "required": ["a", "b"]
-                }),
-            }],
-            model,
-        )
-        .await
-    }
-
-    async fn expire_mesh_catalog_check(llm: &Llm) {
-        llm.mesh_auto_state.lock().await.last_checked =
-            Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-    }
-
-    async fn expire_mesh_auto_cooldown(llm: &Llm) {
-        let mut state = llm.mesh_auto_state.lock().await;
-        state.last_checked = Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-        state.cooldown_until = Some(Instant::now() - std::time::Duration::from_secs(1));
-    }
-
     fn posted_models(requests: &[CapturedHttpRequest]) -> Vec<&str> {
         requests
             .iter()
@@ -3128,381 +2768,59 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn mesh_auto_requires_two_stable_catalog_observations() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("direct")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("collective")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "direct"
-        );
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "collective"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto", "mesh"]);
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_does_not_enable_while_second_model_flaps() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a"])),
-            StubHttpResponse::ok(chat_response("two")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("three")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("four")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for _ in 0..4 {
-            complete_model(&llm, &config, "auto").await.unwrap();
-            expire_mesh_catalog_check(&llm).await;
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh"]
-        );
-    }
-
-    #[test]
-    fn collective_catalog_requires_two_distinct_physical_models() {
-        assert_eq!(mesh_catalog_supports_collective(&json!({})), None);
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "mesh"])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[
-                "org/model@main:Q4",
-                "org/model:Q4",
-                "mesh"
-            ])),
-            Some(false),
-            "two spellings of one model are not collective capacity"
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "model-b", "mesh"])),
-            Some(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_tracks_models_appearing_disappearing_and_reappearing() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("zero")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-stable")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("contracted")),
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("empty-again")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoin-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoined-stable")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for call in 0..8 {
-            if call == 5 {
-                expire_mesh_auto_cooldown(&llm).await;
-            } else if call > 0 {
-                expire_mesh_catalog_check(&llm).await;
-            }
-            complete_model(&llm, &config, "auto").await.unwrap();
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh", "auto", "auto", "auto", "mesh"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            8
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_and_cools_down_when_mesh_contracts() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "cooldown request must not re-probe the catalog"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_when_moa_reducer_fails() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            ),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "mesh-specific failure must enter cooldown without re-probing"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_retries_unstructured_tool_markup_through_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response(
-                "<|tool_call>call:add_numbers{a:17,b:25}<tool_call|>",
-            )),
-            StubHttpResponse::ok(chat_response("safe fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "safe fallback"
-        );
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "pseudo tool markup must enter cooldown without another catalog probe"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_catalog_failure_fails_open_to_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::error(500, "catalog unavailable"),
-            StubHttpResponse::ok(chat_response("direct")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-    }
-
-    #[tokio::test]
-    async fn generic_openai_auto_does_not_probe_or_select_mesh() {
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("provider auto"))]).await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = false;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
-    }
-
+    /// An explicit model is sent verbatim and never rewritten to something
+    /// else. A server error is retried under the *same* model (the ordinary
+    /// transport retry) and then surfaced -- there is no second model to fall
+    /// back to now that MeshLLM resolves `mesh` server-side.
     #[tokio::test]
     async fn explicit_models_are_never_rewritten_or_fallback_retried() {
-        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::error(
-            503,
-            MESH_MOA_UNAVAILABLE_MESSAGE,
-        )])
+        let (base_url, captured) = spawn_sequence_stub(
+            (0..MAX_RETRIES)
+                .map(|_| StubHttpResponse::error(503, "upstream unavailable"))
+                .collect(),
+        )
         .await;
         let mut config = cfg(Provider::OpenAi);
         config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
         let llm = Llm::new(&config).unwrap();
 
         let error = complete_model(&llm, &config, "mesh").await.unwrap_err();
-        assert!(error.to_string().contains(MESH_MOA_UNAVAILABLE_MESSAGE));
+        assert!(error.to_string().contains("upstream unavailable"));
         let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["mesh"]);
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.method == "POST")
+                .all(|request| request.body.as_ref().and_then(|b| b.get("model"))
+                    == Some(&json!("mesh"))),
+            "every attempt must keep the explicit model: {:?}",
+            posted_models(&requests)
+        );
         assert!(requests.iter().all(|request| request.path != "/v1/models"));
     }
 
+    /// Whatever model the config names is what goes on the wire -- including
+    /// `auto`, which is a real provider model name for plain OpenAI hosts. A
+    /// caller routing through a mesh resolves its own name before spawning the
+    /// agent, so there is nothing to rewrite here and no catalog to probe.
     #[tokio::test]
-    async fn explicit_real_model_bypasses_mesh_auto_policy() {
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("explicit"))]).await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
+    async fn the_configured_model_is_sent_verbatim() {
+        for model in ["auto", "mesh", "unsloth/Qwen3-8B-GGUF:Q4_K_M"] {
+            let (base_url, captured) =
+                spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
+            let mut config = cfg(Provider::OpenAi);
+            config.base_url = base_url;
+            let llm = Llm::new(&config).unwrap();
 
-        let response = complete_model(&llm, &config, "model-a").await.unwrap();
-        assert_eq!(response.text, "explicit");
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["model-a"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
-    }
-
-    #[test]
-    fn mesh_unavailable_classifier_requires_exact_openai_error_message() {
-        assert!(is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE)
-                .body
-                .to_string()
-        ));
-        assert!(!is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, "some other outage")
-                .body
-                .to_string()
-        ));
-    }
-
-    #[test]
-    fn mesh_failure_classifier_requires_structured_moa_failure_type() {
-        assert!(is_mesh_moa_failure_body(
-            &StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            )
-            .body
-            .to_string()
-        ));
-        assert!(!is_mesh_moa_failure_body(
-            &StubHttpResponse::error(502, "some other bad gateway")
-                .body
-                .to_string()
-        ));
+            let response = complete_model(&llm, &config, model).await.unwrap();
+            assert_eq!(response.text, "ok");
+            let requests = captured.lock().await;
+            assert_eq!(posted_models(&requests), vec![model]);
+            assert!(
+                requests.iter().all(|request| request.path != "/v1/models"),
+                "no catalog probe belongs on this path"
+            );
+        }
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -4780,7 +4098,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4851,7 +4168,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4909,7 +4225,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -5007,7 +4322,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -5071,7 +4385,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -5240,7 +4553,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({"model": "x"}),
-            false,
             // Small base timeout so the body stall triggers quickly.
             Duration::from_secs(1),
             |b| b,
@@ -6397,7 +5709,6 @@ mod tests {
                 .build()
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         }
     }
