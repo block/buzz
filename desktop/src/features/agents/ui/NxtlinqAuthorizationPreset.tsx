@@ -19,7 +19,6 @@ import {
   deriveNxtlinqReceiptDirectory,
   isNxtlinqGatewayCommand,
   parseNxtlinqLaunchPreset,
-  NXTLINQ_GATEWAY_COMMAND,
   shouldBlockNxtlinqLaunchSave,
 } from "@/features/agents/lib/nxtlinqLaunchPreset";
 import { cn } from "@/shared/lib/cn";
@@ -127,11 +126,21 @@ export function NxtlinqAuthorizationPreset({
     const configuration = setupConfiguration;
     const result = await setupQuery.refetch();
     if (!result.isError) setCheckedConfiguration(configuration);
-    if (result.data?.ready && enabled) applyPreset();
+    if (
+      result.data?.ready &&
+      result.data.gatewayExecutable &&
+      result.data.gatewayExecutableSha256 &&
+      enabled
+    ) {
+      applyPreset(
+        result.data.gatewayExecutable,
+        result.data.gatewayExecutableSha256,
+      );
+    }
     return result.data;
   }
 
-  function applyPreset(command?: string) {
+  function applyPreset(verifiedExecutable: string, executableSha256: string) {
     const passEnvironment = [
       ...requiredEnvKeys,
       ...Object.keys({ ...inheritedEnvVars, ...envVars }),
@@ -142,10 +151,13 @@ export function NxtlinqAuthorizationPreset({
       receiptDirectory: receiptDirectory.trim(),
       passEnvironment,
     });
-    launchFields.setCommandWrapperCommand(
-      command || gatewayQuery.data?.resolvedPath || NXTLINQ_GATEWAY_COMMAND,
-    );
+    launchFields.setCommandWrapperCommand(verifiedExecutable);
     launchFields.setCommandWrapperArgs(args.join(","));
+    launchFields.setCommandWrapperAuthorization({
+      kind: "nxtlinq_gateway",
+      executable: verifiedExecutable,
+      sha256: executableSha256,
+    });
     const nextEnv: EnvVarsValue = {
       ...envVars,
       BUZZ_AGENT_NXTLINQ_PERMISSION_BRIDGE: "1",
@@ -158,6 +170,7 @@ export function NxtlinqAuthorizationPreset({
   function disablePreset() {
     launchFields.setCommandWrapperCommand("");
     launchFields.setCommandWrapperArgs("");
+    launchFields.setCommandWrapperAuthorization(null);
     const next = { ...envVars };
     delete next.BUZZ_ACP_TRUST_NXTLINQ_GATEWAY;
     if (inheritedEnvVars.BUZZ_AGENT_NXTLINQ_PERMISSION_BRIDGE) {
@@ -174,8 +187,12 @@ export function NxtlinqAuthorizationPreset({
       if (!result.success) return;
       const discovery = await gatewayQuery.refetch();
       const setup = await recheckSetup(discovery.data?.available === true);
-      if (setup?.ready) {
-        applyPreset(discovery.data?.resolvedPath ?? undefined);
+      if (
+        setup?.ready &&
+        setup.gatewayExecutable &&
+        setup.gatewayExecutableSha256
+      ) {
+        applyPreset(setup.gatewayExecutable, setup.gatewayExecutableSha256);
       }
     } catch {
       // The mutation/query state renders the actionable failure below.
@@ -220,7 +237,17 @@ export function NxtlinqAuthorizationPreset({
         ) : gatewayQuery.data?.available ? (
           <Button
             disabled={disabled || !canEnable}
-            onClick={() => applyPreset()}
+            onClick={() => {
+              if (
+                currentSetup?.gatewayExecutable &&
+                currentSetup.gatewayExecutableSha256
+              ) {
+                applyPreset(
+                  currentSetup.gatewayExecutable,
+                  currentSetup.gatewayExecutableSha256,
+                );
+              }
+            }}
             size="sm"
             type="button"
           >

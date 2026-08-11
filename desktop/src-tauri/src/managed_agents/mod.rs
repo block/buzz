@@ -65,6 +65,10 @@ pub use launch_wrapper::AgentCommandWrapper;
 pub(crate) use launch_wrapper::{
     apply_agent_launch_update, normalized_agent_launch_config, resolve_agent_launch,
 };
+pub(crate) use launch_wrapper::{
+    verify_managed_nxtlinq_gateway, NXTLINQ_GATEWAY_COMMAND, NXTLINQ_GATEWAY_PACKAGE,
+    NXTLINQ_GATEWAY_VERSION,
+};
 pub(crate) use managed_node_paths::*;
 pub use nest::*;
 pub use parallelism::{acp_agents_value, effective_parallelism, harness_max_parallelism};

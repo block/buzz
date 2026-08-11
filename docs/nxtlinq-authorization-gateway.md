@@ -16,8 +16,9 @@ per-Agent configuration:
   project owner or designated signing authority. The deployment operator only
   enrolls the corresponding public key.
 
-This integration requires `@nxtlinq/authorization-gateway` 0.3.0 or newer so
-Buzz can delegate setup verification to the Gateway's `--check` command.
+This integration pins the reviewed `@nxtlinq/authorization-gateway` 0.3.0
+package so Buzz can delegate setup verification to the Gateway's `--check`
+command without silently adopting a newer, unreviewed authorization boundary.
 
 ## Current deployment model
 
@@ -69,8 +70,9 @@ environment files, trust state, or receipts.
 ## Install and configure
 
 1. Open **Settings → Agents → Nxtlinq authorization**.
-2. Select **Install Gateway**. Use **Reinstall Gateway** when testing a newer
-   Gateway build or replacing a version older than 0.3.0.
+2. Select **Install Gateway**. Buzz installs and verifies the reviewed Gateway
+   0.3.0 package in its private managed Node tools directory. Use **Reinstall
+   Gateway** to repair a missing or mismatched managed installation.
 3. Select the operator-provided `trusted-signers.json` file.
 4. Keep the default receipt root or choose another owner-controlled directory.
 5. Save the Nxtlinq settings.
@@ -159,8 +161,12 @@ by name; the Gateway does not inherit every ambient Buzz environment variable.
 
 `BUZZ_ACP_TRUST_NXTLINQ_GATEWAY` is not an end-user setting. Buzz removes it
 from configurable Agent environment variables and derives it at process spawn
-only when the structured wrapper command is the Nxtlinq Gateway. This prevents
-an Agent configuration from granting itself the Gateway trust path.
+only when the wrapper carries the readiness result's verification binding and
+still resolves to Buzz's managed Gateway 0.3.0 package with the same executable
+SHA-256. A same-name executable, PATH or in-place executable substitution,
+changed package version, or unverified wrapper record does not receive the
+flag. This prevents an Agent configuration from granting itself the Gateway
+trust path.
 
 ## Local Gateway development
 

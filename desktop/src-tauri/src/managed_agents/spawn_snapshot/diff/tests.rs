@@ -14,6 +14,7 @@ fn base() -> SpawnConfigSnapshot {
         command_wrapper: Some(crate::managed_agents::AgentCommandWrapper {
             command: "nxtlinq-authorization-gateway".into(),
             args: vec!["--adapter".into(), "acp".into(), "--".into()],
+            authorization: None,
         }),
         working_directory: Some("/projects/example".into()),
         mcp_command: "goose-mcp".into(),

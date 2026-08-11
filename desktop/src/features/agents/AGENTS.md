@@ -192,7 +192,12 @@ with a TypeScript lookup table or an id comparison in a component.
    own check API/CLI rather than reimplemented in TypeScript or Tauri. When an
    enabled preset's workspace or shared operator paths change, Agent save is
    blocked until Gateway rechecks the exact draft; a successful recheck must
-   rebuild the stored wrapper argv from that same checked configuration.
+   rebuild the stored wrapper argv from that same checked configuration. The
+   internal Gateway trust flag requires the preset's verification binding to
+   match the exact Buzz-managed executable that passed readiness; a basename,
+   PATH lookup, or unverified wrapper record is never sufficient. Managed
+   installation pins the reviewed Gateway package version, and both readiness
+   and process spawn fail closed if that version or executable identity drifts.
 
 ## The tests that enforce this
 

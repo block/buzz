@@ -839,6 +839,11 @@ type RawManagedAgent = {
   command_wrapper?: {
     command: string;
     args: string[];
+    authorization?: {
+      kind: "nxtlinq_gateway";
+      executable: string;
+      sha256: string;
+    } | null;
   } | null;
   working_directory?: string | null;
   mcp_command: string;
@@ -1677,6 +1682,9 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
       ? {
           command: agent.command_wrapper.command,
           args: [...agent.command_wrapper.args],
+          authorization: agent.command_wrapper.authorization
+            ? { ...agent.command_wrapper.authorization }
+            : null,
         }
       : null,
     working_directory: agent.working_directory ?? null,
@@ -11918,6 +11926,9 @@ export function maybeInstallE2eTauriMocks() {
             },
           ],
           signerKeyId: "mock-signer",
+          gatewayExecutable: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+          gatewayExecutableSha256: "a".repeat(64),
+          gatewayVersion: "0.3.0",
           error: null,
         };
       }

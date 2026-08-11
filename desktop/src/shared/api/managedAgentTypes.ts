@@ -26,4 +26,9 @@ export type ManagedAgentBackend =
 export type AgentCommandWrapper = {
   command: string;
   args: string[];
+  authorization?: {
+    kind: "nxtlinq_gateway";
+    executable: string;
+    sha256: string;
+  } | null;
 };

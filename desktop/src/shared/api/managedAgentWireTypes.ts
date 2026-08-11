@@ -16,6 +16,11 @@ export type RawManagedAgent = {
   command_wrapper?: {
     command: string;
     args: string[];
+    authorization?: {
+      kind: "nxtlinq_gateway";
+      executable: string;
+      sha256: string;
+    } | null;
   } | null;
   working_directory?: string | null;
   mcp_command: string;

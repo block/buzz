@@ -63,6 +63,11 @@ test.describe("Nxtlinq authorization screenshots", () => {
           workingDirectory: PROJECT_ROOT,
           commandWrapper: {
             command: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+            authorization: {
+              kind: "nxtlinq_gateway",
+              executable: "/tmp/buzz/bin/nxtlinq-authorization-gateway",
+              sha256: "a".repeat(64),
+            },
             args: [
               "--adapter",
               "acp",

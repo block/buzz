@@ -31,6 +31,9 @@ export type NxtlinqSetupCheckResult = {
   ready: boolean;
   checks: NxtlinqSetupCheckItem[];
   signerKeyId: string | null;
+  gatewayExecutable: string | null;
+  gatewayExecutableSha256: string | null;
+  gatewayVersion: string | null;
   error: string | null;
 };
 

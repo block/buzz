@@ -60,6 +60,7 @@ fn command_wrapper_and_working_directory_validate_fail_closed() {
     let blank = super::AgentCommandWrapper {
         command: "   ".into(),
         args: vec![],
+        authorization: None,
     };
     assert!(blank.normalized().is_err());
     assert!(

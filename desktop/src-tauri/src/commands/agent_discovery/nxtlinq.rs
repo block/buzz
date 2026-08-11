@@ -2,8 +2,7 @@ use serde::Serialize;
 
 use super::*;
 
-const NXTLINQ_GATEWAY_RUNTIME_ID: &str = "nxtlinq-authorization-gateway";
-const NXTLINQ_GATEWAY_INSTALL_COMMAND: &str = "npm install -g @nxtlinq/authorization-gateway";
+const NXTLINQ_GATEWAY_INSTALL_COMMAND: &str = "npm install -g @nxtlinq/authorization-gateway@0.3.0";
 
 /// Discover the optional Nxtlinq authorization wrapper without treating it as
 /// an ACP runtime. Wrapper identity must stay separate from the downstream
@@ -14,7 +13,18 @@ pub async fn discover_nxtlinq_authorization_gateway(
     tokio::task::spawn_blocking(|| {
         crate::managed_agents::refresh_login_shell_path();
         crate::managed_agents::clear_resolve_cache();
-        crate::managed_agents::command_availability(NXTLINQ_GATEWAY_RUNTIME_ID)
+        match crate::managed_agents::verify_managed_nxtlinq_gateway() {
+            Ok(verified) => crate::managed_agents::CommandAvailabilityInfo {
+                command: crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string(),
+                available: true,
+                resolved_path: Some(verified.executable.display().to_string()),
+            },
+            Err(_) => crate::managed_agents::CommandAvailabilityInfo {
+                command: crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string(),
+                available: false,
+                resolved_path: None,
+            },
+        }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))
@@ -46,7 +56,7 @@ fn install_nxtlinq_gateway_blocking(
         let mut set = active_installs()
             .lock()
             .map_err(|_| "install lock poisoned".to_string())?;
-        if !set.insert(NXTLINQ_GATEWAY_RUNTIME_ID.to_string()) {
+        if !set.insert(crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string()) {
             return Err("a Nxtlinq Gateway install is already in progress".to_string());
         }
     }
@@ -55,14 +65,14 @@ fn install_nxtlinq_gateway_blocking(
     impl Drop for Guard {
         fn drop(&mut self) {
             if let Ok(mut set) = active_installs().lock() {
-                set.remove(NXTLINQ_GATEWAY_RUNTIME_ID);
+                set.remove(crate::managed_agents::NXTLINQ_GATEWAY_COMMAND);
             }
         }
     }
     let _guard = Guard;
-    let reporter = InstallReporter::for_run(app, NXTLINQ_GATEWAY_RUNTIME_ID);
+    let reporter = InstallReporter::for_run(app, crate::managed_agents::NXTLINQ_GATEWAY_COMMAND);
 
-    if !force && crate::managed_agents::resolve_command(NXTLINQ_GATEWAY_RUNTIME_ID).is_some() {
+    if !force && crate::managed_agents::verify_managed_nxtlinq_gateway().is_ok() {
         return Ok(InstallRuntimeResult {
             success: true,
             steps: Vec::new(),
@@ -81,17 +91,13 @@ fn install_nxtlinq_gateway_blocking(
         }
     }
 
-    let planned = if use_managed_npm {
-        match managed_npm_command(NXTLINQ_GATEWAY_INSTALL_COMMAND) {
-            Ok(Some(command)) => command,
-            Ok(None) => NXTLINQ_GATEWAY_INSTALL_COMMAND.to_string(),
-            Err(step) => {
-                reporter.record_step(&mut steps, *step);
-                return Ok(reporter.failed(steps));
-            }
+    let planned = match managed_npm_command(NXTLINQ_GATEWAY_INSTALL_COMMAND) {
+        Ok(Some(command)) => command,
+        Ok(None) => NXTLINQ_GATEWAY_INSTALL_COMMAND.to_string(),
+        Err(step) => {
+            reporter.record_step(&mut steps, *step);
+            return Ok(reporter.failed(steps));
         }
-    } else {
-        NXTLINQ_GATEWAY_INSTALL_COMMAND.to_string()
     };
 
     let mut result = run_install_command_with_retry("authorization-wrapper", &planned, &reporter);
@@ -106,21 +112,41 @@ fn install_nxtlinq_gateway_blocking(
 
     crate::managed_agents::refresh_login_shell_path();
     crate::managed_agents::clear_resolve_cache();
-    if crate::managed_agents::resolve_command(NXTLINQ_GATEWAY_RUNTIME_ID).is_none() {
-        reporter.record_step(
+    match crate::managed_agents::verify_managed_nxtlinq_gateway() {
+        Ok(verified) => reporter.record_step(
             &mut steps,
             crate::managed_agents::InstallStepResult {
                 step: "verification".to_string(),
-                command: NXTLINQ_GATEWAY_RUNTIME_ID.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: "installation completed, but Buzz could not resolve the Gateway executable"
-                    .to_string(),
-                exit_code: None,
-                hint: Some("Restart Buzz, then try enabling Nxtlinq again.".to_string()),
+                command: verified.executable.display().to_string(),
+                success: true,
+                stdout: format!(
+                    "verified {} {}",
+                    crate::managed_agents::NXTLINQ_GATEWAY_PACKAGE,
+                    verified.version
+                ),
+                stderr: String::new(),
+                exit_code: Some(0),
+                hint: None,
             },
-        );
-        return Ok(reporter.failed(steps));
+        ),
+        Err(error) => {
+            reporter.record_step(
+                &mut steps,
+                crate::managed_agents::InstallStepResult {
+                    step: "verification".to_string(),
+                    command: crate::managed_agents::NXTLINQ_GATEWAY_COMMAND.to_string(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: error,
+                    exit_code: None,
+                    hint: Some(format!(
+                        "Reinstall the reviewed Gateway version {}.",
+                        crate::managed_agents::NXTLINQ_GATEWAY_VERSION
+                    )),
+                },
+            );
+            return Ok(reporter.failed(steps));
+        }
     }
 
     Ok(InstallRuntimeResult {
@@ -148,6 +174,9 @@ pub struct NxtlinqSetupCheckResult {
     pub(super) ready: bool,
     pub(super) checks: Vec<NxtlinqSetupCheckItem>,
     signer_key_id: Option<String>,
+    gateway_executable: Option<String>,
+    gateway_executable_sha256: Option<String>,
+    gateway_version: Option<String>,
     pub(super) error: Option<String>,
 }
 
@@ -281,13 +310,59 @@ pub(super) fn check_nxtlinq_authorization_setup_blocking(
             ready: false,
             checks,
             signer_key_id: None,
+            gateway_executable: None,
+            gateway_executable_sha256: None,
+            gateway_version: None,
             error: Some("Nxtlinq setup is incomplete.".to_string()),
         };
     }
 
     crate::managed_agents::refresh_login_shell_path();
     crate::managed_agents::clear_resolve_cache();
-    let Some(gateway) = crate::managed_agents::resolve_command(NXTLINQ_GATEWAY_RUNTIME_ID) else {
+    let verified_gateway = match crate::managed_agents::verify_managed_nxtlinq_gateway() {
+        Ok(verified) => verified,
+        Err(error) => {
+            checks.push(setup_item(
+                "gateway",
+                "Reviewed Gateway version",
+                "invalid",
+                None,
+                Some(error.clone()),
+            ));
+            checks.push(setup_item(
+                "trustedSigner",
+                "Trusted signer",
+                "blocked",
+                None,
+                Some(
+                    "Install the reviewed Gateway before verifying the signed policy.".to_string(),
+                ),
+            ));
+            return NxtlinqSetupCheckResult {
+                ready: false,
+                checks,
+                signer_key_id: None,
+                gateway_executable: None,
+                gateway_executable_sha256: None,
+                gateway_version: None,
+                error: Some(error),
+            };
+        }
+    };
+    checks.push(setup_item(
+        "gateway",
+        "Reviewed Gateway version",
+        "valid",
+        Some(&verified_gateway.executable),
+        Some(format!(
+            "{} {}",
+            crate::managed_agents::NXTLINQ_GATEWAY_PACKAGE,
+            verified_gateway.version
+        )),
+    ));
+
+    let gateway = verified_gateway.executable.clone();
+    if !gateway.is_file() {
         checks.push(setup_item(
             "trustedSigner",
             "Trusted signer",
@@ -299,9 +374,12 @@ pub(super) fn check_nxtlinq_authorization_setup_blocking(
             ready: false,
             checks,
             signer_key_id: None,
+            gateway_executable: None,
+            gateway_executable_sha256: None,
+            gateway_version: None,
             error: Some("Nxtlinq Gateway is not installed.".to_string()),
         };
-    };
+    }
 
     let mut path_parts = Vec::new();
     if let Some(path) = crate::managed_agents::buzz_managed_node_bin_dir() {
@@ -351,6 +429,9 @@ pub(super) fn check_nxtlinq_authorization_setup_blocking(
                 ready: false,
                 checks,
                 signer_key_id: None,
+                gateway_executable: None,
+                gateway_executable_sha256: None,
+                gateway_version: None,
                 error: Some(if detail.is_empty() {
                     "Nxtlinq cryptographic verification failed.".to_string()
                 } else {
@@ -370,6 +451,9 @@ pub(super) fn check_nxtlinq_authorization_setup_blocking(
                 ready: false,
                 checks,
                 signer_key_id: None,
+                gateway_executable: None,
+                gateway_executable_sha256: None,
+                gateway_version: None,
                 error: Some("Could not run Nxtlinq Gateway verification.".to_string()),
             };
         }
@@ -399,6 +483,9 @@ pub(super) fn check_nxtlinq_authorization_setup_blocking(
         ready: verified,
         checks,
         signer_key_id,
+        gateway_executable: verified.then(|| verified_gateway.executable.display().to_string()),
+        gateway_executable_sha256: verified.then(|| verified_gateway.executable_sha256.clone()),
+        gateway_version: verified.then_some(verified_gateway.version),
         error: (!verified).then(|| "Nxtlinq cryptographic verification failed.".to_string()),
     }
 }
