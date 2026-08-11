@@ -42,6 +42,12 @@ export function CodexTaskAgentDialog({
   const [taskId, setTaskId] = React.useState("");
   const [name, setName] = React.useState("");
   const [channelId, setChannelId] = React.useState("");
+  const [transport, setTransport] = React.useState<"exclusive" | "shared">(
+    "exclusive",
+  );
+  const [appServerUrl, setAppServerUrl] = React.useState(
+    "ws://127.0.0.1:51919",
+  );
 
   const tasks = tasksQuery.data ?? [];
   const filteredTasks = React.useMemo(() => {
@@ -95,6 +101,8 @@ export function CodexTaskAgentDialog({
     setTaskId("");
     setName("");
     setChannelId("");
+    setTransport("exclusive");
+    setAppServerUrl("ws://127.0.0.1:51919");
     createMutation.reset();
     attachMutation.reset();
   }
@@ -116,6 +124,8 @@ export function CodexTaskAgentDialog({
       const created = await createMutation.mutateAsync({
         name: name.trim(),
         codexTaskId: selectedTask.id,
+        codexAppServerUrl:
+          transport === "shared" ? appServerUrl.trim() : undefined,
         agentCommand: codexRuntime.command,
         agentArgs: codexRuntime.defaultArgs,
         avatarUrl: codexRuntime.avatarUrl,
@@ -305,11 +315,46 @@ export function CodexTaskAgentDialog({
               />
             </div>
 
+            <div className="space-y-2">
+              <span className="text-sm font-medium">Codex connection</span>
+              <div
+                aria-label="Codex connection"
+                className="grid h-9 grid-cols-2 overflow-hidden rounded-md border border-input bg-background p-0.5"
+                role="radiogroup"
+              >
+                {(["exclusive", "shared"] as const).map((option) => (
+                  <button
+                    aria-checked={transport === option}
+                    className={`h-8 px-3 text-sm transition-colors ${
+                      transport === option
+                        ? "bg-muted font-medium text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    key={option}
+                    onClick={() => setTransport(option)}
+                    role="radio"
+                    type="button"
+                  >
+                    {option === "exclusive" ? "Exclusive ACP" : "Shared app-server"}
+                  </button>
+                ))}
+              </div>
+              {transport === "shared" ? (
+                <Input
+                  aria-label="Codex app-server URL"
+                  onChange={(event) => setAppServerUrl(event.target.value)}
+                  placeholder="ws://127.0.0.1:51919"
+                  spellCheck={false}
+                  value={appServerUrl}
+                />
+              ) : null}
+            </div>
+
             <p className="text-sm leading-6 text-muted-foreground">
-              The agent is created offline. Close or leave this task in Codex
-              Desktop before starting the Buzz agent; stop the Buzz agent before
-              resuming the task locally. Task history and workspace files stay
-              on this computer.
+              {transport === "shared"
+                ? "The agent is created offline and joins the existing app-server when started. Codex clients on that same server can keep this task open."
+                : "The agent is created offline. Close or leave this task in Codex Desktop before starting the Buzz agent; stop the Buzz agent before resuming the task locally."}{" "}
+              Task history and workspace files stay on this computer.
             </p>
 
             {!runtimesQuery.isLoading && !codexRuntime ? (
@@ -339,6 +384,7 @@ export function CodexTaskAgentDialog({
                 !selectedTask ||
                 !codexRuntime ||
                 !name.trim() ||
+                (transport === "shared" && !appServerUrl.trim()) ||
                 createMutation.isPending ||
                 attachMutation.isPending
               }

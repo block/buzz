@@ -541,6 +541,11 @@ pub fn spawn_agent_child(
 
     let mut command = std::process::Command::new(&resolved_acp_command);
     super::configure_task_bound_command(&mut command, codex_task_binding.as_ref(), lazy);
+    super::configure_shared_app_server(
+        &mut command,
+        codex_task_binding.as_ref(),
+        &resolved_acp_command,
+    );
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));

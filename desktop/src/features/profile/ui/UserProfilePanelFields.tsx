@@ -372,6 +372,14 @@ export function buildOwnerFields({
       label: "Workspace",
       testId: "user-profile-codex-workspace",
     });
+    fields.push({
+      copyValue: managedAgent.codexTaskBinding.appServerUrl ?? undefined,
+      displayValue:
+        managedAgent.codexTaskBinding.appServerUrl ?? "Exclusive ACP process",
+      icon: Server,
+      label: "Codex connection",
+      testId: "user-profile-codex-connection",
+    });
   }
 
   if (managedAgent?.acpCommand) {

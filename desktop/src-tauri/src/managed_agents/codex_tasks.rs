@@ -15,7 +15,7 @@ use super::{
     ManagedAgentRecord,
 };
 
-const STORE_VERSION: u32 = 2;
+const STORE_VERSION: u32 = 3;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
 
@@ -27,6 +27,10 @@ pub struct CodexTaskBinding {
     pub updated_at: String,
     #[serde(default)]
     pub model: Option<String>,
+    /// When set, codex-acp connects to this long-lived app-server instead of
+    /// spawning a private Codex process for the Buzz agent.
+    #[serde(default)]
+    pub app_server_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -173,18 +177,39 @@ pub fn binding_for_task_id(task_id: &str) -> Result<CodexTaskBinding, String> {
         workspace: task.workspace,
         updated_at: task.updated_at,
         model: task.model,
+        app_server_url: None,
     })
+}
+
+fn normalize_app_server_url(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = url::Url::parse(value)
+        .map_err(|error| format!("invalid Codex app-server URL: {error}"))?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return Err("Codex app-server URL must use ws:// or wss://".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("Codex app-server URL must include a host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Codex app-server URL cannot include credentials".to_string());
+    }
+    Ok(Some(parsed.to_string().trim_end_matches('/').to_string()))
 }
 
 pub fn prepare_codex_task_binding(
     input: &CreateManagedAgentRequest,
 ) -> Result<Option<CodexTaskBinding>, String> {
-    let binding = input
+    let app_server_url = normalize_app_server_url(input.codex_app_server_url.as_deref())?;
+    let mut binding = input
         .codex_task_id
         .as_deref()
         .map(binding_for_task_id)
         .transpose()?;
-    if binding.is_some() {
+    if let Some(binding) = binding.as_mut() {
+        binding.app_server_url = app_server_url;
         if input.backend != BackendKind::Local {
             return Err("Codex tasks can only be bound to local agents".to_string());
         }
@@ -194,6 +219,8 @@ pub fn prepare_codex_task_binding(
         {
             return Err("Codex task-bound agents require parallelism 1".to_string());
         }
+    } else if app_server_url.is_some() {
+        return Err("A shared Codex app-server requires a Codex task binding".to_string());
     }
     Ok(binding)
 }
@@ -235,7 +262,9 @@ pub fn task_binding_for_spawn(
                 binding.workspace
             ));
         }
-        ensure_codex_task_available(&binding.task_id)?;
+        if binding.app_server_url.is_none() {
+            ensure_codex_task_available(&binding.task_id)?;
+        }
     }
     Ok(binding)
 }
@@ -264,6 +293,19 @@ pub fn configure_task_bound_command(
             "false"
         },
     );
+}
+
+pub fn configure_shared_app_server(
+    command: &mut Command,
+    binding: Option<&CodexTaskBinding>,
+    proxy_executable: &Path,
+) {
+    if let Some(url) = binding.and_then(|binding| binding.app_server_url.as_deref()) {
+        command.env("CODEX_PATH", proxy_executable);
+        command.env("CODEX_SHARED_APP_SERVER_URL", url);
+    } else {
+        command.env_remove("CODEX_SHARED_APP_SERVER_URL");
+    }
 }
 
 pub fn task_bound_worker_count(
@@ -481,5 +523,66 @@ mod tests {
             read_latest_codex_model(&path).as_deref(),
             Some("gpt-5.5[xhigh]")
         );
+    }
+
+    #[test]
+    fn validates_shared_app_server_urls() {
+        assert_eq!(
+            normalize_app_server_url(Some(" ws://127.0.0.1:51919/ ")).unwrap(),
+            Some("ws://127.0.0.1:51919".to_string())
+        );
+        assert!(normalize_app_server_url(Some("http://127.0.0.1:51919")).is_err());
+        assert!(normalize_app_server_url(Some("ws://user@127.0.0.1:51919")).is_err());
+    }
+
+    #[test]
+    fn configures_shared_app_server_proxy_environment() {
+        let binding = CodexTaskBinding {
+            task_id: "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+            thread_name: "Shared task".to_string(),
+            workspace: r"C:\repo".to_string(),
+            updated_at: "2026-08-11T00:00:00Z".to_string(),
+            model: Some("gpt-5.5[xhigh]".to_string()),
+            app_server_url: Some("ws://127.0.0.1:51919".to_string()),
+        };
+        let mut command = Command::new("buzz-acp");
+
+        configure_shared_app_server(
+            &mut command,
+            Some(&binding),
+            Path::new(r"C:\Buzz\buzz-acp.exe"),
+        );
+
+        let env = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            env.get("CODEX_SHARED_APP_SERVER_URL"),
+            Some(&Some("ws://127.0.0.1:51919".to_string()))
+        );
+        assert_eq!(
+            env.get("CODEX_PATH"),
+            Some(&Some(r"C:\Buzz\buzz-acp.exe".to_string()))
+        );
+    }
+
+    #[test]
+    fn exclusive_task_keeps_inherited_codex_path() {
+        let mut command = Command::new("buzz-acp");
+
+        configure_shared_app_server(&mut command, None, Path::new(r"C:\Buzz\buzz-acp.exe"));
+
+        let env = command
+            .get_envs()
+            .map(|(key, value)| (key.to_string_lossy().into_owned(), value))
+            .collect::<HashMap<_, _>>();
+        assert!(!env.contains_key("CODEX_PATH"));
+        assert_eq!(env.get("CODEX_SHARED_APP_SERVER_URL"), Some(&None));
     }
 }

@@ -1358,11 +1358,11 @@ fn render_task_handoff(
 fn render_identity_task_handoff(session_id: &str, workspace: &str) -> String {
     format!(
         "[Task Handoff]\n\
-         This Buzz Managed Agent identity exclusively owns a pre-existing Codex task while the agent is online.\n\
+         This Buzz Managed Agent identity is bound to a pre-existing Codex task.\n\
          Continue that task's history, objective, unfinished work, and workspace.\n\
          Messages from every Buzz Room this identity joins are collaboration input to this same task; Rooms do not create separate Codex tasks.\n\
          When asked what you are doing, summarize the loaded task before unrelated room connectivity or media probes.\n\
-         To return control to Codex Desktop, the owner must stop this Buzz agent before opening the task there.\n\
+         Codex client access depends on the selected connection: shared app-server clients may remain connected, while exclusive ACP requires stopping this Buzz agent before local reuse.\n\
          Codex task ID: {session_id}\n\
          Workspace: {workspace}"
     )
@@ -4761,6 +4761,16 @@ mod tests {
         assert!(handoff.contains("exclusively resuming"));
         assert!(handoff.contains("Codex task ID: resumed-task"));
         assert!(!handoff.contains("Source Codex task ID"));
+    }
+
+    #[test]
+    fn identity_handoff_explains_shared_and_exclusive_access() {
+        let handoff = render_identity_task_handoff("bound-task", r"C:\repo");
+
+        assert!(handoff.contains("is bound to a pre-existing Codex task"));
+        assert!(handoff.contains("shared app-server clients may remain connected"));
+        assert!(handoff.contains("exclusive ACP requires stopping this Buzz agent"));
+        assert!(handoff.contains("Codex task ID: bound-task"));
     }
 
     fn test_mcp_server() -> McpServer {

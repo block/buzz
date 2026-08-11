@@ -413,6 +413,7 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   codexTaskId?: string;
+  codexAppServerUrl?: string;
   personaId?: string;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;

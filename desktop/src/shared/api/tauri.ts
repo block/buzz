@@ -833,6 +833,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
       input: {
         name: input.name,
         codexTaskId: input.codexTaskId,
+        codexAppServerUrl: input.codexAppServerUrl,
         personaId: input.personaId,
         teamId: input.teamId,
         relayUrl: input.relayUrl,

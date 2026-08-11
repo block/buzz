@@ -4,6 +4,7 @@ export type CodexTaskBinding = {
   workspace: string;
   updatedAt: string;
   model: string | null;
+  appServerUrl: string | null;
 };
 
 export type CodexTaskSummary = {
@@ -21,6 +22,7 @@ export type RawCodexTaskBinding = {
   workspace: string;
   updated_at: string;
   model?: string | null;
+  app_server_url?: string | null;
 };
 
 export function fromRawCodexTaskBinding(
@@ -33,6 +35,7 @@ export function fromRawCodexTaskBinding(
         workspace: binding.workspace,
         updatedAt: binding.updated_at,
         model: binding.model ?? null,
+        appServerUrl: binding.app_server_url ?? null,
       }
     : null;
 }
