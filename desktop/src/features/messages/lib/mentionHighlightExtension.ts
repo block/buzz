@@ -106,10 +106,7 @@ export function buildHighlightPatterns(
       n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
     );
     patterns.push(
-      new RegExp(
-        `(?:^|(?<=[\\s(]))@(${escapedNames.join("|")})(?=\\W|$)`,
-        "gi",
-      ),
+      new RegExp(`(^|[\\s(])@(${escapedNames.join("|")})(?=\\W|$)`, "gi"),
     );
   }
 
@@ -121,10 +118,7 @@ export function buildHighlightPatterns(
       n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
     );
     patterns.push(
-      new RegExp(
-        `(?:^|(?<=\\s))#(${escapedChannels.join("|")})(?=\\W|$)`,
-        "gi",
-      ),
+      new RegExp(`(^|\\s)#(${escapedChannels.join("|")})(?=\\W|$)`, "gi"),
     );
   }
 
@@ -145,7 +139,15 @@ export function findHighlightMatches(
     pattern.lastIndex = 0;
     let m: RegExpExecArray | null = pattern.exec(text);
     while (m !== null) {
-      results.push({ from: m.index, to: m.index + m[0].length, match: m[0] });
+      // Group 1 is the boundary prefix (empty at start-of-text). It replaces
+      // the previous lookbehind, which macOS 12's WebKit cannot parse
+      // (see block/buzz#3295); skip it so offsets point at the @/# sigil.
+      const prefixLen = m[1] ? m[1].length : 0;
+      results.push({
+        from: m.index + prefixLen,
+        to: m.index + m[0].length,
+        match: m[0].slice(prefixLen),
+      });
       m = pattern.exec(text);
     }
   }
