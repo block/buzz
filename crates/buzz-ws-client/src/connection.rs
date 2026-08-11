@@ -5,11 +5,12 @@ use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
 use crate::error::WsClientError;
 use crate::message::{build_auth_event, parse_relay_message, OkResponse, RelayMessage};
+use crate::proxy::connect_websocket;
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -50,7 +51,7 @@ impl NostrWsConnection {
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
 
-        let (ws, _response) = connect_async(parsed.as_str())
+        let (ws, _response) = connect_websocket(parsed.as_str())
             .await
             .map_err(WsClientError::WebSocket)?;
 

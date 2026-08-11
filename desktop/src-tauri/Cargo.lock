@@ -1078,6 +1078,7 @@ dependencies = [
  "buzz-sdk",
  "buzz-terminal",
  "buzz-voice",
+ "buzz-ws-client",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1232,6 +1233,25 @@ dependencies = [
  "sherpa-onnx",
  "symphonia",
  "tokenizers",
+]
+
+[[package]]
+name = "buzz-ws-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hyper-util",
+ "nostr",
+ "plist",
+ "serde_json",
+ "system-configuration",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower-service",
+ "tracing",
+ "url",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]

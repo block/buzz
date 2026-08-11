@@ -105,6 +105,7 @@ url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
+buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
 buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
