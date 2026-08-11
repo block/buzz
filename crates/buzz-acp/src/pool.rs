@@ -1862,6 +1862,13 @@ pub async fn run_prompt_task(
     // follows as a second block.
     let mut slash_command: Option<String> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+        // No batch → no reply anchor to give the publish-final-if-unsent
+        // fallback gate (and this path is heartbeat-only in practice — see
+        // the `else` arm below — so the gate never fires for it regardless,
+        // gated on PromptSource::Channel in `handle_prompt_result`). Clear
+        // explicitly so a stale anchor from this agent's previous channel
+        // turn can never leak into an unrelated fallback publish.
+        agent.acp.set_pending_reply_anchor(None);
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
         let text = prepend_base_for_legacy(
@@ -1903,6 +1910,23 @@ pub async fn run_prompt_task(
                 "slash-command pass-through"
             );
         }
+
+        // Give the publish-final-if-unsent fallback gate the SAME `--reply-to`
+        // anchor this turn's `[Context]` reply instruction tells the agent to
+        // use, computed the same way `format_prompt` derives it internally —
+        // so a fallback publish (if the gate fires) threads identically to
+        // what the agent was told to do. Set unconditionally (also when the
+        // gate is disabled): the cost is one cheap pure computation per
+        // channel turn, and it keeps `AcpClient`'s pending-anchor state
+        // correct regardless of config, rather than coupling this call site
+        // to `ctx.publish_final_if_unsent`.
+        let is_dm = channel_info
+            .as_ref()
+            .map(|ci| ci.channel_type == "dm")
+            .unwrap_or(false);
+        let reply_anchor =
+            crate::queue::reply_anchor_for_batch(b, is_dm, profile_lookup.as_ref());
+        agent.acp.set_pending_reply_anchor(reply_anchor);
 
         crate::queue::format_prompt(
             b,
@@ -3906,6 +3930,48 @@ pub(crate) async fn post_failure_notice(
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+/// Fallback publish for the opt-in `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` gate.
+///
+/// Posts the harness-buffered final assistant text into `channel_id`, using
+/// the SAME in-process publish path [`post_failure_notice`] uses for failure
+/// notices (`buzz_sdk::build_message` + `rest.keys` + `rest.submit_event`).
+/// This is the closest available match to "the mechanism the harness already
+/// uses to relay a reply" — buzz-acp has no in-process path for an agent's
+/// *normal* reply at all; that is entirely the agent subprocess's own
+/// `buzz messages send` tool call, outside this process. Reusing
+/// `post_failure_notice`'s path (rather than shelling out to the `buzz` CLI
+/// the agent would have invoked) keeps the fallback publish in-process, with
+/// no dependency on the `buzz` binary being on `PATH`.
+///
+/// `reply_anchor`, when present, is used as BOTH the NIP-10 root and parent —
+/// reproducing the flat "anchor to root, no depth-2 nesting" semantics
+/// `queue::resolve_reply_anchor` already applies to the agent's own reply
+/// instruction for this turn (see `queue::reply_anchor_for_batch`), so the
+/// fallback post threads exactly where the agent was told to reply.
+pub(crate) async fn publish_fallback_final_text(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    content: &str,
+    reply_anchor: Option<&str>,
+) -> Result<(), String> {
+    let thread_ref = reply_anchor
+        .and_then(|a| nostr::EventId::from_hex(a).ok())
+        .map(|id| buzz_sdk::ThreadRef {
+            root_event_id: id,
+            parent_event_id: id,
+        });
+    let builder = buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
+        .map_err(|e| format!("build failed: {e}"))?;
+    let event = builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|e| format!("sign failed: {e}"))?;
+    match tokio::time::timeout(Duration::from_secs(10), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("submit failed: {e}")),
+        Err(_) => Err("timed out".to_string()),
     }
 }
 

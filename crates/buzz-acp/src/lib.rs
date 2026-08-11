@@ -3383,6 +3383,51 @@ fn spawn_failure_notice(
     }
 }
 
+/// Spawn a task publishing a `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback post
+/// for a channel turn that ended with buffered final text the agent never
+/// published itself. See [`pool::publish_fallback_final_text`] for the
+/// publish mechanism and reply-threading rationale.
+///
+/// Fire-and-forget, like [`spawn_failure_notice`]: spawned so a slow relay
+/// round-trip cannot block the pool's result-handling loop. Not retried on
+/// failure — a retry risks a duplicate post if the first attempt actually
+/// landed after a slow/errored response.
+fn spawn_fallback_publish(
+    rest_client: Option<&relay::RestClient>,
+    channel_id: Uuid,
+    content: String,
+    reply_anchor: Option<String>,
+) {
+    let Some(rest) = rest_client else {
+        tracing::warn!(
+            channel_id = %channel_id,
+            "publish_final_if_unsent: no rest_client available — cannot publish fallback"
+        );
+        return;
+    };
+    let rest = rest.clone();
+    tokio::spawn(async move {
+        match pool::publish_fallback_final_text(&rest, channel_id, &content, reply_anchor.as_deref())
+            .await
+        {
+            Ok(()) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    reply_to = ?reply_anchor,
+                    "publish_final_if_unsent: agent ended its turn without publishing to the \
+                     channel — harness published the buffered final text on its behalf"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    "publish_final_if_unsent: fallback publish failed: {e}"
+                );
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3581,12 +3626,35 @@ fn handle_prompt_result(
 
     match result.outcome {
         // Successful prompt — return agent to pool.
-        PromptOutcome::Ok(_) => {
+        PromptOutcome::Ok(stop_reason) => {
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
                 "agent_returned"
             );
+            // Opt-in exactly-once fallback publish gate (default OFF; see
+            // `Config::publish_final_if_unsent`). Fires only for:
+            //   - a channel turn (never heartbeats — nothing to reply into)
+            //   - a clean `end_turn` stop (never Refusal/MaxTokens/
+            //     MaxTurnRequests/Cancelled — those are distinct terminal
+            //     outcomes this gate must not paper over with an
+            //     auto-publish, per the design doc)
+            //   - buffered final text that's non-blank AND no accepted
+            //     `buzz messages send` tool call was observed this turn
+            //     (`pending_unpublished_final_text` enforces both)
+            if config.publish_final_if_unsent && stop_reason == acp::StopReason::EndTurn {
+                if let PromptSource::Channel(ch) = &result.source {
+                    if let Some((text, anchor)) = result.agent.acp.pending_unpublished_final_text()
+                    {
+                        spawn_fallback_publish(
+                            rest_client,
+                            *ch,
+                            text.to_string(),
+                            anchor.map(str::to_string),
+                        );
+                    }
+                }
+            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
@@ -6211,6 +6279,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            publish_final_if_unsent: false,
         }
     }
 
@@ -6433,6 +6502,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            publish_final_if_unsent: false,
         }
     }
 

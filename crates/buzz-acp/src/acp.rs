@@ -8,6 +8,8 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use std::collections::HashSet;
+
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -211,6 +213,36 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Buffered `agent_message_chunk` text accumulated for the current (or
+    /// most-recently-completed) turn. Reset at the top of every
+    /// [`session_prompt_blocks_with_idle_timeout`](Self::session_prompt_blocks_with_idle_timeout)
+    /// call — i.e. once per turn, including the initial-message turn (whose
+    /// buffer is then overwritten by the real prompt's call before anything
+    /// reads it). Consumed by the harness's opt-in
+    /// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback-publish gate — see
+    /// [`pending_unpublished_final_text`](Self::pending_unpublished_final_text)
+    /// and `handle_prompt_result` in `lib.rs`.
+    final_text_buffer: String,
+    /// `toolCallId`s from this turn whose `tool_call` title/`rawInput` looked
+    /// like a `buzz messages send` invocation (see
+    /// [`looks_like_buzz_messages_send`]), pending confirmation via a
+    /// `tool_call_update` (or an inline `status` on the `tool_call` itself)
+    /// before being credited to [`channel_publish_detected`](Self::channel_publish_detected).
+    pending_publish_tool_calls: HashSet<String>,
+    /// Set once this turn's stream shows an accepted (`status: "completed"`)
+    /// `buzz messages send` tool call — i.e. the agent already published to
+    /// the channel itself this turn. Reset alongside `final_text_buffer`.
+    channel_publish_detected: bool,
+    /// Pre-resolved `--reply-to` anchor for the in-flight turn, set by the
+    /// caller (`pool::run_prompt_task`) via
+    /// [`set_pending_reply_anchor`](Self::set_pending_reply_anchor) right
+    /// before the prompt is sent. Mirrors the anchor already computed for the
+    /// agent's own `[Context]` reply instruction
+    /// (`queue::reply_anchor_for_batch`), so a fallback publish threads
+    /// identically to what the agent was told to use. Not reset by
+    /// `session_prompt_blocks_with_idle_timeout` — callers that don't have an
+    /// anchor to give (heartbeats) must clear it explicitly via `set_pending_reply_anchor(None)`.
+    pending_reply_anchor: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -387,6 +419,38 @@ enum SteerTransport {
     AcpExtension,
 }
 
+/// Best-effort detection of a `buzz messages send` tool-call invocation from
+/// its ACP `title` and, if present, `rawInput` (some connectors surface the
+/// underlying shell command there instead of, or in addition to, the title).
+///
+/// `buzz-acp` has no typed ACP tool-call schema — all `session/update`
+/// handling in this module is untyped JSON — and there is no dedicated "this
+/// turn published to the channel" signal anywhere else in the codebase (see
+/// `queue.rs` / `pool.rs`: `turn_started`/`turn_completed` and
+/// `PromptOutcome` track turn lifecycle, not channel side-effects). This
+/// substring heuristic is the most direct signal available.
+///
+/// The check is intentionally loose rather than narrow: a false negative here
+/// (failing to recognize a real publish) causes the fallback gate to publish
+/// a duplicate — recreating exactly the failure mode this feature exists to
+/// avoid — while a false positive (wrongly crediting a non-publish as a
+/// publish) only matters if the agent's *actual* reply attempt also silently
+/// failed, which is already the pre-existing bug for the one backend
+/// (`hermes`) this gate is enabled for.
+fn looks_like_buzz_messages_send(update: &serde_json::Value) -> bool {
+    let mut haystack = String::new();
+    if let Some(t) = update.get("title").and_then(|v| v.as_str()) {
+        haystack.push_str(t);
+        haystack.push(' ');
+    }
+    if let Some(raw) = update.get("rawInput") {
+        haystack.push_str(&raw.to_string());
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    haystack.contains("buzz messages send")
+        || (haystack.contains("buzz") && haystack.contains("messages") && haystack.contains("send"))
+}
+
 fn build_client_capabilities() -> serde_json::Value {
     serde_json::json!({
         // Signal to ACP adapters that Buzz can hand users to terminal-native
@@ -550,6 +614,10 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            final_text_buffer: String::new(),
+            pending_publish_tool_calls: HashSet::new(),
+            channel_publish_detected: false,
+            pending_reply_anchor: None,
         })
     }
 
@@ -768,6 +836,14 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // Fresh per-turn state for the publish-final-if-unsent fallback gate.
+        // `pending_reply_anchor` is intentionally NOT cleared here — the
+        // caller sets it (or explicitly clears it) immediately before this
+        // call via `set_pending_reply_anchor`.
+        self.final_text_buffer.clear();
+        self.pending_publish_tool_calls.clear();
+        self.channel_publish_detected = false;
+
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -856,6 +932,39 @@ impl AcpClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    /// Set the `--reply-to` anchor the caller wants used if this turn falls
+    /// through to the publish-final-if-unsent fallback gate. Call with
+    /// `None` for turns with no anchor to give (heartbeats, or human-facing
+    /// scope decisions that intentionally leave no anchor). Must be called
+    /// before [`session_prompt_blocks_with_idle_timeout`](Self::session_prompt_blocks_with_idle_timeout)
+    /// for the value to apply to that turn — see
+    /// [`pending_reply_anchor`](Self::pending_reply_anchor) field docs for why
+    /// it isn't reset automatically.
+    pub fn set_pending_reply_anchor(&mut self, anchor: Option<String>) {
+        self.pending_reply_anchor = anchor;
+    }
+
+    /// Returns the buffered final assistant text for the just-completed turn,
+    /// paired with its reply anchor, IF (a) the text is non-blank after
+    /// trimming and (b) no accepted `buzz messages send` tool call was
+    /// observed during the turn (tracked internally as
+    /// `channel_publish_detected`).
+    ///
+    /// Read-only: does not consume or clear any state. Callers get a fresh
+    /// buffer each turn regardless (see `final_text_buffer` field docs), so
+    /// there is no double-publish risk from calling this more than once
+    /// after the same turn.
+    pub fn pending_unpublished_final_text(&self) -> Option<(&str, Option<&str>)> {
+        if self.channel_publish_detected {
+            return None;
+        }
+        let trimmed = self.final_text_buffer.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some((trimmed, self.pending_reply_anchor.as_deref()))
     }
 
     /// Whether the agent advertised the [`ACP_STEER_METHOD`] extension at
@@ -1732,6 +1841,10 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Accumulated for the opt-in publish-final-if-unsent fallback
+                    // gate — see `pending_unpublished_final_text`. No-op (just
+                    // grows a buffer nobody reads) when the gate is disabled.
+                    self.final_text_buffer.push_str(text);
                 }
                 false
             }
@@ -1745,6 +1858,17 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if looks_like_buzz_messages_send(update) {
+                    if let Some(tool_id) = update.get("toolCallId").and_then(|v| v.as_str()) {
+                        self.pending_publish_tool_calls.insert(tool_id.to_string());
+                    }
+                    // Some connectors report a terminal status inline on the
+                    // creating `tool_call` for synchronous tools, with no
+                    // follow-up `tool_call_update` at all.
+                    if update.get("status").and_then(|v| v.as_str()) == Some("completed") {
+                        self.channel_publish_detected = true;
+                    }
+                }
                 true
             }
             "tool_call_update" => {
@@ -1754,6 +1878,9 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                if status == "completed" && self.pending_publish_tool_calls.contains(tool_id) {
+                    self.channel_publish_detected = true;
+                }
                 false
             }
             "plan" => {

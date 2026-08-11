@@ -1388,6 +1388,42 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
     format!("[Base]\n{}", base_prompt.trim_end())
 }
 
+/// Resolve the `--reply-to` anchor for a batch's triggering turn, independent
+/// of building the rest of the prompt.
+///
+/// Mirrors exactly the anchor computation `format_prompt` performs internally
+/// for the `[Context]` reply instruction (same `last_event`/`thread_tags`/
+/// `is_dm`/[`resolve_reply_anchor`] logic — kept in sync by hand rather than
+/// refactored into a shared helper `format_prompt` also calls, to avoid
+/// touching that function's well-tested internals for this).
+///
+/// Used by `pool::run_prompt_task` to give `AcpClient::set_pending_reply_anchor`
+/// the same anchor the agent's own prompt was told to use, so that a
+/// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback publish (when enabled) threads
+/// identically to what the agent was instructed to do.
+pub(crate) fn reply_anchor_for_batch(
+    batch: &FlushBatch,
+    is_dm: bool,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    let last_event = batch.events.last()?;
+    let thread_tags = parse_thread_tags(&last_event.event);
+    let sender_pubkey = last_event.event.pubkey.to_hex();
+    if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| last_event.event.id.to_hex())
+    } else {
+        resolve_reply_anchor(
+            &sender_pubkey,
+            &thread_tags,
+            &last_event.event.id.to_hex(),
+            profile_lookup,
+        )
+    }
+}
+
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
