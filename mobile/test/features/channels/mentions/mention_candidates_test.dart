@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 
 final userPubkey = 'a' * 64;
 final memberPubkey = 'b' * 64;
@@ -18,6 +19,20 @@ ChannelMember member(String pubkey, {String role = 'member'}) {
 }
 
 void main() {
+  test('role-only agent mentions fall back to a pubkey prefix label', () {
+    const pubkey = 'deadbeef0123456789';
+
+    expect(
+      mentionNamesWithDirectoryLabels(
+        mentionPubkeys: const [pubkey],
+        profileMentionNames: const {},
+        directoryDisplayNames: const {},
+        agentMentionPubkeys: const {pubkey},
+      ),
+      const {pubkey: 'deadbeef'},
+    );
+  });
+
   group('agentIsSharedWithUser', () {
     test('anyone-mode agent is shared when a channel overlaps', () {
       final agent = AgentDirectoryEntry(

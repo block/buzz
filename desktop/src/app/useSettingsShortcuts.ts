@@ -5,7 +5,7 @@ import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 type UseSettingsShortcutsOptions = {
   onClose: () => void;
   onOpenSettings: () => void;
-  open: boolean;
+  open?: boolean;
 };
 
 export function useSettingsShortcuts({
@@ -14,6 +14,8 @@ export function useSettingsShortcuts({
   open,
 }: UseSettingsShortcutsOptions) {
   React.useLayoutEffect(() => {
+    if (open === undefined) return;
+
     function handleKeyDown(event: KeyboardEvent) {
       const isSettingsShortcut =
         hasPrimaryShortcutModifier(event) &&

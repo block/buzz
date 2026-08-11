@@ -564,7 +564,7 @@ fn import_preview_includes_exported_definition_metadata() {
     let bytes = crate::managed_agents::agent_snapshot::encode_snapshot_json(&snapshot).unwrap();
     let decoded = decode_snapshot_from_bytes(&bytes).unwrap();
 
-    let preview = build_agent_snapshot_import_preview(&decoded);
+    let preview = build_agent_snapshot_import_preview(&decoded, false).unwrap();
 
     assert!(preview.is_builtin);
     assert_eq!(preview.model.as_deref(), Some("claude-opus-4-5"));
@@ -949,51 +949,14 @@ fn test_parse_format_is_png_invalid_returns_error() {
 }
 
 // ── Export: validate_snapshot_encode_size ────────────────────────────────────
-//
-// Tests call `validate_snapshot_encode_size` directly so they prove the exact
-// production guard — not a manual reconstruction.  Removing or reversing the
-// check in production code will cause these tests to fail.
 
-/// JSON: boundary-1 passes, boundary is the last legal byte count.
-#[test]
-fn validate_encode_size_json_at_boundary_minus_1_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES - 1, false).is_ok());
-}
+#[path = "tests_memory_entries.rs"]
+mod memory_entries;
 
-/// JSON: exactly at the boundary is the last accepted size.
-#[test]
-fn validate_encode_size_json_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES, false).is_ok());
-}
+#[path = "tests_encode_size.rs"]
+mod encode_size;
 
-/// JSON: boundary+1 is rejected.
-#[test]
-fn validate_encode_size_json_over_boundary_is_rejected() {
-    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES + 1, false).unwrap_err();
-    assert!(
-        err.contains("size limit"),
-        "error must mention size limit, got: {err}"
-    );
-}
+// ── Import: decode_snapshot_for_import (locked cards) ─────────────────────
 
-/// PNG: boundary-1 passes.
-#[test]
-fn validate_encode_size_png_at_boundary_minus_1_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES - 1, true).is_ok());
-}
-
-/// PNG: exactly at the boundary passes.
-#[test]
-fn validate_encode_size_png_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES, true).is_ok());
-}
-
-/// PNG: boundary+1 is rejected.
-#[test]
-fn validate_encode_size_png_over_boundary_is_rejected() {
-    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES + 1, true).unwrap_err();
-    assert!(
-        err.contains("size limit"),
-        "error must mention size limit, got: {err}"
-    );
-}
+#[path = "tests_locked.rs"]
+mod locked_import;

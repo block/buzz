@@ -9,6 +9,14 @@ const MAX_LINES = 1000;
 
 const rules = [
   { root: "src-tauri/src", extensions: new Set([".rs"]), maxLines: MAX_LINES },
+  // Workspace member crates. Without this the ratchet's only Rust root is
+  // `src-tauri/src`, and a crate under `src-tauri/crates/` is born outside the
+  // repo's one size discipline -- silently, since the check still exits 0.
+  {
+    root: "src-tauri/crates",
+    extensions: new Set([".rs"]),
+    maxLines: MAX_LINES,
+  },
   {
     root: "src/app",
     extensions: new Set([".ts", ".tsx"]),

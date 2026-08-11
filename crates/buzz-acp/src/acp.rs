@@ -20,10 +20,6 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
-/// Env var that tells a goose ACP child not to start its cron scheduler.
-/// Injected unconditionally by [`AcpClient::spawn`]; see the call site for why.
-pub(crate) const GOOSE_SCHEDULER_DISABLED_ENV: &str = "GOOSE_ACP_SCHEDULER_DISABLED";
-
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -517,16 +513,6 @@ impl AcpClient {
             cmd.env("CODEX_CONFIG", merged);
         }
 
-        // Buzz-managed agents must never execute the operator's personal cron
-        // schedule. A goose ACP child starts a scheduler over the shared
-        // `schedule.json`, so a pool of N children fires every scheduled job N
-        // times — under the wrong identity and racing standalone goose.
-        //
-        // Set last, and with no operator-wins escape hatch, so it beats both a
-        // conflicting persona `extra_env` entry and any inherited parent value.
-        // Agent builds that don't recognize the variable ignore it.
-        cmd.env(GOOSE_SCHEDULER_DISABLED_ENV, "true");
-
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
@@ -633,29 +619,46 @@ impl AcpClient {
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
-    /// `system_prompt` is included in the request when `Some` — agents that
-    /// support the field will use it; others ignore unknown fields per JSON-RPC.
+    ///
+    /// `system_prompt` controls how the prompt text is delivered:
+    ///
+    /// - `None` — no system-prompt field in the request (legacy framing).
+    /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
+    ///   (ACP protocol v2, buzz-agent, goose unused).
+    /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
+    ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
+    ///
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one.
+    /// member from a null one. When both `ClaudeMeta` and `session_title` are
+    /// present the two `_meta` members are merged into a single object.
+    ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
-        if let Some(sp) = system_prompt {
-            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        match system_prompt {
+            Some(SystemPromptTransport::Field(sp)) => {
+                params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
+            Some(SystemPromptTransport::ClaudeMeta(sp)) => {
+                // Merge into _meta so sessionTitle (set below) is not clobbered.
+                params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
+            }
+            None => {}
         }
         if let Some(title) = session_title {
-            params["_meta"] = serde_json::json!({ "sessionTitle": title });
+            // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
+            params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -677,7 +680,7 @@ impl AcpClient {
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
-        system_prompt: Option<&str>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<String, AcpError> {
         Ok(self
@@ -876,6 +879,16 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1604,7 +1617,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1616,7 +1631,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1846,8 +1863,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -2050,6 +2067,22 @@ pub struct SessionNewResponse {
     pub session_id: String,
     /// The full `result` value from the JSON-RPC response.
     pub raw: serde_json::Value,
+}
+
+/// How to deliver a system prompt on `session/new`.
+///
+/// The two variants match the two mechanisms supported by current adapters:
+///
+/// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
+///   `claude-agent-acp` to append to the adapter's own native system prompt
+///   while keeping its tool-use preset intact.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SystemPromptTransport<'a> {
+    /// Deliver as a bare top-level `systemPrompt` field.
+    Field(&'a str),
+    /// Deliver as `_meta.systemPrompt: {"append": text}`.
+    ClaudeMeta(&'a str),
 }
 
 /// How to switch to a particular model on a session.
@@ -2866,46 +2899,6 @@ mod tests {
             .expect("failed to spawn test script")
     }
 
-    /// Spawn a script that echoes the named env vars as the child observes
-    /// them, one per line. `<unset>` means the child did not receive the var.
-    async fn spawn_and_read_child_env(
-        vars: &[&str],
-        extra_env: &[(String, String)],
-    ) -> Vec<String> {
-        let script = vars
-            .iter()
-            .map(|var| format!("printf '%s\\n' \"${{{var}:-<unset>}}\""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut client = AcpClient::spawn("bash", &["-c".into(), script], extra_env, false)
-            .await
-            .expect("failed to spawn env probe script");
-        let mut observed = Vec::with_capacity(vars.len());
-        for var in vars {
-            observed.push(
-                client
-                    .reader
-                    .next()
-                    .await
-                    .unwrap_or_else(|| panic!("child produced no output for {var}"))
-                    .expect("child stdout was not readable"),
-            );
-        }
-        observed
-    }
-
-    /// Every spawned agent must be told not to run the operator's cron
-    /// schedule, without the caller having to opt in.
-    #[tokio::test]
-    async fn spawn_injects_scheduler_disabled_env_by_default() {
-        let observed = spawn_and_read_child_env(&[GOOSE_SCHEDULER_DISABLED_ENV], &[]).await;
-        assert_eq!(
-            observed,
-            vec!["true"],
-            "{GOOSE_SCHEDULER_DISABLED_ENV} must be injected into every spawn"
-        );
-    }
-
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
     /// `hermes-acp`) and return the value of `var` as the child observed it.
     /// `<unset>` means the child did not receive the var.
@@ -2975,37 +2968,6 @@ mod tests {
             spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
-        );
-    }
-
-    /// Persona config must not be able to re-enable the scheduler: this is a
-    /// correctness invariant, not an operator-tunable default, so the
-    /// injection is set after (and therefore wins over) the `extra_env` loop.
-    ///
-    /// The control var pins that `extra_env` really did reach the child, so a
-    /// pass here means the conflicting entry lost the fight rather than
-    /// `extra_env` being dropped wholesale.
-    #[tokio::test]
-    async fn spawn_scheduler_disabled_env_overrides_conflicting_extra_env() {
-        let extra_env = vec![
-            (
-                GOOSE_SCHEDULER_DISABLED_ENV.to_string(),
-                "false".to_string(),
-            ),
-            (
-                "BUZZ_ENV_PROBE_CONTROL".to_string(),
-                "delivered".to_string(),
-            ),
-        ];
-        let observed = spawn_and_read_child_env(
-            &[GOOSE_SCHEDULER_DISABLED_ENV, "BUZZ_ENV_PROBE_CONTROL"],
-            &extra_env,
-        )
-        .await;
-        assert_eq!(
-            observed,
-            vec!["true", "delivered"],
-            "a persona extra_env entry must not override {GOOSE_SCHEDULER_DISABLED_ENV}"
         );
     }
 
@@ -3356,7 +3318,12 @@ mod tests {
             .expect("initialize should succeed");
 
         let resp = client
-            .session_new_full("/tmp", vec![], Some("Custom system prompt"), None)
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::Field("Custom system prompt")),
+                None,
+            )
             .await
             .expect("session_new_full should succeed");
 
@@ -3505,6 +3472,87 @@ mod tests {
         assert!(
             received["params"].get("_meta").is_none(),
             "_meta should be absent entirely, not an empty object or null"
+        );
+    }
+
+    // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
+
+    #[tokio::test]
+    async fn session_new_full_sends_claude_meta_system_prompt_when_claude_meta_transport() {
+        // When ClaudeMeta transport is requested, the prompt must appear as
+        // _meta.systemPrompt: {"append": text} — never as a bare systemPrompt field.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                None,
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"].get("systemPrompt").is_none(),
+            "bare systemPrompt must not be present for ClaudeMeta transport"
+        );
+        assert_eq!(
+            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
+            Some("Be concise"),
+            "_meta.systemPrompt.append must carry the prompt text"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_merges_claude_meta_and_session_title_into_single_meta_object() {
+        // Both ClaudeMeta prompt and session_title must coexist under _meta —
+        // the prompt must not clobber sessionTitle or vice versa.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_merged","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                Some("Fizz · #buzz-dev"),
+            )
+            .await
+            .expect("session_new_full should succeed");
+
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
+            Some("Be concise"),
+            "_meta.systemPrompt.append must be present"
+        );
+        assert_eq!(
+            received["params"]["_meta"]["sessionTitle"].as_str(),
+            Some("Fizz · #buzz-dev"),
+            "_meta.sessionTitle must be present alongside systemPrompt"
         );
     }
 
@@ -3755,7 +3803,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3816,7 +3864,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -4000,7 +4048,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -4032,7 +4080,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4137,7 +4185,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4194,7 +4242,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4272,8 +4320,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.

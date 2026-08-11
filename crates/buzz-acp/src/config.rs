@@ -240,7 +240,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     pub private_key: String,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
@@ -474,6 +474,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Exit after this many seconds with no dispatched events and no turn in flight.
+    /// 0 disables inactivity self-termination.
+    #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
+    pub exit_after_inactivity: u64,
+
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
@@ -550,6 +555,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
+    pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
@@ -1098,6 +1105,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1468,6 +1476,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -2165,6 +2174,22 @@ channels = "ALL"
     fn test_turn_liveness_one_rejected() {
         let err = validate_turn_liveness(1).unwrap_err();
         assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn inactivity_exit_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.exit_after_inactivity, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--exit-after-inactivity",
+            "120",
+        ]);
+        assert_eq!(configured.exit_after_inactivity, 120);
     }
 
     #[test]
@@ -2897,5 +2922,35 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        use clap::CommandFactory;
+
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let cmd = CliArgs::command();
+        let violations: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| {
+                let env_key = arg.get_env()?;
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    Some(env_name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each: {violations:?}"
+        );
     }
 }

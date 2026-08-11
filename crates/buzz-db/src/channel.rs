@@ -371,7 +371,9 @@ async fn acquire_channel_membership_lock(
 /// Role enforcement:
 /// - Open channels: `invited_by` is optional; role is forced to `Member` regardless of
 ///   what the caller passes — callers cannot self-assign elevated roles.
-/// - Private channels: requires an `invited_by` who is an active owner/admin.
+/// - Private channels: requires an `invited_by` who is an active member, or the channel
+///   creator bootstrapping their own first membership. Any active member may add an
+///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
 /// - Elevated roles (`Owner`, `Admin`) may only be granted by an existing owner/admin,
 ///   even on open channels.
 ///
@@ -419,7 +421,9 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            // Any member can invite others, but only owners/admins may grant elevated roles.
+            // Any active member may extend private-channel access with an
+            // ordinary role. Granting owner/admin remains reserved for an
+            // existing owner/admin.
             if role.is_elevated() && !inviter_role.is_elevated() {
                 return Err(DbError::AccessDenied(
                     "only owners/admins may grant elevated roles".to_string(),

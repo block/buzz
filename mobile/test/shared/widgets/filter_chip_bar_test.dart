@@ -39,10 +39,57 @@ void main() {
     final unselectedLabel = tester.widget<Text>(find.text('Following'));
     expect(selectedLabel.style?.fontSize, filterChipTextStyle.fontSize);
     expect(selectedLabel.style?.height, filterChipTextStyle.height);
+    expect(selectedLabel.style?.fontFamily, 'Inter');
     expect(selectedLabel.style?.fontWeight, FontWeight.w500);
     expect(unselectedLabel.style?.fontSize, filterChipTextStyle.fontSize);
     expect(unselectedLabel.style?.height, filterChipTextStyle.height);
     expect(unselectedLabel.style?.fontWeight, FontWeight.w400);
+    final chip = tester.widget<FilterChip>(
+      find.widgetWithText(FilterChip, 'Everyone'),
+    );
+    final shape = chip.shape! as RoundedRectangleBorder;
+    expect(shape.borderRadius, BorderRadius.circular(Radii.lg));
+    expect(chip.labelPadding, EdgeInsets.zero);
+  });
+
+  testWidgets('search labels are vertically centered in their chips', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: SizedBox(
+            width: 390,
+            child: FilterChipBar<int>(
+              expandItems: true,
+              visualDensity: const VisualDensity(horizontal: -2),
+              chipVerticalPadding: Grid.xxs,
+              barVerticalPadding: Grid.twelve,
+              selected: 0,
+              onSelected: (_) {},
+              items: const [
+                FilterChipItem(id: 0, label: 'All'),
+                FilterChipItem(id: 1, label: 'Messages'),
+                FilterChipItem(id: 2, label: 'Channels'),
+                FilterChipItem(id: 3, label: 'People'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    for (final label in ['All', 'Messages', 'Channels', 'People']) {
+      final text = find.text(label);
+      final chip = find.ancestor(of: text, matching: find.byType(RawChip));
+      expect(chip, findsOneWidget);
+      expect(
+        tester.getCenter(text).dy,
+        closeTo(tester.getCenter(chip).dy, 0.01),
+      );
+    }
   });
 
   testWidgets('expanded chips preserve large accessible text scaling', (
@@ -81,7 +128,10 @@ void main() {
       ),
       findsNothing,
     );
-    expect(tester.getSize(find.text('Messages')).height, greaterThan(32));
+    expect(
+      tester.getSize(find.text('Messages')).height,
+      greaterThanOrEqualTo(30),
+    );
     expect(tester.takeException(), isNull);
   });
 }

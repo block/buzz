@@ -229,6 +229,14 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     };
     let page = query.page.clamp(1, PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page_actual as i64);
+    // Profile typeahead uses broad prefix matching. For one- and two-character
+    // queries, a busy community can have enough newer prefix matches to push a
+    // short exact display name off the bounded first page. Keep the same result
+    // set and pagination contract, but put rows containing the whole lexeme
+    // first for this one narrow caller shape.
+    let prioritize_exact_profile_lexeme = query.mode == SearchMode::Prefix
+        && query.kinds.as_deref() == Some(&[0][..])
+        && search_text.chars().count() <= 2;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, kind, pubkey, channel_id, \
@@ -292,7 +300,13 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push(")");
     }
 
-    qb.push(" ORDER BY rank DESC, created_at DESC, id LIMIT ");
+    if prioritize_exact_profile_lexeme {
+        qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");
+        qb.push_bind(&search_text);
+        qb.push(") DESC, rank DESC, created_at DESC, id LIMIT ");
+    } else {
+        qb.push(" ORDER BY rank DESC, created_at DESC, id LIMIT ");
+    }
     qb.push_bind(per_page_actual as i64);
     qb.push(" OFFSET ");
     qb.push_bind(offset);

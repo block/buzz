@@ -5,6 +5,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyLabel,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -30,6 +31,8 @@ test("getPersonaProviderOptions returns databricks v1 and v2 when hideProviderId
   const ids = options.map((o) => o.id);
   assert.ok(ids.includes("databricks"), "databricks v1 present");
   assert.ok(ids.includes("databricks_v2"), "databricks v2 present");
+  assert.ok(ids.includes("minimax"), "MiniMax global present");
+  assert.ok(ids.includes("minimax-cn"), "MiniMax China present");
 });
 
 test("getPersonaProviderOptions hides databricks v1 when it is in hideProviderIds", () => {
@@ -245,4 +248,56 @@ test("formatModelDiscoveryErrorStatus returns a non-null status for runtime unav
     assert.ok(typeof status?.message === "string", "status has a message");
     assert.ok(typeof status?.tone === "string", "status has a tone");
   }
+});
+
+// ── getProviderApiKeyLabel — provider-accurate credential field labels ────────
+//
+// Each provider with a secretEnvVar must have a distinct label. The helper
+// is the single source of truth used by all three credential field surfaces;
+// if it regresses the field labels diverge silently and the OpenRouter / compat
+// mislabeling recurs.
+
+test("getProviderApiKeyLabel_anthropic_returns_anthropic_label", () => {
+  assert.equal(getProviderApiKeyLabel("anthropic"), "Anthropic API Key");
+});
+
+test("getProviderApiKeyLabel_openai_returns_openai_runtime_label", () => {
+  assert.equal(getProviderApiKeyLabel("openai"), "OpenAI Runtime API Key");
+});
+
+test("getProviderApiKeyLabel_openai_compat_returns_distinct_label", () => {
+  // openai and openai-compat must have distinct labels — both use
+  // OPENAI_COMPAT_API_KEY but carry different semantic identities.
+  assert.equal(
+    getProviderApiKeyLabel("openai-compat"),
+    "OpenAI-compatible Runtime API Key",
+  );
+});
+
+test("getProviderApiKeyLabel_openrouter_returns_openrouter_label", () => {
+  // Key fix: OpenRouter was mislabeled "OpenAI API Key" before this change.
+  assert.equal(getProviderApiKeyLabel("openrouter"), "OpenRouter API Key");
+});
+
+test("getProviderApiKeyLabel_minimax_regions_share_minimax_label", () => {
+  assert.equal(getProviderApiKeyLabel("minimax"), "MiniMax API Key");
+  assert.equal(getProviderApiKeyLabel("minimax-cn"), "MiniMax API Key");
+});
+
+test("getProviderApiKeyLabel_databricks_returns_null", () => {
+  // Databricks uses OAuth PKCE — no typed-secret label.
+  assert.equal(getProviderApiKeyLabel("databricks"), null);
+});
+
+test("getProviderApiKeyLabel_databricks_v2_returns_null", () => {
+  assert.equal(getProviderApiKeyLabel("databricks_v2"), null);
+});
+
+test("getProviderApiKeyLabel_unknown_provider_returns_null", () => {
+  assert.equal(getProviderApiKeyLabel("some-unknown-provider"), null);
+});
+
+test("getProviderApiKeyLabel_provider_id_trimmed_and_lowercased", () => {
+  // Mirrors getProviderApiKeyEnvVar normalisation behaviour.
+  assert.equal(getProviderApiKeyLabel(" Anthropic "), "Anthropic API Key");
 });

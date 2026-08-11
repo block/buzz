@@ -24,7 +24,7 @@ from .manifest import AgentClass, ExperimentManifest
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
 
-DEFAULT_MAX_AGENT_ROUNDS = 32
+DEFAULT_MAX_AGENT_ROUNDS = 0  # 0 = unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial budget is the clock
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
@@ -80,8 +80,8 @@ class BuzzContainerRuntime:
         readiness_timeout_seconds: float = 60.0,
         poll_seconds: float = 1.0,
     ) -> None:
-        if max_agent_rounds <= 0:
-            raise ValueError("max_agent_rounds must be positive")
+        if max_agent_rounds < 0:
+            raise ValueError("max_agent_rounds must be >= 0 (0 = unbounded)")
         if readiness_timeout_seconds <= 0:
             raise ValueError("readiness_timeout_seconds must be positive")
         self.logs_dir = Path(logs_dir)
@@ -157,9 +157,17 @@ class BuzzContainerRuntime:
             )
             # The task arrives exactly as it would in production Buzz: a
             # user prompt @mentioning the orchestrator. The harness never
-            # speaks as any agent.
+            # speaks as any agent. The orchestrator is mentioned by pubkey,
+            # not by name resolution: task text is untrusted payload, and any
+            # @-token inside it (e.g. Vim's `:%normal! @a`) would otherwise
+            # fail member resolution and kill the trial before the agent
+            # ever saw the task. An explicit --mention demotes unresolved
+            # @-tokens in the text to presentation-only.
             await self._send(
-                trial.user, trial, f"@{orchestrator.agent_id} {instruction}"
+                trial.user,
+                trial,
+                f"@{orchestrator.agent_id} {instruction}",
+                mention=orchestrator.nostr_pubkey,
             )
             final_message = await asyncio.wait_for(
                 self._wait_for_done(environment, orchestrator, trial, agents + infra),
@@ -519,18 +527,24 @@ class BuzzContainerRuntime:
             )
 
     async def _send(
-        self, credential: AgentCredential, trial: TrialHandle, content: str
+        self,
+        credential: AgentCredential,
+        trial: TrialHandle,
+        content: str,
+        *,
+        mention: str | None = None,
     ) -> None:
-        await self._buzz_json(
-            credential,
-            trial,
+        args = [
             "messages",
             "send",
             "--channel",
             trial.channel_id,
             "--content",
             content,
-        )
+        ]
+        if mention is not None:
+            args += ["--mention", mention]
+        await self._buzz_json(credential, trial, *args)
 
     async def _buzz_json(
         self, credential: AgentCredential, trial: TrialHandle, *args: str

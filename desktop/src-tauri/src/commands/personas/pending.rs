@@ -75,11 +75,11 @@ pub(super) fn prepare_persona_publication(
 }
 
 fn retained_persona_is_shared(row: Option<&RetainedEvent>) -> bool {
-    use buzz_core_pkg::kind::persona_event_is_shared;
+    use buzz_core_pkg::kind::event_is_shared;
     use nostr::JsonUtil;
 
     row.and_then(|retained| nostr::Event::from_json(&retained.raw_event).ok())
-        .is_some_and(|event| persona_event_is_shared(&event))
+        .is_some_and(|event| event_is_shared(&event))
 }
 
 /// Project each persona's catalog visibility from the active relay+owner

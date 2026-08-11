@@ -16,6 +16,7 @@ import {
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
 // owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
@@ -487,8 +488,13 @@ async function expectIntroActionsShareRow(
   }
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.tags.includes(CACHED_PROFILE_LABELS_TAG)
+      ? { usersBatchDelayMs: 10_000 }
+      : undefined,
+  );
 });
 
 test("sidebar shows all channel types", async ({ page }) => {
@@ -513,6 +519,41 @@ test("sidebar shows all channel types", async ({ page }) => {
   const dmList = page.getByTestId("dm-list");
   await expect(dmList).toContainText("alice-tyler");
   await expect(dmList).toContainText("bob-tyler");
+});
+
+test("shows cached profile labels while relay profiles revalidate", {
+  tag: CACHED_PROFILE_LABELS_TAG,
+}, async ({ page }) => {
+  await page.addInitScript(
+    ({ alicePubkey }) => {
+      window.localStorage.setItem(
+        "buzz-user-labels.v1:ws://localhost:3000",
+        JSON.stringify({
+          version: 1,
+          updatedAt: Date.now(),
+          profiles: {
+            [alicePubkey]: {
+              displayName: "Cached Alice",
+              name: "alice",
+              nip05Handle: null,
+            },
+          },
+        }),
+      );
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  await expect(aliceMessage.getByTestId("message-author")).toHaveText(
+    "Cached Alice",
+    { timeout: 1_000 },
+  );
 });
 
 test("shows presence in sidebar, DM header, and member list", async ({
@@ -1336,8 +1377,26 @@ test("create channel template selector matches the lifecycle controls", async ({
         description: "Coordinate a new project from planning through launch.",
         channelType: "stream",
         visibility: "private",
-        canvasTemplate: null,
-        agents: { personas: [], teams: [] },
+        canvasTemplate: "# {channel.name}\n\nKickoff notes",
+        agents: {
+          personas: [
+            {
+              personaId: "planner",
+              runtime: null,
+              model: null,
+              role: null,
+              backend: null,
+            },
+          ],
+          teams: [
+            {
+              teamId: "research-team",
+              runtime: null,
+              model: null,
+              backend: null,
+            },
+          ],
+        },
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
@@ -1350,16 +1409,73 @@ test("create channel template selector matches the lifecycle controls", async ({
 
   const templateControl = page.getByTestId("create-channel-template");
   await expect(templateControl).toHaveRole("button");
-  await expect(templateControl).toHaveText("No template");
+  await expect(templateControl).toHaveText("None");
   await templateControl.click();
+  await expect(
+    page.getByRole("menuitem", { name: "Create new channel template…" }),
+  ).toBeVisible();
   await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
 
   await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Private · Canvas included · 1 agent · 1 team",
+  );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
   await expect(page.getByTestId("create-channel-permissions")).toContainText(
     "Private",
+  );
+  await page.getByTestId("create-channel-permissions").click();
+  await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Open · Canvas included · 1 agent · 1 team",
+  );
+});
+
+test("create channel exposes templates when the library is empty", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelTemplates: [] });
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const typeContainer = page.getByTestId(
+    "create-channel-channel-type-container",
+  );
+  const visibilityContainer = page.getByTestId(
+    "create-channel-permissions-container",
+  );
+  const templateContainer = page.getByTestId(
+    "create-channel-template-container",
+  );
+  await expect(templateContainer).toContainText("TemplateOptional");
+  const typeBox = await typeContainer.boundingBox();
+  const visibilityBox = await visibilityContainer.boundingBox();
+  const templateBox = await templateContainer.boundingBox();
+  expect(typeBox).not.toBeNull();
+  expect(visibilityBox).not.toBeNull();
+  expect(templateBox).not.toBeNull();
+  expect(typeBox?.y ?? 0).toBeLessThan(visibilityBox?.y ?? 0);
+  expect(visibilityBox?.y ?? 0).toBeLessThan(templateBox?.y ?? 0);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveText("None");
+  await templateControl.click();
+  await page
+    .getByRole("menuitem", { name: "Create new channel template…" })
+    .click();
+
+  await expect(
+    page.getByText("Create template", { exact: true }),
+  ).toBeVisible();
+  await page.locator("#template-name").fill("Weekly planning");
+  await page.locator("#template-description").fill("Plan the next week.");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(templateControl).toHaveText("Weekly planning");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Plan the next week.",
   );
 });
 
@@ -1751,59 +1867,80 @@ test("channel date divider keeps the date sticky while the separator rule scroll
 
   const timeline = page.getByTestId("message-timeline");
   await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
-    );
-    if (!firstGroup) {
-      throw new Error("missing first day group");
-    }
-    const groupRect = firstGroup.getBoundingClientRect();
-    const stickyTop = Number.parseFloat(
-      getComputedStyle(
-        firstGroup.querySelector<HTMLElement>(
-          '[data-testid="message-timeline-day-divider"]',
-        ) ?? firstGroup,
-      ).top,
-    );
-    element.scrollTop +=
-      groupRect.top - (element.getBoundingClientRect().top + stickyTop - 32);
+    element.scrollTop = element.scrollHeight * 0.2;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await page.waitForTimeout(50);
+
+  const [headerBox, stickyPillBox] = await Promise.all([
+    page.getByTestId("chat-header").boundingBox(),
+    page
+      .getByTestId("message-timeline-sticky-day-divider-content")
+      .locator("p")
+      .first()
+      .boundingBox(),
+  ]);
+  if (!headerBox || !stickyPillBox) {
+    throw new Error("missing channel header or sticky day divider");
+  }
+  expect(
+    Math.abs(stickyPillBox.y - (headerBox.y + headerBox.height) - 8),
+  ).toBeLessThanOrEqual(1);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("message-timeline-day-divider").last().locator("p"),
+  ).toHaveCSS("visibility", "visible");
 
   const metrics = await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
+    const pinnedDivider = element.parentElement?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider"]',
     );
-    const firstDivider = firstGroup?.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-divider"]',
+    const pinnedPill = pinnedDivider?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider-content"] p',
     );
-    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
-    if (!firstGroup || !firstDivider || !firstDividerPill) {
-      throw new Error("missing day group or divider");
+    if (!pinnedDivider || !pinnedPill) {
+      throw new Error("missing sticky day divider");
     }
 
-    const groupRect = firstGroup.getBoundingClientRect();
-    const dividerRect = firstDivider.getBoundingClientRect();
-    const groupBefore = getComputedStyle(firstGroup, "::before");
-    const dividerBefore = getComputedStyle(firstDivider, "::before");
-
     return {
-      dividerBeforeContent: dividerBefore.content,
-      dividerPillBackground: getComputedStyle(firstDividerPill).backgroundColor,
-      dividerPillShadow: getComputedStyle(firstDividerPill).boxShadow,
-      dividerPosition: getComputedStyle(firstDivider).position,
-      dividerTop: dividerRect.top,
-      dividerZIndex: getComputedStyle(firstDivider).zIndex,
-      groupBeforeContent: groupBefore.content,
-      groupBeforePosition: groupBefore.position,
-      groupTop: groupRect.top,
-      ruleTop: groupRect.top + Number.parseFloat(groupBefore.top),
+      dividerPillBackground: getComputedStyle(pinnedPill).backgroundColor,
+      dividerPillShadow: getComputedStyle(pinnedPill).boxShadow,
+      dividerZIndex: getComputedStyle(pinnedDivider).zIndex,
     };
   });
 
-  expect(metrics.dividerPosition).toBe("sticky");
   expect(Number.parseInt(metrics.dividerZIndex, 10)).toBeGreaterThan(10);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("overflow", "visible");
+
+  const dividerAlignment = await timeline.evaluate((element) => {
+    const group = [
+      ...element.querySelectorAll<HTMLElement>(
+        '[data-testid="message-timeline-day-group"]',
+      ),
+    ].find((candidate) => {
+      const pill = candidate.querySelector<HTMLElement>("p");
+      return pill && getComputedStyle(pill).visibility === "visible";
+    });
+    const pill = group?.querySelector<HTMLElement>("p");
+    if (!group || !pill) throw new Error("missing visible day divider");
+
+    const rule = getComputedStyle(group, "::before");
+    const groupBox = group.getBoundingClientRect();
+    const pillBox = pill.getBoundingClientRect();
+    return {
+      chipCenter: pillBox.top + pillBox.height / 2,
+      ruleCenter:
+        groupBox.top +
+        Number.parseFloat(rule.top) +
+        Number.parseFloat(rule.height) / 2,
+    };
+  });
+  expect(
+    Math.abs(dividerAlignment.chipCenter - dividerAlignment.ruleCenter),
+  ).toBeLessThanOrEqual(0.5);
   await expect
     .poll(async () => {
       const headerZIndex = await page
@@ -1856,11 +1993,6 @@ test("channel date divider keeps the date sticky while the separator rule scroll
   expect(metrics.dividerPillBackground).not.toBe("rgba(0, 0, 0, 0)");
   expect(metrics.dividerPillBackground).not.toBe("transparent");
   expect(metrics.dividerPillShadow).toBe("none");
-  expect(metrics.dividerBeforeContent).toBe("none");
-  expect(metrics.groupBeforePosition).toBe("absolute");
-  expect(metrics.groupBeforeContent).not.toBe("none");
-  expect(metrics.groupTop).toBeLessThan(metrics.dividerTop - 8);
-  expect(metrics.ruleTop).toBeLessThan(metrics.dividerTop - 8);
 });
 
 test("shows and clears activity indicators for active channel agents", async ({
@@ -2208,7 +2340,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
 
   await expect(page.getByTestId("channel-random")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
@@ -2241,7 +2373,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
 
   await expect(page.getByTestId("channel-watercooler")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
 
@@ -3262,6 +3394,84 @@ test("home inbox manage affordance opens management without leaving home", async
   await expect(page).not.toHaveURL(/#\/channels\//);
 });
 
+test("members sidebar virtualizes large channel rosters", async ({ page }) => {
+  await page.goto("/");
+  const channelId = await page
+    .getByTestId("channel-random")
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Random channel id missing.");
+  }
+
+  const pubkeys = Array.from({ length: 500 }, (_, index) =>
+    (index + 1).toString(16).padStart(64, "0"),
+  );
+  await invokeMockCommand(page, "add_channel_members", {
+    channelId,
+    pubkeys,
+    role: "member",
+  });
+
+  await openMembersSidebar(page, "random");
+  const memberList = page.getByTestId("members-sidebar-people");
+  const memberRows = memberList.locator('[data-testid^="sidebar-member-"]');
+  await expect(memberRows.first()).toBeVisible();
+  expect(await memberRows.count()).toBeLessThan(50);
+
+  const virtualizedList = memberList.locator(".overflow-y-auto");
+  await virtualizedList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(
+    memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
+  ).toBeVisible();
+});
+
+test("members sidebar can invite relay-authorized agents", async ({ page }) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+});
+
+test("members sidebar hides relay agents that are not authorized", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+});
+
 test("members sidebar can invite and remove managed agents", async ({
   page,
 }) => {
@@ -3564,7 +3774,7 @@ test("channel header actions show tooltips", async ({ page }) => {
   }
 });
 
-test("members sidebar collapses same-persona managed agents", async ({
+test("members sidebar retains distinct same-persona managed agents", async ({
   page,
 }) => {
   const inChannelAgentPubkey =
@@ -3614,8 +3824,8 @@ test("members sidebar collapses same-persona managed agents", async ({
   ).toHaveCount(0);
   await expect(
     page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
-  ).toHaveCount(0);
-  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
+  ).toBeVisible();
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
 test("private-channel members can add people and managed agents without admin", async ({
@@ -3632,14 +3842,47 @@ test("private-channel members can add people and managed agents without admin", 
   });
   await page.goto("/");
   // secret-projects is a private (non-DM) channel where the current user is a
-  // plain member, not owner/admin. They should still be able to add members
-  // and bots — only granting elevated roles is reserved for owners/admins.
+  // plain member. Active members may add ordinary members and bots; only
+  // elevated-role grants and role changes require owner/admin authority.
   await openMembersSidebar(page, "secret-projects");
 
-  // The invite card is shown to any member, not just owners/admins.
+  await expect(page.getByTestId("members-sidebar-add-denied")).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-search-users"),
+  ).toHaveAttribute("placeholder", "Add people and agents");
+
+  await page.getByTestId("channel-management-search-users").fill("char");
+  await page
+    .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await expect(
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toContainText("charlie");
+});
+
+test("open-channel members can add people and managed agents without admin", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  // random is open and the current user is a plain member there, so the
+  // owner/admin requirement must not leak outside private channels.
+  await openMembersSidebar(page, "random");
+
+  // The invite card is shown to any member of an open channel, not just
+  // owners/admins.
   await expect(
     page.getByTestId("channel-management-search-users"),
   ).toBeVisible();
+  await expect(page.getByTestId("members-sidebar-add-denied")).toHaveCount(0);
   await page.getByTestId("channel-management-search-users").fill("char");
   await page
     .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)

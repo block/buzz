@@ -4,8 +4,8 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:buzz/features/channels/read_state/read_state_format.dart';
-import 'package:buzz/features/channels/read_state/read_state_manager.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
+import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -107,6 +107,41 @@ void main() {
     },
   );
 
+  test('disables remote sync after an oversized local blob', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    for (var index = 0; index < 1400; index++) {
+      manager.markContextRead(
+        'channel-${index.toString().padLeft(4, '0')}-${'x' * 48}',
+        index + 1,
+      );
+    }
+    await manager.flush();
+
+    manager.markContextRead('channel-new', 2000);
+    await manager.flush();
+
+    expect(relay.submitCount, 0);
+    expect(manager.getEffectiveTimestamp('channel-0000-${'x' * 48}'), 1);
+    expect(manager.getEffectiveTimestamp('channel-new'), 2000);
+  });
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -171,6 +206,7 @@ NostrEvent _stubAckEvent() => const NostrEvent(
 
 class _FakeSignedEventRelay implements SignedEventRelay {
   final Completer<_SubmittedEvent> submitted = Completer<_SubmittedEvent>();
+  int submitCount = 0;
 
   @override
   String? get pubkey => null;
@@ -183,6 +219,7 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent event)? onSigned,
   }) async {
+    submitCount++;
     submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
     return _stubAckEvent();
   }
