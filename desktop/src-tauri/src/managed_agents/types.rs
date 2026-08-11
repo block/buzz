@@ -493,6 +493,8 @@ pub struct ManagedAgentProcess {
 pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
+    /// Desktop-local binding. Never published in the relay agent record.
+    pub codex_task_binding: Option<super::CodexTaskBinding>,
     pub persona_id: Option<String>,
     /// The record's harness/runtime id (mirror of `ManagedAgentRecord.runtime`).
     /// Lets the UI count agents referencing a harness definition (e.g. in the

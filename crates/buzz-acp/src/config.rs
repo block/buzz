@@ -429,6 +429,22 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
     pub session_title: Option<String>,
 
+    /// Existing Codex task exclusively owned by this Buzz agent identity.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_CODEX_TASK_ID",
+        requires = "codex_task_workspace"
+    )]
+    pub codex_task_id: Option<String>,
+
+    /// Workspace recorded by Codex for --codex-task-id.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_CODEX_TASK_WORKSPACE",
+        requires = "codex_task_id"
+    )]
+    pub codex_task_workspace: Option<PathBuf>,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -493,6 +509,12 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTaskBinding {
+    pub task_id: String,
+    pub workspace: String,
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -536,6 +558,8 @@ pub struct Config {
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
+    /// Identity-scoped Codex task. All joined Rooms route into this one task.
+    pub codex_task_binding: Option<CodexTaskBinding>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -914,6 +938,47 @@ impl Config {
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
+        let codex_task_binding = match (args.codex_task_id, args.codex_task_workspace) {
+            (Some(task_id), Some(workspace)) => {
+                if args.agents != 1 {
+                    return Err(ConfigError::ConfigFile(
+                        "Codex task-bound agents require exactly one ACP worker".into(),
+                    ));
+                }
+                let task_id = Uuid::parse_str(task_id.trim())
+                    .map_err(|_| ConfigError::ConfigFile("Codex task ID must be a UUID".into()))?
+                    .to_string();
+                let workspace = workspace.canonicalize().map_err(|error| {
+                    ConfigError::ConfigFile(format!(
+                        "Codex task workspace {} is unavailable: {error}",
+                        workspace.display()
+                    ))
+                })?;
+                if !workspace.is_dir() {
+                    return Err(ConfigError::ConfigFile(format!(
+                        "Codex task workspace is not a directory: {}",
+                        workspace.display()
+                    )));
+                }
+                Some(CodexTaskBinding {
+                    task_id,
+                    workspace: workspace.to_string_lossy().to_string(),
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(ConfigError::ConfigFile(
+                    "Codex task ID and workspace must be configured together".into(),
+                ));
+            }
+        };
+        let lazy_pool = args.lazy_pool && codex_task_binding.is_none();
+        if args.lazy_pool && codex_task_binding.is_some() {
+            tracing::info!(
+                "lazy pool disabled because a task-bound identity must load its Codex task before going online"
+            );
+        }
+
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -1098,6 +1163,7 @@ impl Config {
                 .session_title
                 .as_deref()
                 .and_then(sanitize_session_title),
+            codex_task_binding,
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -1106,7 +1172,7 @@ impl Config {
             has_generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
-            lazy_pool: args.lazy_pool,
+            lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1469,6 +1535,7 @@ mod tests {
             memory_enabled: true,
             model: None,
             session_title: None,
+            codex_task_binding: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -2741,6 +2808,70 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn codex_task_binding_requires_single_worker_and_preserves_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_string = workspace.path().to_string_lossy().to_string();
+        let task_id = "019eca9a-beb9-7902-8ce6-527b2ba56020";
+        let args = CliArgs::try_parse_from(vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--codex-task-id".to_string(),
+            task_id.to_string(),
+            "--codex-task-workspace".to_string(),
+            workspace_string,
+        ])
+        .expect("clap should parse task binding");
+
+        let config = Config::from_args(args).expect("task binding should be valid");
+        let binding = config.codex_task_binding.expect("binding should be set");
+        assert_eq!(binding.task_id, task_id);
+        assert_eq!(
+            PathBuf::from(binding.workspace),
+            workspace.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_task_binding_rejects_multiple_workers() {
+        let workspace = tempfile::tempdir().unwrap();
+        let args = CliArgs::try_parse_from(vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--agents".to_string(),
+            "2".to_string(),
+            "--codex-task-id".to_string(),
+            "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+            "--codex-task-workspace".to_string(),
+            workspace.path().to_string_lossy().to_string(),
+        ])
+        .expect("clap should parse task binding");
+
+        let error = Config::from_args(args).unwrap_err().to_string();
+        assert!(error.contains("exactly one ACP worker"));
+    }
+
+    #[test]
+    fn codex_task_binding_disables_lazy_pool() {
+        let workspace = tempfile::tempdir().unwrap();
+        let args = CliArgs::try_parse_from(vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--lazy-pool".to_string(),
+            "--codex-task-id".to_string(),
+            "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+            "--codex-task-workspace".to_string(),
+            workspace.path().to_string_lossy().to_string(),
+        ])
+        .expect("clap should parse task binding");
+
+        let config = Config::from_args(args).expect("task binding should be valid");
+        assert!(!config.lazy_pool);
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {

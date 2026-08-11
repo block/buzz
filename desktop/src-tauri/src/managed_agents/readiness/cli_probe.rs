@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::{path::Path, process::Command};
 
-use crate::managed_agents::runtime::build_augmented_path;
+use crate::managed_agents::runtime::{build_augmented_path, is_batch_shim};
 
 /// Build the augmented PATH for CLI probes and other native child processes
 /// (auth commands, `buzz-acp models` discovery), including nvm's default
@@ -58,8 +58,7 @@ pub(crate) fn login_probe(
     probe_args: &[&str],
     augmented_path: Option<&str>,
 ) -> ProbeOutcome {
-    let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
+    let mut command = probe_command(binary_path, &probe_args[1..]);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
@@ -70,6 +69,20 @@ pub(crate) fn login_probe(
         Ok(o) => classify_probe_output(&o.stderr, false),
         Err(_) => ProbeOutcome::LoggedOut,
     }
+}
+
+pub(crate) fn probe_command(binary_path: &Path, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    if is_batch_shim(binary_path) {
+        let mut command =
+            Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()));
+        command.args(["/D", "/S", "/C"]).arg(binary_path).args(args);
+        return command;
+    }
+
+    let mut command = Command::new(binary_path);
+    command.args(args);
+    command
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
@@ -99,6 +112,19 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+
+    #[cfg(windows)]
+    #[test]
+    fn login_probe_runs_batch_shim_through_cmd() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("fake-codex.cmd");
+        std::fs::write(&script_path, "@echo off\r\nexit /b 0\r\n").expect("write shim");
+
+        assert_eq!(
+            super::login_probe(&script_path, &["fake-codex", "login", "status"], None,),
+            ProbeOutcome::LoggedIn,
+        );
+    }
 
     #[cfg(unix)]
     #[test]

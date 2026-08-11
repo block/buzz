@@ -58,6 +58,7 @@ export default defineConfig({
         "**/pubkey-display-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/image-attachment-gallery.spec.ts",
+        "**/media-proxy-readiness.spec.ts",
         "**/composer-image-draw.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",

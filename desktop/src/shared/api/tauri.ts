@@ -1,4 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { fromRawCodexTaskBinding } from "./codexTaskTypes";
+import type { RawCodexTaskBinding } from "./codexTaskTypes";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -45,7 +47,6 @@ import type {
 export * from "@/shared/api/tauriChannels";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
-
 type RawAddChannelMembersResult = {
   added: string[];
   errors: Array<{
@@ -116,11 +117,11 @@ type RawRelayAgent = {
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
-
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
+  codex_task_binding?: RawCodexTaskBinding | null;
   persona_id: string | null;
   // Optional: pre-feature fixtures may omit it. The record's harness/runtime id.
   runtime?: string | null;
@@ -163,19 +164,16 @@ export type RawManagedAgent = {
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
-
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
   private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
 };
-
 type RawManagedAgentLog = {
   content: string;
   log_path: string;
 };
-
 export type RawAcpRuntimeCatalogEntry = {
   id: string;
   label: string;
@@ -677,6 +675,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
+    codexTaskBinding: fromRawCodexTaskBinding(agent.codex_task_binding),
     personaId: agent.persona_id,
     runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
@@ -833,6 +832,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
     {
       input: {
         name: input.name,
+        codexTaskId: input.codexTaskId,
         personaId: input.personaId,
         teamId: input.teamId,
         relayUrl: input.relayUrl,

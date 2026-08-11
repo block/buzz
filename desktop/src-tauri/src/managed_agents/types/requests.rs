@@ -131,6 +131,11 @@ pub struct UpdatePersonaRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateManagedAgentRequest {
     pub name: String,
+    /// Existing local Codex task to promote into this agent identity.
+    /// The backend resolves its workspace from Codex-owned metadata; callers
+    /// cannot supply an arbitrary workspace path.
+    #[serde(default)]
+    pub codex_task_id: Option<String>,
     #[serde(default)]
     pub persona_id: Option<String>,
     /// Optional deployment-time team binding for runtime instruction layering.

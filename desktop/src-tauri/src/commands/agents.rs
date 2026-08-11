@@ -6,13 +6,13 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, prepare_codex_task_binding,
+        provider_deploy, resolve_provider_binary, save_agents_with_codex_task_binding,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -571,6 +571,7 @@ pub async fn create_managed_agent(
     if name.is_empty() {
         return Err("agent name is required".to_string());
     }
+    let codex_task_binding = prepare_codex_task_binding(&input)?;
     let requested_persona_id = input
         .persona_id
         .as_deref()
@@ -810,8 +811,14 @@ pub async fn create_managed_agent(
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
         let effective_provider = snapshot_provider
             .or_else(|| input.provider.as_deref().and_then(trim_to_optional_string));
-        let mut effective_model =
-            snapshot_model.or_else(|| input.model.as_deref().and_then(trim_to_optional_string));
+        // A task-bound identity resumes the task's own model and reasoning
+        // effort. It must not silently inherit the Buzz-wide default model.
+        let task_model = codex_task_binding
+            .as_ref()
+            .and_then(|binding| binding.model.clone());
+        let mut effective_model = task_model
+            .or(snapshot_model)
+            .or_else(|| input.model.as_deref().and_then(trim_to_optional_string));
         if effective_provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
             && effective_model.is_none()
         {
@@ -916,8 +923,7 @@ pub async fn create_managed_agent(
         };
 
         records.push(record);
-
-        save_managed_agents(&app, &records)?;
+        save_agents_with_codex_task_binding(&app, &records, &pubkey, codex_task_binding.clone())?;
 
         let record = records
             .iter()
@@ -1331,8 +1337,7 @@ pub async fn delete_managed_agent(
                 return Err(format!("agent {pubkey} not found"));
             }
             save_managed_agents(&app, &records)?;
-            // Remove the agent's nsec from the keyring after the record is gone.
-            crate::managed_agents::delete_agent_key(&pubkey);
+            crate::managed_agents::delete_codex_task_identity_state(&app, &pubkey)?;
             // Tombstone-after-validation: only reached past the deployed-remote
             // guard above and a confirmed removal — never orphan a live remote
             // deployment's relay record. Inside the lock, before the block closes

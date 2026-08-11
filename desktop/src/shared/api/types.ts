@@ -303,12 +303,12 @@ export type ManagedAgentRuntimeStatus = {
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
-
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
   name: string;
+  codexTaskBinding?: import("./codexTaskTypes").CodexTaskBinding | null;
   personaId: string | null;
   /**
    * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
@@ -336,7 +336,12 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
-  modelSource: "definition" | "global" | "instance_legacy" | null;
+  modelSource:
+    | "definition"
+    | "global"
+    | "instance_legacy"
+    | "codex_task"
+    | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
@@ -405,9 +410,9 @@ export type BackendProviderProbeResult = {
 export type RelayMeshConfig = {
   modelRef: string;
 };
-
 export type CreateManagedAgentInput = {
   name: string;
+  codexTaskId?: string;
   personaId?: string;
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;

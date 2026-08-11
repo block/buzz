@@ -15,6 +15,7 @@ pub enum ConfigSource {
     Definition,
     Global,
     InstanceLegacy,
+    CodexTask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

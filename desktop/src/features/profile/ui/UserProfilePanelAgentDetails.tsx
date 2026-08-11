@@ -10,6 +10,9 @@ export const AGENT_DETAILS_FIELD_LABELS = new Set([
   "Runtime",
   "ACP command",
   "MCP command",
+  "Codex task",
+  "Codex model",
+  "Workspace",
 ]);
 
 export function AgentConfigurationFocusedView({

@@ -554,6 +554,8 @@ type MockBridgeOptions = {
    * (`applyProbeResult` in whereToRunIntent.test.mjs).
    */
   backendProviderProbeDelayMs?: number;
+  /** Delay media-proxy readiness so mounted media can exercise the async rewrite path. */
+  mediaProxyPortDelayMs?: number;
 };
 
 type BridgeOptions = {

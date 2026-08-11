@@ -8,15 +8,17 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        resolve_effective_mcp_command, spawn_key_refusal, KnownAcpRuntime,
-        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
+        resolve_effective_mcp_command, spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
 
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
-pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
+pub(crate) use path::{
+    compose_path_entries, is_batch_shim, should_skip_claude_executable, should_use_inherited,
+};
 
 pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
 
@@ -197,32 +199,42 @@ pub fn build_managed_agent_summary(
 
     let global_for_summary =
         crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let codex_task_binding = super::load_codex_task_binding(app, &record.pubkey)?;
     let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
         record,
         personas,
         &global_for_summary,
     );
-    let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
-    {
-        crate::managed_agents::effective_config::EffectiveConfigResult::Resolved(cfg) => {
-            let source = cfg.model.source.clone();
-            (
-                cfg.model.value,
-                cfg.provider.value,
-                cfg.system_prompt.value,
-                Some(source),
-            )
-        }
-        crate::managed_agents::effective_config::EffectiveConfigResult::OrphanedInstance {
-            record_pubkey,
-            missing_persona_id,
-        } => {
-            eprintln!(
+    let (mut effective_model, effective_provider, effective_prompt, mut model_source) =
+        match effective_cfg {
+            crate::managed_agents::effective_config::EffectiveConfigResult::Resolved(cfg) => {
+                let source = cfg.model.source.clone();
+                (
+                    cfg.model.value,
+                    cfg.provider.value,
+                    cfg.system_prompt.value,
+                    Some(source),
+                )
+            }
+            crate::managed_agents::effective_config::EffectiveConfigResult::OrphanedInstance {
+                record_pubkey,
+                missing_persona_id,
+            } => {
+                eprintln!(
                 "orphaned agent instance: pubkey={record_pubkey}, missing_persona_id={missing_persona_id}"
             );
-            (None, None, None, None)
-        }
-    };
+                (None, None, None, None)
+            }
+        };
+    if let Some(task_model) = codex_task_binding
+        .as_ref()
+        .and_then(|binding| binding.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        effective_model = Some(task_model.to_string());
+        model_source = Some(crate::managed_agents::effective_config::ConfigSource::CodexTask);
+    }
 
     // Restart badge: the running process stamped the effective spawn config
     // it was launched with; recompute a prospective one from current disk
@@ -297,6 +309,7 @@ pub fn build_managed_agent_summary(
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
+        codex_task_binding,
         persona_id: record.persona_id.clone(),
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
@@ -432,7 +445,7 @@ pub fn spawn_agent_child(
     // inherits it — no caller can bypass this by reaching `spawn_agent_child`
     // directly. Checked before any side effect (log marker, log file, process
     // spawn) so a refused spawn leaves no trace.
-    let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
+    let mut effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
         record, &personas, &global,
     )
     .require_resolved()?;
@@ -455,6 +468,18 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let codex_task_binding = super::task_binding_for_spawn(app, record)?;
+    if let Some(task_model) = codex_task_binding
+        .as_ref()
+        .and_then(|binding| binding.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        effective_cfg.model = crate::managed_agents::effective_config::ResolvedField {
+            value: Some(task_model.to_string()),
+            source: crate::managed_agents::effective_config::ConfigSource::CodexTask,
+        };
+    }
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -515,9 +540,7 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    super::configure_task_bound_command(&mut command, codex_task_binding.as_ref(), lazy);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -527,7 +550,6 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
-    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -671,7 +693,11 @@ pub fn spawn_agent_child(
     if let Some(max_dur) = record.max_turn_duration_seconds {
         command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     }
-    let acp_n = super::acp_agents_value(effective_command, record.parallelism);
+    let acp_n = super::task_bound_worker_count(
+        effective_command,
+        record.parallelism,
+        codex_task_binding.as_ref(),
+    );
     command.env("BUZZ_ACP_AGENTS", acp_n);
     command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
     command.env("BUZZ_ACP_DEDUP", "queue");

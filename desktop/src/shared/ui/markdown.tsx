@@ -25,6 +25,7 @@ import { cn } from "@/shared/lib/cn";
 import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { parseLinkPreviewSnapshots } from "@/shared/lib/linkPreviewSnapshot";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useMediaProxyPort } from "@/shared/lib/useMediaProxyPort";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
@@ -1504,6 +1505,7 @@ function createMarkdownComponents(
     hr: () => <hr className="border-border/80" />,
     img: function MarkdownImage({ alt, src }) {
       const { imetaByUrl } = useMarkdownRuntime();
+      useMediaProxyPort();
       const entry = src ? imetaByUrl?.get(src) : undefined;
       const isVideo = src ? isVideoMedia(src, entry?.m) : false;
       if (!interactive) {

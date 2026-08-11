@@ -263,6 +263,16 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    // Older task identities predate model capture. Hydrate them from the
+    // local-only binding store so task-owned model/effort still beats the
+    // workspace-wide Buzz default on summaries and spawn.
+    for record in &mut records {
+        if record.model.is_none() {
+            if let Ok(Some(binding)) = super::load_codex_task_binding(app, &record.pubkey) {
+                record.model = binding.model;
+            }
+        }
+    }
     Ok(records)
 }
 

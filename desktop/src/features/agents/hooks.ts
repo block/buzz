@@ -39,6 +39,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { listCodexTasks } from "@/shared/api/codexTasks";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
   setManagedAgentAutoRestart,
@@ -107,6 +108,7 @@ export type {
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
+export const codexTasksQueryKey = ["codex-tasks"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
@@ -357,6 +359,15 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         ? 5_000
         : false;
     },
+  });
+}
+
+export function useCodexTasksQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: codexTasksQueryKey,
+    queryFn: listCodexTasks,
+    staleTime: 10_000,
   });
 }
 

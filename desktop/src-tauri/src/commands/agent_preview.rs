@@ -2,12 +2,7 @@ use base64::Engine;
 use std::path::PathBuf;
 
 const MAX_PREVIEW_BYTES: u64 = 20 * 1024 * 1024;
-const ALLOWED_IMAGE_MIMES: &[&str] = &[
-    "image/png",
-    "image/jpeg",
-    "image/gif",
-    "image/webp",
-];
+const ALLOWED_IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 #[tauri::command]
 pub async fn read_agent_preview_image(path: String) -> Result<String, String> {

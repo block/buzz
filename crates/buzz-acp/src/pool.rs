@@ -32,9 +32,9 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
-    StopReason, SystemPromptTransport,
+    SessionNewResponse, StopReason, SystemPromptTransport,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{compose_session_title, CodexTaskBinding, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
@@ -46,6 +46,128 @@ use crate::session_store::SessionBindingMode;
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+const MAX_PROMPT_IMAGES: usize = 4;
+const MAX_PROMPT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROMPT_IMAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptImageAttachment {
+    url: String,
+    mime_type: String,
+    declared_size: usize,
+}
+
+fn prompt_image_attachments(batch: &FlushBatch) -> Vec<PromptImageAttachment> {
+    let mut seen = HashSet::new();
+    let mut total = 0usize;
+    let mut images = Vec::new();
+    for event in batch.cancelled_events.iter().chain(&batch.events) {
+        for tag in event.event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) != Some("imeta") {
+                continue;
+            }
+            let mut fields = HashMap::new();
+            for part in parts.iter().skip(1) {
+                if let Some((key, value)) = part.split_once(' ') {
+                    fields.insert(key, value);
+                }
+            }
+            let Some(url) = fields.get("url").copied() else {
+                continue;
+            };
+            let Some(mime_type) = fields.get("m").copied() else {
+                continue;
+            };
+            if !matches!(
+                mime_type,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            ) || !seen.insert(url.to_string())
+            {
+                continue;
+            }
+            let Some(declared_size) = fields
+                .get("size")
+                .and_then(|value| value.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if declared_size == 0
+                || declared_size > MAX_PROMPT_IMAGE_BYTES
+                || total.saturating_add(declared_size) > MAX_PROMPT_IMAGE_TOTAL_BYTES
+            {
+                continue;
+            }
+            total += declared_size;
+            images.push(PromptImageAttachment {
+                url: url.to_string(),
+                mime_type: mime_type.to_string(),
+                declared_size,
+            });
+            if images.len() == MAX_PROMPT_IMAGES {
+                return images;
+            }
+        }
+    }
+    images
+}
+
+fn bytes_match_image_type(mime_type: &str, bytes: &[u8]) -> bool {
+    match mime_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => {
+            bytes.starts_with(b"RIFF") && bytes.get(8..12).is_some_and(|value| value == b"WEBP")
+        }
+        _ => false,
+    }
+}
+
+async fn native_prompt_image_blocks(
+    batch: &FlushBatch,
+    rest: &RestClient,
+) -> Vec<serde_json::Value> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use futures_util::future::join_all;
+
+    let images = prompt_image_attachments(batch);
+    let downloads = join_all(
+        images
+            .iter()
+            .map(|image| rest.download_media(&image.url, image.declared_size)),
+    )
+    .await;
+    images
+        .into_iter()
+        .zip(downloads)
+        .filter_map(|(image, result)| match result {
+            Ok(bytes) if bytes_match_image_type(&image.mime_type, &bytes) => {
+                Some(serde_json::json!({
+                    "type": "image",
+                    "data": STANDARD.encode(bytes),
+                    "mimeType": image.mime_type,
+                }))
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    target: "pool::media",
+                    url = %image.url,
+                    "relay image bytes did not match declared MIME type"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "pool::media",
+                    url = %image.url,
+                    "could not prefetch relay image: {error}"
+                );
+                None
+            }
+        })
+        .collect()
+}
 
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
@@ -137,6 +259,11 @@ fn resolve_load_model_switch(
 pub struct SessionState {
     /// channel_id → session_id
     pub sessions: HashMap<Uuid, String>,
+    /// Session owned by the Managed Agent identity rather than one Room.
+    pub identity_session: Option<String>,
+    /// Whether the first Room turn still needs the identity handoff context.
+    pub identity_handoff_pending: bool,
+    pub identity_turn_count: u32,
     pub heartbeat_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
@@ -160,7 +287,11 @@ impl SessionState {
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
             PromptSource::Channel(cid) => {
-                self.invalidate_channel(cid);
+                if self.identity_session.is_some() {
+                    self.invalidate_identity_session();
+                } else {
+                    self.invalidate_channel(cid);
+                }
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
@@ -178,10 +309,23 @@ impl SessionState {
         self.sessions.remove(channel_id).is_some()
     }
 
+    fn invalidate_identity_session(&mut self) {
+        self.sessions.clear();
+        self.turn_counts.clear();
+        self.core_sections.clear();
+        self.canvas_sections.clear();
+        self.identity_session = None;
+        self.identity_handoff_pending = false;
+        self.identity_turn_count = 0;
+    }
+
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
         self.turn_counts.clear();
+        self.identity_session = None;
+        self.identity_handoff_pending = false;
+        self.identity_turn_count = 0;
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
@@ -266,6 +410,28 @@ impl OwnedAgent {
             &self.agent_name,
             self.goose_system_prompt_supported,
         )
+    }
+
+    /// Load the task owned by this Managed Agent before it is announced online.
+    pub(crate) async fn preload_identity_session(
+        &mut self,
+        ctx: &PromptContext,
+    ) -> Result<Option<String>, AcpError> {
+        let Some(binding) = ctx.codex_task_binding.as_ref() else {
+            return Ok(None);
+        };
+        let loaded = restore_identity_session(self, ctx, binding).await?;
+        let session_id = loaded.session_id;
+        self.state.identity_session = Some(session_id.clone());
+        self.state.identity_handoff_pending = true;
+        self.state.identity_turn_count = 0;
+        tracing::info!(
+            target: "pool::session",
+            task_id = %binding.task_id,
+            workspace = %binding.workspace,
+            "preloaded identity-bound Codex task"
+        );
+        Ok(Some(session_id))
     }
 }
 
@@ -640,6 +806,8 @@ pub struct PromptContext {
     pub agent_args: Vec<String>,
     /// Durable channel→session bindings surviving harness restarts.
     pub session_store: std::sync::Arc<crate::session_store::SessionStore>,
+    /// Existing Codex task owned by this Managed Agent identity.
+    pub codex_task_binding: Option<CodexTaskBinding>,
 }
 
 impl AgentPool {
@@ -703,6 +871,24 @@ impl AgentPool {
     /// Whether any agent is currently idle (sitting in its slot).
     pub fn any_idle(&self) -> bool {
         self.agents.iter().any(|slot| slot.is_some())
+    }
+
+    /// Preload the identity-bound task while the harness is still offline.
+    pub async fn preload_identity_session(
+        &mut self,
+        ctx: &PromptContext,
+    ) -> Result<Option<String>, AcpError> {
+        if ctx.codex_task_binding.is_none() {
+            return Ok(None);
+        }
+        let mut agent = self.try_claim(None).ok_or_else(|| {
+            AcpError::Protocol(
+                "no initialized ACP worker is available to load the Codex task".into(),
+            )
+        })?;
+        let result = agent.preload_identity_session(ctx).await;
+        self.return_agent(agent);
+        result
     }
 
     /// Whether any idle agent already has a session for `channel_id`.
@@ -868,7 +1054,7 @@ impl AgentPool {
 
         agent.desired_model = Some(model_id.to_string());
         agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
+        agent.state.invalidate(&PromptSource::Channel(channel_id));
         IdleSwitchResult::Switched
     }
 }
@@ -963,6 +1149,83 @@ struct LoadedSession {
     source_session_id: Option<String>,
 }
 
+async fn apply_loaded_session_settings(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    response: &SessionNewResponse,
+) {
+    if agent.model_capabilities.is_none() {
+        agent.model_capabilities = model_capabilities_from_response(&response.raw);
+    }
+    if let Some(ref desired) = agent.desired_model {
+        match resolve_load_model_switch(&response.raw, agent.model_capabilities.as_ref(), desired) {
+            LoadModelResolution::Method(method) => {
+                if let Err(error) =
+                    apply_model_switch(&mut agent.acp, &response.session_id, desired, &method).await
+                {
+                    tracing::warn!(
+                        target: "pool::session",
+                        error = %error,
+                        "model re-apply after session/load failed — continuing with loaded session"
+                    );
+                }
+            }
+            LoadModelResolution::Unsupported => {
+                tracing::warn!(
+                    target: "pool::model",
+                    "desired model {desired} is absent from the advertised model catalog after session/load"
+                );
+            }
+            LoadModelResolution::Unverifiable => {
+                tracing::debug!(
+                    target: "pool::model",
+                    "session/load returned no model catalog and none is cached — leaving desired model unverifiable"
+                );
+            }
+        }
+    }
+    if !ctx.permission_mode.is_default()
+        && agent_supports_mode(&response.raw, ctx.permission_mode.as_wire_str())
+    {
+        if let Err(error) =
+            apply_permission_mode(&mut agent.acp, &response.session_id, &ctx.permission_mode).await
+        {
+            tracing::warn!(
+                target: "pool::session",
+                error = %error,
+                "permission mode after session/load failed — continuing"
+            );
+        }
+    }
+}
+
+async fn restore_identity_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    binding: &CodexTaskBinding,
+) -> Result<LoadedSession, AcpError> {
+    if !agent.supports_load_session {
+        return Err(AcpError::Protocol(
+            "the configured Codex adapter does not advertise session/load; update the adapter before starting this task-bound agent"
+                .into(),
+        ));
+    }
+    let response = agent
+        .acp
+        .session_load_full(
+            &binding.workspace,
+            &binding.task_id,
+            ctx.mcp_servers.clone(),
+        )
+        .await?;
+    apply_loaded_session_settings(agent, ctx, &response).await;
+    Ok(LoadedSession {
+        session_id: response.session_id,
+        workspace: Some(binding.workspace.clone()),
+        source_session_id: None,
+    })
+}
+
 async fn try_restore_persisted_session(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -1001,56 +1264,7 @@ async fn try_restore_persisted_session(
 
     match restore_result {
         Ok(resp) => {
-            if agent.model_capabilities.is_none() {
-                agent.model_capabilities = model_capabilities_from_response(&resp.raw);
-            }
-            // Re-apply desired model after load when present.
-            if let Some(ref desired) = agent.desired_model {
-                match resolve_load_model_switch(
-                    &resp.raw,
-                    agent.model_capabilities.as_ref(),
-                    desired,
-                ) {
-                    LoadModelResolution::Method(method) => {
-                        if let Err(e) =
-                            apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method)
-                                .await
-                        {
-                            tracing::warn!(
-                                target: "pool::session",
-                                error = %e,
-                                "model re-apply after session/load failed — continuing with loaded session"
-                            );
-                        }
-                    }
-                    LoadModelResolution::Unsupported => {
-                        tracing::warn!(
-                            target: "pool::model",
-                            "desired model {desired} is absent from the advertised model catalog after session/load"
-                        );
-                    }
-                    LoadModelResolution::Unverifiable => {
-                        tracing::debug!(
-                            target: "pool::model",
-                            "session/load returned no model catalog and none is cached — leaving desired model unverifiable"
-                        );
-                    }
-                }
-            }
-            if !ctx.permission_mode.is_default()
-                && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
-            {
-                if let Err(e) =
-                    apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode)
-                        .await
-                {
-                    tracing::warn!(
-                        target: "pool::session",
-                        error = %e,
-                        "permission mode after session/load failed — continuing"
-                    );
-                }
-            }
+            apply_loaded_session_settings(agent, ctx, &resp).await;
             let source_session_id = if is_fork {
                 ctx.session_store.put_fork_result(
                     &ctx.agent_command,
@@ -1139,6 +1353,19 @@ fn render_task_handoff(
              Workspace: {workspace}"
         )
     }
+}
+
+fn render_identity_task_handoff(session_id: &str, workspace: &str) -> String {
+    format!(
+        "[Task Handoff]\n\
+         This Buzz Managed Agent identity exclusively owns a pre-existing Codex task while the agent is online.\n\
+         Continue that task's history, objective, unfinished work, and workspace.\n\
+         Messages from every Buzz Room this identity joins are collaboration input to this same task; Rooms do not create separate Codex tasks.\n\
+         When asked what you are doing, summarize the loaded task before unrelated room connectivity or media probes.\n\
+         To return control to Codex Desktop, the owner must stop this Buzz agent before opening the task there.\n\
+         Codex task ID: {session_id}\n\
+         Workspace: {workspace}"
+    )
 }
 
 /// Whether a failed `session/load` proves the stored binding is dead.
@@ -1877,6 +2104,61 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false, None)
+            } else if let Some(sid) = agent.state.identity_session.clone() {
+                let task_handoff = if agent.state.identity_handoff_pending {
+                    agent.state.identity_handoff_pending = false;
+                    ctx.codex_task_binding
+                        .as_ref()
+                        .map(|binding| render_identity_task_handoff(&sid, &binding.workspace))
+                } else {
+                    None
+                };
+                agent.state.sessions.insert(*cid, sid.clone());
+                if let Some((pending_cid, section)) = pending_canvas.take() {
+                    agent.state.canvas_sections.insert(pending_cid, section);
+                }
+                tracing::info!(
+                    target: "pool::session",
+                    "aliased channel {cid} to identity session {sid}"
+                );
+                (sid, false, task_handoff)
+            } else if let Some(binding) = ctx.codex_task_binding.as_ref() {
+                let loaded = match restore_identity_session(&mut agent, &ctx, binding).await {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "pool::session",
+                            task_id = %binding.task_id,
+                            error = %error,
+                            "failed to load identity-bound Codex task; preserving the binding"
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(error),
+                            requeue_batch_if_queue(&ctx, batch),
+                        );
+                        return;
+                    }
+                };
+                let sid = loaded.session_id;
+                let handoff = Some(render_identity_task_handoff(
+                    &sid,
+                    loaded.workspace.as_deref().unwrap_or(&ctx.cwd),
+                ));
+                tracing::info!(
+                    target: "pool::session",
+                    "loaded identity-bound Codex task {sid} for channel {cid}"
+                );
+                agent.state.identity_session = Some(sid.clone());
+                agent.state.identity_handoff_pending = false;
+                agent.state.sessions.insert(*cid, sid.clone());
+                if let Some((pending_cid, section)) = pending_canvas.take() {
+                    agent.state.canvas_sections.insert(pending_cid, section);
+                }
+                (sid, false, handoff)
             } else if let Some(loaded) = match try_restore_persisted_session(
                 &mut agent,
                 &ctx,
@@ -2277,6 +2559,23 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let mut prompt_content = prompt_blocks
+        .iter()
+        .map(|text| serde_json::json!({ "type": "text", "text": text }))
+        .collect::<Vec<_>>();
+    if agent.acp.image_prompt_supported() {
+        if let Some(batch) = batch.as_ref() {
+            let image_blocks = native_prompt_image_blocks(batch, &ctx.rest_client).await;
+            if !image_blocks.is_empty() {
+                tracing::info!(
+                    target: "pool::media",
+                    count = image_blocks.len(),
+                    "prefetched relay images as native ACP content blocks"
+                );
+                prompt_content.extend(image_blocks);
+            }
+        }
+    }
 
     // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
     // log reads as start/stop pairs. Purely observational: an unpaired start is
@@ -2299,9 +2598,9 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_content_with_idle_timeout(
                     &session_id,
-                    &prompt_blocks,
+                    &prompt_content,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -2310,9 +2609,9 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_content_with_idle_timeout(
                     &session_id,
-                    &prompt_blocks,
+                    &prompt_content,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -2482,9 +2781,14 @@ pub async fn run_prompt_task(
                 if limit > 0 {
                     match &source {
                         PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
-                            *count += 1;
-                            *count >= limit
+                            if agent.state.identity_session.is_some() {
+                                agent.state.identity_turn_count += 1;
+                                agent.state.identity_turn_count >= limit
+                            } else {
+                                let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                                *count += 1;
+                                *count >= limit
+                            }
                         }
                         PromptSource::Heartbeat => {
                             agent.state.heartbeat_turn_count += 1;
@@ -4397,12 +4701,52 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn fork_handoff_names_active_and_source_tasks() {
-        let handoff = render_task_handoff(
-            "active-task",
-            r"C:\repo",
-            Some("source-task"),
+    fn prompt_image_parser_keeps_supported_relay_images() {
+        let image_tag = Tag::parse([
+            "imeta",
+            "url http://relay.test/media/abc.png",
+            "m image/png",
+            "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size 1024",
+            "filename probe.png",
+        ])
+        .unwrap();
+        let video_tag = Tag::parse([
+            "imeta",
+            "url http://relay.test/media/video.mp4",
+            "m video/mp4",
+            "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "size 2048",
+        ])
+        .unwrap();
+        let event = EventBuilder::new(Kind::TextNote, "inspect these")
+            .tags([image_tag, video_tag])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        assert_eq!(
+            prompt_image_attachments(&batch),
+            vec![PromptImageAttachment {
+                url: "http://relay.test/media/abc.png".into(),
+                mime_type: "image/png".into(),
+                declared_size: 1024,
+            }]
         );
+    }
+
+    #[test]
+    fn fork_handoff_names_active_and_source_tasks() {
+        let handoff = render_task_handoff("active-task", r"C:\repo", Some("source-task"));
 
         assert!(handoff.contains("independent Codex task"));
         assert!(handoff.contains("Buzz Codex task ID: active-task"));
@@ -5666,6 +6010,44 @@ mod tests {
         s.heartbeat_session = Some("sess-hb".into());
         s.heartbeat_turn_count = 7;
         (s, ch_a, ch_b)
+    }
+
+    #[test]
+    fn identity_session_invalidation_clears_every_room_alias() {
+        let (mut state, ch_a, ch_b) = make_state();
+        state.identity_session = Some("shared-task".into());
+        state.identity_handoff_pending = true;
+        state.identity_turn_count = 4;
+        state.sessions.insert(ch_a, "shared-task".into());
+        state.sessions.insert(ch_b, "shared-task".into());
+
+        state.invalidate(&PromptSource::Channel(ch_a));
+
+        assert!(state.identity_session.is_none());
+        assert!(!state.identity_handoff_pending);
+        assert_eq!(state.identity_turn_count, 0);
+        assert!(state.sessions.is_empty());
+        assert!(state.turn_counts.is_empty());
+        assert_eq!(state.heartbeat_session.as_deref(), Some("sess-hb"));
+    }
+
+    #[test]
+    fn room_membership_removal_keeps_identity_task_online() {
+        let (mut state, ch_a, ch_b) = make_state();
+        state.identity_session = Some("shared-task".into());
+        state.identity_handoff_pending = true;
+        state.sessions.insert(ch_a, "shared-task".into());
+        state.sessions.insert(ch_b, "shared-task".into());
+
+        assert!(state.invalidate_channel(&ch_a));
+
+        assert_eq!(state.identity_session.as_deref(), Some("shared-task"));
+        assert!(state.identity_handoff_pending);
+        assert!(!state.sessions.contains_key(&ch_a));
+        assert_eq!(
+            state.sessions.get(&ch_b).map(String::as_str),
+            Some("shared-task")
+        );
     }
 
     #[test]
@@ -6962,6 +7344,7 @@ mod tests {
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
             session_title: None,
+            codex_task_binding: None,
             team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,

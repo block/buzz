@@ -1,5 +1,5 @@
 import * as React from "react";
-import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
+import { EllipsisVertical, Link2, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -8,6 +8,7 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
+import { CodexTaskAgentDialog } from "./CodexTaskAgentDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -49,6 +50,7 @@ export function AgentsView() {
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
+  const [isCodexTaskOpen, setIsCodexTaskOpen] = React.useState(false);
 
   function openUnifiedCatalog() {
     personas.prepareCreate();
@@ -138,6 +140,14 @@ export function AgentsView() {
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
                   <Button
+                    onClick={() => setIsCodexTaskOpen(true)}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <Link2 />
+                    Add Codex task
+                  </Button>
+                  <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
                     onClick={(event) => openAiDefaults(event.currentTarget)}
@@ -179,6 +189,10 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => setIsCodexTaskOpen(true)}>
+                      <Link2 />
+                      Add Codex task
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -299,6 +313,12 @@ export function AgentsView() {
         onOpenChange={setAiDefaultsDialogOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
+      />
+
+      <CodexTaskAgentDialog
+        onCreated={(agent) => openProfilePanel?.(agent.pubkey)}
+        onOpenChange={setIsCodexTaskOpen}
+        open={isCodexTaskOpen}
       />
 
       {agents.agentToAddToChannel ? (

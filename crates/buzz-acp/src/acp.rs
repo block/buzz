@@ -200,6 +200,8 @@ pub struct AcpClient {
     steering_supported: bool,
     /// Whether the adapter advertised ACP `session/fork` at initialization.
     fork_session_supported: bool,
+    /// Whether the adapter accepts ACP image content blocks in prompts.
+    image_prompt_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -551,6 +553,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             fork_session_supported: false,
+            image_prompt_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -608,6 +611,7 @@ impl AcpClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         self.fork_session_supported = Self::agent_supports_fork_session(&result);
+        self.image_prompt_supported = Self::agent_supports_image_prompt(&result);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -772,8 +776,20 @@ impl AcpClient {
             .is_some_and(|value| !value.is_null())
     }
 
+    /// Returns true when an initialize result advertises image prompt support.
+    pub fn agent_supports_image_prompt(init_result: &serde_json::Value) -> bool {
+        init_result
+            .pointer("/agentCapabilities/promptCapabilities/image")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     pub fn fork_session_supported(&self) -> bool {
         self.fork_session_supported
+    }
+
+    pub fn image_prompt_supported(&self) -> bool {
+        self.image_prompt_supported
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -855,7 +871,28 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        let content = prompt_blocks
+            .iter()
+            .map(|text| serde_json::json!({ "type": "text", "text": text }))
+            .collect::<Vec<_>>();
+        self.session_prompt_content_with_idle_timeout(
+            session_id,
+            &content,
+            idle_timeout,
+            max_duration,
+        )
+        .await
+    }
+
+    /// Send already-typed ACP content blocks, including native image blocks.
+    pub async fn session_prompt_content_with_idle_timeout(
+        &mut self,
+        session_id: &str,
+        content: &[serde_json::Value],
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        let params = build_prompt_content_params(session_id, content);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -875,7 +912,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            "→ session/prompt id={id} blocks={}",
+            content.len()
+        );
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -2074,11 +2115,19 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
+#[cfg(test)]
 fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
+    build_prompt_content_params(session_id, &blocks)
+}
+
+fn build_prompt_content_params(
+    session_id: &str,
+    blocks: &[serde_json::Value],
+) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
@@ -2381,6 +2430,37 @@ mod tests {
 
         assert!(AcpClient::agent_supports_fork_session(&supported));
         assert!(!AcpClient::agent_supports_fork_session(&absent));
+    }
+
+    #[test]
+    fn image_capability_requires_explicit_true() {
+        let supported = serde_json::json!({
+            "agentCapabilities": {
+                "promptCapabilities": { "image": true }
+            }
+        });
+        let absent = serde_json::json!({ "agentCapabilities": {} });
+
+        assert!(AcpClient::agent_supports_image_prompt(&supported));
+        assert!(!AcpClient::agent_supports_image_prompt(&absent));
+    }
+
+    #[test]
+    fn session_prompt_preserves_native_image_block() {
+        let blocks = [
+            serde_json::json!({ "type": "text", "text": "inspect" }),
+            serde_json::json!({
+                "type": "image",
+                "data": "aGVsbG8=",
+                "mimeType": "image/png"
+            }),
+        ];
+        let params = build_prompt_content_params("sess_abc123", &blocks);
+
+        assert_eq!(params["prompt"][1]["type"], "image");
+        assert_eq!(params["prompt"][1]["mimeType"], "image/png");
+        assert_eq!(params["prompt"][1]["data"], "aGVsbG8=");
+        assert!(params["prompt"][1].get("uri").is_none());
     }
 
     #[test]

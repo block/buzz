@@ -32,9 +32,10 @@ use serde::Serialize;
 
 use super::{
     effective_config::{resolve_effective_config, EffectiveConfigResult},
-    normalize_agent_args, resolve_effective_mcp_command,
+    normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
     readiness::EffectiveHarnessDescriptor,
+    resolve_effective_mcp_command,
     runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
     types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     GlobalAgentConfig,
@@ -141,10 +142,7 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: resolve_effective_mcp_command(
-                &descriptor.command,
-                &record.mcp_command,
-            ),
+            mcp_command: resolve_effective_mcp_command(&descriptor.command, &record.mcp_command),
             env: descriptor.env.clone(),
             relay_url: relay_url.to_string(),
             team_instructions: team_instructions.map(str::to_string),

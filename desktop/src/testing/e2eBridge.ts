@@ -554,6 +554,8 @@ type E2eConfig = {
     backendProviders?: Array<{ id: string; binaryPath: string }>;
     backendProviderProbeResult?: Record<string, unknown>;
     backendProviderProbeDelayMs?: number;
+    /** Delay media-proxy readiness so mounted media can exercise the async rewrite path. */
+    mediaProxyPortDelayMs?: number;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -12623,6 +12625,11 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "get_media_proxy_port":
+        if ((activeConfig?.mock?.mediaProxyPortDelayMs ?? 0) > 0) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, activeConfig?.mock?.mediaProxyPortDelayMs ?? 0),
+          );
+        }
         return MOCK_MEDIA_PROXY_PORT;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);

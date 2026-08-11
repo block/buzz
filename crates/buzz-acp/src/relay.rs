@@ -262,6 +262,103 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    fn blossom_get_header(&self, media_url: &str) -> Result<String, RelayError> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let parsed = url::Url::parse(media_url)
+            .map_err(|error| RelayError::Http(format!("invalid media URL: {error}")))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| RelayError::Http("media URL has no host".to_string()))?;
+        let server = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        let expiration = (unix_now_secs() + 600).to_string();
+        let event = EventBuilder::new(Kind::from(24242), "Get media")
+            .tags([
+                Tag::parse(["t", "get"]).map_err(|error| RelayError::Http(error.to_string()))?,
+                Tag::parse(["expiration", &expiration])
+                    .map_err(|error| RelayError::Http(error.to_string()))?,
+                Tag::parse(["server", &server])
+                    .map_err(|error| RelayError::Http(error.to_string()))?,
+            ])
+            .sign_with_keys(&self.keys)
+            .map_err(|error| RelayError::Http(format!("media auth signing failed: {error}")))?;
+        let json = serde_json::to_string(&event)
+            .map_err(|error| RelayError::Http(format!("media auth encoding failed: {error}")))?;
+        Ok(format!("Nostr {}", URL_SAFE_NO_PAD.encode(json)))
+    }
+
+    /// Download a relay-local Blossom object without forwarding credentials
+    /// through redirects. The caller supplies a strict byte ceiling.
+    pub async fn download_media(
+        &self,
+        media_url: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RelayError> {
+        let base = url::Url::parse(&self.base_url)
+            .map_err(|error| RelayError::Http(format!("invalid relay URL: {error}")))?;
+        let media = url::Url::parse(media_url)
+            .map_err(|error| RelayError::Http(format!("invalid media URL: {error}")))?;
+        let same_origin = base.scheme() == media.scheme()
+            && base.host_str() == media.host_str()
+            && base.port_or_known_default() == media.port_or_known_default();
+        if !same_origin
+            || !media.path().starts_with("/media/")
+            || !media.username().is_empty()
+            || media.password().is_some()
+            || media.query().is_some()
+            || media.fragment().is_some()
+        {
+            return Err(RelayError::Http("refusing non-relay media URL".to_string()));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| RelayError::Http(format!("media client init failed: {error}")))?;
+        let mut request = client
+            .get(media.clone())
+            .header("Authorization", self.blossom_get_header(media_url)?);
+        if let Some(auth_tag) = &self.auth_tag_json {
+            request = request.header("x-auth-tag", auth_tag);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| RelayError::Http(format!("media download failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(RelayError::Http(format!(
+                "media download returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(RelayError::Http(format!(
+                "media exceeds {max_bytes} byte limit"
+            )));
+        }
+
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|error| RelayError::Http(format!("media read failed: {error}")))?;
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(RelayError::Http(format!(
+                    "media exceeds {max_bytes} byte limit"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the

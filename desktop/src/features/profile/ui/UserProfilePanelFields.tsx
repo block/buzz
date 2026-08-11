@@ -6,6 +6,7 @@ import {
   Cpu,
   Ear,
   Fingerprint,
+  History,
   Server,
   Terminal,
   UserRound,
@@ -59,6 +60,9 @@ const AGENT_SETTINGS_LABELS = new Set([
   "Who can send instructions",
   "ACP command",
   "MCP command",
+  "Codex task",
+  "Codex model",
+  "Workspace",
   "Start on launch",
 ]);
 const DIAGNOSTICS_LABELS = new Set(["Status", "Last error"]);
@@ -343,6 +347,30 @@ export function buildOwnerFields({
       icon: Activity,
       label: "Status",
       testId: "user-profile-agent-status",
+    });
+  }
+
+  if (managedAgent?.codexTaskBinding) {
+    fields.push({
+      copyValue: managedAgent.codexTaskBinding.taskId,
+      displayValue: managedAgent.codexTaskBinding.threadName,
+      icon: History,
+      label: "Codex task",
+      testId: "user-profile-codex-task",
+    });
+    fields.push({
+      copyValue: managedAgent.codexTaskBinding.model ?? undefined,
+      displayValue: managedAgent.codexTaskBinding.model ?? "Not recorded",
+      icon: Cpu,
+      label: "Codex model",
+      testId: "user-profile-codex-model",
+    });
+    fields.push({
+      copyValue: managedAgent.codexTaskBinding.workspace,
+      displayValue: managedAgent.codexTaskBinding.workspace,
+      icon: Terminal,
+      label: "Workspace",
+      testId: "user-profile-codex-workspace",
     });
   }
 

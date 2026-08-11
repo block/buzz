@@ -698,21 +698,25 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         return Some(managed);
     }
 
-    for candidate in path_candidates_from_env(command) {
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    // On Windows, also scan PATH for .cmd/.bat shims (npm globals).
+    // Preserve PATH directory precedence on Windows. Checking every `.exe`
+    // first can incorrectly select a later, inaccessible WindowsApps alias
+    // ahead of an earlier npm `.cmd` shim for the same command.
     #[cfg(windows)]
     {
-        for basename in command_basenames(command).iter().skip(1) {
-            for candidate in path_candidates_from_env_raw(basename) {
+        for dir in path_dirs_from_env() {
+            for basename in &basenames {
+                let candidate = dir.join(basename);
                 if candidate.is_file() {
                     return Some(candidate);
                 }
             }
+        }
+    }
+
+    #[cfg(not(windows))]
+    for candidate in path_candidates_from_env(command) {
+        if is_executable_file(&candidate) {
+            return Some(candidate);
         }
     }
 
@@ -746,26 +750,17 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(windows))]
 fn path_candidates_from_env(command: &str) -> Vec<PathBuf> {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(executable_basename(command)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    path_dirs_from_env()
+        .into_iter()
+        .map(|dir| dir.join(executable_basename(command)))
+        .collect()
 }
 
-/// Like `path_candidates_from_env` but joins `basename` as-is (no `.exe` suffix).
-/// Used for `.cmd`/`.bat` shim resolution on Windows.
-#[cfg(windows)]
-fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
+fn path_dirs_from_env() -> Vec<PathBuf> {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(basename))
-                .collect::<Vec<_>>()
-        })
+        .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default()
 }
 
@@ -1022,8 +1017,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
 
     let augmented_path = cli_probe::augmented_path();
 
-    let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
+    let mut command = cli_probe::probe_command(binary_path, &probe_args[1..]);
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }

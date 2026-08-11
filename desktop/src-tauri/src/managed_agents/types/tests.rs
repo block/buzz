@@ -703,6 +703,7 @@ fn summary_fixture(
     super::ManagedAgentSummary {
         pubkey: "aa".repeat(32),
         name: "test".into(),
+        codex_task_binding: None,
         persona_id: None,
         runtime: None,
         team_id: None,

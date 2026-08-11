@@ -1789,16 +1789,6 @@ async fn tokio_main() -> Result<()> {
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
 
-    // Online means the harness can receive work, not merely that its socket is
-    // connected. Publishing after channel subscriptions gives desktop callers
-    // a durable readiness boundary before they send a startup mention.
-    if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
-            Ok(_) => tracing::info!("presence set to online"),
-            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
-        }
-    }
-
     if config.lazy_pool {
         emit_runtime_lifecycle(
             observer.as_ref(),
@@ -1820,6 +1810,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        codex_task_binding: config.codex_task_binding.clone(),
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -1854,6 +1845,23 @@ async fn tokio_main() -> Result<()> {
             ),
         )),
     });
+
+    // A task-bound identity is only online after its exact Codex task has been
+    // loaded. This acquires the adapter's task writer lock before peers can send
+    // work and prevents Codex Desktop from owning the task at the same time.
+    pool.preload_identity_session(&ctx)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load identity-bound Codex task: {error}"))?;
+
+    // Online means the harness can receive work, not merely that its socket is
+    // connected. Publishing after channel subscriptions and task preloading gives
+    // desktop callers a durable readiness boundary before they send a mention.
+    if config.presence_enabled {
+        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+            Ok(_) => tracing::info!("presence set to online"),
+            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
+        }
+    }
 
     if !config.memory_enabled {
         tracing::info!(
@@ -2096,7 +2104,7 @@ async fn tokio_main() -> Result<()> {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
                 Ok((acp, protocol_version, agent_name, supports_load_session)) => {
-                    let agent = OwnedAgent {
+                    let mut agent = OwnedAgent {
                         index: rr.index,
                         acp,
                         state: SessionState::default(),
@@ -2108,6 +2116,16 @@ async fn tokio_main() -> Result<()> {
                         protocol_version,
                         supports_load_session,
                     };
+                    if let Err(error) = agent.preload_identity_session(&ctx).await {
+                        crash_history[rr.index].mark_spawn_failed();
+                        tracing::warn!(
+                            agent = rr.index,
+                            error = %error,
+                            "respawn could not reload identity-bound Codex task"
+                        );
+                        agent.acp.shutdown().await;
+                        continue;
+                    }
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
                     respawn_collected = true;
@@ -6221,6 +6239,7 @@ mod build_mcp_servers_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
+            codex_task_binding: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
@@ -6443,6 +6462,7 @@ mod error_outcome_emission_tests {
             memory_enabled: false,
             model: None,
             session_title: None,
+            codex_task_binding: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
