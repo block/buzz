@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeThreadReplyUnreadCounts } from "./threadReplyUnreadCounts.ts";
+import {
+  computeThreadReplyUnreadCounts,
+  unionScopeMessages,
+} from "./threadReplyUnreadCounts.ts";
 
 // Open thread "root":
 //   root(100)
@@ -176,4 +179,56 @@ test("computeThreadReplyUnreadCounts_forcedUnread_relightsReadDescendant", () =>
   });
   assert.equal(counts.get("a"), 1); // a1 forced unread
   assert.equal(counts.has("b"), false); // b subtree still read
+});
+
+// --- block/buzz#3799 (scope-b): depth-2+ replies outside the channel window ---
+
+test("unionScopeMessages dedupes by id and preserves order", () => {
+  const windowMessages = [
+    { id: "a", createdAt: 1, parentId: null },
+    { id: "b", createdAt: 2, parentId: null },
+  ];
+  const extras = [
+    { id: "b", createdAt: 2, parentId: null },
+    { id: "c", createdAt: 3, parentId: null },
+  ];
+  assert.deepEqual(
+    unionScopeMessages(windowMessages, extras).map((m) => m.id),
+    ["a", "b", "c"],
+  );
+  // Empty extras return the input reference unchanged (memo-friendly).
+  assert.equal(unionScopeMessages(windowMessages, []), windowMessages);
+});
+
+test("computeThreadReplyUnreadCounts with scoped union counts a depth-2 reply outside the channel window (#3799)", () => {
+  // Read-line 550: b2(600) is unread but lives ONLY in the open thread's
+  // fetched reply set (threadReplyEvents) — the channel-window projection
+  // never materialized it. The hook must union the scope before computing,
+  // or collapsed b renders badge-less and the reply is invisible (#3799).
+  const windowMessages = fixture().filter((m) => m.id !== "b2");
+  const openThreadExtras = [{ id: "b2", createdAt: 600, parentId: "b1" }];
+  const counts = computeThreadReplyUnreadCounts({
+    timelineMessages: unionScopeMessages(windowMessages, openThreadExtras),
+    subtreeReplyIds: ROOT_SUBTREE,
+    visibleReplyIds: ["a", "b"],
+    expandedReplyIds: new Set(),
+    getReadAt: uniformReadAt(550),
+  });
+  assert.equal(counts.get("b"), 1); // b2
+  assert.equal(counts.has("a"), false); // a1(400) read at 550
+});
+
+test("computeThreadReplyUnreadCounts without the union misses the window-external reply (documents #3799 pre-fix)", () => {
+  // Baseline negative control: feeding only the channel-window projection
+  // yields a zero badge for b even though b2 is unread — exactly the bug
+  // shape. The union above is the fix; this pins the before/after contrast.
+  const windowMessages = fixture().filter((m) => m.id !== "b2");
+  const counts = computeThreadReplyUnreadCounts({
+    timelineMessages: windowMessages,
+    subtreeReplyIds: ROOT_SUBTREE,
+    visibleReplyIds: ["a", "b"],
+    expandedReplyIds: new Set(),
+    getReadAt: uniformReadAt(550),
+  });
+  assert.equal(counts.has("b"), false);
 });

@@ -25,6 +25,29 @@ import type { TimelineMessage } from "@/features/messages/types";
  * @param isForcedUnread Session-local OR-overlay: a reply forced unread this
  *   session counts regardless of its marker (per-message mark-unread).
  */
+/**
+ * Union the channel-window timeline with extra messages (e.g. the open
+ * thread's fetched replies) by id. Needed because fresh depth-2+ replies
+ * materialize in `threadRepliesKey` before the channel-window projection
+ * re-materializes from the event store (block/buzz#3799 scope-b): without
+ * this union the descendant-aware unread subtree walk never sees them and a
+ * collapsed ancestor row renders badge-less.
+ */
+export function unionScopeMessages(
+  timelineMessages: TimelineMessage[],
+  extraMessages: readonly TimelineMessage[],
+): TimelineMessage[] {
+  if (extraMessages.length === 0) {
+    return timelineMessages;
+  }
+  const seen = new Set(timelineMessages.map((message) => message.id));
+  const additions = extraMessages.filter((message) => !seen.has(message.id));
+  if (additions.length === 0) {
+    return timelineMessages;
+  }
+  return [...timelineMessages, ...additions];
+}
+
 export function computeThreadReplyUnreadCounts(params: {
   timelineMessages: TimelineMessage[];
   subtreeReplyIds: Iterable<string>;
