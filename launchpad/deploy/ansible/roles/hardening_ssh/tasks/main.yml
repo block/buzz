@@ -1,0 +1,502 @@
+---
+# hardening_ssh — SOP Step 13.2-13.3, hardening-spec sec-C2.
+#
+# Delete the deliberately-insecure cloud-init parity drop-in, install one that sshd reads FIRST,
+# prove it valid before anything reloads, and then verify the MERGED effective configuration —
+# because a file that exists proves nothing here.
+#
+# sec-C2: "This is the single most likely way the hardening role passes review and does nothing."
+# sshd keeps the FIRST value it finds for a keyword and /etc/ssh/sshd_config.d/*.conf is read in
+# name order, so a hardening file dropped alongside 01-dev-parity.conf / 50-cloud-init.conf /
+# 60-cloudimg-settings.conf can be perfectly correct and completely inert. Two things follow, and
+# both are implemented below: the parity file is DELETED, and our file is named 00- so it sorts
+# ahead of everything the image or cloud-init wrote.
+#
+# All plays run as user `dev` with `become: true` (deployment decision 6: this role turns off root
+# SSH login, so Ansible must never depend on being root over SSH). This role is therefore rewriting
+# the policy for the very account and connection it is using — which is why the safety proofs come
+# first, why `AllowUsers` is empty by default, and why `dev`'s NOPASSWD sudo is left alone here.
+#
+# SCOPE NOTE: this role knowingly overrides launchpad/deploy/AGENTS.md rule 5, which says the SSH
+# policy role does not exist yet. Chunk scope is SOP Steps 0-13 and Step 13 is the hardening step.
+# SOP Steps 14-16 (the AI agent) stay out of scope. Stated, not silently ignored.
+#
+# IDEMPOTENCE: every check is `changed_when: false`; the only mutating tasks are the parity removal
+# (reports changed only while the file still exists), the drop-in copy (content is key-sorted, so it
+# is byte-identical every run) and the reload handler they notify. A second run reports zero changed
+# tasks. A run interrupted between the write and the reload also converges — see the marker file
+# comment in defaults/main.yml (ansible/README.md "Convergence", Ruling 11, issue #36).
+
+# --- Safety proofs: everything here runs BEFORE anything is changed ------------------------------
+# SOP Step 13.2 is explicit — "Prove you can get in as a non-root user before you disable root … If
+# that does not print root, stop here and fix it before going further." These tasks are that step.
+
+- name: Assert the admin account this role must preserve is not root
+  ansible.builtin.assert:
+    that:
+      - hardening_ssh_admin_user | length > 0
+      - hardening_ssh_admin_user != 'root'
+    fail_msg: >-
+      hardening_ssh_admin_user is '{{ hardening_ssh_admin_user }}'. It names the unprivileged
+      account that must still be able to log in and reach root AFTER this role disables root SSH
+      login (SOP Step 13.2). Setting it to root defeats the entire point of the check.
+    quiet: true
+
+# Deployment decision 6 and the comment in ansible/inventory/hosts.yml: connect as `dev`, escalate
+# with become. A root-connected run survives this role on its already-open connection and then fails
+# in a later chunk when a fresh connection is refused — a failure that looks nothing like its cause.
+- name: Assert Ansible is not connecting as root
+  ansible.builtin.assert:
+    that:
+      - (ansible_user | default('')) != 'root'
+    fail_msg: >-
+      This play is connecting as root, and it is about to set PermitRootLogin no. The next fresh SSH
+      connection would be refused. Set `ansible_user: {{ hardening_ssh_admin_user }}` with
+      `ansible_become: true` (deployment decision 6; already the default in
+      ansible/inventory/hosts.yml) and re-run.
+    quiet: true
+
+- name: Look up the admin account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ hardening_ssh_admin_user }}"
+    fail_key: false
+
+- name: Assert the admin account exists and can run a login shell
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.getent_passwd[hardening_ssh_admin_user] is defined
+      - ansible_facts.getent_passwd[hardening_ssh_admin_user] is not none
+      - ansible_facts.getent_passwd[hardening_ssh_admin_user][5] is not search('(nologin|/false)$')
+    fail_msg: >-
+      No usable '{{ hardening_ssh_admin_user }}' account on this host. SOP Step 13.2: the account
+      and its passwordless sudo are created by cloud-init (virtual-box/build-vps-clone.sh); if it is
+      missing, that file did not apply. Do not continue — disabling root login now leaves no way in.
+    quiet: true
+
+- name: Resolve the admin account's home directory
+  ansible.builtin.set_fact:
+    hardening_ssh_admin_home: "{{ ansible_facts.getent_passwd[hardening_ssh_admin_user][4] }}"
+
+# From getent, never from `~` — there is no shell expansion in argv.
+- name: Resolve the admin account's authorized_keys path
+  ansible.builtin.set_fact:
+    hardening_ssh_admin_keys_path: >-
+      {{ hardening_ssh_admin_authorized_keys
+         | default(hardening_ssh_admin_home ~ '/.ssh/authorized_keys', true) }}
+
+- name: Check the admin account has an authorized_keys file
+  ansible.builtin.stat:
+    path: "{{ hardening_ssh_admin_keys_path }}"
+  register: hardening_ssh_admin_keys
+  changed_when: false
+
+# Not just "the file exists" — ssh-keygen -l parses it and fails if there is no usable key in it.
+# PasswordAuthentication is about to become `no`, so a key that sshd cannot parse is a lockout.
+- name: Parse the admin account's authorized keys
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_ssh_sshkeygen_binary }}"
+      - "-l"
+      - "-f"
+      - "{{ hardening_ssh_admin_keys_path }}"
+  register: hardening_ssh_admin_keys_parsed
+  changed_when: false
+  failed_when: false
+  when: hardening_ssh_admin_keys.stat.exists
+
+- name: Assert the admin account has at least one usable public key
+  ansible.builtin.assert:
+    that:
+      - hardening_ssh_admin_keys.stat.exists
+      - hardening_ssh_admin_keys_parsed.rc | default(1) == 0
+      - (hardening_ssh_admin_keys_parsed.stdout_lines | default([])) | length > 0
+    fail_msg: >-
+      {{ hardening_ssh_admin_keys_path }} holds no key sshd can use. This role sets
+      PasswordAuthentication no, so key authentication is the only door left — SOP Step 13.2. Add
+      the operator's public key to that file first. (Never commit a key to this repo: AGENTS.md
+      rule 2.)
+    quiet: true
+
+# The real thing, not just the sudoers policy: run sudo AS the admin account and check it reaches
+# uid 0 without a password. `runuser` needs no password because we are already root via become.
+- name: Prove the admin account reaches root without a password (SOP Step 13.2)
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_ssh_runuser_binary }}"
+      - "-u"
+      - "{{ hardening_ssh_admin_user }}"
+      - "--"
+      - "{{ hardening_ssh_sudo_binary }}"
+      - "-n"
+      - "{{ hardening_ssh_id_binary }}"
+      - "-u"
+  register: hardening_ssh_sudo_probe
+  changed_when: false
+  failed_when: false
+
+# Diagnostics only — read as root, so it needs no credentials and cannot lock anything.
+- name: Read the admin account's sudo policy (for the failure message only)
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_ssh_sudo_binary }}"
+      - "-n"
+      - "-l"
+      - "-U"
+      - "{{ hardening_ssh_admin_user }}"
+  register: hardening_ssh_sudo_policy
+  changed_when: false
+  failed_when: false
+
+- name: Assert passwordless sudo works for the admin account
+  ansible.builtin.assert:
+    that:
+      - (hardening_ssh_sudo_probe.rc | default(1)) == 0
+      - (hardening_ssh_sudo_probe.stdout | default('') | trim) == '0'
+    fail_msg: >-
+      `sudo -n id -u` as '{{ hardening_ssh_admin_user }}' returned
+      rc={{ hardening_ssh_sudo_probe.rc | default('n/a') }}
+      stdout='{{ hardening_ssh_sudo_probe.stdout | default('') | trim }}'
+      stderr='{{ hardening_ssh_sudo_probe.stderr | default(hardening_ssh_sudo_probe.msg | default('')) | trim }}'.
+      SOP Step 13.2 says stop here: without this, disabling root SSH login leaves no way to
+      administer the host. sudo policy for the account reads:
+      {{ hardening_ssh_sudo_policy.stdout | default('(unavailable)') | trim }}.
+      If stderr mentions a terminal, the host has `Defaults requiretty` in sudoers — fix that, not
+      this role.
+    quiet: true
+
+# hardening-spec sec-C2 also asks for AllowUsers. If it is set, it MUST contain the account Ansible
+# connects as, or this role severs its own access one file later (decision 6).
+- name: Assert any AllowUsers list still admits the admin account
+  ansible.builtin.assert:
+    that:
+      - hardening_ssh_admin_user in hardening_ssh_allow_users
+    fail_msg: >-
+      hardening_ssh_allow_users is {{ hardening_ssh_allow_users }} and omits
+      '{{ hardening_ssh_admin_user }}'. That is the account this play is connected as; writing that
+      AllowUsers line would lock Ansible out of the host at the next connection. Add it, or leave
+      the list empty (the default — see defaults/main.yml).
+    quiet: true
+  when: hardening_ssh_allow_users | length > 0
+
+# --- Compose the policy -------------------------------------------------------------------------
+
+- name: Reject YAML booleans in the policy values
+  ansible.builtin.assert:
+    that:
+      - hardening_ssh_policy.values() | select('boolean') | list | length == 0
+    fail_msg: >-
+      hardening_ssh_policy contains an unquoted YAML boolean. Bare yes/no/true/false load as Python
+      booleans and would render as `PermitRootLogin True`, which sshd rejects. Quote every value:
+      PermitRootLogin: "no".
+    quiet: true
+
+# dictsort, so the rendered content is byte-identical on every run whatever order an override used.
+- name: Compose the policy lines
+  ansible.builtin.set_fact:
+    hardening_ssh_policy_lines: "{{ hardening_ssh_policy | dictsort | map('join', ' ') | list }}"
+
+- name: Compose the optional directives
+  ansible.builtin.set_fact:
+    hardening_ssh_extra_lines: >-
+      {{
+        (['AllowUsers ' ~ (hardening_ssh_allow_users | join(' '))] if hardening_ssh_allow_users | length > 0 else [])
+        + (['Ciphers ' ~ (hardening_ssh_ciphers | join(','))] if hardening_ssh_ciphers | length > 0 else [])
+        + (['MACs ' ~ (hardening_ssh_macs | join(','))] if hardening_ssh_macs | length > 0 else [])
+        + (['KexAlgorithms ' ~ (hardening_ssh_kex_algorithms | join(','))] if hardening_ssh_kex_algorithms | length > 0 else [])
+      }}
+
+- name: Compose the drop-in content
+  ansible.builtin.set_fact:
+    hardening_ssh_dropin_content: |
+      # Managed by the Ansible role hardening_ssh. Do not edit by hand.
+      #
+      # SOP Step 13.3 / hardening-spec sec-C2. The NAME of this file is part of the control: sshd
+      # keeps the FIRST value it finds for a keyword and {{ hardening_ssh_dropin_dir }}/*.conf is
+      # read in name order, so this must sort ahead of 50-cloud-init.conf and
+      # 60-cloudimg-settings.conf. Renaming it to 99-* silently disables every line below.
+      {{ (hardening_ssh_policy_lines + hardening_ssh_extra_lines) | join('\n') }}
+
+# --- How this host's sshd is asked to re-read its configuration ----------------------------------
+# noble ships both ssh.service and ssh.socket, and which is active decides what a reload means. With
+# the service active, `systemctl reload ssh.service` re-reads the config in place — preferred,
+# because it does not drop the connection this play is running over. Socket-activated hosts start a
+# fresh sshd per connection (so new connections pick the policy up regardless); the socket is
+# restarted anyway, which is cheap and keeps the convergence marker honest.
+- name: Check whether sshd runs as a service or is socket-activated
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_ssh_systemctl_binary }}"
+      - "is-active"
+      - "{{ item }}"
+  loop:
+    - "{{ hardening_ssh_service_unit }}"
+    - "{{ hardening_ssh_socket_unit }}"
+  register: hardening_ssh_unit_state
+  changed_when: false
+  failed_when: false
+
+- name: Decide how to make sshd re-read its configuration
+  ansible.builtin.set_fact:
+    hardening_ssh_reload_unit: >-
+      {{ hardening_ssh_service_unit
+         if (hardening_ssh_unit_state.results[0].stdout | trim == 'active')
+         else (hardening_ssh_socket_unit
+               if (hardening_ssh_unit_state.results[1].stdout | trim == 'active')
+               else '') }}
+    hardening_ssh_reload_state: >-
+      {{ 'reloaded' if (hardening_ssh_unit_state.results[0].stdout | trim == 'active') else 'restarted' }}
+
+- name: Warn when neither the ssh service nor its socket is active
+  ansible.builtin.debug:
+    msg: >-
+      Neither {{ hardening_ssh_service_unit }} nor {{ hardening_ssh_socket_unit }} is active, so
+      nothing will be reloaded. The policy file is still installed and validated, and the merged
+      configuration is still asserted below; whatever starts sshd next will read it.
+  when: hardening_ssh_reload_unit | length == 0
+
+# --- Remove the insecure starting state ----------------------------------------------------------
+# hardening-spec sec-C2 step 1. This is the step whose omission makes the whole role inert.
+
+- name: Ensure the sshd drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ hardening_ssh_dropin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Find any dev-parity sshd drop-in
+  ansible.builtin.find:
+    paths: "{{ hardening_ssh_dropin_dir }}"
+    patterns: "{{ hardening_ssh_parity_dropin_globs }}"
+    file_type: any
+  register: hardening_ssh_parity_found
+  changed_when: false
+
+- name: Remove the dev-parity sshd drop-in
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ hardening_ssh_parity_found.files | map(attribute='path') | sort }}"
+  notify: sshd policy changed
+
+# --- Install the policy --------------------------------------------------------------------------
+
+# The rescue below must know whether a policy file was already there: if `validate` rejects the
+# staged content, `copy` fails without touching the destination, and deleting it then would remove a
+# previously-good drop-in.
+- name: Note whether a policy drop-in already exists
+  ansible.builtin.stat:
+    path: "{{ hardening_ssh_dropin_path }}"
+  register: hardening_ssh_dropin_before
+  changed_when: false
+
+- name: Install and validate the sshd policy drop-in
+  block:
+    # `validate` runs sshd against the STAGED temp file and refuses to move it into place if the
+    # check fails, so a bad value never reaches {{ hardening_ssh_dropin_dir }} at all — stronger
+    # than the SOP's write-then-test order (Step 13.3), which leaves broken content on disk for the
+    # next reboot to load. Validating the fragment alone is necessary but NOT sufficient, which is
+    # why the merged check follows; do not delete one as redundant with the other.
+    # Templated, not `copy: content:`. Assembling multi-line sshd config into a
+    # string is where the escaping goes wrong — see the note in the template.
+    - name: Write the sshd policy drop-in (validated before it is put in place)
+      ansible.builtin.template:
+        src: 00-hardening.conf.j2
+        dest: "{{ hardening_ssh_dropin_path }}"
+        owner: root
+        group: root
+        mode: "{{ hardening_ssh_dropin_mode }}"
+        backup: true
+        validate: "{{ hardening_ssh_sshd_binary }} -t -f %s"
+      register: hardening_ssh_dropin
+      notify: sshd policy changed
+
+    # The real, merged configuration — every file in name order, exactly what a reload would load.
+    # SOP Step 13.3: "A syntax error here plus a restart is a lockout." The reload handler is gated
+    # on this task setting the fact below, so a failure here cannot be followed by a reload.
+    # If this ever reports "Missing privilege separation directory: /run/sshd", the fix is
+    # `mkdir /run/sshd`, not a change to the config.
+    - name: Validate the merged sshd configuration with sshd -t
+      ansible.builtin.command:
+        argv:
+          - "{{ hardening_ssh_sshd_binary }}"
+          - "-t"
+      changed_when: false
+
+    - name: Record that the merged configuration is valid (gates the reload handler)
+      ansible.builtin.set_fact:
+        hardening_ssh_config_validated: true
+
+  rescue:
+    - name: Restore the previous policy drop-in
+      ansible.builtin.copy:
+        src: "{{ (hardening_ssh_dropin | default({})).backup_file }}"
+        dest: "{{ hardening_ssh_dropin_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ hardening_ssh_dropin_mode }}"
+      when: (hardening_ssh_dropin | default({})).backup_file is defined
+
+    - name: Remove the invalid policy drop-in when there was nothing to restore
+      ansible.builtin.file:
+        path: "{{ hardening_ssh_dropin_path }}"
+        state: absent
+      when:
+        - (hardening_ssh_dropin | default({})).backup_file is not defined
+        - not hardening_ssh_dropin_before.stat.exists
+
+    - name: Fail without reloading sshd
+      ansible.builtin.fail:
+        msg: >-
+          The sshd configuration did not validate, so nothing was reloaded and the previous policy
+          file state was restored. sshd is still running its old configuration — you are not locked
+          out. Run `sudo {{ hardening_ssh_sshd_binary }} -t` on the host to see the error, fix the
+          policy variables, and re-run. If the host is already unreachable, roll back the VM
+          snapshot from SOP Step 13.1 (`VBoxManage snapshot buzz-dev restore buzz-working`).
+
+# --- Convergence: has the RUNNING daemon actually loaded this policy? ---------------------------
+# `sshd -T` re-parses the files on disk, so it reports the new policy the moment the file is written
+# — before any reload. A run interrupted between the write and the reload would therefore leave a
+# host that passes every assertion below while the live daemon still permits root and password
+# login. The marker file records what the daemon has actually loaded (written by a handler, after
+# the reload), which turns that invisible hole into a `changed` task.
+
+- name: Ensure the deployment state directory exists
+  ansible.builtin.file:
+    path: "{{ hardening_ssh_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read the policy checksum the running sshd has loaded
+  ansible.builtin.slurp:
+    src: "{{ hardening_ssh_state_file }}"
+  register: hardening_ssh_loaded_marker
+  failed_when: false
+  changed_when: false
+
+- name: Flag a reload when the running sshd has not loaded the current policy
+  ansible.builtin.debug:
+    msg: >-
+      The policy on disk is not the policy the running sshd has loaded — no marker at
+      {{ hardening_ssh_state_file }}, or a stale one. Reloading
+      {{ hardening_ssh_reload_unit | default('(nothing active)', true) }}.
+  changed_when: >-
+    hardening_ssh_loaded_marker.content is not defined
+    or (hardening_ssh_loaded_marker.content | b64decode | trim)
+       != (hardening_ssh_dropin_content | hash('sha256'))
+  notify: sshd policy changed
+
+# Verification must observe the post-reload state, so the handlers cannot wait for end of play.
+- name: Apply the reload before verifying
+  ansible.builtin.meta: flush_handlers
+
+# --- Verify ------------------------------------------------------------------------------------
+# hardening-spec sec-C2 step 4 and SOP Step 13.3: "Verify with `sshd -T`, never by looking at the
+# file. sshd -T prints the settings actually in force after all files are merged. That is the only
+# output that proves the trap above was avoided."
+
+- name: Read the merged effective sshd configuration
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_ssh_sshd_binary }}"
+      - "-T"
+  register: hardening_ssh_effective
+  changed_when: false
+
+- name: Assert root login, password auth and keyboard-interactive auth are all off
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in hardening_ssh_effective.stdout_lines"
+      - "'passwordauthentication no' in hardening_ssh_effective.stdout_lines"
+      - "'kbdinteractiveauthentication no' in hardening_ssh_effective.stdout_lines"
+    fail_msg: >-
+      The merged sshd configuration still permits root or password login:
+      {{ hardening_ssh_effective.stdout_lines
+         | select('search', '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication) ')
+         | join(', ') }}.
+      This is the sec-C2 ordering trap. Something in {{ hardening_ssh_dropin_dir }} is read before
+      {{ hardening_ssh_dropin_name }} and wins (sshd keeps the FIRST value), or
+      /etc/ssh/sshd_config has lost its `Include {{ hardening_ssh_dropin_dir }}/*.conf` line, in
+      which case no drop-in is read at all. Inspect with
+      `ls -1 {{ hardening_ssh_dropin_dir }}` and `sudo {{ hardening_ssh_sshd_binary }} -T`.
+    quiet: true
+
+- name: Assert every configured directive is what sshd actually believes
+  ansible.builtin.assert:
+    that:
+      - (hardening_ssh_policy | dictsort | map('join', ' ') | map('lower') | list)
+        | difference(hardening_ssh_effective.stdout_lines) | length == 0
+    fail_msg: >-
+      Configured but not in force:
+      {{ (hardening_ssh_policy | dictsort | map('join', ' ') | map('lower') | list)
+         | difference(hardening_ssh_effective.stdout_lines) | join('; ') }}.
+      Compare against `sudo {{ hardening_ssh_sshd_binary }} -T` on the host — a keyword set in a
+      file that sorts before {{ hardening_ssh_dropin_name }} wins over ours.
+    quiet: true
+
+- name: Re-check that no dev-parity drop-in survives
+  ansible.builtin.find:
+    paths: "{{ hardening_ssh_dropin_dir }}"
+    patterns: "{{ hardening_ssh_parity_dropin_globs }}"
+    file_type: any
+  register: hardening_ssh_parity_after
+  changed_when: false
+
+- name: Assert the dev-parity drop-in is gone
+  ansible.builtin.assert:
+    that:
+      - hardening_ssh_parity_after.files | length == 0
+    fail_msg: >-
+      Still present: {{ hardening_ssh_parity_after.files | map(attribute='path') | join(', ') }}.
+      hardening-spec Part D assertion 2 and sec-C2 step 1 require the parity drop-in to be deleted,
+      not out-voted.
+    quiet: true
+
+- name: List the sshd drop-ins in the order sshd reads them
+  ansible.builtin.find:
+    paths: "{{ hardening_ssh_dropin_dir }}"
+    patterns: "*.conf"
+    file_type: file
+  register: hardening_ssh_dropins
+  changed_when: false
+
+# Structural guard on the ordering trap: even with the effective config correct today, a file that
+# sorts ahead of ours is one edit away from silently overriding it.
+- name: Assert our policy file is the first one sshd reads
+  ansible.builtin.assert:
+    that:
+      - (hardening_ssh_dropins.files | map(attribute='path') | map('basename') | sort | first | default(''))
+        == hardening_ssh_dropin_name
+    fail_msg: >-
+      {{ hardening_ssh_dropin_dir }} is read in this order:
+      {{ hardening_ssh_dropins.files | map(attribute='path') | map('basename') | sort | join(', ') }}.
+      {{ hardening_ssh_dropin_name }} must be first, because sshd keeps the FIRST value it finds for
+      a keyword (sec-C2; SOP Step 13.3). Either remove the file that sorts ahead of it or rename
+      ours to sort earlier.
+    quiet: true
+
+- name: Report the effective SSH policy
+  ansible.builtin.debug:
+    msg: >-
+      {{ hardening_ssh_effective.stdout_lines
+         | select('search', '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|permitemptypasswords|maxauthtries|maxstartups|logingracetime|allowtcpforwarding|x11forwarding|allowusers) ')
+         | join(' | ') }}
+
+# NOT DONE HERE, deliberately:
+#
+# * The live "root is actually refused" check. SOP Step 13.3 ends by running
+#   `ssh -p 2222 root@127.0.0.1` from the operator's machine and expecting
+#   `Permission denied (publickey)`. That is a probe of the RUNNING daemon from off-host, which no
+#   task on the target can perform honestly, so it belongs to the chunk doc's Verify block.
+# * Removing `{{ hardening_ssh_admin_user }}`'s NOPASSWD sudo, which hardening-spec sec-C2 also
+#   asks for. It is the escalation path every play in this chunk depends on (decision 6), so
+#   dropping it here would break Ansible mid-chunk. Prod's narrow sudo allowlist, `Defaults
+#   use_pty` and `Defaults log_output` are a separate role under #29.
+# * An SSH certificate authority (sec-C2's target state: TrustedUserCAKeys,
+#   AuthorizedPrincipalsFile, AuthorizedKeysFile none). It replaces the standing authorized_keys
+#   bearer credential this role currently depends on, and needs a CA that does not exist yet.

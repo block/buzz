@@ -1,0 +1,67 @@
+---
+# Dev VM overrides — the only file where the nine variables from
+# hardening-spec.md §A.2 are allowed to diverge from production.
+#
+# NOTHING ELSE BELONGS HERE. A control relaxed in dev is a control that has never
+# been executed before it runs on prod, and the two plays that can lock you out
+# are exactly the ones you least want to run for the first time against the real
+# server. If you find yourself wanting to add a tenth key, that is a signal the
+# roles are not parity-clean.
+
+# ---------------------------------------------------------------- addressing
+# Why there is a port here at all, and why it is 8443:
+#
+# Caddy binds 80/443 INSIDE the guest, exactly as it will on the VPS. But macOS
+# refuses to let a non-root process bind a host port below 1024, and VirtualBox's
+# NAT forwarder runs as the invoking user — so the host side of the forward has to
+# be high (8443 -> 443). VirtualBox host-only networking, which would have given
+# the guest its own IP and a real 443, is unavailable here: /dev/vboxnetctl does
+# not exist because the VirtualBox network kext is not loaded.
+#
+# The consequence is confined to this one variable. The relay derives its
+# community host from RELAY_URL and preserves any non-default port, stripping only
+# a trailing :443 or :80 (normalize_host, crates/buzz-core/src/tenant.rs:121). So
+# dev's community is `buzz-vm.test:8443` and prod's is a bare `<domain>`.
+# buzz_relay_url was already one of the nine, so this costs no parity that the
+# model did not already concede.
+#
+# Everything else §A.3 wanted from running Caddy in dev still holds: identical
+# compose file sets, wss:// through a reverse proxy, the relay's port unpublished,
+# and the admin vhost split exercised.
+buzz_domain: buzz-vm.test
+buzz_relay_url: "wss://buzz-vm.test:8443"
+
+# Caddy's local CA rather than Let's Encrypt, which cannot certify a name that
+# does not publicly resolve. The cost is trusting one root on the host — see
+# chunk 03.
+buzz_tls_mode: internal
+buzz_acme_email: ""
+
+# Deliberately MORE PERMISSIVE than prod, and one of only two such cases.
+# hardening-spec.md §B1: on a loopback-bound VM an unauthenticated admin API is
+# acceptable and worth exercising, because the vhost split is a code path we want
+# tested. On a public host the same setting is an information disclosure. Chunk 11
+# asserts 200 here and 404/403 on prod — that difference is the point, not an
+# oversight.
+buzz_admin_host: "admin.buzz-vm.test:8443"
+
+# The other deliberate divergence. Correct for a throwaway VM that needs its
+# schema created on first boot; wrong for a database with real data in it
+# (hardening-spec.md §B6).
+buzz_auto_migrate: true
+
+# Left at the relay's default until issue #39 measures a real ceiling under load.
+# The idle footprint is known and comfortable (~570 MB of 1.9 GiB, swap never
+# touched); concurrency is the open question, and guessing a number here would
+# look like evidence.
+buzz_max_connections: ""
+
+buzz_backup_target: /var/backups/buzz
+buzz_log_target: journal
+
+# ---------------------------------------------------------------- front-ends
+# Both bundles ship inside the relay image at /srv/buzz/web and /srv/buzz/admin-web
+# with their directory variables already set (Dockerfile:145-152), so nothing is
+# built or copied. BUZZ_SERVE_GIT_WEB_GUI is what makes the web bundle answer at
+# `/` rather than only at /invite/<code>.
+buzz_serve_git_web_gui: true

@@ -1,0 +1,44 @@
+---
+# hardening_ssh — handlers
+#
+# Both handlers listen on the single topic "sshd policy changed", notified by the parity removal,
+# the drop-in write, and the convergence-marker check in tasks/main.yml.
+#
+# DEFINITION ORDER IS LOAD-BEARING. Handlers on one topic run in the order they are defined here,
+# and the marker must only ever be written AFTER a reload has actually succeeded — a marker written
+# first (or written when the reload was skipped) records a reload that never happened and makes the
+# gap it exists to close permanently invisible. Do not reorder, and do not alphabetise.
+#
+# Both carry the SAME `when` for the same reason:
+#   * hardening_ssh_config_validated — set only after `sshd -t` passed on the MERGED configuration
+#     (SOP Step 13.3: "A syntax error here plus a restart is a lockout"). Belt and braces: a failed
+#     validation also fails the play in the rescue block, so handlers would not run anyway — but
+#     `--force-handlers` would run them, and this gate holds even then.
+#   * hardening_ssh_reload_unit — empty when neither ssh.service nor ssh.socket is active, i.e.
+#     there is nothing to reload.
+
+- name: Reload sshd
+  ansible.builtin.systemd_service:
+    name: "{{ hardening_ssh_reload_unit }}"
+    state: "{{ hardening_ssh_reload_state }}"
+  listen: sshd policy changed
+  when:
+    - hardening_ssh_config_validated | default(false)
+    - hardening_ssh_reload_unit | length > 0
+
+# `reloaded` where ssh.service is active (SOP Step 13.3 restarts; reload is sufficient, re-reads the
+# configuration in place and does not drop the connection this play is running over). `restarted`
+# only for a socket-activated host, where ssh.socket has no reload verb — harmless there, because a
+# socket-activated host starts a fresh sshd per connection and picks the policy up regardless.
+
+- name: Record the policy checksum the running sshd has loaded
+  ansible.builtin.copy:
+    dest: "{{ hardening_ssh_state_file }}"
+    content: "{{ hardening_ssh_dropin_content | hash('sha256') }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  listen: sshd policy changed
+  when:
+    - hardening_ssh_config_validated | default(false)
+    - hardening_ssh_reload_unit | length > 0

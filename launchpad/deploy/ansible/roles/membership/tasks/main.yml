@@ -1,0 +1,346 @@
+---
+# membership — SOP Step 11, hardening-spec sec-B13.
+#
+# Approves the pubkeys in `buzz_members` on the relay's roster by calling upstream
+# deploy/compose/run.sh, which is consumed, never edited (AGENTS.md rule 1).
+#
+# All plays run as user `dev` with `become: true` (deployment decision 6: SOP Step 13.3 disables
+# root SSH login, so Ansible must never depend on being root over SSH).
+#
+# ================================================================================================
+# THE ONE DANGEROUS THING IN THIS ROLE — ADDS MUST BE SERIALISED WITH A PAUSE
+# ================================================================================================
+# Every add republishes the whole roster as a kind:13534 event. Two adds that land in the same
+# second collide on that event's timestamp and corrupt it (SOP Step 11; run.sh help; hardening-spec
+# sec-B13). The roster IS the access control list, so corruption is either a lockout or an
+# unintended grant — this is the closest thing to a data-integrity bug in the deploy path.
+#
+# The add task therefore has, all three deliberately:
+#   throttle: 1                  one host at a time, never fanned out
+#   loop_control.pause           >= 1s of quiet between adds (membership_add_pause_seconds)
+#   flock                        blocks a concurrent second run or a hand-typed add
+# and NEVER `async`/`poll: 0`. Do not "optimise" any of it away. buzz-admin's own
+# `custom_created_at = max(now, newest + 1s)` bump only helps SERIAL callers; its module docs say
+# outright that run.sh serialisation is the guard against parallel adds.
+# ================================================================================================
+#
+# IDEMPOTENCE: the roster is read with `./run.sh list-members` first and only missing pubkeys are
+# added, so a second run reports zero changed tasks (ansible/README.md "Convergence", Ruling 11,
+# issue #36). That is not only a reporting nicety — `add-member` republishes kind:13534 even when
+# the row already exists ("already a member: … (no change)" still falls through to the publish), so
+# a loop that re-added everyone every converge run would push a fresh roster event to every
+# connected client for no reason, and re-enter the timestamp window above.
+
+# --- Guards -------------------------------------------------------------------------------------
+
+- name: Validate the shape of buzz_members
+  ansible.builtin.assert:
+    that:
+      - buzz_members is iterable
+      - buzz_members is not string
+      - buzz_members is not mapping
+    fail_msg: >-
+      buzz_members must be a list of {pubkey, role} mappings, not
+      {{ buzz_members | type_debug }}. See roles/membership/defaults/main.yml for the shape and for
+      where the real list belongs (a gitignored file — AGENTS.md rule 2).
+    quiet: true
+
+- name: Validate every roster entry before anything is added
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.pubkey is defined
+      - item.role is defined
+      - item.pubkey | default('') | string | trim is match('^[0-9a-fA-F]{64}$')
+      - item.role | default('') in membership_allowed_roles
+    fail_msg: >-
+      Bad buzz_members entry: {{ item }}.
+      `pubkey` must be 64 hex characters — an `npub1…` is rejected on purpose, because
+      `./run.sh list-members` prints hex and hex is the only form this role can compare against it
+      (that comparison is what stops it re-adding people every run). Convert with any Nostr
+      client's key export or `nak decode npub1…`.
+      `role` must be one of {{ membership_allowed_roles | join(', ') }} — buzz-admin refuses
+      `owner`, which comes from RELAY_OWNER_PUBKEY at relay startup and must not be listed here.
+    quiet: true
+  loop: "{{ buzz_members }}"
+  loop_control:
+    label: "{{ (item.pubkey | default('<no pubkey>'))[:12] }}… as {{ item.role | default('<no role>') }}"
+
+- name: Reject duplicate pubkeys in buzz_members
+  ansible.builtin.assert:
+    that:
+      - (buzz_members | map(attribute='pubkey') | map('lower') | unique | list | length) == (buzz_members | length)
+    fail_msg: >-
+      buzz_members lists the same pubkey twice. Two entries for one key are either a copy-paste
+      error or two different intended roles, and the second add would be a no-op that still
+      republishes the roster event (sec-B13). Deduplicate first.
+    quiet: true
+
+- name: Refuse to run with no pause between adds
+  ansible.builtin.assert:
+    that:
+      - membership_add_pause_seconds | int >= 1
+    fail_msg: >-
+      membership_add_pause_seconds is {{ membership_add_pause_seconds }}. SOP Step 11 and
+      hardening-spec sec-B13 require at least 1 second between adds — below that, entries share a
+      timestamp and the kind:13534 roster event can be corrupted. This is the access control list.
+    quiet: true
+
+- name: Check upstream run.sh is present
+  ansible.builtin.stat:
+    path: "{{ membership_run_sh }}"
+  register: membership_run_sh_stat
+  changed_when: false
+
+- name: Fail if the compose bundle is not in place yet
+  ansible.builtin.assert:
+    that:
+      - membership_run_sh_stat.stat.exists
+      - membership_run_sh_stat.stat.executable | default(false)
+    fail_msg: >-
+      {{ membership_run_sh }} is missing or not executable. The compose bundle chunk (SOP Step 6)
+      must run before this one; roster commands are `./run.sh add-member` / `list-members`, and this
+      role never reimplements them (AGENTS.md rule 1).
+    quiet: true
+
+- name: Build the intended roster, normalised to lowercase hex
+  ansible.builtin.set_fact:
+    membership_desired: []
+
+- name: Normalise each entry
+  ansible.builtin.set_fact:
+    membership_desired: >-
+      {{ membership_desired + [{'pubkey': item.pubkey | string | trim | lower, 'role': item.role}] }}
+  loop: "{{ buzz_members }}"
+  loop_control:
+    label: "{{ (item.pubkey | string | trim | lower)[:12] }}… as {{ item.role }}"
+
+- name: Report when there is no roster to apply
+  ansible.builtin.debug:
+    msg: >-
+      buzz_members is empty, so nothing will be approved. That is a valid state — the owner from
+      RELAY_OWNER_PUBKEY is approved by the relay at startup and needs no add (SOP Step 11).
+  when: membership_desired | length == 0
+
+# --- Read the roster BEFORE touching it ----------------------------------------------------------
+#
+# Also the community check. buzz-admin resolves the community from RELAY_URL against the
+# `communities` host map the relay seeded at startup, and fails closed on an unmapped host
+# (crates/buzz-admin/src/main.rs resolve_admin_tenant). Doing the read first means that failure is
+# reported with its cause before any mutation, not halfway through a list of adds.
+#
+# `docker compose exec` needs no `-T` here: in Compose v2 the `--no-TTY` default is
+# `!dockerCli.Out().IsTerminal()` (cmd/compose/exec.go, v2.40.3 — the version the Ubuntu 24.04
+# archive ships), so it drops the pseudo-TTY by itself under Ansible.
+
+- name: Read the current relay roster
+  ansible.builtin.command:
+    cmd: ./run.sh list-members
+    chdir: "{{ membership_compose_dir }}"
+  register: membership_roster_before_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Explain a roster read that failed because the relay never seeded its community
+  ansible.builtin.fail:
+    msg: >-
+      The relay has not started properly, so there is no community to hold a roster.
+      buzz-admin resolves the community from RELAY_URL against the host map the RELAY SEEDS AT
+      STARTUP — there is no seeding command (AGENTS.md, runbooks/relay-build-list.md). Fix the
+      startup first: check `RELAY_URL` in {{ membership_compose_dir }}/.env is the exact authority
+      clients use (dev: {{ buzz_relay_url | default('wss://buzz-vm.test:8443') }}), then
+      `./run.sh logs relay`. Re-run this chunk once `./run.sh list-members` answers.
+      Relay said: {{ (membership_roster_before_raw.stderr | default('')) | trim }}
+  when:
+    - membership_roster_before_raw.rc != 0
+    - "'not mapped to a community' in (membership_roster_before_raw.stdout | default('') ~ membership_roster_before_raw.stderr | default(''))"
+
+- name: Explain a roster read that failed because the stack is not running
+  ansible.builtin.fail:
+    msg: >-
+      The relay container is not running, so `docker compose exec relay` had nothing to run in.
+      Bring the stack up first (SOP Steps 8-9, chunk 07) — all three compose files, including
+      compose.caddy.yml (hardening-spec sec-A.3/sec-B2) — then re-run this chunk.
+      Compose said: {{ (membership_roster_before_raw.stderr | default('')) | trim }}
+  when:
+    - membership_roster_before_raw.rc != 0
+    - >-
+      'not running' in (membership_roster_before_raw.stderr | default('')) or
+      'no container' in (membership_roster_before_raw.stderr | default(''))
+
+- name: Fail on any other roster read error
+  ansible.builtin.fail:
+    msg: >-
+      `./run.sh list-members` exited {{ membership_roster_before_raw.rc }} in
+      {{ membership_compose_dir }}. Nothing has been added. stdout:
+      {{ (membership_roster_before_raw.stdout | default('')) | trim }} stderr:
+      {{ (membership_roster_before_raw.stderr | default('')) | trim }}
+  when: membership_roster_before_raw.rc != 0
+
+- name: Start from an empty picture of the roster
+  ansible.builtin.set_fact:
+    membership_roster_before: {}
+
+# First token only — `added_by` is also a 64-hex pubkey (see membership_roster_line_re).
+- name: Parse the roster into pubkey to role
+  ansible.builtin.set_fact:
+    membership_roster_before: >-
+      {{ membership_roster_before
+         | combine({(item.split() | first): (item.split())[1]}) }}
+  loop: >-
+    {{ membership_roster_before_raw.stdout_lines | default([])
+       | map('trim') | select('match', membership_roster_line_re) | list }}
+  loop_control:
+    label: "{{ (item.split() | first)[:12] }}… {{ (item.split())[1] }}"
+
+# --- Role conflicts, checked BEFORE mutating anything --------------------------------------------
+#
+# `add_relay_member` is `INSERT … ON CONFLICT (community_id, pubkey) DO NOTHING`
+# (crates/buzz-db/src/relay_members.rs). An existing member with a different role is left exactly as
+# it was and the command still reports success, so add-member can never promote or demote anyone.
+# Detecting that here — rather than in the post-run assertion — means the run fails before it
+# publishes a roster event that would not have matched intent anyway.
+
+- name: Collect members whose approved role differs from the intended one
+  ansible.builtin.set_fact:
+    membership_role_conflicts: []
+
+- name: Compare intended roles against the approved ones
+  ansible.builtin.set_fact:
+    membership_role_conflicts: >-
+      {{ membership_role_conflicts
+         + [item.pubkey ~ ' is approved as ' ~ membership_roster_before[item.pubkey]
+            ~ ' but buzz_members says ' ~ item.role] }}
+  loop: "{{ membership_desired }}"
+  when:
+    - item.pubkey in membership_roster_before
+    - membership_roster_before[item.pubkey] != item.role
+  loop_control:
+    label: "{{ item.pubkey[:12] }}…"
+
+- name: Fail on a role that cannot be reached by adding
+  ansible.builtin.assert:
+    that:
+      - membership_role_conflicts | length == 0
+    fail_msg: >-
+      {{ membership_role_conflicts | join('; ') }}.
+      `add-member` cannot change an existing member's role — the insert is ON CONFLICT DO NOTHING,
+      and it reports success while changing nothing. Change a role deliberately instead:
+      `cd {{ membership_compose_dir }} && sudo ./run.sh remove-member <hex> --role <old>`, wait a
+      second, then re-run this chunk. If one of these is the relay owner, remove it from
+      buzz_members — the owner is seeded from RELAY_OWNER_PUBKEY with role `owner` and buzz-admin
+      refuses to set that role at all.
+    quiet: true
+
+- name: Work out which pubkeys still need approving
+  ansible.builtin.set_fact:
+    membership_missing: >-
+      {{ membership_desired
+         | rejectattr('pubkey', 'in', membership_roster_before.keys() | list) | list }}
+
+# --- The adds ------------------------------------------------------------------------------------
+#
+# See the banner at the top of this file before editing this task. throttle + pause + flock, no
+# async. `flock` execs the rest of the argv, so this stays a plain `command` — no shell, nothing to
+# quote, and the pubkey has already been asserted to be 64 hex characters.
+
+- name: Approve each missing pubkey — ONE AT A TIME, NEVER IN PARALLEL (SOP Step 11, sec-B13)
+  ansible.builtin.command:
+    cmd: >-
+      flock -w {{ membership_lock_wait_seconds }} {{ membership_lock_file }}
+      ./run.sh add-member {{ item.pubkey }} --role {{ item.role }}
+    chdir: "{{ membership_compose_dir }}"
+  loop: "{{ membership_missing }}"
+  loop_control:
+    label: "{{ item.pubkey[:12] }}… as {{ item.role }}"
+    # Seconds of quiet between iterations. This is the `sleep 1` from SOP Step 11.
+    pause: "{{ membership_add_pause_seconds | int }}"
+  # One host at a time. Never replace with async/poll:0 or a parallel fan-out.
+  throttle: 1
+  register: membership_add_result
+  changed_when: "'added ' in membership_add_result.stdout"
+  failed_when: >-
+    membership_add_result.rc != 0
+    or not ('added ' in membership_add_result.stdout
+            or 'already a member' in membership_add_result.stdout)
+
+- name: Note any add that found the pubkey already approved
+  ansible.builtin.debug:
+    msg: >-
+      At least one add reported "already a member", which means the roster changed between the read
+      and the write — someone else was adding members at the same time. Nothing is broken (the row
+      was left alone), but re-run this chunk to confirm the final roster, and do not run two adds
+      concurrently again (sec-B13).
+  when: >-
+    membership_add_result.results | default([])
+    | selectattr('stdout', 'defined')
+    | selectattr('stdout', 'search', 'already a member') | list | length > 0
+
+# --- Verification: the roster matches intent (hardening-spec Part F, assertion 19) ---------------
+
+- name: Re-read the roster after the adds
+  ansible.builtin.command:
+    cmd: ./run.sh list-members
+    chdir: "{{ membership_compose_dir }}"
+  register: membership_roster_after_raw
+  changed_when: false
+  check_mode: false
+
+- name: Start from an empty picture of the final roster
+  ansible.builtin.set_fact:
+    membership_roster_after: {}
+
+- name: Parse the final roster into pubkey to role
+  ansible.builtin.set_fact:
+    membership_roster_after: >-
+      {{ membership_roster_after
+         | combine({(item.split() | first): (item.split())[1]}) }}
+  loop: >-
+    {{ membership_roster_after_raw.stdout_lines | default([])
+       | map('trim') | select('match', membership_roster_line_re) | list }}
+  loop_control:
+    label: "{{ (item.split() | first)[:12] }}… {{ (item.split())[1] }}"
+
+- name: Collect anything the final roster still gets wrong
+  ansible.builtin.set_fact:
+    membership_final_problems: >-
+      {{ membership_desired
+         | rejectattr('pubkey', 'in', membership_roster_after.keys() | list)
+         | map(attribute='pubkey') | list }}
+
+- name: Compare intended roles against the final roster
+  ansible.builtin.set_fact:
+    membership_final_problems: >-
+      {{ membership_final_problems
+         + [item.pubkey ~ ' has role ' ~ membership_roster_after[item.pubkey]
+            ~ ', wanted ' ~ item.role] }}
+  loop: "{{ membership_desired }}"
+  when:
+    - item.pubkey in membership_roster_after
+    - membership_roster_after[item.pubkey] != item.role
+  loop_control:
+    label: "{{ item.pubkey[:12] }}…"
+
+# Skipped under --check, where the adds above were skipped too: the roster genuinely does not match
+# intent yet, and failing on that would make a dry run look like a broken host.
+- name: Assert the roster matches the intended state
+  when: not ansible_check_mode
+  ansible.builtin.assert:
+    that:
+      - membership_final_problems | length == 0
+    fail_msg: >-
+      The roster does not match buzz_members: {{ membership_final_problems | join('; ') }}.
+      Read it yourself before doing anything else —
+      `cd {{ membership_compose_dir }} && sudo ./run.sh list-members` — because a roster that
+      disagrees with intent is either a lockout or an unintended grant (sec-B13). Do not re-run
+      blind, and do not add in a loop to catch up.
+    success_msg: >-
+      {{ membership_desired | length }} intended member(s) present with the intended role;
+      {{ membership_roster_after | length }} pubkey(s) approved in total.
+    quiet: true
+
+- name: Show the roster
+  ansible.builtin.debug:
+    var: membership_roster_after_raw.stdout_lines
+  when: membership_show_roster | bool

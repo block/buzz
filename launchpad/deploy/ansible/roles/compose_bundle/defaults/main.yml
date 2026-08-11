@@ -1,0 +1,55 @@
+---
+# compose_bundle — variables. Implements dev-deployment-SOP.md Step 6.
+#
+# Two variables have NO default on purpose: `buzz_image` and `buzz_sync_commit`.
+# Both come from launchpad/deploy/scripts/resolve-image-tag.sh, and a guessed
+# value is worse than a failure — it pairs a relay binary with configuration it
+# was never built against, which is the entire failure mode SOP Step 6.1 exists
+# to prevent. tasks/main.yml asserts they are set and prints how to get them.
+
+# Where the bundle lands on the target. /opt/buzz is the SOP's location and
+# `run.sh` cd's to its own directory, so nothing outside this path is assumed.
+buzz_base_dir: /opt/buzz
+buzz_compose_dir: "{{ buzz_base_dir }}/compose"
+
+# Root of the fork checkout on the CONTROL NODE, derived from the role's own
+# location so the play works from any working directory:
+#   <repo>/launchpad/deploy/ansible/roles/compose_bundle  -> five dirnames -> <repo>
+buzz_repo_root: "{{ role_path | dirname | dirname | dirname | dirname | dirname }}"
+
+# The upstream-owned bundle. NEVER edited here (AGENTS.md rule 1) — it is read
+# and copied verbatim. The relay itself arrives as a prebuilt image, so this is
+# the whole payload: roughly 32 KB.
+buzz_bundle_src: "{{ buzz_repo_root }}/deploy/compose"
+
+# The seven files of SOP Step 6.4's expected listing. `run.sh` keeps its
+# executable bit; everything else is data read by `docker compose`.
+buzz_bundle_files:
+  - name: .env.example
+    mode: "0644"
+  - name: Caddyfile
+    mode: "0644"
+  - name: compose.caddy.yml
+    mode: "0644"
+  - name: compose.dev.yml
+    mode: "0644"
+  - name: compose.yml
+    mode: "0644"
+  - name: README.md
+    mode: "0644"
+  - name: run.sh
+    mode: "0755"
+
+# Recorded in UPSTREAM_COMMIT (SOP Step 6.3). Public fork URL, already present
+# in the committed SOP; override per target if the source repo differs.
+buzz_source_repo: https://github.com/launchpad-26/buzz
+
+# Human-readable companion to a digest pin: `ghcr.io/block/buzz:sha-<7>`. Kept
+# only so a reviewer can follow the digest back to a commit. Empty is fine.
+buzz_image_tag: ""
+
+# hardening-spec §B12: a `sha-<7>` TAG is mutable and can be re-pushed; a
+# `@sha256:<64 hex>` digest cannot. Dev warns, prod should fail — set this true
+# in the production inventory and Part D verification check 12 becomes a gate
+# instead of a grep somebody has to remember to run.
+buzz_image_require_digest: false

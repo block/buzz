@@ -1,0 +1,89 @@
+---
+# hardening_docker — defaults
+#
+# Implements SOP Step 13.7 (runbooks/dev-deployment-SOP.md) and hardening-spec sec-C10.
+#
+# SCOPE NOTE: launchpad/deploy/AGENTS.md rule 5 ("scope discipline") says hardening roles do not
+# exist yet and belong to PRD #5 / #29-#34. This role knowingly overrides that rule: the agreed
+# chunk scope is SOP Steps 0-13, and Step 13 *is* the hardening step. SOP Steps 14-16 (the AI
+# agent) remain out of scope. Stated here rather than silently ignored.
+
+# Where daemon.json lives. Only change this if you are testing against a non-standard dockerd.
+hardening_docker_config_dir: /etc/docker
+hardening_docker_config_path: "{{ hardening_docker_config_dir }}/daemon.json"
+
+# The daemon configuration, rendered to JSON. From hardening-spec sec-C10 (the fuller set — the
+# SOP's Step 13.7 block shows only the first four keys).
+#
+#   no-new-privileges  no container process can gain privileges via setuid/setgid binaries.
+#                      Verified by reading /proc/1/status inside a container, NOT by docker inspect
+#                      — see tasks/main.yml for why.
+#   icc                governs ONLY Docker's default bridge network. See the long comment in
+#                      tasks/main.yml before you touch this while debugging connectivity.
+#   live-restore       containers survive a daemon restart. This is also precisely why the
+#                      --force-recreate in tasks/main.yml is mandatory rather than optional.
+#   log-driver         journald, so container logs land in the same journal as the host's and are
+#                      covered by one retention/forwarding policy.
+#   userland-proxy     false — publish ports via iptables DNAT instead of docker-proxy processes.
+#   default-ulimits    nofile 1024 soft / 4096 hard, so one container cannot exhaust host fds.
+#
+# Overriding this variable REPLACES the whole dict (Ansible's default hash behaviour is replace,
+# not merge). Copy the block and edit it; do not supply a partial dict.
+#
+# TWO KEYS ARE DELIBERATELY ABSENT. Both appear in popular Docker hardening guides and both are
+# actively harmful. A guard in tasks/main.yml fails the run if either reappears via an override:
+#
+#   "disable-legacy-registry": true
+#       Removed from Docker in 17.12. On any current daemon an unknown key is fatal, so this
+#       STOPS dockerd STARTING and takes the whole Buzz stack down with it. `dockerd --validate`
+#       does catch this one — which is exactly why the restart below is gated on the validator.
+#
+#   "ip-forward-no-drop": true
+#       This is the documented OPT-OUT from Docker 28+'s default drop of traffic to unpublished
+#       container ports. Setting it does not add protection, it switches the protection OFF, and
+#       the config stays perfectly valid. `dockerd --validate` will NOT catch this. NOTHING will.
+#       (hardening-spec sec-C10; SOP Step 13.7 trap note.)
+hardening_docker_daemon_config:
+  no-new-privileges: true
+  icc: false
+  live-restore: true
+  log-driver: journald
+  userland-proxy: false
+  default-ulimits:
+    nofile:
+      Name: nofile
+      Hard: 4096
+      Soft: 1024
+
+# Keys that must never end up in daemon.json, whatever an override says.
+hardening_docker_forbidden_keys:
+  - disable-legacy-registry
+  - ip-forward-no-drop
+
+# --- Container recreate -------------------------------------------------------------------------
+# daemon.json supplies DEFAULTS FOR NEW CONTAINERS ONLY. The relay/postgres/redis/minio containers
+# were created before it existed, so until they are recreated these settings apply to nothing that
+# is actually running. See SOP Step 13.7 ("Now recreate them, or the settings you just wrote do not
+# apply to them").
+hardening_docker_compose_dir: /opt/buzz/compose
+hardening_docker_compose_env_file: .env
+
+# All three files, per deployment decision 3 (the TLS-corrected path, hardening-spec sec-A.3 and
+# sec-B2): compose.caddy.yml is what sets `relay: ports: !reset []` and removes the relay's
+# published port 3000 entirely. Omit it from this list and the recreate re-publishes 3000.
+#
+# The list intentionally does not name an agent compose file: SOP Steps 14-16 are out of scope, and
+# in any case Step 15 appends the agent service to compose.cohort.yml, so it is already covered.
+hardening_docker_compose_files:
+  - compose.yml
+  - compose.caddy.yml
+  - compose.cohort.yml
+
+# The container the verification reads. `buzz-prod` is COMPOSE_PROJECT_NAME from
+# deploy/compose/compose.yml (SOP Step 8, Step 13.7).
+hardening_docker_relay_container: buzz-prod-relay-1
+
+# Seconds to wait for the daemon to answer again after a restart (SOP Step 13.7 uses `sleep 10`;
+# this role polls instead, so it is neither slower nor flakier than it needs to be).
+hardening_docker_daemon_ready_retries: 20
+hardening_docker_daemon_ready_delay: 3

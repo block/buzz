@@ -1,0 +1,278 @@
+---
+# roles/hardening_firewall/tasks/main.yml
+#
+# SOP Step 13.4 — turn on the firewall. hardening-spec.md §C3 (ingress firewall) and
+# §B2 (published container ports bypass ufw). The rationale for every control lives in
+# those two documents; this file is the operation only.
+#
+# SCOPE OVERRIDE, STATED RATHER THAN HIDDEN: ../../AGENTS.md rule 5 lists "firewall" among
+# the roles that must NOT exist yet, on the grounds that #29–#34 (PRD #5) would front-run
+# PRD #2. Chunk 10's scope decision knowingly overrides that rule: the automation covers
+# SOP Steps 0–13, and Step 13 includes 13.4. If AGENTS.md rule 5 is ever re-asserted, this
+# role is one of the two it means (the other is the SSH-policy role).
+#
+# THE SECOND PLAY THAT CAN LOCK US OUT. The first is the SSH-policy role (SOP 13.3). Both
+# require the `buzz-working` snapshot from SOP Step 13.1 to exist before this runs.
+#
+# CONNECTION MODEL: this role, like every play in the bundle, connects as `dev` with
+# `become: true`. SOP Step 13.3 disables root SSH login; a play connected as root would
+# sever its own access partway through hardening.
+#
+# WHY `command` AND NOT A UFW MODULE: there is no `ansible.posix.ufw` — checked, and
+# `ansible.posix` 2.2.2 ships acl/at/authorized_key/firewalld/mount/patch/seboolean/selinux/
+# synchronize/sysctl and no ufw at all. The only ufw module is `community.general.ufw`, and
+# ansible-core 2.21 ships neither collection; this repo carries no requirements.yml, and a
+# role whose failure mode is permanent lockout should not acquire a collection dependency
+# that nobody has pinned. So every ufw call below is `ansible.builtin.command` with an
+# explicit idempotence guard. ufw's own output and /etc/default/ufw supply exact change
+# signals, so a second run reports zero changed tasks (../../ansible/README.md
+# "Convergence", Ruling 11, #36). If the cohort later pins community.general, swapping the
+# six ufw invocations below for `community.general.ufw` is a mechanical change.
+
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+# ---------------------------------------------------------------------------
+# Allow rules FIRST, then defaults, then enable.
+#
+# This is deliberately stricter than SOP Step 13.4's literal order (defaults, then allow,
+# then enable). Defaults-first is only safe because ufw starts inactive on a fresh host;
+# allow-first is safe on that first run AND on any rerun where ufw is already active. With
+# defaults first, a rerun that failed between "default deny incoming" and "allow 22/tcp"
+# would leave a live firewall with no way back in.
+# ---------------------------------------------------------------------------
+
+- name: Allow inbound ports before the firewall is enabled
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - allow
+      - "{{ item }}"
+  loop: "{{ hardening_firewall_allow_in }}"
+  register: hardening_firewall_allow_result
+  # ufw prints "Rule added" / "Rules updated" for a new rule and
+  # "Skipping adding existing rule" (plus a second "… (v6)" line) when it already exists.
+  # That is the only reliable per-rule change signal, and it works while ufw is inactive.
+  changed_when: >-
+    'Skipping adding existing rule'
+    not in (hardening_firewall_allow_result.stdout | default(''))
+
+- name: Read the recorded ufw default policies
+  ansible.builtin.slurp:
+    src: /etc/default/ufw
+  register: hardening_firewall_defaults_file
+  check_mode: false
+
+- name: Record which default policies are already in force
+  ansible.builtin.set_fact:
+    # The capture-group spec is '\1' with ONE backslash. These are YAML block scalars, where
+    # YAML performs no escape processing and Jinja does not unescape '\\' either — '\\1'
+    # reaches regex_search as a broken group spec and the filter raises. Verified on
+    # ansible-core 2.21.2 / Jinja 3.1.6. In a double-quoted YAML scalar the same expression
+    # needs '\\1'; do not copy this line into one without changing it back.
+    hardening_firewall_current_incoming: >-
+      {{ (hardening_firewall_defaults_file.content | b64decode)
+         | regex_search('DEFAULT_INPUT_POLICY="?([A-Za-z]+)', '\1')
+         | default([''], true) | first }}
+    hardening_firewall_current_outgoing: >-
+      {{ (hardening_firewall_defaults_file.content | b64decode)
+         | regex_search('DEFAULT_OUTPUT_POLICY="?([A-Za-z]+)', '\1')
+         | default([''], true) | first }}
+
+# `ufw default …` rewrites /etc/default/ufw and reloads the live ruleset itself when ufw is
+# active, so no handler and no separate reload task is needed. It also prints its "changed
+# to" message and exits 0 even when nothing changed, which is why the `when` guard reads the
+# file rather than trusting the command's output.
+- name: Set the default inbound policy
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - default
+      - "{{ hardening_firewall_default_incoming }}"
+      - incoming
+  when: >-
+    hardening_firewall_current_incoming
+    != hardening_firewall_policy_file_values[hardening_firewall_default_incoming]
+  changed_when: true
+
+- name: Set the default outbound policy
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - default
+      - "{{ hardening_firewall_default_outgoing }}"
+      - outgoing
+  when: >-
+    hardening_firewall_current_outgoing
+    != hardening_firewall_policy_file_values[hardening_firewall_default_outgoing]
+  changed_when: true
+
+- name: Read the current ufw activation state
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - status
+  register: hardening_firewall_status_before
+  changed_when: false
+  check_mode: false
+
+# `--force` skips ufw's interactive "this may disrupt existing ssh connections" prompt,
+# which has no answer over a non-interactive connection.
+- name: Enable ufw
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - --force
+      - enable
+  when: "'Status: active' not in hardening_firewall_status_before.stdout"
+  changed_when: true
+
+# ---------------------------------------------------------------------------
+# Prove we did not just cut ourselves off (SOP Step 13.4's "still-here" check).
+# ---------------------------------------------------------------------------
+
+# Drop the SSH control connection so the next task must open a brand new one, inbound,
+# through the firewall that was just enabled. Reusing the existing multiplexed connection
+# would prove nothing — it was established before the rules existed. A loopback check on the
+# target proves nothing either: ufw's before-rules unconditionally ACCEPT traffic on `lo`.
+#
+# `meta: reset_connection` ignores `when`, so it is intentionally unconditional and not
+# wrapped in a conditional block.
+- name: Force a fresh SSH connection through the new firewall
+  ansible.builtin.meta: reset_connection
+
+- name: Confirm inbound SSH still works after enabling the firewall
+  ansible.builtin.ping:
+
+- name: Read the full firewall state
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_firewall_ufw_bin }}"
+      - status
+      - verbose
+  register: hardening_firewall_status
+  changed_when: false
+  check_mode: false
+
+# SOP acceptance checklist item 11: `Status: active` and a default of `deny (incoming)`.
+# Asserted, not merely printed, so a silently-inactive firewall fails the play.
+- name: Assert the firewall is active with the intended default policy
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in hardening_firewall_status.stdout"
+      - >-
+        (hardening_firewall_default_incoming ~ ' (incoming)')
+        in hardening_firewall_status.stdout
+    success_msg: "ufw active, default {{ hardening_firewall_default_incoming }} (incoming)"
+    fail_msg: >-
+      ufw is not in the intended state. `ufw status verbose` said:
+      {{ hardening_firewall_status.stdout }}
+
+# THE REAL PROOF IS NOT AVAILABLE HERE. Everything above is an on-host check, and on-host
+# checks cannot establish reachability: `ss -tlnp` shows docker-proxy listening and tells you
+# nothing about whether anything off-host can reach it (hardening-spec §B2 "Verify", §C3
+# "Prove it from off-host with nmap, never from the host with ss"). The
+# `nmap -Pn -p 3000,5432,6379,8080,9000,9001,9090,9102 <host>` assertion must run from a
+# machine that is not the target, so it belongs to the verify chunk, not to this role.
+- name: Show the firewall state
+  ansible.builtin.debug:
+    var: hardening_firewall_status.stdout_lines
+
+# ---------------------------------------------------------------------------
+# hardening-spec §B2 required control 4 — fail if any published port is on a wildcard
+# address.
+#
+# READ THIS BEFORE BELIEVING `ufw status`. ufw DOES NOT GOVERN DOCKER'S PUBLISHED PORTS.
+# Docker inserts its own rules into the DOCKER iptables chain, and that chain is evaluated
+# BEFORE ufw's chains. So `ufw deny 443` would not close a published container port: the
+# packet is accepted by Docker's rule and never reaches ufw's. A reader who runs
+# `ufw status`, sees `deny (incoming)`, and concludes a container port is closed has drawn
+# exactly the wrong conclusion (SOP Step 13.4; hardening-spec §B2).
+#
+# On this dev VM that gap is harmless — VirtualBox forwards only from 127.0.0.1, so nothing
+# off the operator's own machine can reach a published port either way. ON THE VPS IT IS NOT
+# HARMLESS: the same configuration serves a plaintext relay to the internet while the
+# firewall reports everything denied.
+#
+# The real fix is not a firewall rule at all. It is compose.caddy.yml's
+# `relay: ports: !reset []`, which stops publishing the relay port entirely and puts it
+# behind Caddy — which the TLS-corrected path this bundle uses now does on both targets
+# (hardening-spec §A.3, §B2 control 1). Host policy for any port that genuinely must stay
+# published belongs in the DOCKER-USER chain, with §B2 control 3's ordering fix (conntrack
+# rule first, DROP appended last — an unconditional `-I DOCKER-USER -j DROP` blocks return
+# traffic and kills all container networking).
+#
+# The task below is the assertion that keeps the fix in place: if anyone drops
+# compose.caddy.yml from the -f list, or re-publishes a port without binding it to
+# loopback (§B2 control 2), this fails.
+# ---------------------------------------------------------------------------
+
+- name: Read published ports from the running Compose project
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file {{ hardening_firewall_compose_env_file }}
+      {{ hardening_firewall_compose_files | map('regex_replace', '^', '-f ') | join(' ') }}
+      ps --format json
+    chdir: "{{ hardening_firewall_compose_dir }}"
+  register: hardening_firewall_compose_ps
+  changed_when: false
+  check_mode: false
+
+# Compose changed this output shape: v2.21.0 moved `ps --format json` from a single JSON
+# array to newline-delimited JSON objects, to match `docker ps`. The measured version here is
+# 2.40.3 (NDJSON), but both shapes are handled so the assert does not become a version
+# guess. Empty stdout — nothing running — yields an empty list and the assert below is a
+# no-op loop rather than a parse error.
+- name: Parse the Compose service list
+  ansible.builtin.set_fact:
+    hardening_firewall_compose_services: >-
+      {{ (hardening_firewall_compose_ps.stdout | trim | from_json)
+         if (hardening_firewall_compose_ps.stdout | trim)[0:1] == '['
+         else ((hardening_firewall_compose_ps.stdout | trim).splitlines()
+               | select | map('from_json') | list) }}
+
+# Compose reports PublishedPort as a JSON number, but the allowlist is compared with `in`,
+# which does not coerce types — so both forms are built once here. A type mismatch would make
+# the assert reject a legitimate ingress port, which fails loudly rather than silently
+# passing a real exposure; this keeps it from failing at all.
+- name: Build the ingress-port allowlist in both int and string form
+  ansible.builtin.set_fact:
+    hardening_firewall_ingress_allowlist: >-
+      {{ hardening_firewall_public_ingress_ports
+         + (hardening_firewall_public_ingress_ports | map('string') | list) }}
+
+- name: Assert no service publishes a non-ingress port on a wildcard address
+  vars:
+    # Publishers entries with PublishedPort 0 are exposed-but-not-published and are not a
+    # finding. `default([], true)` also covers a JSON null, which `default([])` would not.
+    hardening_firewall_service_wildcards: >-
+      {{ item.Publishers | default([], true)
+         | selectattr('PublishedPort', 'defined')
+         | selectattr('URL', 'defined')
+         | rejectattr('PublishedPort', 'in', [0, '0', '', none])
+         | rejectattr('PublishedPort', 'in', hardening_firewall_ingress_allowlist)
+         | selectattr('URL', 'in', hardening_firewall_wildcard_addresses)
+         | list }}
+  ansible.builtin.assert:
+    that:
+      - hardening_firewall_service_wildcards | length == 0
+    success_msg: >-
+      {{ item.Service | default(item.Name | default('?')) }} publishes nothing outside
+      {{ hardening_firewall_public_ingress_ports }} on a wildcard address
+    fail_msg: >-
+      hardening-spec §B2 control 4 violated: service
+      '{{ item.Service | default(item.Name | default('?')) }}' publishes
+      {{ hardening_firewall_service_wildcards }} on a wildcard address, and that port is not
+      one of the declared ingress ports {{ hardening_firewall_public_ingress_ports }}. ufw
+      cannot close this — Docker's chain is evaluated first. Either add compose.caddy.yml to
+      the -f list so `ports: !reset []` unpublishes the relay, or bind the port to 127.0.0.1
+      in compose.cohort.yml (§B2 control 2).
+  loop: "{{ hardening_firewall_compose_services }}"
+  loop_control:
+    label: "{{ item.Service | default(item.Name | default('?')) }}"

@@ -1,0 +1,28 @@
+---
+# Both handlers deliberately pass the full three-file list. A bare
+# `docker compose` here would load compose.yml plus any auto-loaded
+# compose.override.yml and MISS compose.caddy.yml and compose.cohort.yml —
+# bringing up a plaintext relay on 3000 with no network alias. That is the
+# failure hardening-spec.md §B2 describes, arriving through a handler.
+
+- name: Restart caddy
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file .env
+      {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }}
+      up -d --wait caddy
+    chdir: "{{ buzz_compose_dir }}"
+  changed_when: true
+  # Only meaningful once the stack exists; on the very first run chunk 07 brings
+  # everything up anyway, so a failure here is not fatal.
+  failed_when: false
+
+- name: Recreate stack
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file .env
+      {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }}
+      up -d --wait
+    chdir: "{{ buzz_compose_dir }}"
+  changed_when: true
+  failed_when: false

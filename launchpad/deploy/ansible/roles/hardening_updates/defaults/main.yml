@@ -1,0 +1,74 @@
+---
+# hardening_updates — automatic security updates.
+# SOP Step 13.5, hardening-spec §C7.
+#
+# Scope note: AGENTS.md rule 5 lists `unattended-upgrades` as a role that does
+# not exist yet (#32 under PRD #5). The chunked deploy system knowingly covers
+# SOP Steps 0-13 including Step 13 hardening, so this role exists deliberately
+# and overrides that rule rather than ignoring it.
+
+# The package is 'unattended-upgrades' (PLURAL). The binary it installs is
+# 'unattended-upgrade' (SINGULAR) — see hardening_updates_binary below and the
+# assert in tasks/main.yml. SOP Step 13.5 trap.
+#
+# needrestart catches services still running against deleted libraries, which a
+# package upgrade alone does not restart — hardening-spec §C7.
+hardening_updates_packages:
+  - unattended-upgrades
+  - needrestart
+
+# Absolute path, not a bare name: a real existence test against a real path is
+# what makes a missing binary read as a missing binary (SOP Step 13.5).
+hardening_updates_binary: /usr/bin/unattended-upgrade
+
+# Loaded after the package's own 50unattended-upgrades and after
+# 20auto-upgrades, both lexically earlier, so this file's values are the
+# effective ones. See the template for why that is not sufficient on its own
+# for list-valued options.
+hardening_updates_conf_path: /etc/apt/apt.conf.d/52buzz-hardening
+hardening_updates_conf_mode: "0644"
+
+# ONLY the security pocket. Ubuntu's `universe` component has no guaranteed
+# security updates, so auto-patching from it buys the reboots without the
+# safety — hardening-spec §C7 records that the research doc has this backwards.
+# Docker comes from the Ubuntu archive (not Docker's apt repo), so Docker
+# patches ride this same stream and need no extra origin.
+hardening_updates_allowed_origins:
+  - "${distro_id}:${distro_codename}-security"
+
+# Ubuntu Pro / ESM origins, appended to the list above when the host is
+# attached (hardening-spec §C7). Empty by default: an origin that does not
+# exist on the host is a permanent no-op at best and a config error at worst.
+# Attached hosts set, for example:
+#   hardening_updates_esm_origins:
+#     - "${distro_id}ESMApps:${distro_codename}-apps-security"
+#     - "${distro_id}ESM:${distro_codename}-infra-security"
+hardening_updates_esm_origins: []
+
+# "false" — reboots are orchestrated, not surprise. A server that reboots
+# itself at 3am because a kernel arrived took the service down without asking
+# (SOP Step 13.5, hardening-spec §C7). Quoted string, not a YAML boolean: this
+# value is written verbatim into an apt.conf directive.
+hardening_updates_automatic_reboot: "false"
+
+# The timers fire apt.systemd.daily; these APT::Periodic values are what make
+# it do anything. Installing the package is not the same as switching it on,
+# and neither is enabling the timers.
+hardening_updates_periodic_update_lists: "1"
+hardening_updates_periodic_download: "1"
+hardening_updates_periodic_unattended_upgrade: "1"
+
+# Enabled explicitly — see above.
+hardening_updates_timers:
+  - apt-daily.timer
+  - apt-daily-upgrade.timer
+
+# Report-only posture for needrestart. 'l' = list, never restart; keeps the
+# apt-hook invocation from restarting services (or opening an interactive
+# dialog) behind Ansible's back. Set to '' to leave the host default alone.
+hardening_updates_needrestart_conf_path: /etc/needrestart/conf.d/50buzz-listonly.conf
+hardening_updates_needrestart_mode: "l"
+
+# Detected and reported, never acted on: rebooting is a decision.
+hardening_updates_reboot_required_path: /var/run/reboot-required
+hardening_updates_reboot_required_pkgs_path: /var/run/reboot-required.pkgs

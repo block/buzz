@@ -1,0 +1,164 @@
+---
+# hardening_ssh — defaults
+#
+# Implements SOP Step 13.2-13.3 (runbooks/dev-deployment-SOP.md) and hardening-spec sec-C2.
+#
+# SCOPE NOTE: launchpad/deploy/AGENTS.md rule 5 ("scope discipline") says the SSH-policy role does
+# not exist yet and belongs to PRD #5 / #29. This role knowingly overrides that rule: the agreed
+# chunk scope is SOP Steps 0-13, and Step 13 *is* the hardening step. SOP Steps 14-16 (the AI
+# agent) remain out of scope. Stated here rather than silently ignored.
+#
+# sec-C2 opens with "this is the single most likely way the hardening role passes review and does
+# nothing." Two variables below carry that whole warning: hardening_ssh_dropin_name (must sort
+# FIRST) and hardening_ssh_parity_dropin_globs (the file that must be DELETED, not out-voted).
+
+# --- The account that must keep working ---------------------------------------------------------
+# SOP Step 13.2: prove non-root access BEFORE root login is disabled, or there is no way in at all.
+# This is also the account Ansible itself connects as (deployment decision 6, and the comment in
+# ansible/inventory/hosts.yml). Change it only in lock-step with ansible_user.
+hardening_ssh_admin_user: dev
+
+# Where that account's public keys live. Empty means the standard
+# <home>/.ssh/authorized_keys, resolved from getent rather than from `~` (no shell expansion in
+# argv). Override only if the host sets a non-default AuthorizedKeysFile. The role asserts the file
+# parses and holds at least one usable key BEFORE it turns PasswordAuthentication off — with
+# passwords gone, an unparseable key file is a lockout (SOP Step 13.2).
+hardening_ssh_admin_authorized_keys: ""
+
+# --- Where the policy lands ---------------------------------------------------------------------
+hardening_ssh_dropin_dir: /etc/ssh/sshd_config.d
+hardening_ssh_dropin_path: "{{ hardening_ssh_dropin_dir }}/{{ hardening_ssh_dropin_name }}"
+
+# THE NAME IS THE CONTROL. sshd keeps the FIRST value it finds for a keyword, and
+# /etc/ssh/sshd_config.d/*.conf is read in name order. This host has, or may have:
+#
+#   01-dev-parity.conf       cloud-init, PermitRootLogin yes / PasswordAuthentication yes
+#   50-cloud-init.conf       cloud-init, PasswordAuthentication yes (written when ssh_pwauth is set)
+#   60-cloudimg-settings.conf  the noble cloud image, PermitRootLogin prohibit-password
+#
+# A file named 99-hardening.conf loses to all three and changes nothing while looking correct —
+# the exact failure the SOP's own Step 13.3 note and hardening-spec sec-C2 describe, and the
+# correction the SOP records ("Step 13.3's hardening file is named 00-, not 99-"). 00- sorts first,
+# is read first, and therefore wins. If you rename this, re-check the sorts-first assertion in
+# tasks/main.yml — it exists to catch exactly that mistake.
+hardening_ssh_dropin_name: 00-hardening.conf
+
+# Not a secret (no keys, no hashes — see AGENTS.md rule 2); 0644 root:root matches the mode
+# cloud-init and the cloud image use for their own drop-ins, and sshd reads it as root.
+hardening_ssh_dropin_mode: "0644"
+
+# --- The insecure starting state that must be REMOVED -------------------------------------------
+# hardening-spec sec-C2 step 1: "file: path=/etc/ssh/sshd_config.d/01-dev-parity.conf state=absent".
+# Adding a file alongside it is not enough — for the 00- prefix above it happens to be enough for
+# the merge, but leaving the fixture in place means one rename (or one operator writing a
+# 00-something.conf) silently restores password + root login. Delete it.
+#
+# Both names are listed because virtual-box/build-vps-clone.sh used to write 01-vps-parity.conf and
+# now writes 01-dev-parity.conf (PARITY_CONF, line ~29). A missed removal means hardening silently
+# does nothing, so the glob covers the old name and any future 01-*parity* rename as well.
+hardening_ssh_parity_dropin_globs:
+  - "01-dev-parity.conf"
+  - "01-vps-parity.conf"
+  - "01-*parity*.conf"
+
+# --- The policy ---------------------------------------------------------------------------------
+# Rendered one "Keyword value" per line, key-sorted, so the file content is byte-identical on every
+# run (a dict whose order shifted would make the copy task report changed forever).
+#
+# QUOTE THE VALUES. Bare yes/no in YAML are booleans and would render as True/False, which sshd
+# rejects. A guard in tasks/main.yml fails the run if an override reintroduces a bare boolean.
+#
+# Overriding this variable REPLACES the whole dict (Ansible's default hash behaviour is replace,
+# not merge). Copy the block and edit it; do not supply a partial dict.
+#
+#   PermitRootLogin no              SOP 13.2/13.3, sec-C2. The reason Ansible connects as `dev`.
+#   PasswordAuthentication no       the VM ships a known password on root and dev; kill the vector.
+#   KbdInteractiveAuthentication no PAM's interactive path is a second password door; closing
+#                                   PasswordAuthentication alone leaves it open.
+#   PubkeyAuthentication yes        stated explicitly, not inherited — it is the only way in left.
+#   PermitEmptyPasswords no
+#   MaxAuthTries 3
+#   MaxStartups 10:30:60            start dropping unauthenticated connections at 10, all at 60.
+#   LoginGraceTime 30
+#   AllowTcpForwarding no           nothing in this deployment tunnels through sshd; Caddy fronts
+#                                   the relay (decision 3), so forwarding is pure attack surface.
+#   X11Forwarding no                headless host.
+hardening_ssh_policy:
+  PermitRootLogin: "no"
+  PasswordAuthentication: "no"
+  KbdInteractiveAuthentication: "no"
+  PubkeyAuthentication: "yes"
+  PermitEmptyPasswords: "no"
+  MaxAuthTries: "3"
+  MaxStartups: "10:30:60"
+  LoginGraceTime: "30"
+  AllowTcpForwarding: "no"
+  X11Forwarding: "no"
+
+# --- AllowUsers: deliberately EMPTY -------------------------------------------------------------
+# sec-C2's policy list includes `AllowUsers <deploy user>`. It is off by default here on purpose:
+# deployment decision 6 has Ansible connecting as `{{ hardening_ssh_admin_user }}` with become, so
+# an AllowUsers list that omits that account severs Ansible's own access halfway through the
+# hardening chunk — the same self-inflicted lockout the decision exists to prevent, one file later.
+#
+# Set it if you want it (prod, once the deploy account is settled). tasks/main.yml asserts that
+# hardening_ssh_admin_user appears in the list before the file is written, so the lockout cannot
+# happen silently.
+hardening_ssh_allow_users: []
+
+# --- Crypto: opt-in ----------------------------------------------------------------------------
+# sec-C2 also wants "modern Ciphers/MACs/KexAlgorithms only". Left empty here because the required
+# policy for this chunk does not include them and because narrowing the algorithm lists is the one
+# change in this role that can break a client rather than a server (the operator's own ssh, the
+# desktop app's git transport, any CI runner). OpenSSH 9.6 on noble already negotiates a sane set
+# by default, so this is a tightening, not a fix.
+#
+# Recommended values when the cohort is ready to turn them on — populate as lists, they are joined
+# with commas and validated by `sshd -t` before they can land:
+#
+#   hardening_ssh_ciphers:
+#     - chacha20-poly1305@openssh.com
+#     - aes256-gcm@openssh.com
+#     - aes128-gcm@openssh.com
+#   hardening_ssh_macs:
+#     - hmac-sha2-512-etm@openssh.com
+#     - hmac-sha2-256-etm@openssh.com
+#   hardening_ssh_kex_algorithms:
+#     - sntrup761x25519-sha512@openssh.com
+#     - curve25519-sha256
+#     - curve25519-sha256@libssh.org
+hardening_ssh_ciphers: []
+hardening_ssh_macs: []
+hardening_ssh_kex_algorithms: []
+
+# --- Binaries and units -------------------------------------------------------------------------
+# Absolute paths: the command module's PATH under become is not guaranteed to include sbin.
+hardening_ssh_sshd_binary: /usr/sbin/sshd
+hardening_ssh_sshkeygen_binary: /usr/bin/ssh-keygen
+hardening_ssh_sudo_binary: /usr/bin/sudo
+hardening_ssh_runuser_binary: /usr/sbin/runuser
+hardening_ssh_id_binary: /usr/bin/id
+hardening_ssh_systemctl_binary: /usr/bin/systemctl
+
+# noble ships both units. Which one is active decides how sshd is made to re-read its config, so
+# tasks/main.yml detects it rather than assuming (see the reload comment there).
+hardening_ssh_service_unit: ssh.service
+hardening_ssh_socket_unit: ssh.socket
+
+# Filled in by tasks/main.yml from `systemctl is-active`. Defaults here so the handlers never
+# reference an undefined variable if the tasks were skipped or interrupted early.
+hardening_ssh_reload_unit: ""
+hardening_ssh_reload_state: reloaded
+
+# --- Convergence marker -------------------------------------------------------------------------
+# Records the sha256 of the policy content that the RUNNING daemon has actually loaded, written by
+# a handler *after* the reload succeeds.
+#
+# Why this exists: `sshd -T` re-parses the files on disk, so it reports the new policy the instant
+# the file is written — before any reload. If a run is interrupted between the write and the
+# reload, a second run would find the file already correct, notify nothing, and still pass every
+# `sshd -T` assertion while the live daemon kept permitting root and password login. The marker
+# turns that invisible hole into a `changed` task that triggers the reload. (ansible/README.md
+# "Convergence", Ruling 11, issue #36.)
+hardening_ssh_state_dir: /var/lib/buzz-deploy
+hardening_ssh_state_file: "{{ hardening_ssh_state_dir }}/hardening_ssh.loaded"

@@ -1,0 +1,5 @@
+---
+# Caddy site addresses take a hostname, but BUZZ_ADMIN_HOST carries the port the
+# relay expects to see in the Host header. Strip the port for SNI/--resolve while
+# keeping the full authority for the Host header itself.
+buzz_admin_sni: "{{ buzz_admin_host | regex_replace(':[0-9]+$', '') }}"

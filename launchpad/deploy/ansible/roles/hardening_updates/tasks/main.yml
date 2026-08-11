@@ -1,0 +1,239 @@
+---
+# hardening_updates — automatic security updates.
+# SOP Step 13.5, hardening-spec §C7.
+#
+# Privilege escalation comes from the inventory / play (`ansible_user: dev`,
+# `ansible_become: true`), never from a root connection: SOP Step 13.3 disables
+# root SSH login, and a root-connected run would sever its own access partway
+# through hardening.
+#
+# Scope: AGENTS.md rule 5 lists unattended-upgrades among the roles that do not
+# exist yet. The chunked system deliberately covers SOP Steps 0-13, hardening
+# included, so this role overrides that rule knowingly rather than silently.
+#
+# No facts are required by this role, so it is safe in a play with
+# `gather_facts: false`.
+
+- name: Refresh apt cache when stale
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  # A cache refresh is not a state change. Guarded so a rerun cannot report a
+  # changed task (ansible/README "Convergence", Ruling 11, issue #36).
+  changed_when: false
+
+- name: Install unattended-upgrades and needrestart
+  ansible.builtin.apt:
+    # PLURAL package name. The binary is singular — see the assert below.
+    name: "{{ hardening_updates_packages }}"
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Keep needrestart in report-only mode
+  # needrestart's shipped default is interactive, which under a
+  # non-interactive apt run either restarts services or stalls on a dialog.
+  # 'l' (list) keeps the apt-hook invocation reporting instead of acting —
+  # the same posture as Automatic-Reboot "false". Written as a drop-in so the
+  # packaged /etc/needrestart/needrestart.conf is left untouched.
+  ansible.builtin.copy:
+    # NOT `{{ ansible_managed }}` here. That variable is injected by the TEMPLATE
+    # module only; inside `copy: content:` it is simply undefined and the task
+    # fails with "'ansible_managed' is undefined" — which cannot be fixed by
+    # setting `ansible_managed` in ansible.cfg, because the value is never looked
+    # up on this code path. Verified on 2026-08-12.
+    content: |
+      # Managed by the Ansible role hardening_updates. Do not edit by hand.
+      # SOP Step 13.5 / hardening-spec §C7 — detect, do not act.
+      $nrconf{restart} = '{{ hardening_updates_needrestart_mode }}';
+    dest: "{{ hardening_updates_needrestart_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: hardening_updates_needrestart_mode | length > 0
+
+- name: Write the apt patching policy
+  ansible.builtin.template:
+    src: 52buzz-hardening.j2
+    dest: "{{ hardening_updates_conf_path }}"
+    owner: root
+    group: root
+    mode: "{{ hardening_updates_conf_mode }}"
+    # A syntactically broken file anywhere in apt.conf.d breaks EVERY apt
+    # operation on the host, so it is validated before it is installed. The
+    # dry run further down only runs once the file is already in place.
+    validate: apt-config --config-file %s dump
+
+- name: Enable and start the apt timers
+  # Installing the package is not the same as switching it on. On a stock noble
+  # image these are already enabled, which is exactly why the state is asserted
+  # rather than assumed.
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: "{{ hardening_updates_timers }}"
+
+- name: Check the unattended-upgrade binary exists
+  ansible.builtin.stat:
+    path: "{{ hardening_updates_binary }}"
+  register: hardening_updates_binary_stat
+
+- name: Assert the unattended-upgrade binary exists
+  # SOP Step 13.5 trap: the package is `unattended-upgrades` (plural) but the
+  # binary is `unattended-upgrade` (singular). A real existence test against a
+  # real path makes a missing binary read as a missing binary, instead of
+  # surfacing later as an unexplained non-zero exit from the dry run.
+  ansible.builtin.assert:
+    that:
+      - hardening_updates_binary_stat.stat.exists
+      - hardening_updates_binary_stat.stat.executable | default(false)
+    fail_msg: >-
+      {{ hardening_updates_binary }} is missing or not executable. The package
+      is 'unattended-upgrades' (plural); the binary is 'unattended-upgrade'
+      (singular) and the plural form is not reliably present. Confirm the
+      package installed before looking anywhere else.
+    success_msg: "{{ hardening_updates_binary }} present and executable"
+
+- name: Read the effective allowed origins
+  # The merged value apt itself will use, across every file in apt.conf.d.
+  ansible.builtin.command:
+    argv:
+      - apt-config
+      - dump
+      - Unattended-Upgrade::Allowed-Origins
+  register: hardening_updates_origins
+  changed_when: false
+  check_mode: false
+
+- name: Assert only security origins are allowed
+  # This is what a missing `#clear` in the template would break: apt.conf lists
+  # APPEND across files, and the package's own 50unattended-upgrades already
+  # lists the full release pocket. Universe/release pockets have no guaranteed
+  # security updates, so auto-patching from them buys reboots without safety
+  # (hardening-spec §C7).
+  vars:
+    # Strip the prefix and the suffix with two backreference-free replacements.
+    # A capture-group form here does NOT work: written as '\\1' in YAML the
+    # replacement reaches Python's `re` as an escaped backslash plus a literal
+    # "1", so every entry comes back as the string `\1` rather than the captured
+    # value — the assertion then fails with
+    #   Effective Allowed-Origins is ['\1']
+    # while the apt config on disk is perfectly correct. Verified 2026-08-12.
+    hardening_updates_effective_origins: >-
+      {{ hardening_updates_origins.stdout_lines
+         | select('match', '^Unattended-Upgrade::Allowed-Origins:: ')
+         | map('regex_replace', '^[^"]*"', '')
+         | map('regex_replace', '";?$', '')
+         | list }}
+    hardening_updates_expected_origins: >-
+      {{ hardening_updates_allowed_origins + hardening_updates_esm_origins }}
+  ansible.builtin.assert:
+    that:
+      - hardening_updates_effective_origins | length > 0
+      - hardening_updates_effective_origins | sort
+        == hardening_updates_expected_origins | sort
+      - hardening_updates_effective_origins
+        | reject('search', '-security$') | list | length == 0
+    fail_msg: >-
+      Effective Allowed-Origins is
+      {{ hardening_updates_effective_origins }}, expected
+      {{ hardening_updates_expected_origins }}. Check that
+      {{ hardening_updates_conf_path }} still begins with
+      '#clear Unattended-Upgrade::Allowed-Origins;' — apt.conf lists append, so
+      without it 50unattended-upgrades' non-security entries survive. Raw
+      apt-config output: {{ hardening_updates_origins.stdout_lines }}
+    success_msg: >-
+      Allowed-Origins limited to
+      {{ hardening_updates_effective_origins | join(', ') }}
+
+- name: Validate the patching policy with a dry run
+  # SOP Step 13.5 trap: the SOP's `... | tail -5` reports tail's exit status,
+  # not the upgrade command's, so a failure prints a cheerful 0. There is no
+  # pipeline and no shell here — argv runs the binary directly, so `rc` IS the
+  # command's own status by construction and pipefail has nothing to guard.
+  ansible.builtin.command:
+    argv:
+      - "{{ hardening_updates_binary }}"
+      - --dry-run
+      - --debug
+  register: hardening_updates_dry_run
+  changed_when: false
+  failed_when: hardening_updates_dry_run.rc != 0
+  check_mode: false
+
+- name: Assert the dry run succeeded
+  # Redundant with failed_when by design: the exit status of this command is
+  # the one signal Step 13.5 exists to make trustworthy, so it is asserted in
+  # the open rather than left implicit.
+  ansible.builtin.assert:
+    that:
+      - hardening_updates_dry_run.rc == 0
+    fail_msg: >-
+      unattended-upgrade --dry-run exited
+      {{ hardening_updates_dry_run.rc }} — patching is NOT working. Last lines:
+      {{ hardening_updates_dry_run.stdout_lines[-5:] | join(' | ') }}
+    success_msg: "unattended-upgrade --dry-run exited 0"
+
+- name: Show the tail of the dry run
+  # The `tail -5` the SOP prints, without borrowing tail's exit status.
+  ansible.builtin.debug:
+    msg: "{{ hardening_updates_dry_run.stdout_lines[-5:] }}"
+
+- name: Report services running against deleted libraries
+  # `-b` batch output, `-r l` list-only — explicit on the command line so the
+  # report-only posture holds even where the drop-in above was skipped. A
+  # package upgrade does not restart what is still mapping the old library
+  # (hardening-spec §C7). Reported, never acted on.
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/needrestart
+      - -b
+      - -r
+      - l
+  register: hardening_updates_needrestart
+  changed_when: false
+  failed_when: hardening_updates_needrestart.rc != 0
+  check_mode: false
+
+- name: Show the needrestart findings
+  ansible.builtin.debug:
+    msg: >-
+      {{ hardening_updates_needrestart.stdout_lines
+         | select('search', '^NEEDRESTART-(SVC|SESS|KSTA|KCUR|KEXP)')
+         | list }}
+
+- name: Check whether a reboot is pending
+  ansible.builtin.stat:
+    path: "{{ hardening_updates_reboot_required_path }}"
+  register: hardening_updates_reboot_required
+
+- name: Read the packages that asked for the reboot
+  ansible.builtin.slurp:
+    src: "{{ hardening_updates_reboot_required_pkgs_path }}"
+  register: hardening_updates_reboot_pkgs
+  when: hardening_updates_reboot_required.stat.exists
+  # The .pkgs companion file is not guaranteed to exist alongside the flag.
+  failed_when: false
+
+- name: Report the pending reboot
+  # Detected and reported only. This role never reboots: SOP Step 13.5 and
+  # hardening-spec §C7 both leave reboots to an operator, and on this host a
+  # reboot stops the relay.
+  vars:
+    hardening_updates_reboot_pkg_list: >-
+      {{ (hardening_updates_reboot_pkgs.content | default('') | b64decode).splitlines()
+         | select('truthy') | list }}
+  ansible.builtin.debug:
+    msg: >-
+      REBOOT REQUIRED on {{ inventory_hostname }} —
+      {{ hardening_updates_reboot_required_path }} exists. Requested by:
+      {{ hardening_updates_reboot_pkg_list | join(', ')
+         if hardening_updates_reboot_pkg_list | length > 0 else 'unrecorded' }}.
+      Schedule it; nothing in this role will do it for you.
+  when: hardening_updates_reboot_required.stat.exists
+
+- name: Report that no reboot is pending
+  ansible.builtin.debug:
+    msg: "No reboot pending ({{ hardening_updates_reboot_required_path }} absent)"
+  when: not hardening_updates_reboot_required.stat.exists

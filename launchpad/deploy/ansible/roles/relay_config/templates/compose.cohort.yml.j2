@@ -1,0 +1,45 @@
+{# Cohort-owned Compose override. Rendered to {{ buzz_compose_dir }}/compose.cohort.yml.
+ #
+ # Named compose.cohort.yml and NOT compose.override.yml deliberately: Docker
+ # auto-loads the latter for bare `docker compose` commands but upstream's run.sh
+ # passes an explicit -f list and would ignore it — giving two different stacks
+ # depending on which command someone typed. This name is never loaded
+ # automatically, so it is always explicit.
+ #
+ # Everything here is additive. deploy/compose/ stays untouched (AGENTS.md rule 1).
+-#}
+---
+services:
+  relay:
+    # Makes `{{ buzz_domain }}` resolve to the relay from inside the Docker
+    # network. Container DNS consults neither the guest's nor the host's
+    # /etc/hosts, and `.test` never resolves publicly — so without this alias
+    # nothing inside the network can reach the relay by the one name it accepts.
+    # The relay refuses any Host that is not its seeded community, so
+    # `relay:3000` is not a usable substitute.
+    networks:
+      buzz-net:
+        aliases:
+          - {{ buzz_domain }}
+{% if buzz_admin_host | length > 0 %}
+          - {{ buzz_admin_host | regex_replace(':[0-9]+$', '') }}
+{% endif %}
+
+  caddy:
+    # Point Caddy at the cohort-owned Caddyfile instead of upstream's four-line
+    # one. compose.caddy.yml mounts ./Caddyfile relative to the compose
+    # directory; this replaces that single entry.
+    #
+    # The volume list is REPLACED, not merged: Compose merges named volume lists
+    # by appending, which would leave both Caddyfiles mounted at the same
+    # container path and make the winner arbitrary. `!override` forces
+    # replacement (Compose >= 2.24.4; measured 2.40.3).
+    volumes: !override
+      - {{ buzz_cohort_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - buzz-caddy-data:/data
+      - buzz-caddy-config:/config
+    # A wedged reverse proxy takes the whole deployment offline, and on a 1.9 GiB
+    # host an unbounded proxy is a plausible OOM route to the relay dying with it.
+    mem_limit: 256m
+    security_opt:
+      - "no-new-privileges:true"

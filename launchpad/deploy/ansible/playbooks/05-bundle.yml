@@ -1,0 +1,29 @@
+---
+# Chunk 05 — compose bundle. Implements dev-deployment-SOP.md Step 6.
+#
+# Connects as the unprivileged `dev` account and escalates with sudo, like every
+# play in this tree. The reason is Step 13.3: hardening sets PermitRootLogin no,
+# so a play that reached the host as root would sever Ansible's own access
+# partway through the sequence. Using `dev` + become from the first chunk means
+# hardening changes nothing about how we reach the target.
+#
+# Requires two extra vars, both produced by one run of
+# launchpad/deploy/scripts/resolve-image-tag.sh on the control node:
+#
+#   ansible-playbook -i inventory/hosts.yml playbooks/05-bundle.yml \
+#     -e buzz_image=ghcr.io/block/buzz@sha256:<64 hex> \
+#     -e buzz_image_tag=ghcr.io/block/buzz:sha-<7> \
+#     -e buzz_sync_commit=<upstream commit>
+#
+# See runbooks/chunks/05-compose-bundle.md for the copy-paste form.
+
+- name: "Chunk 05 — deploy the Buzz compose bundle and record its image pin"
+  hosts: buzz_relay
+  become: true
+  gather_facts: true
+
+  roles:
+    # Plain role name: ansible/ansible.cfg sets `roles_path = roles`, and the
+    # `deploy` entrypoint cd's into ansible/ before invoking ansible-playbook so
+    # that config is picked up.
+    - role: compose_bundle

@@ -1,0 +1,326 @@
+---
+# Chunk 07 — SOP Steps 8 and 9, corrected for TLS.
+#
+# Brings the stack up and then verifies it in a way that can actually fail.
+# SOP Step 8.2 is emphatic about why that distinction matters: /health,
+# /_liveness and the NIP-11 document at / ALL return 200 even when the relay's
+# address is completely wrong. A relay that refuses every client passes all
+# three. Only a real WebSocket upgrade proves the community binding.
+
+- name: Bring the stack up
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file .env
+      {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }}
+      up -d --wait
+    chdir: "{{ buzz_compose_dir }}"
+  register: stack_up
+  # A converged stack prints "<container>  Running" for every long-lived service,
+  # so Started/Created/Recreated is the change signal.
+  #
+  # minio-init is EXCLUDED from that signal, and this is not a fudge. It is a
+  # one-shot (`restart: "no"`) that the relay depends on with
+  # `condition: service_completed_successfully`, so Compose re-runs it on EVERY
+  # `up` to re-satisfy that condition — it reports "Starting"/"Started"/"Exited"
+  # even when nothing about the deployment has changed. Its work is idempotent by
+  # construction (`mc mb --ignore-existing`, `mc anonymous set none`), so counting
+  # it would make this chunk permanently report changed=1 and destroy the
+  # convergence signal that ansible/README.md, Ruling 11 and issue #36 require.
+  # Verified on 2026-08-12: with minio-init filtered out, a second run reports
+  # changed=0 and every other service reports "Running".
+  changed_when: >-
+    stack_up.stderr_lines
+    | reject('search', 'minio-init')
+    | select('search', 'Started|Created|Recreated')
+    | list | length > 0
+
+- name: Collect container state
+  ansible.builtin.command:
+    cmd: docker compose --env-file .env {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }} ps -a --format json
+    chdir: "{{ buzz_compose_dir }}"
+  register: ps_json
+  changed_when: false
+
+- name: Parse container state
+  ansible.builtin.set_fact:
+    # `docker compose ps --format json` emits one JSON object per line, not an
+    # array, so parse line by line.
+    buzz_containers: "{{ ps_json.stdout_lines | map('from_json') | list }}"
+
+- name: Assert every long-running service is healthy (or running, if it declares no healthcheck)
+  # An EMPTY Health field means the service defines no healthcheck, not that it
+  # is unhealthy. Caddy is exactly that case: compose.caddy.yml declares none, so
+  # `docker compose ps` reports Health="" even though `up --wait` prints
+  # "Healthy" for it. Asserting Health == 'healthy' for every service therefore
+  # fails against a perfectly good stack — verified on 2026-08-12.
+  ansible.builtin.assert:
+    that:
+      - (item.Health == 'healthy') or (not item.Health and item.State == 'running')
+    fail_msg: "{{ item.Service }} is {{ item.State }} / health={{ item.Health | default('(none declared)', true) }}"
+    success_msg: "{{ item.Service }} {{ item.Health | default('running, no healthcheck', true) }}"
+  loop: "{{ buzz_containers | rejectattr('Service', 'equalto', 'minio-init') | list }}"
+  loop_control:
+    label: "{{ item.Service }}"
+
+- name: Assert minio-init completed successfully
+  # This one is SUPPOSED to be Exited — it does one job (create the bucket, set
+  # it non-public) and stops. `ps` without -a does not list it at all, which
+  # makes a failed run look like a missing container.
+  ansible.builtin.assert:
+    that:
+      - (buzz_containers | selectattr('Service', 'equalto', 'minio-init') | first).ExitCode == 0
+    fail_msg: minio-init did not exit 0; the media bucket may not exist
+
+- name: Assert no service publishes a port on all interfaces
+  # hardening-spec.md §B2 required control 4. ufw cannot save us here — Docker's
+  # rules are evaluated before it — so this assertion is the control.
+  # Caddy legitimately publishes 80 and 443; nothing else may publish anything.
+  ansible.builtin.assert:
+    that:
+      - item.Publishers | default([]) | selectattr('PublishedPort', 'ne', 0) | map(attribute='PublishedPort') | reject('in', [80, 443]) | list | length == 0
+    fail_msg: >-
+      {{ item.Service }} publishes an unexpected host port
+      ({{ item.Publishers | default([]) | map(attribute='PublishedPort') | list }}).
+      Only Caddy's 80/443 should be published; the relay's 3000 must be closed by
+      compose.caddy.yml's `ports: !reset []`.
+  loop: "{{ buzz_containers }}"
+  loop_control:
+    label: "{{ item.Service }}"
+
+# ------------------------------------------------------------------ community binding
+- name: Read the community host from the database
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file .env
+      {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }}
+      exec -T postgres psql -U buzz -d buzz -tAc "select host from communities;"
+    chdir: "{{ buzz_compose_dir }}"
+  register: community_rows
+  changed_when: false
+
+- name: Assert exactly one community, bound to the expected authority
+  ansible.builtin.assert:
+    that:
+      - community_rows.stdout_lines | map('trim') | select | list == [buzz_authority]
+    fail_msg: >-
+      communities table holds {{ community_rows.stdout_lines | map('trim') | select | list }},
+      expected exactly ['{{ buzz_authority }}']. RELAY_URL is wrong, or the relay
+      was started once with a different value and seeded a second community —
+      seeding is an idempotent INSERT keyed on lower(host), so old rows persist.
+    success_msg: "community bound to {{ buzz_authority }}"
+
+# ------------------------------------------------------------------ the test that can fail
+- name: WebSocket upgrade through Caddy with the correct Host
+  # THE --http1.1 IS LOAD-BEARING. Over TLS, curl negotiates HTTP/2 via ALPN, and
+  # HTTP/2 deleted the Connection/Upgrade mechanism — so the relay sees a plain
+  # GET, answers 200 with the NIP-11 document, and this check passes while
+  # proving nothing at all. Verified on 2026-08-12: identical request returns 101
+  # with --http1.1 and 200 without it.
+  #
+  # --resolve pins connection + SNI to the guest-side port (443); -H Host carries
+  # the authority the community was seeded with, including its :8443, which is
+  # what a browser on the host actually sends through the NAT forward.
+  # Capture ONLY the status code, never the body. A successful upgrade leaves the
+  # socket open and curl then emits raw WebSocket frame bytes, which are not
+  # valid UTF-8 — Ansible refuses to deserialize the result with "Refusing to
+  # deserialize an invalid UTF8 string value: ... surrogates not allowed" and the
+  # task fails even though the relay behaved perfectly. Hit on 2026-08-12.
+  # `-o /dev/null -w '%{http_code}'` reports 101 and discards the frames.
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sk
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --http1.1
+      - --max-time
+      - "8"
+      - --resolve
+      - "{{ buzz_domain }}:443:127.0.0.1"
+      - -H
+      - "Host: {{ buzz_authority }}"
+      - -H
+      - "Connection: Upgrade"
+      - -H
+      - "Upgrade: websocket"
+      - -H
+      - "Sec-WebSocket-Version: 13"
+      - -H
+      - "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA=="
+      - "https://{{ buzz_domain }}/"
+  register: ws_ok
+  changed_when: false
+
+- name: Assert the upgrade was accepted
+  ansible.builtin.assert:
+    that:
+      - ws_ok.stdout | trim == '101'
+    fail_msg: >-
+      Expected status 101, got '{{ ws_ok.stdout | trim | default('no response', true) }}'.
+      200 usually means HTTP/2 was negotiated and --http1.1 was dropped from the
+      command — HTTP/2 has no Connection/Upgrade mechanism, so the relay answered
+      a plain GET. 404 means RELAY_URL and the Host header disagree, i.e. the
+      community is bound to something other than {{ buzz_authority }}.
+    success_msg: "WebSocket upgrade accepted through Caddy (101)"
+
+- name: Relay refuses an unmapped Host (bypassing Caddy)
+  # Must bypass Caddy to observe this. Caddy rejects an unknown SNI at the TLS
+  # handshake (curl reports status 000), so the relay's own refusal is invisible
+  # from outside — a different layer failing for a different reason. Both are
+  # worth asserting; this one proves the community gate, not the proxy config.
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - buzz-prod_buzz-net
+      - curlimages/curl:latest
+      - -s
+      - --max-time
+      - "6"
+      - -H
+      - "Host: wrong.example.invalid"
+      - -H
+      - "Connection: Upgrade"
+      - -H
+      - "Upgrade: websocket"
+      - -H
+      - "Sec-WebSocket-Version: 13"
+      - -H
+      - "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA=="
+      - http://relay:3000/
+  register: ws_refused
+  changed_when: false
+
+- name: Assert the refusal is the community gate, not something else
+  ansible.builtin.assert:
+    that:
+      - "'no community is configured for this host' in ws_refused.stdout"
+    fail_msg: >-
+      Expected the relay to refuse an unmapped Host. Got:
+      {{ ws_refused.stdout | default('(empty)') }}. If this SUCCEEDS instead, the
+      relay is accepting arbitrary hosts and the tenant boundary is not being
+      enforced.
+    success_msg: unmapped Host refused by the relay
+
+# ------------------------------------------------------------------ front-ends
+- name: Probe the relay-served surfaces
+  # Both bundles ship inside the relay image (Dockerfile:145-152); nothing is
+  # built or copied. These four probes are SOP Step 9.4 re-pointed at Caddy.
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sk
+      - -o
+      - /dev/null
+      - -w
+      - "%{http_code}"
+      - --max-time
+      - "8"
+      - --resolve
+      - "{{ item.sni }}:443:127.0.0.1"
+      - -H
+      - "Host: {{ item.host }}"
+      - -H
+      - "Accept: {{ item.accept }}"
+      - "https://{{ item.sni }}{{ item.path }}"
+  register: surfaces
+  changed_when: false
+  loop:
+    - name: web bundle at /
+      sni: "{{ buzz_domain }}"
+      host: "{{ buzz_authority }}"
+      path: /
+      accept: text/html
+      expect: "200"
+    - name: NIP-11 document at /
+      sni: "{{ buzz_domain }}"
+      host: "{{ buzz_authority }}"
+      path: /
+      accept: application/nostr+json
+      expect: "200"
+    - name: admin API on the ordinary host must be refused
+      sni: "{{ buzz_domain }}"
+      host: "{{ buzz_authority }}"
+      path: /api/admin/v1/reports
+      accept: application/json
+      expect: "403"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Assert each surface answered as expected
+  ansible.builtin.assert:
+    that:
+      - item.stdout == item.item.expect
+    fail_msg: "{{ item.item.name }}: got {{ item.stdout }}, expected {{ item.item.expect }}"
+    success_msg: "{{ item.item.name }}: {{ item.stdout }}"
+  loop: "{{ surfaces.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Probe the admin surfaces when an admin host is configured
+  # Skipped entirely in production, where buzz_admin_host is empty on purpose so
+  # the relay never mounts /api/admin/v1 (hardening-spec.md §B1). The 200 below
+  # is UNAUTHENTICATED — the admin API's only credential is a matching Host
+  # header. That is acceptable on a loopback VM and is an information disclosure
+  # on a public host, which is exactly why the variable differs.
+  when: buzz_admin_host | length > 0
+  block:
+    - name: Probe admin dashboard and API
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -sk
+          - -o
+          - /dev/null
+          - -w
+          - "%{http_code}"
+          - --max-time
+          - "8"
+          - --resolve
+          - "{{ buzz_admin_sni }}:443:127.0.0.1"
+          - -H
+          - "Host: {{ buzz_admin_host }}"
+          - "https://{{ buzz_admin_sni }}{{ item }}"
+      register: admin_probe
+      changed_when: false
+      loop:
+        - /reports
+        - /api/admin/v1/reports
+
+    - name: Assert both admin surfaces answer 200 on the admin host
+      ansible.builtin.assert:
+        that:
+          - item.stdout == '200'
+        fail_msg: "admin {{ item.item }} returned {{ item.stdout }}, expected 200"
+      loop: "{{ admin_probe.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+# ------------------------------------------------------------------ fit
+- name: Read memory and swap
+  ansible.builtin.command: free -m
+  register: mem
+  changed_when: false
+
+- name: Assert swap is untouched
+  # The whole point of matching the VPS's 1.9 GiB is that memory problems show
+  # up here rather than in production. Measured baseline: ~570 MB at steady idle
+  # with swap never touched. Swap in use at idle is a genuine capacity finding —
+  # do NOT respond by giving the VM more RAM, which hides the thing you just
+  # found (SOP Step 15).
+  ansible.builtin.assert:
+    that:
+      - (mem.stdout_lines | select('match', '^Swap:') | first).split()[2] | int == 0
+    fail_msg: >-
+      Swap is in use at idle. Investigate with
+      `docker stats --no-stream --format "{{ '{{' }}.Name{{ '}}' }} {{ '{{' }}.MemUsage{{ '}}' }}"`
+      and compare against SOP Step 8.3's per-container figures.
+    success_msg: swap at 0
+
+- name: Report the footprint
+  ansible.builtin.debug:
+    msg: "{{ mem.stdout_lines }}"

@@ -1,0 +1,99 @@
+---
+# Chunk 10 — the dev-VM hardening subset. Implements SOP Step 13.
+#
+# SCOPE, STATED PLAINLY. Two things a reader must not misread:
+#
+# 1. This chunk knowingly OVERRIDES AGENTS.md rule 5, which says the firewall,
+#    SSH-policy, unattended-upgrades and service-identity roles are issues
+#    #29-#34 under PRD #5 and that writing them now puts #5's work ahead of #2's
+#    deadline. That was an explicit decision by the repo owner, not an oversight.
+#    The rule and the reasoning behind it are still sound; this is a deliberate
+#    exception with a named owner.
+#
+# 2. This is the DEV-VM SUBSET, not production parity. It covers SSH policy, an
+#    ingress firewall, kernel parameters, automatic security updates and the
+#    Docker daemon. It does NOT implement the rest of hardening-spec.md's
+#    baseline: DOCKER-USER rules, default-deny EGRESS, the split
+#    internal/external container networks (§B5), module blacklisting, systemd
+#    resource limits (§C6), auditd and sudo I/O logging (§C8), authenticated time
+#    (§C9), the MinIO service account (§B4), or Caddy rate limiting (§B9).
+#    Do not read a clean run here as "this host is production-hardened".
+#
+# ORDER MATTERS AND IS NOT ALPHABETICAL. Access before firewall: getting locked
+# out midway is the failure mode (hardening-spec.md Part F, step 6 before 7).
+#
+# TAKE A SNAPSHOT FIRST. Two of these plays can lock you out permanently:
+#   ./deploy snapshot buzz-working
+# On a VPS there is no snapshot — hardening-spec.md §C1 requires break-glass
+# (cloud serial console plus a sealed out-of-band credential) to exist and be
+# TESTED before this runs anywhere near production.
+
+- name: "Chunk 10 — apply the dev-VM hardening subset (SOP Step 13)"
+  hosts: buzz_relay
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    # SOP Step 13.2, and the single most important guard in this file. Ansible
+    # already connects as `dev` and escalates, so if this fails the play cannot
+    # have got this far — but assert it explicitly anyway, because the cost of
+    # being wrong is a machine nobody can reach.
+    - name: Prove unprivileged escalation works before removing root access
+      ansible.builtin.command: id -u
+      register: whoami_check
+      changed_when: false
+
+    - name: Assert we are escalating to root as the unprivileged user
+      ansible.builtin.assert:
+        that:
+          - whoami_check.stdout | trim == '0'
+          - ansible_user == buzz_admin_user
+        fail_msg: >-
+          Refusing to harden SSH. This play disables root login, so it must be
+          reached as '{{ buzz_admin_user }}' with working sudo — otherwise the next
+          connection has no way in. Current ansible_user is '{{ ansible_user }}'.
+
+  roles:
+    - role: hardening_ssh       # access first
+    - role: hardening_firewall  # then ingress
+    - role: hardening_kernel
+    - role: hardening_updates
+    - role: hardening_docker    # last: it recreates containers
+
+  post_tasks:
+    # Hardening that breaks the thing it hardens is not finished (SOP Step 13.8).
+    - name: Re-prove the stack still works after hardening
+      ansible.builtin.command:
+        argv:
+          - curl
+          - -sk
+          - -o
+          - /dev/null
+          - -w
+          - "%{http_code}"
+          - --http1.1
+          - --max-time
+          - "8"
+          - --resolve
+          - "{{ buzz_domain }}:443:127.0.0.1"
+          - -H
+          - "Host: {{ buzz_authority }}"
+          - "https://{{ buzz_domain }}/"
+      register: post_harden
+      changed_when: false
+
+    - name: Assert the relay is still serving
+      ansible.builtin.assert:
+        that:
+          - post_harden.stdout == '200'
+        fail_msg: >-
+          The relay stopped answering after hardening (got {{ post_harden.stdout }}).
+          Most likely the firewall or the Docker daemon restart. Restore the
+          buzz-working snapshot and bisect: `./deploy restore buzz-working`.
+
+    - name: Remind the operator to snapshot the hardened state
+      ansible.builtin.debug:
+        msg:
+          - "Hardening applied and the relay still answers."
+          - "Snapshot it:  ./deploy snapshot hardened"
+          - "Then run the full suite:  ./deploy verify"

@@ -1,0 +1,37 @@
+---
+# Chunk 06 — secrets and configuration. Implements SOP Step 7, corrected for TLS
+# per hardening-spec.md §A.3 and §B2.
+#
+# Connects as `dev` and escalates, like every play here: SOP Step 13.3 disables
+# root SSH, so a root-connected Ansible would sever its own access during
+# hardening.
+#
+# Everything secret is generated ON THE TARGET and appears in no tracked file
+# (AGENTS.md rule 3, issue #22). Secrets are GENERATE-ONCE: .env is written only
+# when absent, and later runs converge the non-secret lines in place. A rerun
+# that rotated BUZZ_RELAY_PRIVATE_KEY would make every event the relay ever
+# signed unverifiable, and there is no rotation path (hardening-spec.md §B8).
+#
+#   ./deploy run 06
+# or
+#   ansible-playbook playbooks/06-config.yml --limit dev-vm -e buzz_image=...
+
+- name: "Chunk 06 — generate secrets and render configuration (SOP Step 7)"
+  hosts: buzz_relay
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Require the image pin
+      ansible.builtin.assert:
+        that:
+          - buzz_image is defined
+          - buzz_image | length > 0
+        fail_msg: >-
+          buzz_image is unset. Chunk 05 records the pin it deployed in
+          /opt/buzz/compose/UPSTREAM_COMMIT; pass the same value here so the
+          key-generation container runs the relay build these config files were
+          written for. Resolve it with scripts/resolve-image-tag.sh.
+
+  roles:
+    - role: relay_config

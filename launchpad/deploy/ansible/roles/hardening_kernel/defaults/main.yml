@@ -1,0 +1,84 @@
+---
+# roles/hardening_kernel/defaults/main.yml
+#
+# Kernel parameters for the Buzz relay host.
+# Spec: dev-deployment-SOP.md Step 13.6 (the value set) and hardening-spec.md
+# sec-C5 (why the set is the full one, not the usual five).
+#
+# Every value is QUOTED as a string. The verify step compares what the running
+# kernel reports (always a string) against these, so keeping them strings here
+# means prod can extend the dict without an int-vs-string mismatch turning into
+# a false drift report. Quoting is also mandatory for `kernel.core_pattern`,
+# whose value starts with `|` — unquoted, YAML reads that as a block scalar.
+
+# NAME ORDER IS LOAD-BEARING HERE TOO — and in the OPPOSITE DIRECTION to sshd.
+#
+# systemd-sysctl merges /etc/sysctl.d, /run/sysctl.d and /usr/lib/sysctl.d and
+# sorts them by FILENAME, and for sysctl the LAST value applied wins (sshd keeps
+# the FIRST — see hardening_ssh). A file in /etc only masks a /usr/lib file of the
+# SAME name; different names are pure sort order.
+#
+# Ubuntu noble ships /usr/lib/sysctl.d/99-protect-links.conf with
+# `fs.protected_fifos = 1`. Our old name, 99-buzz-hardening.conf, sorts BEFORE it
+# ("99-b" < "99-p"), so protect-links was applied afterwards and won:
+# SOP Step 13.6 asks for 2, the host reported 1. Verified on 2026-08-12 — the
+# value came back as 1 with the old name and the role correctly refused to relax
+# the expectation.
+#
+# `zz-` puts us last. If you rename this, check nothing in /usr/lib/sysctl.d
+# sorts after the new name:
+#   ls /etc/sysctl.d /usr/lib/sysctl.d | sort
+hardening_kernel_conf_path: /etc/sysctl.d/99-zz-buzz-hardening.conf
+
+# The declared set. Rendered in this order into the conf file, so the grouping
+# comments below are the documentation for the file as well.
+hardening_kernel_sysctl:
+  # Hide kernel addresses and logs from unprivileged users, and switch off
+  # kernel features this host has no use for.
+  kernel.kptr_restrict: "2"
+  kernel.dmesg_restrict: "1"
+  kernel.yama.ptrace_scope: "1"
+  kernel.sysrq: "0"
+  kernel.kexec_load_disabled: "1"
+  kernel.perf_event_paranoid: "3"
+  kernel.unprivileged_bpf_disabled: "1"
+  net.core.bpf_jit_harden: "2"
+
+  # No core dumps. hardening-spec sec-B7: every Buzz secret
+  # (POSTGRES_PASSWORD, REDIS_PASSWORD, BUZZ_S3_SECRET_KEY,
+  # BUZZ_RELAY_PRIVATE_KEY, BUZZ_GIT_HOOK_HMAC_SECRET) lives in the relay
+  # process environment because upstream's compose.yml uses `env_file`, which
+  # hard rule 1 forbids editing. A core dump captures that environment, so
+  # `suid_dumpable=0` plus a `core_pattern` that discards the dump is the only
+  # control available at this layer (sec-C5 asks for both).
+  fs.suid_dumpable: "0"
+  kernel.core_pattern: "|/bin/false"
+
+  # Filesystem link protections.
+  fs.protected_symlinks: "1"
+  fs.protected_hardlinks: "1"
+  fs.protected_fifos: "2"
+  fs.protected_regular: "2"
+
+  # Network.
+  net.ipv4.conf.all.rp_filter: "1"
+  net.ipv4.tcp_syncookies: "1"
+  net.ipv4.conf.all.send_redirects: "0"
+  net.ipv4.conf.all.accept_redirects: "0"
+  net.ipv4.conf.all.accept_source_route: "0"
+  net.ipv4.conf.all.log_martians: "1"
+  net.ipv4.icmp_echo_ignore_broadcasts: "1"
+
+# Extension point for the VPS. Merged over `hardening_kernel_sysctl`, so
+# group_vars can add or override single keys without restating the whole dict
+# (a group_vars redefinition of `hardening_kernel_sysctl` REPLACES it wholesale)
+# and without editing the template.
+#
+# What must never go in here: net.ipv4.ip_forward. See the template header.
+hardening_kernel_sysctl_extra: {}
+
+# Mask apport before applying, because it rewrites `kernel.core_pattern` at
+# boot — after systemd-sysctl has run — which would silently undo the sec-B7
+# control on every reboot. Set false only on a host where something else owns
+# apport. See tasks/main.yml.
+hardening_kernel_disable_apport: true

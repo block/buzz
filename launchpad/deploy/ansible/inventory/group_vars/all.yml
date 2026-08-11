@@ -1,0 +1,102 @@
+---
+# Shared defaults for every target.
+#
+# Deliberate policy: the defaults here are the PRODUCTION-SAFE values, and
+# group_vars/dev.yml relaxes them for the throwaway VM. A target that forgets to
+# declare which group it belongs to therefore gets the closed configuration, not
+# the open one. Getting this the other way round is how a dev carve-out reaches a
+# public host.
+#
+# hardening-spec.md §A.2 lists the nine variables that legitimately differ
+# between dev and prod. Anything NOT in that list must be identical on both, and
+# adding a tenth needs a reason written down next to it.
+
+# ---------------------------------------------------------------- paths
+buzz_compose_dir: /opt/buzz/compose
+buzz_cohort_dir: /opt/buzz/cohort
+
+# The three-file invocation. compose.caddy.yml is NOT optional hardening — its
+# `ports: !reset []` is the only thing that stops the relay publishing port 3000,
+# and hardening-spec.md §B2 calls its omission from the SOP's restart command
+# "a bug in the current spec, not new scope". Every command that touches the
+# stack must pass all three, or it silently brings up a different stack.
+buzz_compose_files:
+  - compose.yml
+  - compose.caddy.yml
+  - compose.cohort.yml
+
+# ---------------------------------------------------------------- the nine (prod values)
+buzz_domain: ""                     # required; no sensible default exists
+buzz_relay_url: ""                  # required; see runbooks/relay-build-list.md
+buzz_tls_mode: acme                 # dev overrides to `internal`
+buzz_acme_email: ""                 # required when buzz_tls_mode == acme
+
+# Unset on purpose. hardening-spec.md §B1: the admin API's ONLY credential is a
+# matching Host header — no token, no Nostr auth, no membership check. Leaving
+# this empty makes buzz-relay skip mounting /api/admin/v1 entirely
+# (config.rs:910-937, router.rs:60), which removes the surface rather than
+# guarding it. Setting it on a public host is unauthenticated disclosure of
+# moderation reports and feedback attachments.
+buzz_admin_host: ""
+
+# hardening-spec.md §B6: upstream's compose.yml defaults this to false, which is
+# what upstream considers the production value. With it true, `run.sh upgrade`
+# can migrate the production schema as a side effect of pulling a newer image —
+# no backup gate, no dry run, no rollback.
+buzz_auto_migrate: false
+
+# hardening-spec.md §B9: the relay defaults to 10,000 connections, each buffering
+# up to 1,000 messages, on a host that idles at ~570 MB of 1.9 GiB. Set a
+# measured ceiling rather than inheriting that. Empty means "leave the relay's
+# own default", which is explicitly not good enough for prod — issue #39.
+buzz_max_connections: ""
+
+buzz_backup_target: ""
+buzz_log_target: journal
+
+# ---------------------------------------------------------------- derived addressing
+# Derivations, not new variables — everything here follows from buzz_relay_url, so
+# production needs no tenth entry in §A.2's list of nine.
+#
+# These live at GROUP scope rather than in a role's defaults because more than one
+# role needs them: relay_config renders them into .env and the Caddyfile, relay_up
+# and hardening's post-check assert against them. A role default is only in scope
+# while that role runs, so a copy in relay_config/defaults left relay_up failing
+# with "'buzz_authority' is undefined" — hit for real on 2026-08-12.
+
+# wss://buzz-vm.test:8443 -> https://buzz-vm.test:8443
+buzz_http_origin: >-
+  {{ buzz_relay_url | regex_replace('^wss://', 'https://') | regex_replace('^ws://', 'http://') }}
+
+# wss://buzz-vm.test:8443 -> buzz-vm.test:8443
+#
+# The authority the relay compares inbound Host headers against, after
+# normalize_host lowercases it and strips a trailing :443 or :80 and NOTHING else
+# (crates/buzz-core/src/tenant.rs:121). Dev therefore KEEPS its :8443 as part of
+# the community host; production's :443 is stripped to a bare domain.
+buzz_authority: "{{ buzz_relay_url | regex_replace('^wss?://', '') }}"
+
+# ---------------------------------------------------------------- host baseline
+# Ubuntu 24.04 archive, NOT Docker's own apt repo. Measured on this image:
+# docker.io 29.1.3, docker-compose-v2 2.40.3, containerd 2.2.1 — well clear of
+# the 2.24.4 floor the `!reset` tag needs. One trusted repo means Docker security
+# patches ride Ubuntu's stream and the `-security` origin in chunk 10 covers
+# them; a third-party repo needs its own GPG key on a host about to be hardened
+# AND its own Unattended-Upgrade::Allowed-Origins entry, or Docker silently stops
+# being patched. See hardening-spec.md lines 34-43, which deletes the
+# contradicting Design rule 3 in ansible/README.md.
+docker_packages:
+  - docker.io
+  - docker-compose-v2
+  - containerd
+docker_compose_min_version: "2.24.4"
+
+# The unprivileged account Ansible connects as, and the sshd file cloud-init
+# wrote to keep the VM deliberately insecure. Chunk 10 deletes the latter by
+# name — if virtual-box/build-vps-clone.sh renames it, this must change too, or
+# hardening reports success and does nothing (hardening-spec.md §C2).
+buzz_admin_user: dev
+sshd_parity_globs:
+  - /etc/ssh/sshd_config.d/01-dev-parity.conf
+  - /etc/ssh/sshd_config.d/01-vps-parity.conf   # the pre-2026-08-12 name
+sshd_hardening_conf: /etc/ssh/sshd_config.d/00-hardening.conf

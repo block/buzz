@@ -1,0 +1,78 @@
+---
+# membership — defaults
+#
+# Implements SOP Step 11 ("Approve people so they can connect",
+# runbooks/dev-deployment-SOP.md) and the required control in hardening-spec sec-B13.
+#
+# The roster is the relay's access control list. Everything in this file exists to keep two
+# properties true: the list ends up exactly as intended, and getting there cannot corrupt the
+# kind:13534 roster event.
+
+# ---------------------------------------------------------------- what to approve
+#
+# List of {pubkey, role}. Empty by default, so a target that never declares a roster is a no-op
+# rather than a surprise.
+#
+# WHERE TO PUT THE REAL LIST. Not here, and not in group_vars: AGENTS.md rule 2 keeps keys and
+# identities out of tracked files. Pass a file that lives outside the repository:
+#
+#   ansible-playbook playbooks/09-members.yml --limit dev-vm -e @"$HOME"/buzz-roster.yml
+#
+# (The gitignored `ansible/inventory/hosts.local.yml` also works, but only for runs that name it
+# with `-i` — ansible.cfg points `inventory` at the single file inventory/hosts.yml, so a second
+# inventory file is not read implicitly.) The file looks like:
+#
+#   buzz_members:
+#     - pubkey: "<64-char lowercase hex public key>"
+#       role: member
+#     - pubkey: "<64-char lowercase hex public key>"
+#       role: admin
+#
+# PUBKEYS MUST BE 64-CHARACTER HEX, not `npub1…`. buzz-admin accepts either form, but it prints and
+# stores hex, so hex is the only form this role can compare against `./run.sh list-members` output —
+# and comparing is what makes the role idempotent (see tasks/main.yml). There is no safe converter
+# on this path: `remove-member` would print the hex, but running it as a probe can delete a member.
+# Convert with any Nostr client's key export or `nak decode npub1…` before putting it here.
+buzz_members: []
+
+# Roles buzz-admin will accept. `owner` is rejected by the CLI itself
+# (crates/buzz-admin/src/main.rs validate_role) — the owner comes from RELAY_OWNER_PUBKEY in .env at
+# relay startup, so the owner's key must NOT appear in buzz_members.
+membership_allowed_roles:
+  - member
+  - admin
+
+# ---------------------------------------------------------------- where the commands run
+# Upstream's own wrapper, called rather than reimplemented (ansible/README.md Design rule 1).
+# `run.sh add-member` / `list-members` shell out to `docker compose exec relay buzz-admin …`, so the
+# stack must be up and the relay must have started successfully at least once.
+membership_compose_dir: "{{ buzz_compose_dir | default('/opt/buzz/compose') }}"
+membership_run_sh: "{{ membership_compose_dir }}/run.sh"
+
+# ---------------------------------------------------------------- the serialisation controls
+#
+# READ hardening-spec sec-B13 BEFORE CHANGING EITHER OF THESE.
+#
+# Seconds of quiet between two adds. SOP Step 11's floor is 1 ("adding several at once — or in a
+# loop without a `sleep 1` — can corrupt the membership record because entries share a timestamp").
+# 2 is used here for margin on a 1-vCPU host where the pause is free. A task in tasks/main.yml
+# asserts this is >= 1; do not set it to 0.
+membership_add_pause_seconds: 2
+
+# Cross-process guard. `throttle: 1` plus the pause above serialise the adds *this* run makes; the
+# lock also serialises against a second ansible-playbook run or a hand-typed `./run.sh add-member`
+# happening at the same time. buzz-admin's own `custom_created_at = max(now, newest + 1s)` bump
+# defeats same-second domination for SERIAL invocations only and is explicitly documented as not
+# serialising concurrent CLI processes (crates/buzz-admin/src/main.rs module docs).
+membership_lock_file: /var/lock/buzz-roster.lock
+membership_lock_wait_seconds: 120
+
+# ---------------------------------------------------------------- parsing and reporting
+# `./run.sh list-members` prints `pubkey role added_by created_at`, column-padded. Only the FIRST
+# token of a line is the member's key — `added_by` is a pubkey too, so a whole-output hex scan would
+# treat an adder as a member and silently skip approving someone.
+membership_roster_line_re: '^[0-9a-f]{64}[ \t]'
+
+# Print the final roster in the play output, so the evidence hardening-spec Part F assertion 19
+# ("Roster matches intent") asks for does not need a second ssh session.
+membership_show_roster: true

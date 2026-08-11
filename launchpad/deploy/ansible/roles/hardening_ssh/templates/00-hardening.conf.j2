@@ -1,0 +1,32 @@
+# Managed by the Ansible role hardening_ssh. Do not edit by hand.
+#
+# SOP Step 13.3 / hardening-spec.md §C2. The NAME of this file is part of the
+# control: sshd keeps the FIRST value it finds for a keyword and
+# {{ hardening_ssh_dropin_dir }}/*.conf is read in NAME ORDER, so this must sort
+# ahead of 50-cloud-init.conf and 60-cloudimg-settings.conf. Confirmed present on
+# this image 2026-08-12, with 60- setting `PermitRootLogin prohibit-password`.
+# Renaming this file to 99-* silently disables every line below.
+#
+# Rendered from a template rather than assembled into a string, deliberately.
+# An earlier version joined the policy lines with `join('\n')` inside a YAML block
+# scalar; the escape did not survive, every directive ran together separated by a
+# literal backslash-n, and sshd rejected the file with
+#   unsupported option "no\nKbdInteractiveAuthentication"
+# A template has real newlines and no escaping layer to get wrong.
+{% for key, value in hardening_ssh_policy | dictsort %}
+{{ key }} {{ value }}
+{% endfor %}
+{% if hardening_ssh_allow_users | length > 0 %}
+{# Must include the account Ansible connects as, or this play severs its own
+ # access on the next run. The role asserts that separately. #}
+AllowUsers {{ hardening_ssh_allow_users | join(' ') }}
+{% endif %}
+{% if hardening_ssh_ciphers | length > 0 %}
+Ciphers {{ hardening_ssh_ciphers | join(',') }}
+{% endif %}
+{% if hardening_ssh_macs | length > 0 %}
+MACs {{ hardening_ssh_macs | join(',') }}
+{% endif %}
+{% if hardening_ssh_kex_algorithms | length > 0 %}
+KexAlgorithms {{ hardening_ssh_kex_algorithms | join(',') }}
+{% endif %}

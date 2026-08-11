@@ -1,0 +1,33 @@
+// {{ ansible_managed }}
+// Buzz host patching policy — SOP Step 13.5, hardening-spec §C7.
+// Comments here are `//` only: `#clear` below is an apt directive, not a
+// comment, and mixing `#` comments in invites a misread of it.
+
+// apt.conf LISTS APPEND across apt.conf.d files — they do not replace. The
+// unattended-upgrades package ships 50unattended-upgrades with the release
+// pocket (`${distro_id}:${distro_codename}`) and the ESM origins already in
+// Allowed-Origins, and 50 sorts before 52, so without this #clear our block
+// would ADD to that list and the "-security only" policy would silently not
+// hold. `unattended-upgrade --dry-run --debug` prints the effective list on
+// its "Allowed origins are:" line — that is where to confirm it.
+#clear Unattended-Upgrade::Allowed-Origins;
+
+Unattended-Upgrade::Allowed-Origins {
+{% for origin in hardening_updates_allowed_origins %}
+        "{{ origin }}";
+{% endfor %}
+{% for origin in hardening_updates_esm_origins %}
+        "{{ origin }}";
+{% endfor %}
+};
+
+// Reboots are orchestrated, not a side effect of patching.
+Unattended-Upgrade::Automatic-Reboot "{{ hardening_updates_automatic_reboot }}";
+
+// Scalars are last-wins, so these override 20auto-upgrades without a #clear.
+// apt-daily.timer / apt-daily-upgrade.timer only run apt.systemd.daily; these
+// are what make that run fetch lists and apply upgrades. Enabling the timers
+// without these gets you a scheduler with nothing scheduled.
+APT::Periodic::Update-Package-Lists "{{ hardening_updates_periodic_update_lists }}";
+APT::Periodic::Download-Upgradeable-Packages "{{ hardening_updates_periodic_download }}";
+APT::Periodic::Unattended-Upgrade "{{ hardening_updates_periodic_unattended_upgrade }}";

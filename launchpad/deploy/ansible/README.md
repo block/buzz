@@ -28,8 +28,15 @@ Three things it settled that the roles must reproduce:
   auto-loads the latter for bare `docker compose` commands but `run.sh` passes explicit `-f` and
   would ignore it, giving two different stacks depending on the command used.
 - **`run.sh` cannot bring up that stack.** Its `-f` list is hardcoded with no extension hook, so the
-  role invokes `docker compose --env-file .env -f compose.yml -f compose.cohort.yml up -d --wait`
-  and must replicate `require_env`'s no-`CHANGE_ME` check itself, since it loses it.
+  role invokes the compose command directly and must replicate `require_env`'s no-`CHANGE_ME` check
+  itself, since it loses it. **The invocation takes THREE files:**
+  ```
+  docker compose --env-file .env -f compose.yml -f compose.caddy.yml -f compose.cohort.yml up -d --wait
+  ```
+  An earlier version of this line omitted `compose.caddy.yml`, which is exactly the defect
+  `hardening-spec.md` §B2 describes: its `ports: !reset []` is the only thing that stops the relay
+  publishing port 3000, and `ufw` cannot close a Docker-published port. The canonical list lives in
+  `inventory/group_vars/all.yml` as `buzz_compose_files` — read it from there rather than retyping it.
 - **Env-var ordering is load-bearing.** `BUZZ_ADMIN_WEB_DIR` is validated at relay startup against
   `index.html` *inside the container*, so mounts must exist before the variable is set or the relay
   crash-loops on a config error. Also `BUZZ_SERVE_GIT_WEB_GUI=true` is what makes the web bundle
@@ -54,9 +61,15 @@ unattended-upgrades, service identities. Those are #29–#34 under PRD #5. Writi
 2. **Generate `.env` secrets on the target when absent.** Never template them from control-node
    vars, never commit them. Satisfies #22's "generated on the host and appear in no tracked file"
    without pre-empting ADR #25's secret-storage decision.
-3. **Install Docker from Docker's own apt repo**, not `docker.io`/`docker-compose-v2`. Compose
-   must be ≥ 2.24.4 for the `!reset` tag in `compose.caddy.yml`; Ubuntu 24.04's archive version
-   sits close to that line and varies with updates. The point is a known, current version.
+3. ~~**Install Docker from Docker's own apt repo**, not `docker.io`/`docker-compose-v2`.~~
+   **DELETED 2026-08-12.** This rule contradicted the "Decided during that pass" paragraph above it
+   and every role in the tree, and it was wrong on the facts: the Ubuntu 24.04 archive ships Compose
+   **2.40.3**, measured on the VM, well clear of the 2.24.4 floor the `!reset` tag needs. Keeping to
+   one trusted repo means Docker patches ride Ubuntu's security stream and chunk 10's `-security`
+   origin covers them; a third-party repo needs its own GPG key on a host about to be hardened *and*
+   its own `Unattended-Upgrade::Allowed-Origins` entry, or Docker silently stops being patched —
+   the failure mode that looks fine for months. See `hardening-spec.md` lines 34-43, which called for
+   this deletion.
 4. **`RELAY_URL` is the variable that matters.** It alone decides which community the relay seeds
    and therefore which `Host` headers it accepts — there is no seeding command. See
    `../runbooks/relay-build-list.md` before writing the `compose-bundle` role.
@@ -71,11 +84,26 @@ gitignored:
 all:
   children:
     buzz_relay:
-      hosts:
-        vps:
-          ansible_host: <cohort VPS address>
-          ansible_user: root
+      children:
+        prod:
+          hosts:
+            vps:
+              ansible_host: <cohort VPS address>
 ```
+
+**Do not set `ansible_user: root` here** — an earlier version of this template did. Every play
+connects as the unprivileged deploy account and escalates with sudo, because chunk 10 sets
+`PermitRootLogin no`; a root-connected inventory severs Ansible's own access partway through
+hardening and every later chunk fails with a permission error that looks nothing like its cause.
+`inventory/hosts.yml` sets `ansible_user` and `ansible_become` on the `buzz_relay` group, so a host
+added under it inherits them. It does **not** inherit the dev group's
+`StrictHostKeyChecking=no` — that is in `ansible.cfg` and must not be carried to production, where
+host-key verification is the control telling you you are talking to your own server.
+
+A `prod` group also needs `inventory/group_vars/prod.yml` supplying the five values
+`group_vars/all.yml` deliberately leaves empty (`buzz_domain`, `buzz_relay_url`, `buzz_acme_email`,
+`buzz_max_connections`, `buzz_backup_target`). That file does not exist yet — no play can run against
+a VPS until it does.
 
 Run against one target at a time and rehearse on the VM first:
 

@@ -1,0 +1,50 @@
+---
+# roles/docker/defaults/main.yml — fallbacks only.
+#
+# `docker_packages`, `docker_compose_min_version` and `buzz_admin_user` are ALSO
+# declared in ../../group_vars/all.yml, which outranks role defaults. That file is
+# the operative source; the values here are byte-identical copies so the role
+# still works when it is run standalone (for example `ansible-playbook
+# playbooks/04-docker.yml -i some-other-inventory` with no group_vars). If you
+# change one, change both, or the standalone path silently installs something
+# different from the chunked path.
+
+# Ubuntu 24.04 archive, NOT Docker's own apt repo. hardening-spec.md lines 34-43:
+# the archive ships Compose 2.40.3, well clear of the 2.24.4 floor, so the version
+# argument for a third-party repo does not hold — and a third-party repo means an
+# extra GPG key plus its own Unattended-Upgrade::Allowed-Origins entry on a host
+# about to be hardened, or Docker quietly stops receiving patches. This is why
+# ansible/README.md's Design rule 3 (which said the opposite) is being deleted.
+docker_packages:
+  - docker.io
+  - docker-compose-v2
+  - containerd
+
+# The floor that `ports: !reset []` in deploy/compose/compose.caddy.yml needs.
+# Older Compose does not error on the `!reset` tag — it ignores it, and the relay
+# is republished on 0.0.0.0:3000 past ufw (hardening-spec.md §B2). Measured on the
+# noble cloud image: 2.40.3.
+docker_compose_min_version: "2.24.4"
+
+# Accounts added to the `docker` group. See the §B7 comment in tasks/main.yml
+# before adding anyone: this group is root-equivalent.
+docker_group_members:
+  - "{{ buzz_admin_user | default('dev') }}"
+
+# systemd units this role owns. Deliberately short: Docker cannot run without
+# containerd, and everything else about the daemon — /etc/docker/daemon.json,
+# `no-new-privileges`, `icc: false`, the network split — is hardening-spec.md §C10
+# and §B5, owned by the hardening chunk, not by this one.
+docker_service_units:
+  - containerd
+  - docker
+
+# apt behaviour. `cache_valid_time` keeps reruns from re-fetching indexes for no
+# reason; a pure cache refresh does not report `changed`, so this costs no
+# convergence either way.
+docker_apt_cache_valid_time: 3600
+
+# cloud-init's own apt work and (after the hardening chunk) unattended-upgrades
+# both take the dpkg lock. Ansible's default 60s wait is not always enough on a
+# VM that booted seconds ago. See the chunk doc's Traps.
+docker_apt_lock_timeout: 300

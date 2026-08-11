@@ -1,0 +1,142 @@
+---
+# compose_bundle — dev-deployment-SOP.md Step 6.
+#
+# Copies the seven upstream deployment files onto the target and records what
+# they were paired with. It does NOT clone the fork into the VM: SOP Step 6's
+# preamble is explicit that ~460 MB of source and ~30 Rust crates on 1 vCPU /
+# 2 GB either takes hours or runs out of memory. The prebuilt image exists so
+# the target never needs a compiler, so the payload here is ~32 KB of YAML.
+#
+# No task in this role runs a shell or a command, which is what makes the
+# convergence requirement (ansible/README.md "Convergence", Ruling 11) trivially
+# true: given the same inputs, a second run reports zero changed.
+
+- name: Assert the image pin was supplied
+  ansible.builtin.assert:
+    that:
+      # default() on the length check too: an undefined variable inside a
+      # condition aborts with Ansible's own message and swallows fail_msg.
+      - buzz_image is defined
+      - buzz_image | default('') | string | length > 0
+    fail_msg: >-
+      buzz_image is unset and this role deliberately does not guess one. A wrong
+      image silently pairs a relay binary with configuration it was not built
+      against (SOP Step 6.1). Resolve the pin on the control node with
+      launchpad/deploy/scripts/resolve-image-tag.sh and pass it, together with
+      the sync point it reported, as extra vars — see
+      launchpad/deploy/runbooks/chunks/05-compose-bundle.md.
+    success_msg: "image pin supplied: {{ buzz_image | default('') }}"
+    quiet: true
+
+- name: Assert the upstream sync point was supplied
+  ansible.builtin.assert:
+    that:
+      - buzz_sync_commit is defined
+      - buzz_sync_commit | default('') | string | length >= 7
+    fail_msg: >-
+      buzz_sync_commit is unset. SOP Step 6.3 records the upstream commit the
+      bundle came from; without it UPSTREAM_COMMIT cannot tell a reviewer which
+      source tree produced the files on disk. resolve-image-tag.sh prints it on
+      its "# sync point:" line.
+    quiet: true
+
+- name: Assert the image reference is well formed
+  ansible.builtin.assert:
+    that:
+      - buzz_image is match('^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]+)$')
+    fail_msg: >-
+      buzz_image ({{ buzz_image }}) is neither registry/repo:tag nor
+      registry/repo@sha256:<64 hex>. A truncated digest here would otherwise be
+      written into .env and only fail at bring-up, several steps later.
+    quiet: true
+
+# hardening-spec §B12 item 1: pin one step further than the SOP, to a digest.
+- name: Assert the pin is an immutable digest
+  ansible.builtin.assert:
+    that:
+      - "'@sha256:' in buzz_image"
+    fail_msg: >-
+      buzz_image_require_digest is true but {{ buzz_image }} is a mutable tag.
+      A sha-<7> tag can be re-pushed to a different manifest (hardening-spec
+      §B12); resolve the digest and pin ghcr.io/block/buzz@sha256:<64 hex>.
+    quiet: true
+  when: buzz_image_require_digest | bool
+
+- name: Note that the pin is a mutable tag rather than a digest
+  ansible.builtin.debug:
+    msg: >-
+      {{ buzz_image }} is pinned by tag, not digest. Acceptable on the dev VM;
+      hardening-spec §B12 wants a @sha256: digest, and the production inventory
+      should set buzz_image_require_digest: true.
+  when:
+    - not (buzz_image_require_digest | bool)
+    - "'@sha256:' not in buzz_image"
+
+# Read-only, on the control node. `become: false` matters: the play escalates on
+# the target, and a delegated task would otherwise try to sudo on the operator's
+# own machine.
+- name: Stat the upstream bundle files in the control-node checkout
+  ansible.builtin.stat:
+    path: "{{ buzz_bundle_src }}/{{ item.name }}"
+  loop: "{{ buzz_bundle_files }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  register: buzz_bundle_src_stat
+
+- name: Assert every upstream bundle file is present
+  ansible.builtin.assert:
+    that:
+      - buzz_bundle_src_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing from {{ buzz_bundle_src }}:
+      {{ buzz_bundle_src_stat.results | rejectattr('stat.exists')
+         | map(attribute='item.name') | join(', ') }}.
+      This role copies the bundle from the control-node checkout; check that
+      buzz_repo_root resolved correctly and that deploy/compose/ is intact.
+    quiet: true
+
+- name: Create the bundle directories owned by root
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ buzz_base_dir }}"
+    - "{{ buzz_compose_dir }}"
+
+# SOP Step 6.2, minus its two traps: no scp port confusion, and ownership is
+# stated rather than inherited from the operator's host UID.
+- name: Copy the upstream deployment files
+  ansible.builtin.copy:
+    src: "{{ buzz_bundle_src }}/{{ item.name }}"
+    dest: "{{ buzz_compose_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop: "{{ buzz_bundle_files }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# SOP Step 6.3. Contains no timestamp on purpose — resolve-image-tag.sh emits a
+# "# Resolved <date>" line, and copying that in would make every rerun report a
+# changed task, breaking the convergence requirement for no informational gain.
+# The digest is recorded alongside the commit per hardening-spec §B12 item 2.
+- name: Record provenance in UPSTREAM_COMMIT
+  ansible.builtin.copy:
+    dest: "{{ buzz_compose_dir }}/UPSTREAM_COMMIT"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      source: {{ buzz_source_repo }}
+      upstream sync point: {{ buzz_sync_commit }}
+      image: {{ buzz_image }}
+      image tag: {{ buzz_image_tag | default('(none recorded)', true) }}
+      delivered: ansible role compose_bundle, copied from deploy/compose/ in the
+        control-node checkout per dev-deployment-SOP.md Step 6

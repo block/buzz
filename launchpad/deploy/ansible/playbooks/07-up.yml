@@ -1,0 +1,29 @@
+---
+# Chunk 07 — bring the stack up and verify it. SOP Steps 8 and 9, corrected for TLS.
+#
+# The verification here is the point of the chunk. SOP Step 8.2: /health,
+# /_liveness and the NIP-11 document at / all return 200 even when the relay's
+# address is completely wrong, so a relay that refuses every client passes all
+# three. Only a real WebSocket upgrade proves the community binding, and over TLS
+# that upgrade must be forced to HTTP/1.1 or curl negotiates HTTP/2 — which
+# deleted the Connection/Upgrade mechanism — and quietly answers 200.
+
+- name: "Chunk 07 — start the stack and prove it is usable (SOP Steps 8-9)"
+  hosts: buzz_relay
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Require the rendered configuration
+      ansible.builtin.stat:
+        path: "{{ buzz_compose_dir }}/.env"
+      register: env_present
+
+    - name: Fail clearly when chunk 06 has not run
+      ansible.builtin.assert:
+        that:
+          - env_present.stat.exists
+        fail_msg: "{{ buzz_compose_dir }}/.env is missing — run chunk 06 first."
+
+  roles:
+    - role: relay_up

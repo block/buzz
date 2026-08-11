@@ -1,0 +1,195 @@
+---
+# roles/docker/tasks/main.yml — SOP Step 5 ("Install Docker inside the VM").
+#
+# Rationale for every decision here lives in dev-deployment-SOP.md Step 5 and
+# hardening-spec.md; this file holds the operation, not the argument.
+#
+# SCOPE BOUNDARY — this role installs Docker and nothing else. It deliberately
+# does NOT write /etc/docker/daemon.json (`no-new-privileges`, `icc: false`,
+# `live-restore`, journald logging) and does not split `buzz-net`. Those are
+# hardening-spec.md §C10 and §B5 (issue #34), owned by the hardening chunk that
+# runs last. Keeping them apart means a bad daemon.json key cannot turn a working
+# Docker install into a dockerd that refuses to start, and it keeps the
+# `dockerd --validate`-gated restart in one place.
+#
+# IDEMPOTENCE — every task is either a declarative module with a target state, or
+# a read guarded by `changed_when: false`. A second run must report changed=0
+# (ansible/README.md "Convergence", Ruling 11, issue #36).
+
+- name: Assert the target is Ubuntu 24.04 or newer
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_major_version'] | int >= 24
+    fail_msg: >-
+      This role installs Docker from the Ubuntu archive
+      ({{ docker_packages | join(', ') }}), so it only makes sense on Ubuntu 24.04
+      or newer. Found {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}. Older releases ship a Compose
+      below the {{ docker_compose_min_version }} floor; do not fix that by adding
+      Docker's own apt repo (hardening-spec.md lines 34-43).
+    success_msg: >-
+      {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }} — archive packages apply.
+
+# MUST stay ahead of the apt task. SOP Step 5.2 wants the cost of the Docker
+# daemon itself visible (~296 MB -> ~449 MB, i.e. ~125 MB for dockerd +
+# containerd on a 1.9 GiB host). Sampled after the install this number does not
+# exist, and on a rerun it reads ~0 because Docker is already resident.
+- name: Sample memory in use before Docker is installed
+  ansible.builtin.command: free -m
+  register: docker_mem_before
+  changed_when: false
+  check_mode: false
+
+- name: Install Docker, the Compose plugin and containerd from the Ubuntu archive
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: "{{ docker_apt_cache_valid_time }}"
+    lock_timeout: "{{ docker_apt_lock_timeout }}"
+  # `state: present`, never `latest`. `latest` reports `changed` on any upstream
+  # version bump, which destroys the changed=0 convergence check and turns an
+  # unrelated rerun into an unplanned Docker upgrade under a running stack.
+  # Package updates are the hardening chunk's unattended-upgrades job
+  # (hardening-spec.md §C7), not this role's.
+
+- name: Ensure containerd and the Docker daemon are enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: "{{ docker_service_units }}"
+
+# ---------------------------------------------------------------- versions
+# SOP Step 5.1 and issue #18 both want the installed versions recorded. Read them
+# from the target rather than assuming what the archive shipped.
+
+- name: Read the installed Docker version
+  ansible.builtin.command: docker --version
+  register: docker_version_out
+  changed_when: false
+  check_mode: false
+
+- name: Read the installed Compose plugin version
+  ansible.builtin.command: docker compose version --short
+  register: docker_compose_version_out
+  changed_when: false
+  check_mode: false
+
+- name: Read the installed containerd version
+  ansible.builtin.command: containerd --version
+  register: containerd_version_out
+  changed_when: false
+  check_mode: false
+
+# Ubuntu's Compose reports a Debian-revisioned string such as
+# "2.40.3+ds1-0ubuntu1~24.04.1"; upstream's static binary reports "v2.24.5".
+# Reduce both to a bare x.y.z before comparing.
+- name: Reduce the Compose version to a comparable x.y.z
+  ansible.builtin.set_fact:
+    docker_compose_version: >-
+      {{ docker_compose_version_out.stdout | trim
+         | regex_replace('^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$', '\1') }}
+
+# Runs BEFORE the floor comparison on purpose: regex_replace returns its input
+# unchanged when nothing matches, and feeding an unparseable string to the
+# `version` test raises a Jinja error whose traceback says nothing about Compose.
+- name: Assert the Compose version string could be parsed
+  ansible.builtin.assert:
+    that:
+      - docker_compose_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      Could not read a version number out of `docker compose version --short`,
+      which returned "{{ docker_compose_version_out.stdout | trim }}". The
+      {{ docker_compose_min_version }} floor below cannot be checked, so this play
+      stops rather than continuing unverified.
+    success_msg: "Compose reports {{ docker_compose_version }}."
+
+- name: Assert Compose is new enough for compose.caddy.yml's "!reset" tag
+  ansible.builtin.assert:
+    that:
+      - docker_compose_version is version(docker_compose_min_version, '>=', version_type='loose')
+    fail_msg: >-
+      Docker Compose {{ docker_compose_version }} is below the required
+      {{ docker_compose_min_version }}. STOP — do not continue to the stack chunk.
+      deploy/compose/compose.caddy.yml uses `ports: !reset []` to remove the
+      relay's published port 3000 entirely. Compose older than
+      {{ docker_compose_min_version }} does not reject that tag, it IGNORES it: the
+      relay comes up published on 0.0.0.0:3000, in plaintext, past ufw, and the
+      stack looks healthy while doing it (hardening-spec.md §B2). The Ubuntu 24.04
+      archive ships 2.40.3, so seeing a lower number here means the packages did
+      not come from the noble archive. Fix the package source; do NOT add Docker's
+      own apt repo (hardening-spec.md lines 34-43).
+    success_msg: >-
+      Compose {{ docker_compose_version }} >= {{ docker_compose_min_version }} —
+      `ports: !reset []` will be honoured.
+
+# ---------------------------------------------------------------- docker group
+# hardening-spec.md §B7: THE `docker` GROUP IS ROOT-EQUIVALENT. Every secret the
+# stack has lives in the container environment (`env_file: .env` plus an
+# `environment:` block in upstream's compose.yml), so anyone in this group can
+# read POSTGRES_PASSWORD, REDIS_PASSWORD, BUZZ_S3_SECRET_KEY,
+# BUZZ_GIT_HOOK_HMAC_SECRET and BUZZ_RELAY_PRIVATE_KEY out of `docker inspect`,
+# and can mount `/` from a container and write to it. Membership is a CONVENIENCE
+# — it means an interactive operator can type `docker ps` without `sudo` — and it
+# is emphatically NOT a privilege reduction. Do not present the non-root workflow
+# as safer than the SOP's all-root one; it is the same privilege by another path.
+#
+# A group change only takes effect in a NEW login session: the group list is
+# stamped on a process at login and neither this task nor a `newgrp` in one shell
+# retroactively grants it to Ansible's existing connection. That is why every
+# later chunk still runs `become: true` instead of relying on this membership —
+# and it is the right dependency anyway, since the plays must also work on a VPS
+# where nobody is in the docker group at all.
+- name: Add the deploy account to the docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_group_members }}"
+
+# ---------------------------------------------------------------- record
+- name: Record the installed versions as facts
+  ansible.builtin.set_fact:
+    buzz_docker_versions:
+      docker: "{{ docker_version_out.stdout | trim }}"
+      compose: "{{ docker_compose_version_out.stdout | trim }}"
+      compose_comparable: "{{ docker_compose_version }}"
+      containerd: "{{ containerd_version_out.stdout | trim }}"
+    cacheable: true
+
+- name: Sample memory in use after Docker is installed
+  ansible.builtin.command: free -m
+  register: docker_mem_after
+  changed_when: false
+  check_mode: false
+
+- name: Compute the memory Docker costs
+  ansible.builtin.set_fact:
+    # `free -m` line 2 is "Mem: total used free shared buff/cache available";
+    # field 3 (index 2) is used MB, which is the number SOP Step 5.2 quotes.
+    buzz_docker_memory_mb:
+      used_before: "{{ docker_mem_before.stdout_lines[1].split()[2] | int }}"
+      used_after: "{{ docker_mem_after.stdout_lines[1].split()[2] | int }}"
+      delta: >-
+        {{ (docker_mem_after.stdout_lines[1].split()[2] | int)
+           - (docker_mem_before.stdout_lines[1].split()[2] | int) }}
+    cacheable: true
+
+- name: Report versions and the memory Docker costs
+  ansible.builtin.debug:
+    msg:
+      - "docker:     {{ buzz_docker_versions.docker }}"
+      - "compose:    {{ buzz_docker_versions.compose }} (compared as {{ buzz_docker_versions.compose_comparable }}, floor {{ docker_compose_min_version }})"
+      - "containerd: {{ buzz_docker_versions.containerd }}"
+      - "memory used: {{ buzz_docker_memory_mb.used_before }} MB -> {{ buzz_docker_memory_mb.used_after }} MB (delta {{ buzz_docker_memory_mb.delta }} MB)"
+      - >-
+        SOP Step 5.2 measured ~296 MB -> ~449 MB on a first install, ~125 MB of it
+        dockerd + containerd, against 1.9 GiB total. On a RERUN the delta reads ~0
+        because Docker was already running when the "before" sample was taken —
+        that is convergence, not a lost measurement.
+      - >-
+        Post to the issue, not the repo: AGENTS.md rule 4 — #18 and #20 produce
+        evidence, not repository files.

@@ -1,0 +1,93 @@
+---
+# roles/hardening_firewall/defaults/main.yml
+#
+# Ingress firewall for the Buzz relay host.
+# Spec: dev-deployment-SOP.md Step 13.4, hardening-spec.md §C3 (ingress) and §B2 (the
+# Docker/ufw trap and its required control 4).
+
+# ---------------------------------------------------------------------------
+# ufw policy
+# ---------------------------------------------------------------------------
+
+# Absolute path, deliberately. `ufw` lives in /usr/sbin, which is on sudo's secure_path on
+# noble — but a lockout-critical role should not depend on that being true, and a
+# "command not found" partway through a firewall sequence is the worst place to discover it.
+hardening_firewall_ufw_bin: /usr/sbin/ufw
+
+# Ports opened inbound. Made a variable specifically so prod can differ — per
+# hardening-spec §C3 prod is "default deny inbound; allow only 443 (and 80 for ACME
+# redirect, prod only) plus the mesh interface", and per §C1 prod eventually reaches
+# `ufw deny 22` once SSM / a WireGuard mesh is the access path. Override in group_vars
+# for the VPS; do not edit this default, which is the dev VM's list.
+#
+# 80 and 443 are here — and not in the SOP's literal Step 13.4 list — because the
+# TLS-corrected path runs Caddy in dev too (hardening-spec §A.3), so the guest listens
+# on 80/443 rather than publishing the relay on 3000. Guest-side ports stay 80/443;
+# the host forwards 8080->80 and 8443->443 because macOS forbids non-root binding
+# below 1024. The guest firewall therefore knows nothing about 8080/8443.
+hardening_firewall_allow_in:
+  - 22/tcp
+  - 80/tcp
+  - 443/tcp
+
+# Default policies, in `ufw default <policy> <direction>` wording.
+# NOTE: `allow outgoing` is the SOP Step 13.4 / §C3 state. hardening-spec §C4 wants
+# default-deny *egress* as well, but that is a separate control with its own allowlist
+# and is deliberately not implemented here — do not flip this to `deny` without §C4's
+# allowlist, or the host loses apt, ghcr.io and DNS in one task.
+hardening_firewall_default_incoming: deny
+hardening_firewall_default_outgoing: allow
+
+# Constant, not a knob: how `ufw default <policy>` records itself in /etc/default/ufw.
+# tasks/main.yml reads that file to decide whether the policy already matches, because
+# `ufw default …` prints "Default incoming policy changed to …" and exits 0 whether or
+# not anything changed, so its output cannot drive changed_when.
+hardening_firewall_policy_file_values:
+  deny: DROP
+  allow: ACCEPT
+  reject: REJECT
+
+# ---------------------------------------------------------------------------
+# hardening-spec §B2 required control 4 — no published port on a wildcard address
+# ---------------------------------------------------------------------------
+
+# Host addresses that mean "reachable from off-host" in `docker compose ps` output.
+# The empty string is included so an unexpected/absent URL fails closed rather than
+# passing the assert silently.
+hardening_firewall_wildcard_addresses:
+  - "0.0.0.0"
+  - "::"
+  - "[::]"
+  - "*"
+  - ""
+
+# The published ports that are ALLOWED to sit on a wildcard address, because they are the
+# intended public ingress. Everything else on a wildcard address is a finding.
+#
+# §B2 control 4 says "fails if any published port is bound to 0.0.0.0 or ::", and taken
+# literally that fails on a correct stack: upstream `compose.caddy.yml` publishes caddy as
+# "${CADDY_HTTP_PORT:-80}:80" and "${CADDY_HTTPS_PORT:-443}:443" with no host IP, so Docker
+# binds both 0.0.0.0 and ::. That is Caddy doing its job as the reverse proxy. §B2's own
+# nmap verification list (3000, 5432, 6379, 8080, 9000, 9001, 9090, 9102) deliberately omits
+# 80 and 443 for the same reason, and §C3's policy is "allow only 443 (and 80 for ACME
+# redirect, prod only)". So the control is read as "no port OTHER than the declared ingress".
+#
+# These are the GUEST-side published ports. Decision 4's host-side 8080/8443 forwards are a
+# VirtualBox NAT concern and never appear in `docker compose ps`.
+# Prod can narrow this — drop 80 if nothing needs the ACME/redirect vhost.
+hardening_firewall_public_ingress_ports:
+  - 80
+  - 443
+
+# Where the compose bundle landed (SOP Step 8.1). Defaults track a shared
+# `buzz_compose_dir` / `buzz_compose_files` if the compose-bundle role or group_vars
+# define one, so the two roles cannot drift apart.
+hardening_firewall_compose_dir: "{{ buzz_compose_dir | default('/opt/buzz/compose') }}"
+hardening_firewall_compose_env_file: "{{ buzz_compose_env_file | default('.env') }}"
+
+# The three-file invocation from hardening-spec §B2 required control 1. compose.caddy.yml
+# is what carries `relay: ports: !reset []`; omitting it is how the plaintext-relay-on-3000
+# path comes back.
+hardening_firewall_compose_files: >-
+  {{ buzz_compose_files
+     | default(['compose.yml', 'compose.caddy.yml', 'compose.cohort.yml']) }}

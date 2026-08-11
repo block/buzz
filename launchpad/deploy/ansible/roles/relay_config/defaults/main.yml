@@ -1,0 +1,49 @@
+---
+# buzz_http_origin and buzz_authority are deliberately NOT defined here. They live
+# in inventory/group_vars/all.yml, because relay_up and the hardening post-check
+# need them too and a role default is only in scope while its own role runs.
+
+# Every non-secret .env setting, in one place. Both the first-run template and
+# the every-run lineinfile convergence read this, so they cannot drift apart.
+buzz_env_settings:
+  BUZZ_IMAGE: "{{ buzz_image }}"
+
+  # --- addressing (the family that must agree, or clients are refused) ---
+  BUZZ_DOMAIN: "{{ buzz_domain }}"
+  RELAY_URL: "{{ buzz_relay_url }}"
+  BUZZ_MEDIA_BASE_URL: "{{ buzz_http_origin }}/media"
+  BUZZ_MEDIA_SERVER_DOMAIN: "{{ buzz_authority }}"
+  BUZZ_CORS_ORIGINS: "{{ buzz_http_origin }}"
+
+  # --- closed-relay posture, identical on both targets ---
+  BUZZ_REQUIRE_AUTH_TOKEN: "true"
+  BUZZ_REQUIRE_RELAY_MEMBERSHIP: "true"
+  BUZZ_ALLOW_NIP_OA_AUTH: "true"
+  BUZZ_GIT_CONFORMANCE_PROBE: "true"
+
+  # --- one of the nine: true in dev, false in prod (hardening-spec.md §B6) ---
+  BUZZ_AUTO_MIGRATE: "{{ buzz_auto_migrate | lower }}"
+
+  # --- TLS ---
+  # Set even though we pass an explicit -f list, so that anyone who reaches for
+  # upstream's run.sh gets Caddy too rather than a plaintext relay on 3000.
+  # hardening-spec.md §B2 required control 1.
+  BUZZ_COMPOSE_TLS: "true"
+  # Guest-side ports, unchanged from production. The host-side 8080/8443 forwards
+  # are a VirtualBox concern and appear nowhere in the container configuration.
+  CADDY_HTTP_PORT: "80"
+  CADDY_HTTPS_PORT: "443"
+
+  # --- front-ends ---
+  # Empty in prod, which makes the relay skip mounting /api/admin/v1 entirely
+  # (hardening-spec.md §B1).
+  BUZZ_ADMIN_HOST: "{{ buzz_admin_host }}"
+  BUZZ_SERVE_GIT_WEB_GUI: "{{ buzz_serve_git_web_gui | default(true) | lower }}"
+
+  # --- datastores (names only; passwords are generated on the target) ---
+  POSTGRES_DB: buzz
+  POSTGRES_USER: buzz
+  BUZZ_S3_BUCKET: buzz-media
+  BUZZ_S3_ADDRESSING_STYLE: path
+
+  RUST_LOG: "buzz_relay=info,buzz_db=info,buzz_auth=info,buzz_pubsub=info,tower_http=info"

@@ -1,0 +1,188 @@
+---
+# roles/hardening_kernel/tasks/main.yml
+#
+# Chunk 10 — kernel parameters. Implements dev-deployment-SOP.md Step 13.6 and
+# hardening-spec.md sec-C5 (sysctl portion only; sec-C5's module blacklist and
+# sec-C6's systemd sandboxing are separate roles).
+#
+# SCOPE NOTE — this role knowingly overrides ../../AGENTS.md hard rule 5, which
+# says hardening roles do not exist yet because they belong to PRD #5 (#31).
+# The decision for this deployment system is that automation scope is SOP
+# Steps 0-13, hardening included; only Steps 14-16 (the AI agent) are out.
+# Rule 5 is stale, not being ignored.
+#
+# All plays connect as `dev` with become, never root — SOP Step 13.3 disables
+# root SSH login, so a root-connected Ansible would cut its own access partway
+# through chunk 10. Nothing in this role needs a different identity.
+
+- name: Ensure the sysctl tooling is present
+  ansible.builtin.apt:
+    name: procps
+    state: present
+  # No update_cache here on purpose: the apt module reports `changed` when it
+  # refreshes the cache, which would break the zero-changed-on-rerun
+  # requirement (ansible/README.md "Convergence", Ruling 11, issue #36).
+
+- name: Resolve the effective parameter set
+  ansible.builtin.set_fact:
+    hardening_kernel_sysctl_effective: >-
+      {{ hardening_kernel_sysctl | combine(hardening_kernel_sysctl_extra) }}
+
+- name: Derive the key list and the expected values in a single stable order
+  ansible.builtin.set_fact:
+    hardening_kernel_keys: >-
+      {{ hardening_kernel_sysctl_effective.keys() | list }}
+    hardening_kernel_expected: >-
+      {{ hardening_kernel_sysctl_effective.values() | map('string') | list }}
+
+# --------------------------------------------------------------------------
+# apport must be neutralised BEFORE the parameters are applied.
+#
+# Ubuntu's apport rewrites kernel.core_pattern at boot, after systemd-sysctl
+# has read /etc/sysctl.d — so winning the filename-ordering fight is not
+# enough, and sec-B7's "a crash cannot spill the environment to disk" would be
+# false after every reboot while this role still reported success. Nothing else
+# in the SOP or hardening-spec owns apport (neither document mentions it), so
+# it is handled here.
+#
+# Masked rather than purged: masking is sufficient (a masked unit cannot be
+# started at boot or by another unit), reversible, and does not remove a
+# package the base image expects. `enabled:` is deliberately not set — apport
+# ships as a SysV script whose unit is generated at runtime, and `systemctl
+# disable` on a generated unit is not a reliable no-op; masking makes
+# enablement moot.
+# --------------------------------------------------------------------------
+
+- name: Collect service facts
+  ansible.builtin.service_facts:
+  when: hardening_kernel_disable_apport | bool
+
+- name: Mask and stop apport so it cannot rewrite kernel.core_pattern at boot
+  ansible.builtin.systemd_service:
+    name: apport.service
+    state: stopped
+    masked: true
+  when:
+    - hardening_kernel_disable_apport | bool
+    # Both keys checked on purpose: a SysV-generated unit is not always keyed
+    # with the `.service` suffix by service_facts, and a missed detection is
+    # exactly the failure this task exists to prevent.
+    - >-
+      'apport.service' in (ansible_facts.services | default({}))
+      or 'apport' in (ansible_facts.services | default({}))
+
+- name: Install the hardening sysctl drop-in
+  ansible.builtin.template:
+    src: 99-buzz-hardening.conf.j2
+    dest: "{{ hardening_kernel_conf_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: hardening_kernel_conf
+
+# --------------------------------------------------------------------------
+# Read the running kernel BEFORE applying, so the apply is gated on real state
+# rather than only on the file changing. Two cases need that:
+#   - stopping apport (above) writes `core` back into kernel.core_pattern, so
+#     the file can be already-correct while the kernel is not;
+#   - a manual `sysctl -w` on a live host must converge back on the next run.
+# --------------------------------------------------------------------------
+
+- name: Read the declared parameters back from the running kernel
+  ansible.builtin.command:
+    argv: "{{ ['sysctl', '-n'] + hardening_kernel_keys }}"
+  register: hardening_kernel_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert every declared parameter exists on this kernel
+  ansible.builtin.assert:
+    that:
+      - hardening_kernel_before.stdout_lines | length == hardening_kernel_keys | length
+    fail_msg: >-
+      `sysctl -n` returned {{ hardening_kernel_before.stdout_lines | length }}
+      values for {{ hardening_kernel_keys | length }} declared keys, so at least
+      one key does not exist on this kernel and the readback is misaligned.
+      sysctl said: {{ hardening_kernel_before.stderr | default('') | trim }}.
+      Most likely cause: a key whose LSM or feature is absent (for example
+      kernel.yama.ptrace_scope with the yama LSM not built in). Fix the declared
+      set for this kernel rather than skipping the check.
+    quiet: true
+
+- name: Apply the sysctl set
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - --system
+  register: hardening_kernel_apply
+  when: >-
+    hardening_kernel_conf is changed
+    or (hardening_kernel_before.stdout_lines | map('trim') | list) != hardening_kernel_expected
+  # Tolerate only the one-way latches. kernel.kexec_load_disabled and
+  # kernel.unprivileged_bpf_disabled cannot be lowered once raised, and on some
+  # kernels any write after latching returns EPERM — which would make
+  # `sysctl --system` exit non-zero on a host that is in exactly the desired
+  # state. The post-apply readback below is the authoritative gate, so a
+  # permission error on an already-correct value must not fail the run, while
+  # any other stderr still does.
+  failed_when:
+    - hardening_kernel_apply.rc is defined
+    - hardening_kernel_apply.rc != 0
+    - >-
+      hardening_kernel_apply.stderr_lines
+      | reject('search', '(?i)operation not permitted')
+      | reject('search', '(?i)permission denied')
+      | select()
+      | list
+      | length > 0
+
+- name: Read the parameters back after applying
+  ansible.builtin.command:
+    argv: "{{ ['sysctl', '-n'] + hardening_kernel_keys }}"
+  register: hardening_kernel_after
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the readback after applying is aligned
+  ansible.builtin.assert:
+    that:
+      - hardening_kernel_after.stdout_lines | length == hardening_kernel_keys | length
+    fail_msg: >-
+      Post-apply readback returned
+      {{ hardening_kernel_after.stdout_lines | length }} values for
+      {{ hardening_kernel_keys | length }} keys. sysctl said:
+      {{ hardening_kernel_after.stderr | default('') | trim }}
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Assert the running kernel matches every declared parameter
+  ansible.builtin.assert:
+    that:
+      - >-
+        (hardening_kernel_after.stdout_lines | map('trim') | list)[item.0]
+        == item.1
+    fail_msg: >-
+      {{ hardening_kernel_keys[item.0] }} is
+      '{{ (hardening_kernel_after.stdout_lines | map('trim') | list)[item.0] }}',
+      expected '{{ item.1 }}'. Something is overriding
+      {{ hardening_kernel_conf_path }} at runtime — a file that sorts after it
+      in /etc/sysctl.d, or a service that writes the value itself (apport for
+      kernel.core_pattern). Do not relax the expectation; find the writer.
+    quiet: true
+  loop: "{{ range(hardening_kernel_keys | length) | list | zip(hardening_kernel_expected) | list }}"
+  loop_control:
+    label: "{{ hardening_kernel_keys[item.0] }} = {{ item.1 }}"
+  when: not ansible_check_mode
+
+# Mirrors the two lines SOP Step 13.6 tells an operator to expect, so the
+# automated run and the manual procedure produce the same evidence.
+- name: Show the SOP Step 13.6 expected output
+  ansible.builtin.debug:
+    msg:
+      - "kernel.kptr_restrict = {{ (hardening_kernel_after.stdout_lines | map('trim') | list)[hardening_kernel_keys.index('kernel.kptr_restrict')] }}"
+      - "fs.suid_dumpable = {{ (hardening_kernel_after.stdout_lines | map('trim') | list)[hardening_kernel_keys.index('fs.suid_dumpable')] }}"
+  when:
+    - not ansible_check_mode
+    - "'kernel.kptr_restrict' in hardening_kernel_keys"
+    - "'fs.suid_dumpable' in hardening_kernel_keys"

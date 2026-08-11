@@ -6,12 +6,27 @@
 # Local deviation:     root disk is 10G (host has limited free space).
 set -euo pipefail
 
-VM="vps-clone-noble"
+VM="${VM:-buzz-dev}"
 CPUS=1
 RAM_MB=2048          # matches the VPS's 1.9Gi
-DISK_MB=10240        # 10G -- deliberately smaller than the VPS's 49.5G
+DISK_MB=20480        # 20G -- deliberately smaller than the VPS's 49.5G
 SSH_PORT=2222
 SWAP_BYTES=520093696 # 496 MiB, matching the VPS swap partition
+
+# Caddy fronts the relay on 80/443 inside the guest (compose.caddy.yml), and
+# `ports: !reset []` means the relay's own 3000 is never published. macOS will
+# not let a non-root process bind a port below 1024, so the host side of each
+# forward is a high port. The guest side is the real one, so the container
+# configuration is byte-identical to production's.
+HTTP_PORT=8080       # host 8080 -> guest 80
+HTTPS_PORT=8443      # host 8443 -> guest 443
+
+# Guest hostname and the non-root fallback account. These names are load-bearing
+# downstream: the hardening role removes the sshd parity file by name, and
+# hardening-spec.md Part D asserts on it. Keep all three in step.
+GUEST_HOSTNAME="${GUEST_HOSTNAME:-buzz-dev}"
+FALLBACK_USER="${FALLBACK_USER:-dev}"
+PARITY_CONF="01-dev-parity.conf"
 
 # Where the Ubuntu cloud image lives, and a scratch area for the cloud-init seed.
 # Both overridable. Get the OVA from:
@@ -21,11 +36,24 @@ SCRATCH="${SCRATCH:-$HOME/vm-images/.build-$VM}"
 VMDIR="$HOME/VirtualBox VMs/$VM"
 PUBKEY="$(cat "$HOME/.ssh/id_ed25519.pub")"
 
-# Console-fallback password hash for root and the fallback user. Deliberately NOT
+# Console-fallback password for root and the fallback user, used only from the
+# VirtualBox console window when the guest's network is broken. Deliberately NOT
 # committed: a hash in version control is a shared password on a root account,
-# and #17's definition of done forbids it. Generate your own:
-#   PWHASH="$(openssl passwd -6)" ./build-vps-clone.sh
-PWHASH="${PWHASH:?set PWHASH to a hash from: openssl passwd -6}"
+# and #17's definition of done forbids it.
+#
+# Supply your own with `PWHASH="$(openssl passwd -6)" ./build-vps-clone.sh`, or
+# let this generate a random one and drop it in a gitignored file next door.
+CREDS="${CREDS:-$HOME/vm-images/.${VM}-console-password}"
+if [ -z "${PWHASH:-}" ]; then
+  # No pipe into `head` here: with `set -o pipefail` a short-reading `head`
+  # SIGPIPEs its producer and kills the script with 141 before it logs a thing.
+  _pw="$(openssl rand -hex 12)"
+  PWHASH="$(printf '%s' "$_pw" | openssl passwd -6 -stdin)"
+  ( umask 077; printf 'vm: %s\nuser: root and %s\nconsole password: %s\n' \
+      "$VM" "$FALLBACK_USER" "$_pw" > "$CREDS" )
+  unset _pw
+  echo "generated a random console password -> $CREDS (mode 600, not in the repo)"
+fi
 
 [ -f "$OVA" ] || { echo "OVA not found: $OVA (set OVA=/path/to/noble.ova)"; exit 1; }
 
@@ -44,7 +72,10 @@ say "Locating imported disk"
 # The OVA attaches its disk to a SCSI controller, which is NOT controller 0
 # (that's the IDE one). Parse the actual attachment line -- "SCSI-0-0"="/path.vmdk"
 # -- so the controller name and port/device always come from reality.
-ATTACH="$(VBoxManage showvminfo "$VM" --machinereadable | grep -E '^"[^"]+-[0-9]+-[0-9]+"="[^"]*\.vmdk"$' | head -1)"
+# Take the first match with a parameter expansion rather than `| head -1`: head
+# exiting early SIGPIPEs grep, which `set -o pipefail` turns into a hard failure.
+ATTACH="$(VBoxManage showvminfo "$VM" --machinereadable | grep -E '^"[^"]+-[0-9]+-[0-9]+"="[^"]*\.vmdk"$' || true)"
+ATTACH="${ATTACH%%$'\n'*}"
 SLOT="${ATTACH%%=*}"; SLOT="${SLOT//\"/}"       # e.g. SCSI-0-0
 VMDK="${ATTACH#*=}"; VMDK="${VMDK//\"/}"
 DEV="${SLOT##*-}"; REST="${SLOT%-*}"
@@ -72,16 +103,16 @@ rm -rf "$SEED"; mkdir -p "$SEED"
 
 cat > "$SEED/meta-data" <<EOF
 instance-id: ${VM}-001
-local-hostname: vps-clone
+local-hostname: ${GUEST_HOSTNAME}
 EOF
 
 cat > "$SEED/user-data" <<EOF
 #cloud-config
-hostname: vps-clone
+hostname: ${GUEST_HOSTNAME}
 manage_etc_hosts: true
 
 # The VPS is accessed as 'ssh root@<ip>', so root login is enabled here to match.
-# 'jeff' is kept only as a fallback so a bad sshd edit can't lock you out.
+# '${FALLBACK_USER}' is kept only as a fallback so a bad sshd edit can't lock you out.
 disable_root: false
 
 users:
@@ -89,8 +120,8 @@ users:
   - name: root
     ssh_authorized_keys:
       - ${PUBKEY}
-  - name: jeff
-    gecos: Jeff
+  - name: ${FALLBACK_USER}
+    gecos: Dev
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
@@ -106,7 +137,7 @@ chpasswd:
     - name: root
       password: "${PWHASH}"
       type: hash
-    - name: jeff
+    - name: ${FALLBACK_USER}
       password: "${PWHASH}"
       type: hash
 
@@ -114,7 +145,11 @@ write_files:
   # sshd uses the FIRST value it obtains for a keyword, and the cloud image's
   # own 60-cloudimg-settings.conf sets 'PermitRootLogin prohibit-password'.
   # This file must sort BEFORE that one to win, hence the 01- prefix.
-  - path: /etc/ssh/sshd_config.d/01-vps-parity.conf
+  #
+  # The hardening role REMOVES this file by name. If you rename it here, rename
+  # it there too -- adding a hardening file alongside this one changes nothing,
+  # because sshd keeps the first value it read. See hardening-spec.md C2.
+  - path: /etc/ssh/sshd_config.d/${PARITY_CONF}
     permissions: '0644'
     content: |
       PermitRootLogin yes
@@ -154,13 +189,27 @@ VBoxManage modifyvm "$VM" \
   --audio-driver none \
   --graphicscontroller vmsvga \
   --vram 16
-VBoxManage modifyvm "$VM" --natpf1 delete "ssh" 2>/dev/null || true
-VBoxManage modifyvm "$VM" --natpf1 "ssh,tcp,127.0.0.1,${SSH_PORT},,22"
+say "Adding NAT port forwards"
+# Bound to 127.0.0.1 so nothing off this machine can reach the guest -- that is
+# what stands in for "no public listener" on the VPS (hardening-spec.md C1).
+for rule in "ssh,tcp,127.0.0.1,${SSH_PORT},,22" \
+            "http,tcp,127.0.0.1,${HTTP_PORT},,80" \
+            "https,tcp,127.0.0.1,${HTTPS_PORT},,443"; do
+  name="${rule%%,*}"
+  VBoxManage modifyvm "$VM" --natpf1 delete "$name" 2>/dev/null || true
+  VBoxManage modifyvm "$VM" --natpf1 "$rule"
+done
+VBoxManage showvminfo "$VM" --machinereadable | grep -i '^Forwarding'
 
 say "Starting headless"
 VBoxManage startvm "$VM" --type headless
 
 echo
 echo "VM '$VM' is booting. cloud-init takes ~60-90s on first boot."
-echo "SSH:  ssh -p ${SSH_PORT} root@127.0.0.1     # matches the VPS access pattern"
-echo "      ssh -p ${SSH_PORT} jeff@127.0.0.1     # fallback account"
+echo "SSH:   ssh -p ${SSH_PORT} root@127.0.0.1                 # matches the VPS access pattern"
+echo "       ssh -p ${SSH_PORT} ${FALLBACK_USER}@127.0.0.1                  # fallback account"
+echo "Relay: https://buzz-vm.test:${HTTPS_PORT}         # once the stack is up (chunk 07)"
+echo
+echo "Note: the guest hostname is '${GUEST_HOSTNAME}'; the relay's community host is"
+echo "'buzz-vm.test:${HTTPS_PORT}'. They are deliberately different things -- the community"
+echo "host comes from RELAY_URL alone. See runbooks/relay-build-list.md."

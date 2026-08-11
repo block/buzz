@@ -1,0 +1,109 @@
+{# Cohort-owned Caddyfile. Rendered to {{ buzz_cohort_dir }}/Caddyfile.
+ #
+ # Replaces upstream's four-line deploy/compose/Caddyfile, which is:
+ #     {$BUZZ_DOMAIN} { encode zstd gzip
+ #                      reverse_proxy relay:3000 }
+ #
+ # That has no timeouts, no body cap, no header policy, and — the dangerous part —
+ # no site block for the admin host, leaving it undefined how admin.<domain>
+ # reaches the relay. hardening-spec.md §B10: if someone solves that with a
+ # wildcard site block they have handed §B1's unauthenticated admin API to the
+ # internet.
+ #
+ # We do not edit upstream's copy (AGENTS.md hard rule 1). compose.cohort.yml
+ # overrides the bind mount to point at this file instead.
+ #
+ # EXPLICIT SITE BLOCKS ONLY. Never a wildcard. Adding a hostname here is a
+ # deliberate act.
+-#}
+{
+	# Caddy's own admin API on localhost:2019 can reconfigure the server. Nothing
+	# here uses it, so turn it off rather than leaving it listening inside the
+	# container network.
+	admin off
+{% if buzz_acme_email | default('', true) | length > 0 %}
+
+	# ACME account address. Emitted ONLY when non-empty: a bare `email` directive
+	# with no argument is a Caddyfile parse error, not an ignored blank —
+	# "wrong argument count or unexpected line ending after 'email'". Dev uses
+	# `tls internal` and has no ACME account, so the line is absent there.
+	email {{ buzz_acme_email }}
+{% endif %}
+}
+
+{# ---------------------------------------------------------------- shared policy #}
+(buzz_common) {
+	encode zstd gzip
+
+	# hardening-spec.md §B10 header set. Deliberately NOT setting a restrictive
+	# script-src/style-src: the relay serves two React bundles from inside its own
+	# image (/srv/buzz/web, /srv/buzz/admin-web) and a tight script policy is
+	# liable to break them. frame-ancestors and base-uri are the two that close
+	# real attacks (clickjacking, base-tag hijack) without touching how the
+	# bundles load. Tightening the rest requires testing against the bundles
+	# first — see the Traps in runbooks/chunks/07-up.md.
+	header {
+		Content-Security-Policy "frame-ancestors 'none'; base-uri 'none'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		# CSP frame-ancestors supersedes X-Frame-Options; kept only for clients
+		# too old to honour the former.
+		X-Frame-Options "DENY"
+		# Do not advertise the reverse proxy.
+		-Server
+	}
+
+	# Do NOT add header manipulation to the proxy directive below. The relay
+	# serves three different things on the same address — an HTML page to
+	# browsers, a NIP-11 JSON document to Nostr clients, and a WebSocket to the
+	# apps — so a naive header or routing rule can break one while the other two
+	# keep working, and nothing will tell you. Chunk 11 asserts all three.
+	reverse_proxy relay:3000 {
+		# Caddy v2 forwards the client's Host header unchanged, which is what the
+		# relay's community binding requires: it compares the inbound Host against
+		# the community seeded from RELAY_URL and fails closed on a mismatch
+		# (normalize_host, crates/buzz-core/src/tenant.rs:121). Rewriting Host
+		# here would reject every client while every health check still passed.
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
+
+{# ---------------------------------------------------------------- relay #}
+{{ buzz_domain }} {
+{% if buzz_tls_mode == 'internal' %}
+	# Caddy's local CA. Let's Encrypt cannot certify a name that does not
+	# publicly resolve, which is why dev uses this and prod uses ACME. The root
+	# must be trusted on the host or the desktop app may refuse the connection —
+	# chunk 03.
+	tls internal
+{% endif %}
+
+	import buzz_common
+}
+
+{# ---------------------------------------------------------------- admin #}
+{% if buzz_admin_host | length > 0 %}
+{#- Rendered ONLY when buzz_admin_host is non-empty, which group_vars/all.yml
+ #  leaves empty for production on purpose (§B1). Strip any :port — a Caddy site
+ #  address takes a hostname, while BUZZ_ADMIN_HOST carries the port the relay
+ #  expects to see in the Host header. -#}
+{{ buzz_admin_host | regex_replace(':[0-9]+$', '') }} {
+{% if buzz_tls_mode == 'internal' %}
+	tls internal
+{% endif %}
+
+	import buzz_common
+}
+{% else %}
+# No admin site block: buzz_admin_host is empty, so the relay does not mount
+# /api/admin/v1 at all (buzz-relay config.rs:910-937, router.rs:60) and there is
+# nothing to proxy. This is the production posture from hardening-spec.md §B1 —
+# the admin API's only credential is a matching Host header, so the surface is
+# removed rather than guarded.
+{% endif %}

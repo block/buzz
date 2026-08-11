@@ -1,0 +1,230 @@
+---
+# Chunk 06 — SOP Step 7, corrected for TLS per hardening-spec.md §A.3/§B2.
+#
+# Generates every secret ON THE TARGET (AGENTS.md rule 3, issue #22) and renders
+# .env, the cohort Caddyfile, and compose.cohort.yml.
+#
+# THE IDEMPOTENCE RULE THAT MATTERS MOST HERE: secrets are generate-once, never
+# regenerate. A rerun that rotated BUZZ_RELAY_PRIVATE_KEY would make every event
+# the relay ever signed unverifiable — hardening-spec.md §B8 notes there is no
+# rotation path at all, and the answer to a compromised relay key is a new
+# community, not a new key. So this role creates .env only when absent, and
+# thereafter converges the NON-SECRET lines in place.
+
+- name: Assert the addressing variables are set
+  ansible.builtin.assert:
+    that:
+      - buzz_domain | length > 0
+      - buzz_relay_url | length > 0
+    fail_msg: >-
+      buzz_domain and buzz_relay_url must be set (group_vars/dev.yml for the VM,
+      hosts.local.yml + group_vars for the VPS). RELAY_URL is the single control
+      over which community exists and therefore which Host headers the relay
+      accepts — there is no seeding command. See runbooks/relay-build-list.md.
+
+- name: Create the compose and cohort directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ buzz_compose_dir }}"
+    - "{{ buzz_cohort_dir }}"
+
+- name: Check whether .env already exists
+  ansible.builtin.stat:
+    path: "{{ buzz_compose_dir }}/.env"
+  register: env_file
+
+# ------------------------------------------------------------------ first run only
+- name: Generate secrets and identities (first run only)
+  when: not env_file.stat.exists
+  block:
+    # buzz-admin ships inside the relay image and GenerateKey never touches the
+    # database (main.rs:132-138), so this works before Postgres exists.
+    - name: Generate the owner keypair
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --entrypoint
+          - /usr/local/bin/buzz-admin
+          - "{{ buzz_image }}"
+          - generate-key
+      register: owner_key
+      changed_when: true
+
+    # A SECOND, SEPARATE keypair. The owner is the administrator (whoever holds
+    # its secret controls the relay); the relay key is the relay's own signing
+    # identity. Reusing one for both conflates two roles and causes problems that
+    # surface much later — SOP Step 7.1.
+    - name: Generate the relay keypair
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --entrypoint
+          - /usr/local/bin/buzz-admin
+          - "{{ buzz_image }}"
+          - generate-key
+      register: relay_key
+      changed_when: true
+
+    - name: Extract the two halves we actually need
+      ansible.builtin.set_fact:
+        # Ignore buzz-admin's own advice here. It prints "Set BUZZ_PRIVATE_KEY to
+        # the secret key to use this identity", but there is no BUZZ_PRIVATE_KEY
+        # in this deployment — the owner contributes its PUBLIC half and the
+        # relay its SECRET half (SOP Step 7.1).
+        buzz_owner_pubkey: "{{ owner_key.stdout | regex_search('Public key:\\s+([0-9a-f]{64})', '\\1') | first }}"
+        buzz_owner_secret: "{{ owner_key.stdout | regex_search('Secret key:\\s+([0-9a-f]{64})', '\\1') | first }}"
+        buzz_relay_secret: "{{ relay_key.stdout | regex_search('Secret key:\\s+([0-9a-f]{64})', '\\1') | first }}"
+
+    - name: Sanity-check the extracted keys
+      ansible.builtin.assert:
+        that:
+          - buzz_owner_pubkey | length == 64
+          - buzz_owner_secret | length == 64
+          - buzz_relay_secret | length == 64
+          - buzz_owner_secret != buzz_relay_secret
+        fail_msg: >-
+          Could not parse a 64-hex keypair out of buzz-admin's output, or the two
+          keypairs came back identical. Refusing to write a .env that would leave
+          the relay unable to start (SOP Step 7.5).
+
+    - name: Generate the random secrets
+      ansible.builtin.command: "openssl rand -hex {{ item.bytes }}"
+      register: rand
+      changed_when: true
+      loop:
+        - { name: git_hmac, bytes: 32 }
+        - { name: postgres_password, bytes: 24 }
+        - { name: redis_password, bytes: 24 }
+        - { name: s3_access_key, bytes: 16 }
+        - { name: s3_secret_key, bytes: 32 }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Collect the random secrets into one mapping
+      ansible.builtin.set_fact:
+        buzz_secrets: "{{ dict(rand.results | map(attribute='item.name') | zip(rand.results | map(attribute='stdout') | map('trim'))) }}"
+
+    - name: Render .env
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ buzz_compose_dir }}/.env"
+        owner: root
+        group: root
+        # 0600: this file holds every secret in the system. Chunk 11 asserts it.
+        mode: "0600"
+
+    # A dev-only convenience with a real caveat. On the VPS, hardening-spec.md §B8
+    # requires the owner secret and the relay key to be escrowed encrypted, in at
+    # least two locations, separately from the backup credentials, with a TESTED
+    # recovery procedure. A file on the host is none of those things.
+    - name: Stash the owner secret for the operator to move to a password manager
+      ansible.builtin.copy:
+        dest: /root/owner-key.txt
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          Buzz relay owner identity for {{ buzz_relay_url }}
+          Generated on the target by Ansible; present in no tracked file.
+
+          public  {{ buzz_owner_pubkey }}
+          secret  {{ buzz_owner_secret }}
+
+          Whoever holds the secret half controls this relay. Move it to a password
+          manager and delete this file. The desktop app needs it in chunk 08
+          (SOP Step 12.2).
+
+          There is NO ROTATION PATH for the relay's own key
+          (hardening-spec.md §B8) — losing it breaks signature verification for
+          every message this relay ever signed.
+
+    - name: Tell the operator where the owner secret is
+      ansible.builtin.debug:
+        msg:
+          - "Owner public key: {{ buzz_owner_pubkey }}"
+          - "Owner SECRET is at /root/owner-key.txt (mode 0600) — move it to a password manager."
+          - "Chunk 08 needs it to launch the desktop app as the owner."
+
+# ------------------------------------------------------------------ every run
+# Converge the non-secret settings without touching the generated secrets. This
+# is what lets a config change be applied by a rerun rather than by wiping .env.
+- name: Converge the non-secret .env settings
+  ansible.builtin.lineinfile:
+    path: "{{ buzz_compose_dir }}/.env"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ buzz_env_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Assert no CHANGE_ME placeholder survives
+  # Replicates upstream run.sh's require_env check, which we lose by invoking
+  # docker compose directly (ansible/README.md). Anchored to assignment lines so
+  # the CHANGE_ME in .env.example's line-2 comment does not trip it.
+  ansible.builtin.command:
+    cmd: "grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*CHANGE_ME' {{ buzz_compose_dir }}/.env"
+  register: change_me
+  changed_when: false
+  failed_when: change_me.rc == 0
+  # grep exits 1 when it matches nothing, which is the success case here.
+
+- name: Render the cohort Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.cohort.j2
+    dest: "{{ buzz_cohort_dir }}/Caddyfile"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "docker run --rm -i -v %s:/tmp/Caddyfile:ro caddy:2-alpine caddy validate --config /tmp/Caddyfile --adapter caddyfile"
+  notify: Restart caddy
+
+- name: Render compose.cohort.yml
+  ansible.builtin.template:
+    src: compose.cohort.yml.j2
+    dest: "{{ buzz_compose_dir }}/compose.cohort.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recreate stack
+
+- name: Verify the three compose files merge cleanly
+  ansible.builtin.command:
+    cmd: "docker compose --env-file .env {{ buzz_compose_files | map('regex_replace', '^', '-f ') | join(' ') }} config --format json"
+    chdir: "{{ buzz_compose_dir }}"
+  register: compose_config
+  changed_when: false
+
+- name: Assert the relay publishes no host port
+  # compose.caddy.yml's `ports: !reset []` is the ONLY thing that closes 3000,
+  # and hardening-spec.md §B2 is explicit that it is the control, not optional
+  # hardening. If a future edit drops compose.caddy.yml from buzz_compose_files
+  # this assertion is what catches it — ufw cannot, because Docker's rules are
+  # evaluated first.
+  #
+  # Parse the merged structure; do NOT substring-match the rendered document.
+  # An earlier version tested for '0.0.0.0:3000' anywhere in the output and
+  # failed against a correctly-configured stack, because compose.yml sets
+  # `BUZZ_BIND_ADDR: 0.0.0.0:3000` as an ENVIRONMENT VARIABLE. That string is
+  # supposed to be there — it is the address the relay binds INSIDE its network
+  # namespace, which says nothing about host publishing.
+  ansible.builtin.assert:
+    that:
+      - (compose_config.stdout | from_json).services.relay.ports | default([], true) | length == 0
+    fail_msg: >-
+      The merged config publishes the relay on
+      {{ (compose_config.stdout | from_json).services.relay.ports | default([], true) }}.
+      compose.caddy.yml is probably missing from buzz_compose_files — its
+      `ports: !reset []` is the control that closes 3000 (hardening-spec.md §B2).
+    success_msg: relay publishes no host port; only Caddy is reachable

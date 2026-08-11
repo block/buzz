@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Single entrypoint for the chunked Buzz deployment.
+#
+#   ./deploy list                 show the chunks and where each runs
+#   ./deploy run <chunk>          run one chunk
+#   ./deploy run all              run every automatable chunk in order
+#   ./deploy verify               run the verification suite
+#   ./deploy snapshot <name>      save a VM restore point (dev only)
+#   ./deploy restore <name>       go back to one (dev only)
+#   ./deploy check <chunk>        Ansible --check --diff, no changes made
+#
+# Why a shell wrapper over ansible-playbook: it gives humans and agents ONE
+# command shape for host-side chunks (VirtualBox, /etc/hosts) and target-side
+# chunks (Ansible), which otherwise look nothing like each other. It also cd's
+# into ansible/ so ansible.cfg is picked up implicitly.
+#
+# Every chunk is idempotent. Re-running one is always safe, and a second run
+# should report changed=0 — that is the convergence requirement from
+# ansible/README.md, Ruling 11 and issue #36, and `./deploy run all` twice is how
+# you check it.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VM="${VM:-buzz-dev}"
+LIMIT="${LIMIT:-dev-vm}"
+
+# chunk : kind : artifact : description
+CHUNKS=(
+	"00:host:virtual-box/preflight.sh:preflight checks on your own machine"
+	"01:host:virtual-box/fetch-image.sh:download the Ubuntu cloud image"
+	"02:host:virtual-box/build-vps-clone.sh:create the VM (destroys and rebuilds it)"
+	"03:host:virtual-box/host-dns.sh:hosts-file entries and Caddy CA trust"
+	"04:target:04-docker.yml:install Docker from the Ubuntu archive"
+	"05:target:05-bundle.yml:copy the compose bundle, pin the image"
+	"06:target:06-config.yml:generate secrets, render .env and the cohort overrides"
+	"07:target:07-up.yml:bring the stack up and verify it properly"
+	"08:manual:runbooks/chunks/08-desktop.md:connect the desktop app (GUI, not scriptable)"
+	"09:target:09-members.yml:approve pubkeys on the relay roster"
+	"10:target:10-harden.yml:apply the dev-VM hardening subset"
+	"11:both:scripts/verify.sh:the full verification suite"
+)
+
+die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+note() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+
+chunk_field() {
+	local want="$1" field="$2" row
+	for row in "${CHUNKS[@]}"; do
+		[ "${row%%:*}" = "$want" ] || continue
+		printf '%s' "$row" | cut -d: -f"$field"
+		return 0
+	done
+	return 1
+}
+
+cmd_list() {
+	printf '%-4s %-7s %-34s %s\n' CHUNK WHERE ARTIFACT WHAT
+	printf '%-4s %-7s %-34s %s\n' ---- ----- -------- ----
+	local row
+	for row in "${CHUNKS[@]}"; do
+		printf '%-4s %-7s %-34s %s\n' \
+			"$(cut -d: -f1 <<<"$row")" \
+			"$(cut -d: -f2 <<<"$row")" \
+			"$(cut -d: -f3 <<<"$row")" \
+			"$(cut -d: -f4- <<<"$row")"
+	done
+	cat <<-'EOF'
+
+	host   = runs on your own machine        target = runs in the VM/VPS via Ansible
+	manual = a runbook a person follows      both   = runs in each place
+
+	Ordering constraints that are not obvious from the numbers:
+	  03's CA-trust half needs 07 to have started Caddy at least once
+	  09 needs 07 to have seeded the community (buzz-admin resolves it at startup)
+	  10 should follow a snapshot -- two of its plays can lock you out
+	Docs: runbooks/chunks/README.md
+	EOF
+}
+
+run_target() {
+	local playbook="$1" extra="${2:-}"
+	local path="$HERE/ansible/playbooks/$playbook"
+	[ -f "$path" ] || die "playbook not found: $path"
+	note "ansible-playbook $playbook (limit: $LIMIT)"
+	# cd so ansible.cfg applies; --limit so a stray inventory entry (the VPS in
+	# hosts.local.yml) is never touched by accident.
+	( cd "$HERE/ansible" && ansible-playbook "playbooks/$playbook" --limit "$LIMIT" ${extra:+$extra} )
+}
+
+run_host() {
+	local script="$1"
+	local path="$HERE/$script"
+	[ -f "$path" ] || die "script not found: $path"
+	[ -x "$path" ] || chmod +x "$path"
+	note "$script"
+	"$path"
+}
+
+cmd_run() {
+	local id="${1:-}"
+	[ -n "$id" ] || die "usage: ./deploy run <chunk|all>"
+
+	if [ "$id" = "all" ]; then
+		# 08 is skipped: it launches a GUI app and cannot be automated. 02 is
+		# skipped because it DESTROYS the VM -- far too dangerous to fold into a
+		# blanket "all". Run both explicitly.
+		note "running every automatable chunk; 02 (destructive) and 08 (manual GUI) are skipped"
+		local c
+		for c in 00 01 03 04 05 06 07 09 10 11; do
+			cmd_run "$c"
+		done
+		return
+	fi
+
+	local kind artifact
+	kind="$(chunk_field "$id" 2)" || die "unknown chunk: $id (try ./deploy list)"
+	artifact="$(chunk_field "$id" 3)"
+
+	case "$kind" in
+		host) run_host "$artifact" ;;
+		target) run_target "$artifact" ;;
+		both) run_host "$artifact" ;;
+		manual)
+			note "chunk $id is manual -- nothing to run"
+			printf 'Follow: %s\n' "$HERE/$artifact"
+			;;
+		*) die "unknown chunk kind: $kind" ;;
+	esac
+}
+
+cmd_check() {
+	local id="${1:-}"
+	[ -n "$id" ] || die "usage: ./deploy check <chunk>"
+	[ "$(chunk_field "$id" 2)" = "target" ] || die "chunk $id is not an Ansible chunk; --check does not apply"
+	run_target "$(chunk_field "$id" 3)" "--check --diff"
+}
+
+cmd_snapshot() {
+	local name="${1:-}"
+	[ -n "$name" ] || die "usage: ./deploy snapshot <name>"
+	# Power off first. Snapshotting a running VM also captures its RAM, adding a
+	# couple of GB to the host disk for no benefit here.
+	note "powering off $VM"
+	VBoxManage controlvm "$VM" acpipowerbutton 2>/dev/null || true
+	until VBoxManage showvminfo "$VM" --machinereadable | grep -q '^VMState="poweroff"'; do sleep 3; done
+	VBoxManage snapshot "$VM" take "$name"
+	note "restarting $VM"
+	VBoxManage startvm "$VM" --type headless
+}
+
+cmd_restore() {
+	local name="${1:-}"
+	[ -n "$name" ] || die "usage: ./deploy restore <name>"
+	note "restoring $VM to '$name' -- everything since that point is discarded"
+	VBoxManage controlvm "$VM" poweroff 2>/dev/null || true
+	until VBoxManage showvminfo "$VM" --machinereadable | grep -q '^VMState="poweroff"'; do sleep 2; done
+	VBoxManage snapshot "$VM" restore "$name"
+	VBoxManage startvm "$VM" --type headless
+}
+
+case "${1:-list}" in
+	list) cmd_list ;;
+	run) shift; cmd_run "$@" ;;
+	check) shift; cmd_check "$@" ;;
+	verify) run_host "scripts/verify.sh" ;;
+	snapshot) shift; cmd_snapshot "$@" ;;
+	restore) shift; cmd_restore "$@" ;;
+	-h | --help | help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+	*) die "unknown command: $1 (try ./deploy help)" ;;
+esac

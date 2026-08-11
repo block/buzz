@@ -1,0 +1,234 @@
+---
+# hardening_docker — SOP Step 13.7, hardening-spec sec-C10.
+#
+# Write /etc/docker/daemon.json, prove it valid before it can ever be loaded, restart the daemon,
+# and then RECREATE the running containers — because without that last step the hardening applies
+# to nothing that is actually running (see the block comment above the recreate task).
+#
+# All plays run as user `dev` with `become: true` (deployment decision 6: SOP Step 13.3 disables
+# root SSH login, so Ansible must never depend on being root over SSH).
+#
+# SCOPE NOTE: this role knowingly overrides launchpad/deploy/AGENTS.md rule 5, which says hardening
+# roles do not exist yet. Chunk scope is SOP Steps 0-13 and Step 13 is the hardening step. SOP
+# Steps 14-16 (the AI agent) stay out of scope. Stated, not silently ignored.
+#
+# IDEMPOTENCE: every check task is `changed_when: false`; the two mutating tasks (daemon restart,
+# container recreate) are each gated on an observed-state test, not on "did the file change". A
+# second run therefore reports zero changed tasks, and a run that resumes after a half-finished
+# first attempt still converges (ansible/README.md "Convergence", Ruling 11, issue #36).
+
+# --- Guards -------------------------------------------------------------------------------------
+
+- name: Reject daemon.json keys that are known to break or weaken Docker
+  ansible.builtin.assert:
+    that:
+      - hardening_docker_daemon_config.keys() | list | intersect(hardening_docker_forbidden_keys) | length == 0
+    fail_msg: >-
+      hardening_docker_daemon_config contains a forbidden key
+      ({{ hardening_docker_daemon_config.keys() | list | intersect(hardening_docker_forbidden_keys) | join(', ') }}).
+      'disable-legacy-registry' was removed from Docker years ago and now stops the daemon starting.
+      'ip-forward-no-drop' switches OFF Docker 28+'s default drop of traffic to unpublished
+      container ports — it disables the protection rather than adding one, and no validator catches
+      it. See hardening-spec sec-C10 and the SOP Step 13.7 trap note.
+    quiet: true
+
+- name: Check the compose bundle is present before planning a recreate
+  ansible.builtin.stat:
+    path: "{{ hardening_docker_compose_dir }}/{{ item }}"
+  loop: "{{ [hardening_docker_compose_env_file] + hardening_docker_compose_files }}"
+  register: hardening_docker_bundle_stat
+  changed_when: false
+
+- name: Fail early if the compose bundle is incomplete
+  ansible.builtin.assert:
+    that:
+      - hardening_docker_bundle_stat.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Missing from {{ hardening_docker_compose_dir }}:
+      {{ hardening_docker_bundle_stat.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}.
+      The compose bundle chunk (SOP Steps 6-9) must have run before this one — the recreate below
+      needs every -f file, and compose.caddy.yml in particular is what keeps port 3000 unpublished
+      (hardening-spec sec-A.3 / sec-B2).
+    quiet: true
+
+# --- daemon.json --------------------------------------------------------------------------------
+
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: "{{ hardening_docker_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# `validate:` runs dockerd against the STAGED temp file and refuses to move it into place if the
+# check fails. That is strictly stronger than the SOP's write-then-validate order: a bad key never
+# reaches /etc/docker/daemon.json at all, so it cannot break Docker on the next reboot either.
+# Not a secret file — 0644 root:root is the packaged default and dockerd runs as root.
+- name: Install the hardened daemon.json (validated before it is put in place)
+  ansible.builtin.copy:
+    dest: "{{ hardening_docker_config_path }}"
+    content: "{{ hardening_docker_daemon_config | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: dockerd --validate --config-file %s
+  register: hardening_docker_config
+
+# Also assert the validator explicitly, every run, so the evidence the SOP's completion checklist
+# item 13 asks for is produced even when the file was already correct and copy skipped validation.
+# dockerd prints "configuration OK" — historically on stderr, so both streams are searched.
+- name: Validate the installed daemon.json with dockerd --validate
+  ansible.builtin.command:
+    cmd: dockerd --validate --config-file {{ hardening_docker_config_path }}
+  register: hardening_docker_validate
+  changed_when: false
+
+- name: Assert the validator reported the configuration OK
+  ansible.builtin.assert:
+    that:
+      - "'configuration OK' in (hardening_docker_validate.stdout + hardening_docker_validate.stderr)"
+    fail_msg: >-
+      dockerd --validate did not report 'configuration OK' for {{ hardening_docker_config_path }}.
+      Do NOT restart Docker — a bad daemon config stops the daemon starting and takes the whole
+      Buzz stack with it (SOP Step 13.7).
+    quiet: true
+
+# --- Daemon restart ------------------------------------------------------------------------------
+
+# Read what the RUNNING daemon believes, not what the file says. This is what makes a resumed run
+# converge: if a previous attempt wrote the file but never restarted, the file is unchanged on this
+# run yet the daemon is still unhardened, and gating on `hardening_docker_config.changed` alone
+# would skip the restart forever. Two fields are enough as a "did the daemon load this file" probe;
+# it is not meant to be a full comparison of every key.
+- name: Read the running daemon's effective settings
+  ansible.builtin.command:
+    cmd: >-
+      docker info --format
+      {% raw %}'{{.LoggingDriver}} {{.LiveRestoreEnabled}}'{% endraw %}
+  register: hardening_docker_info
+  changed_when: false
+  failed_when: false
+
+# On the FIRST run live-restore is not yet active in the running daemon, so this restart stops the
+# running containers and they come back via their compose restart policy. That is expected and
+# harmless — the recreate below rebuilds them anyway. Every subsequent restart leaves them alone.
+- name: Restart Docker so the new daemon.json is loaded
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted
+  when: >-
+    hardening_docker_config.changed
+    or hardening_docker_info.rc != 0
+    or hardening_docker_info.stdout | trim != (hardening_docker_daemon_config['log-driver'] ~ ' '
+    ~ (hardening_docker_daemon_config['live-restore'] | string | lower))
+
+- name: Wait for the Docker daemon to answer again
+  ansible.builtin.command:
+    cmd: docker info
+  register: hardening_docker_ready
+  until: hardening_docker_ready.rc == 0
+  retries: "{{ hardening_docker_daemon_ready_retries }}"
+  delay: "{{ hardening_docker_daemon_ready_delay }}"
+  changed_when: false
+
+# --- The part that is easy to miss ---------------------------------------------------------------
+#
+# daemon.json supplies DEFAULTS FOR NEW CONTAINERS. The relay, Postgres, Redis and MinIO containers
+# were created in an earlier chunk, before this file existed, and `live-restore: true` deliberately
+# leaves them running untouched across the restart above. So at this point the hardening applies to
+# NOTHING that is actually running: those containers still carry the old json-file log driver and
+# no no-new-privileges. They only pick the defaults up when they are recreated.
+# (SOP Step 13.7; SOP "things that will bite you" note on Step 13.7.)
+#
+# HOW THIS IS DETECTED, AND THE TRAP:
+#   Do NOT test `docker inspect ... --format '{{.HostConfig.SecurityOpt}}'` for no-new-privileges.
+#   That field only reports flags supplied at container-creation time. A setting that arrived as a
+#   DAEMON DEFAULT renders as an empty list even when it is fully active — which reads as failure
+#   and sends you round the recreate loop forever. Ask the kernel instead:
+#     - docker inspect <relay> --format '{{.HostConfig.LogConfig.Type}}'  must be 'journald'
+#     - docker exec <relay> grep NoNewPrivs /proc/1/status                must show 1
+#
+# ON `icc: false`, BECAUSE IT DOES NOT MEAN WHAT IT READS LIKE:
+#   It is NOT container isolation. It governs only Docker's DEFAULT bridge network. Buzz runs on its
+#   own buzz-net, where containers still reach each other freely — which is required, since the relay
+#   must talk to Postgres, Redis and MinIO. It neither breaks nor hardens this stack; it is the right
+#   default for anything that later lands on the default bridge. Do NOT remove it while debugging a
+#   connectivity problem: it will not be the cause. (SOP Step 13.7 note.)
+
+- name: Check whether the relay container already carries the journald log driver
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect {{ hardening_docker_relay_container }} --format
+      {% raw %}'{{.HostConfig.LogConfig.Type}}'{% endraw %}
+  register: hardening_docker_relay_logdriver
+  changed_when: false
+  failed_when: false
+
+- name: Ask the kernel whether the relay container has no-new-privileges in effect
+  ansible.builtin.command:
+    cmd: docker exec {{ hardening_docker_relay_container }} grep NoNewPrivs /proc/1/status
+  register: hardening_docker_relay_nnp
+  changed_when: false
+  failed_when: false
+
+# Two independent reasons to recreate, and both are needed:
+#   - the file changed at all — the probes below only see the log driver and no-new-privileges, so a
+#     change to userland-proxy or default-ulimits would otherwise be written, loaded by the daemon,
+#     and silently applied to nothing that is running;
+#   - the probes disagree with the config — covers a resumed run whose earlier attempt restarted the
+#     daemon but never got as far as recreating, and a relay container that is absent entirely.
+- name: Decide whether the stack still needs recreating
+  ansible.builtin.set_fact:
+    hardening_docker_needs_recreate: >-
+      {{ hardening_docker_config.changed
+      or hardening_docker_relay_logdriver.rc != 0
+      or hardening_docker_relay_logdriver.stdout | trim != hardening_docker_daemon_config['log-driver']
+      or hardening_docker_relay_nnp.rc != 0
+      or (hardening_docker_relay_nnp.stdout | trim).split()[-1] | default('0') != '1' }}
+
+# Gated, so a converged host runs nothing here and reports zero changes. --force-recreate is
+# unconditional destruction of the containers by design; the gate above is what keeps it idempotent.
+# --remove-orphans is deliberately absent: it would delete containers this file list does not name.
+- name: Recreate the stack so the daemon defaults actually apply
+  ansible.builtin.command:
+    cmd: >-
+      docker compose --env-file {{ hardening_docker_compose_env_file }}
+      {{ '-f ' ~ (hardening_docker_compose_files | join(' -f ')) }}
+      up -d --force-recreate --wait
+    chdir: "{{ hardening_docker_compose_dir }}"
+  when: hardening_docker_needs_recreate | bool
+  changed_when: true
+
+# --- Verification --------------------------------------------------------------------------------
+
+- name: Re-read the relay container's log driver
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect {{ hardening_docker_relay_container }} --format
+      {% raw %}'{{.HostConfig.LogConfig.Type}}'{% endraw %}
+  register: hardening_docker_verify_logdriver
+  changed_when: false
+
+- name: Re-ask the kernel about no-new-privileges
+  ansible.builtin.command:
+    cmd: docker exec {{ hardening_docker_relay_container }} grep NoNewPrivs /proc/1/status
+  register: hardening_docker_verify_nnp
+  changed_when: false
+
+- name: Assert the daemon defaults reached the running containers
+  ansible.builtin.assert:
+    that:
+      - hardening_docker_verify_logdriver.stdout | trim == hardening_docker_daemon_config['log-driver']
+      - (hardening_docker_verify_nnp.stdout | trim).split()[-1] == '1'
+    fail_msg: >-
+      Hardening did not reach the running relay container.
+      log driver={{ hardening_docker_verify_logdriver.stdout | trim }}
+      (want {{ hardening_docker_daemon_config['log-driver'] }}),
+      /proc/1/status {{ hardening_docker_verify_nnp.stdout | trim }} (want NoNewPrivs: 1).
+      A log driver still reading 'json-file' means the recreate did not happen — re-run this role.
+      Do not switch this check to '{{ '{{' }}.HostConfig.SecurityOpt{{ '}}' }}': it is empty for
+      daemon defaults and will never pass (SOP Step 13.7).
+    success_msg: >-
+      relay log driver={{ hardening_docker_verify_logdriver.stdout | trim }},
+      {{ hardening_docker_verify_nnp.stdout | trim }}

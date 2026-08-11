@@ -27,6 +27,83 @@ does not describe, one of the two is wrong. Keep them in step.
 
 ---
 
+## AMENDMENT 2026-08-12 — this document now specifies the TLS path
+
+**Read this before Step 7, Step 9, Step 10 or Step 12.** The automation in
+[`../runbooks/chunks/`](./chunks/) implements the amended values below, and they have been executed
+and verified. The step-by-step prose further down still shows the older plaintext-on-3000 values in
+places; **where the two disagree, this amendment wins.**
+
+**What changed and why.** Steps 8–12 originally published the relay directly on port 3000 over
+plaintext HTTP and told you to type `ws://`. [`hardening-spec.md`](./hardening-spec.md) §B2 identifies
+that as a defect rather than a simplification — the restart command omits `compose.caddy.yml`, whose
+`ports: !reset []` is *the only thing* that stops the relay publishing 3000, and `ufw` cannot close a
+Docker-published port. §A.3 adds that running Caddy in dev is the single change that buys the most
+production parity: identical Compose file sets, `wss://` through a reverse proxy, and the admin vhost
+split all exercised before they matter.
+
+**The amended dev values** (see [`../ansible/inventory/group_vars/dev.yml`](../ansible/inventory/group_vars/dev.yml)):
+
+| Setting | Was | Now |
+|---|---|---|
+| `RELAY_URL` | `ws://buzz-vm.test:3000` | `wss://buzz-vm.test:8443` |
+| Community host | `buzz-vm.test:3000` | `buzz-vm.test:8443` |
+| `BUZZ_MEDIA_BASE_URL` | `http://buzz-vm.test:3000/media` | `https://buzz-vm.test:8443/media` |
+| `BUZZ_MEDIA_SERVER_DOMAIN` | `buzz-vm.test:3000` | `buzz-vm.test:8443` |
+| `BUZZ_CORS_ORIGINS` | `http://buzz-vm.test:3000` | `https://buzz-vm.test:8443` |
+| `BUZZ_ADMIN_HOST` | `admin.buzz-vm.test:3000` | `admin.buzz-vm.test:8443` |
+| Compose files | `compose.yml` + `compose.cohort.yml` | **plus `compose.caddy.yml`** |
+| VM port forwards | `2222`, `3000` | `2222`, **`8080→80`, `8443→443`** |
+| Desktop app address (Step 12.3) | `ws://buzz-vm.test:3000` | `wss://buzz-vm.test:8443` |
+
+**Why 8443 and not 443.** Caddy binds 80/443 *inside* the guest, exactly as on the VPS, so container
+configuration is byte-identical to production. But macOS refuses to let a non-root process bind a host
+port below 1024, and VirtualBox host-only networking — which would have given the guest its own IP and
+a real 443 — is unavailable because `/dev/vboxnetctl` does not exist (the network kext is not loaded).
+So the *host* side of each forward is high. The relay preserves any non-default port in its community
+host and strips only a trailing `:443`/`:80`, which is why dev's community carries `:8443` and
+production's is a bare domain. `buzz_relay_url` was already one of the nine dev/prod variables in
+§A.2, so this costs no parity the model had not already conceded.
+
+**Four traps found by executing this path.** None appears anywhere else in this document:
+
+1. **The WebSocket check must force HTTP/1.1.** Over TLS, `curl` negotiates HTTP/2 via ALPN, and
+   HTTP/2 removed the `Connection: Upgrade` mechanism — so the relay sees a plain GET and answers
+   `200` with the NIP-11 document. Verified: the identical request returns `101` with `--http1.1` and
+   `200` without it. Step 8.2's test is correct as written *only* because it runs over plaintext; add
+   `--http1.1` the moment it goes through Caddy.
+2. **Capture only the status code from that check.** A successful upgrade leaves the socket open and
+   `curl` then emits raw WebSocket frames, which are not valid UTF-8. Anything that deserializes the
+   output (Ansible, `jq`) fails on it despite the relay behaving perfectly.
+3. **Caddy declares no healthcheck**, so `docker compose ps --format json` reports `Health: ""` for it
+   while `up --wait` prints `Healthy`. A check demanding `healthy` for every service fails on a good
+   stack.
+4. **Step 17 item 27's secret scan fails on a clean checkout.** `git grep -nE 'sk-or-v1-|OPENROUTER_API_KEY=sk'`
+   matches this document's own prose, `crates/buzz-agent/README.md`, and
+   `desktop/src-tauri/src/commands/agent_models_tests.rs` — which uses `sk-or-v1-secret-key-12345` as
+   a fixture in a test *for secret redaction*. Scope the scan and match real key shapes instead.
+
+**Two further corrections, from `hardening-spec.md` Part G:**
+
+- **Step 7.3 lists `BUZZ_AUTO_MIGRATE=true` under "leave these alone — they are already correct."**
+  Correct for a throwaway VM; **wrong for production**, where upstream's own `compose.yml` defaults it
+  to `false`. With it true, `run.sh upgrade` can migrate a production schema as a side effect of
+  pulling a newer image — no backup gate, no dry run, no rollback (§B6).
+- **Step 9.4's `admin data: [] <- 200` is not a clean pass, it is the expected result of a
+  Host-header-only check.** The admin API has no token, no Nostr auth and no membership check; its only
+  credential is a matching `Host`. Correct on a loopback VM, an unauthenticated disclosure of
+  moderation reports and feedback attachments on a public host. Production leaves `BUZZ_ADMIN_HOST`
+  unset so the router is never mounted (§B1).
+- **Step 7.1's "save both halves somewhere safe" undersells the relay key.** It cannot be rotated:
+  losing or changing it breaks signature verification for every message the relay ever signed, and the
+  answer to a suspected compromise is a new community, not a new key (§B8).
+
+**Still owed.** The prose in Steps 7.3, 8.1–8.3, 9.2–9.4, 10 and 12.3 has not been rewritten
+line-by-line; it still shows `:3000` and `ws://` in examples. Treat those as illustrations of the
+mechanism, take the values from the table above, and finish the reconciliation.
+
+---
+
 ## Conventions used here
 
 - Commands that run **on your own computer** are shown plainly.

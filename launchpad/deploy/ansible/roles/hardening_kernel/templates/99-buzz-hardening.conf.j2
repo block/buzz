@@ -1,0 +1,32 @@
+# {{ hardening_kernel_conf_path }}
+#
+# MANAGED BY ANSIBLE — role `hardening_kernel`. Local edits are overwritten on
+# the next run. Change the values in that role's defaults/main.yml, or override
+# `hardening_kernel_sysctl_extra` in inventory group_vars.
+#
+# Spec: dev-deployment-SOP.md Step 13.6, hardening-spec.md sec-C5.
+#
+# Why `99-`, when the hardened sshd drop-in is `00-`: the two directories have
+# OPPOSITE precedence. sshd_config.d is first-match-wins, so hardening must sort
+# first (SOP Step 13.3). /etc/sysctl.d is last-write-wins, so hardening must
+# sort LAST — after /usr/lib/sysctl.d/10-magic-sysrq.conf, 50-coredump.conf and
+# anything the cloud image ships. Renaming this file to match the sshd one would
+# quietly hand those defaults the win.
+#
+# DELIBERATELY OMITTED: net.ipv4.ip_forward = 0
+#   Most Linux hardening guides recommend it. Do NOT add it here. Docker
+#   requires IP forwarding and turns it straight back on, so the only thing the
+#   line achieves is a declared value that permanently disagrees with the
+#   running kernel — which makes every future audit of this file read as a
+#   failure. SOP Step 13.6 and hardening-spec sec-C5 both call this out as the
+#   one exception for this deployment. If you are here to "fix" it: it is not
+#   broken.
+#
+# kernel.core_pattern is the one entry that is in sec-C5 but not in the SOP's
+# Step 13.6 block. Reason: hardening-spec sec-B7 — every Buzz secret is in the
+# relay's process environment, and a core dump writes that environment to disk.
+# It is paired with fs.suid_dumpable = 0 below.
+
+{% for key, value in hardening_kernel_sysctl_effective.items() %}
+{{ key }} = {{ value }}
+{% endfor %}
