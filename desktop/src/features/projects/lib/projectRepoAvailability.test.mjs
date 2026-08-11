@@ -27,6 +27,28 @@ test("classifies authentication failures before generic availability errors", ()
   );
 });
 
+test("classifies a git credential prompt failure as authentication", () => {
+  // git 2.46+ is required by git-credential-nostr; on an older git the helper
+  // declines, no credential is supplied, and git reports this instead of ever
+  // surfacing the relay's 401.
+  assert.equal(
+    projectRepoUnavailableReason(
+      new Error(
+        "fatal: could not read Username for 'https://relay.example': Device not configured",
+      ),
+    ),
+    "authentication",
+  );
+  assert.equal(
+    projectRepoUnavailableReason(
+      new Error(
+        "fatal: could not read Password for 'https://relay.example': terminal prompts disabled",
+      ),
+    ),
+    "authentication",
+  );
+});
+
 test("classifies branch and network failures", () => {
   assert.equal(
     projectRepoUnavailableReason(
