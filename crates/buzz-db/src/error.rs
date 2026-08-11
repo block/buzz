@@ -13,6 +13,10 @@ pub enum DbError {
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
 
+    /// Operation is unsupported by the selected database backend.
+    #[error("unsupported database backend operation: {0}")]
+    UnsupportedBackend(&'static str),
+
     /// Attempted to store an AUTH event (kind 22242), which is forbidden.
     #[error("AUTH events (kind 22242) must not be stored")]
     AuthEventRejected,

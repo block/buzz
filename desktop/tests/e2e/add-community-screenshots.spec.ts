@@ -66,6 +66,7 @@ test("capture: join an existing community", async ({ page }) => {
 
 test("capture: create a new community", async ({ page }) => {
   await page.getByTestId("add-community-create").click();
+  await page.getByTestId("community-create-hosted").click();
   const dialog = page.getByTestId("add-community-dialog");
   await page.getByLabel("Community address").waitFor();
   await waitForAnimations(page);

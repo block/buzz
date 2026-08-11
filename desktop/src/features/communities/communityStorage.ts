@@ -10,6 +10,13 @@ const LEGACY_ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
 const COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY =
   "buzz-community-discovery-after-leave";
 
+export const LOCAL_COMMUNITY_RELAY_URL = "buzz-local://on-this-device";
+export const LOCAL_COMMUNITY_NAME = "On this device";
+
+export function isLocalCommunityRelayUrl(relayUrl: string): boolean {
+  return relayUrl === LOCAL_COMMUNITY_RELAY_URL;
+}
+
 /**
  * Expand a leading `~` to the user's home directory. The backend rejects
  * `~`-prefixed paths (`std::fs` does not expand the shell tilde), so the UI
@@ -186,13 +193,16 @@ export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
 }
 
 export function deriveCommunityName(relayUrl: string): string {
+  if (isLocalCommunityRelayUrl(relayUrl)) {
+    return LOCAL_COMMUNITY_NAME;
+  }
   try {
     const url = new URL(
       relayUrl.replace("ws://", "http://").replace("wss://", "https://"),
     );
     const host = url.hostname;
     if (isLocalRelayHost(host)) {
-      return "Local Dev";
+      return "On this device";
     }
     const parts = host.split(".");
     // Detect staging environments (e.g. buzz-oss.stage.blox.sqprod.co)

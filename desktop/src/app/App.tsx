@@ -42,7 +42,10 @@ import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
-import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
+import {
+  isLocalCommunityRelayUrl,
+  loadCommunityDiscoveryAfterLeave,
+} from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -387,13 +390,17 @@ function CommunityApp({
       return;
     }
     const previousCommunityId = activeCommunity?.id;
+    const isLocal = isLocalCommunityRelayUrl(transaction.relayUrl);
     const relayAlreadyExists = communities.some(
-      (community) => community.relayUrl === transaction.relayUrl,
+      (community) =>
+        community.relayUrl === transaction.relayUrl ||
+        (isLocal && community.local === true),
     );
     const id = addCommunity({
       id: crypto.randomUUID(),
       name: transaction.communityName,
       relayUrl: transaction.relayUrl,
+      local: isLocal,
       token: transaction.token,
       reposDir: transaction.reposDir,
       pubkey: currentPubkey ?? undefined,

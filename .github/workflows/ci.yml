@@ -1011,7 +1011,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz buzz-relay; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
       - name: Clippy (workspace)
@@ -1089,6 +1089,7 @@ jobs:
           touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-$TARGET"
+          touch "desktop/src-tauri/binaries/buzz-relay-$TARGET"
       # Mesh rev is derived from Cargo.lock so a dependency bump needs no
       # lockstep edit here; the cache key tracks it automatically.
       - name: Resolve mesh-llm rev

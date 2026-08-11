@@ -30,6 +30,12 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "localCommunities",
+      "name": "Local communities",
+      "description": "Create a community that lives entirely on this device (local relay)",
+      "platforms": ["desktop"]
     }
   ]
 }

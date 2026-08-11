@@ -14,6 +14,7 @@ mod initial_window;
 mod key_backup;
 mod link_preview_tags;
 mod linux_media;
+mod local_relay;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
 mod managed_agents;
@@ -301,6 +302,7 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(local_relay::RuntimeState::new(None))
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
@@ -968,9 +970,11 @@ pub fn run() {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
+            local_relay::stop(&app_handle.state::<local_relay::RuntimeState>());
             shut_down_app(app_handle, &run_shutdown_done);
         }
         RunEvent::Exit => {
+            local_relay::stop(&app_handle.state::<local_relay::RuntimeState>());
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
 

@@ -1,6 +1,11 @@
 import * as React from "react";
 import { Check, Copy } from "lucide-react";
 
+import {
+  LOCAL_COMMUNITY_NAME,
+  LOCAL_COMMUNITY_RELAY_URL,
+} from "@/features/communities/communityStorage";
+import { CommunityCreationChoice } from "@/features/communities/ui/CommunityCreationChoice";
 import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
@@ -14,6 +19,7 @@ import {
   OnboardingSlideTransition,
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { useFeatureEnabled } from "@/shared/features";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
@@ -21,7 +27,13 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
-type WelcomeSetupPage = "welcome" | "existing" | "join" | "member" | "owned";
+type WelcomeSetupPage =
+  | "welcome"
+  | "create"
+  | "existing"
+  | "join"
+  | "member"
+  | "owned";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
@@ -47,6 +59,7 @@ export function WelcomeSetup({
   const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
   const [copiedNpub, setCopiedNpub] = React.useState(false);
   const communityOnboarding = useCommunityOnboarding();
+  const localCommunitiesEnabled = useFeatureEnabled("localCommunities");
   const identityQuery = useIdentityQuery();
   const systemColorScheme = useSystemColorScheme();
   const npub = identityQuery.data?.pubkey
@@ -91,6 +104,15 @@ export function WelcomeSetup({
     },
     [communityOnboarding, page],
   );
+
+  const startLocalCommunity = React.useCallback(() => {
+    communityOnboarding.start({
+      source: "first-community",
+      firstCommunityPage: "join",
+      communityName: LOCAL_COMMUNITY_NAME,
+      relayUrl: LOCAL_COMMUNITY_RELAY_URL,
+    });
+  }, [communityOnboarding]);
 
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
@@ -144,7 +166,7 @@ export function WelcomeSetup({
                 >
                   <button
                     data-testid="community-choice-create"
-                    onClick={() => setIsHostedSignInOpen(true)}
+                    onClick={() => showPage("create")}
                     type="button"
                   >
                     Create a community
@@ -177,6 +199,39 @@ export function WelcomeSetup({
                   </Button>
                 </OnboardingFooter>
               ) : null}
+            </OnboardingSlideTransition>
+          ) : page === "create" ? (
+            <OnboardingSlideTransition
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
+              direction={transitionDirection}
+              transitionKey={`create-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[760px]">
+                <h1 className="text-title font-normal">Create a community</h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  Choose where your community will live.
+                </p>
+              </div>
+              <div className="flex w-full flex-1 items-center justify-center py-8">
+                <CommunityCreationChoice
+                  onChooseHosted={() => setIsHostedSignInOpen(true)}
+                  onChooseLocal={startLocalCommunity}
+                  showLocalOption={localCommunitiesEnabled}
+                  variant="onboarding"
+                />
+              </div>
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="community-create-back"
+                  onClick={() => showPage("welcome")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
             </OnboardingSlideTransition>
           ) : page === "existing" ? (
             <OnboardingSlideTransition

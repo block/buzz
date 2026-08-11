@@ -1,5 +1,6 @@
 import {
   deriveCommunityName,
+  isLocalCommunityRelayUrl,
   normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
@@ -84,6 +85,7 @@ export type StartCommunityOnboardingInput = {
 
 function canonicalRelayUrl(rawRelayUrl: string) {
   const trimmed = rawRelayUrl.trim();
+  if (isLocalCommunityRelayUrl(trimmed)) return trimmed;
   const withScheme = /^(ws|wss):\/\//i.test(trimmed)
     ? trimmed
     : normalizeRelayUrl(trimmed);

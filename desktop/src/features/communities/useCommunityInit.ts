@@ -36,6 +36,7 @@ import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import {
   initFirstCommunity,
+  LOCAL_COMMUNITY_RELAY_URL,
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage";
 import type { Community } from "./types";
@@ -137,9 +138,8 @@ export function useCommunityInit(
           const autoConnectDefaultRelay =
             await autoConnectDefaultRelayEnabled();
 
-          // Internal builds explicitly opt into treating their reviewed default
-          // relay as the first community. Public builds retain community
-          // selection even when BUZZ_RELAY_URL is overridden at runtime.
+          // Hosted defaults retain their existing opt-in behavior. Local mode
+          // is created only through the explicit first-run choice.
           if (
             !suppressAutoConnect &&
             (isSharedIdentity ||
@@ -226,7 +226,9 @@ export function useCommunityInit(
       // legacy entries; this site refuses to apply one even if present.
       try {
         await applyCommunity(
-          activeCommunity.relayUrl,
+          activeCommunity.local
+            ? LOCAL_COMMUNITY_RELAY_URL
+            : activeCommunity.relayUrl,
           undefined,
           activeCommunity.token,
           activeCommunity.reposDir,
@@ -300,6 +302,7 @@ export function useCommunityInit(
     activeCommunity?.relayUrl,
     activeCommunity?.token,
     activeCommunity?.reposDir,
+    activeCommunity?.local,
     isSharedIdentity,
     suppressAutoConnect,
     communityKey,

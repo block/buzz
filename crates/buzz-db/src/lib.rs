@@ -45,6 +45,7 @@ pub mod relay_invite;
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+mod sqlite;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -168,9 +169,17 @@ pub async fn insert_mentions(
     Ok(())
 }
 
+/// Selected backing store for a [`Db`] handle.
+#[derive(Clone, Debug)]
+enum DbBackend {
+    Postgres,
+    SQLite(sqlx::SqlitePool),
+}
+
 /// Database handle. Clone is cheap (Arc-backed pool).
 #[derive(Clone, Debug)]
 pub struct Db {
+    backend: DbBackend,
     pub(crate) pool: PgPool,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
@@ -639,6 +648,32 @@ pub struct TokenSummary {
 }
 
 impl Db {
+    fn sqlite_pool(&self) -> Result<&sqlx::SqlitePool> {
+        match &self.backend {
+            DbBackend::SQLite(pool) => Ok(pool),
+            DbBackend::Postgres => Err(DbError::UnsupportedBackend(
+                "SQLite operation on PostgreSQL Db",
+            )),
+        }
+    }
+
+    /// Creates a local single-node database backed by SQLite.
+    pub async fn new_sqlite(database_url: &str) -> Result<Self> {
+        let sqlite = sqlite::connect(database_url).await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+        Ok(Self {
+            backend: DbBackend::SQLite(sqlite),
+            pool,
+            max_connections: 0,
+            read_pool: None,
+            read_max_connections: 0,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+            replica_read_max_age: None,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+        })
+    }
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
     /// When `config.read_database_url` is set, a second pool with the same
@@ -659,6 +694,7 @@ impl Db {
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
         Ok(Self {
+            backend: DbBackend::Postgres,
             pool,
             max_connections: config.max_connections,
             read_pool,
@@ -774,6 +810,7 @@ impl Db {
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            backend: DbBackend::Postgres,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
             pool,
@@ -793,6 +830,7 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            backend: DbBackend::Postgres,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
@@ -1010,12 +1048,18 @@ impl Db {
 
     /// Run pending database migrations.
     pub async fn migrate(&self) -> Result<()> {
-        migration::run_migrations(&self.pool).await
+        match &self.backend {
+            DbBackend::Postgres => migration::run_migrations(&self.pool).await,
+            DbBackend::SQLite(_) => sqlite::migrate(self.sqlite_pool()?).await,
+        }
     }
 
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
-        sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+        match &self.backend {
+            DbBackend::Postgres => sqlx::query("SELECT 1").execute(&self.pool).await.is_ok(),
+            DbBackend::SQLite(pool) => sqlx::query("SELECT 1").execute(pool).await.is_ok(),
+        }
     }
 
     /// Returns pool utilisation stats for metrics emission.
@@ -1196,6 +1240,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        if matches!(&self.backend, DbBackend::SQLite(_)) {
+            return sqlite::lookup_community_by_host(self.sqlite_pool()?, normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -1222,6 +1269,9 @@ impl Db {
 
     /// Returns whether a community id still exists in the active lifecycle state.
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        if matches!(&self.backend, DbBackend::SQLite(_)) {
+            return sqlite::is_community_active(self.sqlite_pool()?, community_id).await;
+        }
         let active = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
         )
@@ -1299,6 +1349,9 @@ impl Db {
     /// community is authoritative; the host is read back for labelling only and
     /// is never used to re-derive the community.
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
+        if matches!(&self.backend, DbBackend::SQLite(_)) {
+            return sqlite::lookup_community_host(self.sqlite_pool()?, community_id).await;
+        }
         let row = sqlx::query(
             r#"
             SELECT host
@@ -1316,6 +1369,22 @@ impl Db {
             Ok(host)
         })
         .transpose()
+    }
+
+    /// Rebinds a stale loopback community to the current single-node authority.
+    pub async fn rebind_single_node_community_host(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        match &self.backend {
+            DbBackend::SQLite(pool) => {
+                sqlite::rebind_single_node_community_host(pool, normalized_host, owner_pubkey).await
+            }
+            DbBackend::Postgres => Err(DbError::UnsupportedBackend(
+                "single-node community rebind on PostgreSQL Db",
+            )),
+        }
     }
 
     /// Returns the community's workspace icon (NIP-11 `icon`), if set.
@@ -1370,6 +1439,9 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        if matches!(&self.backend, DbBackend::SQLite(_)) {
+            return sqlite::ensure_configured_community(self.sqlite_pool()?, normalized_host).await;
+        }
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -2165,6 +2237,20 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
     ) -> Result<(channel::ChannelRecord, bool)> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::create_channel_with_id(
+                pool,
+                community_id,
+                channel_id,
+                name,
+                channel_type,
+                visibility,
+                description,
+                created_by,
+                ttl_seconds,
+            )
+            .await;
+        }
         channel::create_channel_with_id(
             &self.pool,
             community_id,
@@ -2185,7 +2271,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<channel::ChannelRecord> {
-        channel::get_channel(&self.pool, community_id, channel_id).await
+        match &self.backend {
+            DbBackend::SQLite(pool) => sqlite::get_channel(pool, community_id, channel_id).await,
+            DbBackend::Postgres => channel::get_channel(&self.pool, community_id, channel_id).await,
+        }
     }
 
     /// Returns the canvas content for a channel, if any.
@@ -2216,6 +2305,10 @@ impl Db {
         role: channel::MemberRole,
         invited_by: Option<&[u8]>,
     ) -> Result<channel::MemberRecord> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::add_member(pool, community_id, channel_id, pubkey, role, invited_by)
+                .await;
+        }
         channel::add_member(
             &self.pool,
             community_id,
@@ -2245,7 +2338,14 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool> {
-        channel::is_member(&self.pool, community_id, channel_id, pubkey).await
+        match &self.backend {
+            DbBackend::SQLite(pool) => {
+                sqlite::is_member(pool, community_id, channel_id, pubkey).await
+            }
+            DbBackend::Postgres => {
+                channel::is_member(&self.pool, community_id, channel_id, pubkey).await
+            }
+        }
     }
 
     /// Return the active (channel, pubkey) membership pairs among the given
@@ -2265,7 +2365,10 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<Vec<channel::MemberRecord>> {
-        channel::get_members(&self.pool, community_id, channel_id).await
+        match &self.backend {
+            DbBackend::SQLite(pool) => sqlite::get_members(pool, community_id, channel_id).await,
+            DbBackend::Postgres => channel::get_members(&self.pool, community_id, channel_id).await,
+        }
     }
 
     /// Returns active members for multiple channels in a single query.
@@ -2283,7 +2386,14 @@ impl Db {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
-        channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+        match &self.backend {
+            DbBackend::SQLite(pool) => {
+                sqlite::get_accessible_channel_ids(pool, community_id, pubkey).await
+            }
+            DbBackend::Postgres => {
+                channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+            }
+        }
     }
 
     /// Lists channels, optionally filtered by visibility.
@@ -4007,6 +4117,9 @@ impl Db {
     /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
     /// permission reads.
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::is_relay_member(pool, community, pubkey).await;
+        }
         let path = "relay_membership";
         match self.route_read(path, RoutePredicate::Bounded).await {
             RouteDecision::Replica(mut tx, _entry, reason) => {
@@ -4034,6 +4147,9 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<Option<relay_members::RelayMember>> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::get_relay_member(pool, community, pubkey).await;
+        }
         relay_members::get_relay_member(&self.pool, community, pubkey).await
     }
 
@@ -4042,6 +4158,9 @@ impl Db {
         &self,
         community: CommunityId,
     ) -> Result<Vec<relay_members::RelayMember>> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::list_relay_members(pool, community).await;
+        }
         relay_members::list_relay_members(&self.pool, community).await
     }
 
@@ -4056,6 +4175,9 @@ impl Db {
         role: &str,
         added_by: Option<&str>,
     ) -> Result<bool> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::add_relay_member(pool, community, pubkey, role, added_by).await;
+        }
         relay_members::add_relay_member(&self.pool, community, pubkey, role, added_by).await
     }
 
@@ -4118,6 +4240,9 @@ impl Db {
 
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
     pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+        if let DbBackend::SQLite(pool) = &self.backend {
+            return sqlite::bootstrap_owner(pool, community, owner_pubkey).await;
+        }
         relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
     }
 

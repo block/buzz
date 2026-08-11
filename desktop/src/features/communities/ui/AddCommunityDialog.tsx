@@ -2,9 +2,16 @@ import * as React from "react";
 import { ArrowLeft, ChevronRight, Link2, Plus } from "lucide-react";
 
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
+import {
+  LOCAL_COMMUNITY_NAME,
+  LOCAL_COMMUNITY_RELAY_URL,
+} from "@/features/communities/communityStorage";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { CommunityCreationChoice } from "@/features/communities/ui/CommunityCreationChoice";
 import { HostedCommunityCreateFlow } from "@/features/communities/ui/HostedCommunityCreateFlow";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
+import { useFeatureEnabled } from "@/shared/features";
 import {
   Dialog,
   DialogContent,
@@ -22,7 +29,7 @@ type AddCommunityDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-type AddCommunityMode = "choose" | "create" | "join";
+type AddCommunityMode = "choose" | "create-choose" | "create-hosted" | "join";
 
 const OPTION_CLASS =
   "flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-4 text-left transition-colors duration-150 ease-out hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring";
@@ -33,6 +40,9 @@ export function AddCommunityDialog({
   onOpenChange,
 }: AddCommunityDialogProps) {
   const communityOnboarding = useCommunityOnboarding();
+  const localCommunitiesEnabled = useFeatureEnabled("localCommunities");
+  const { communities } = useCommunities();
+  const hasLocalCommunity = communities.some((community) => community.local);
   const [mode, setMode] = React.useState<AddCommunityMode>("choose");
   const [joinError, setJoinError] = React.useState<string | null>(null);
   const appliedPrefillId = React.useRef<string | null>(null);
@@ -78,19 +88,38 @@ export function AddCommunityDialog({
     [communityOnboarding, handleClose, prefill?.name],
   );
 
+  const startLocalCommunity = React.useCallback(() => {
+    const started = communityOnboarding.start({
+      source: "add-community",
+      communityName: LOCAL_COMMUNITY_NAME,
+      relayUrl: LOCAL_COMMUNITY_RELAY_URL,
+    });
+    if (!started) {
+      setJoinError(
+        "Finish connecting the community already in progress, then try again.",
+      );
+      return;
+    }
+    handleClose();
+  }, [communityOnboarding, handleClose]);
+
   const title =
-    mode === "create"
+    mode === "create-choose"
       ? "Create a new community"
-      : mode === "join"
-        ? "Join an existing community"
-        : "Add community";
+      : mode === "create-hosted"
+        ? "Host a community online"
+        : mode === "join"
+          ? "Join an existing community"
+          : "Add community";
 
   const description =
-    mode === "create"
-      ? "Opens Builderlab in your browser."
-      : mode === "join"
-        ? "Use the community URL or invite link you received."
-        : "Create a new community or join one you already have.";
+    mode === "create-choose"
+      ? "Choose where your community will live."
+      : mode === "create-hosted"
+        ? "Opens Builderlab in your browser."
+        : mode === "join"
+          ? "Use the community URL or invite link you received."
+          : "Create a new community or join one you already have.";
 
   return (
     <Dialog
@@ -123,7 +152,7 @@ export function AddCommunityDialog({
             <DialogTitle className="truncate">{title}</DialogTitle>
           </div>
           <DialogDescription
-            className={mode === "create" ? "sr-only" : undefined}
+            className={mode === "create-hosted" ? "sr-only" : undefined}
           >
             {description}
           </DialogDescription>
@@ -135,7 +164,7 @@ export function AddCommunityDialog({
               <button
                 className={OPTION_CLASS}
                 data-testid="add-community-create"
-                onClick={() => setMode("create")}
+                onClick={() => setMode("create-choose")}
                 type="button"
               >
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -187,6 +216,14 @@ export function AddCommunityDialog({
                 startConnection({ relayUrl, inviteCode, policyReceipt })
               }
               variant="add-community"
+            />
+          ) : mode === "create-choose" ? (
+            <CommunityCreationChoice
+              hasLocalCommunity={hasLocalCommunity}
+              onChooseHosted={() => setMode("create-hosted")}
+              onChooseLocal={startLocalCommunity}
+              showLocalOption={localCommunitiesEnabled}
+              variant="dialog"
             />
           ) : (
             <HostedCommunityCreateFlow onComplete={handleClose} />

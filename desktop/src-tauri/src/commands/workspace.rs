@@ -135,13 +135,28 @@ pub async fn apply_workspace(
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
-        // ── Validate before mutating ──────────────────────────────────────────
+        // Validate credentials before starting a local sidecar: an onboarding
+        // import may replace the in-memory identity, and the relay's durable
+        // nest/owner must match the identity that this workspace will use.
         let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(nsec_trimmed) => {
                 Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
             }
             None => None,
         };
+
+        let is_local_workspace = crate::local_relay::is_local_relay_url(&relay_url);
+        if is_local_workspace {
+            // Only the UI-created local sentinel can launch the bundled relay.
+            // An arbitrary loopback URL remains a normal remote community.
+            let keys = parsed_keys.clone().unwrap_or(state.signing_keys()?);
+            let runtime = app.state::<crate::local_relay::RuntimeState>();
+            crate::local_relay::ensure_started(&app, &runtime, &keys, None)?;
+        } else {
+            // A desktop-owned relay is private to the active local workspace;
+            // do not leave it serving after a switch to any remote workspace.
+            crate::local_relay::stop(&app.state::<crate::local_relay::RuntimeState>());
+        }
 
         // Decide the effective repos_dir from the candidate. A bad path does NOT
         // reject — it is treated as if no override were set: relay/keys still
@@ -165,8 +180,17 @@ pub async fn apply_workspace(
 
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
+            // The local sentinel persists across restarts while the sidecar
+            // endpoint is deliberately ephemeral. Resolve it only after
+            // `ensure_started` above, before any agent can be restored.
+            let effective_relay_url = if crate::local_relay::is_local_relay_url(&relay_url) {
+                crate::local_relay::relay_url(&app.state::<crate::local_relay::RuntimeState>())
+                    .ok_or("local relay did not start")?
+            } else {
+                relay_url
+            };
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
-            *override_guard = Some(relay_url);
+            *override_guard = Some(effective_relay_url);
         }
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
@@ -205,6 +229,12 @@ pub async fn apply_workspace(
         }
 
         try_regenerate_nest(&app);
+        if is_local_workspace {
+            let changed = super::agent_auth::backfill_missing_agent_auth_tags(&app, &state)?;
+            if changed > 0 {
+                eprintln!("buzz-desktop: backfilled NIP-OA auth tags for {changed} local agent(s)");
+            }
+        }
 
         Ok::<(), String>(())
     })

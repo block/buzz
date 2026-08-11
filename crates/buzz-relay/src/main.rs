@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -11,16 +12,17 @@ fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
+use buzz_auth::nip98_replay::Nip98ReplayGuard;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::PubSubManager;
+use buzz_pubsub::{rate_limiter::AdmissionRateLimiter, InProcessNip98ReplayGuard, PubSubManager};
 use buzz_search::SearchService;
 
-use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
+use buzz_relay::config::{Config, RelayProfile, MAX_DRAIN_JITTER_MS};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
-use buzz_relay::state::AppState;
+use buzz_relay::state::{AppBackends, AppState};
 use buzz_relay::storage_sweep;
 use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
@@ -153,13 +155,8 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
-    // Phase 1 constructor fence: never fall through to production's eager
-    // Postgres/Redis/S3 graph for a single-node profile. The local backend
-    // constructor replaces this explicit denial as its implementations land.
     if config.profile.is_single_node() {
-        return Err(anyhow::anyhow!(
-            "BUZZ_PROFILE=single-node local backend bundle is not installed yet"
-        ));
+        return run_single_node(config, tracer_init).await;
     }
 
     let usage_interval_secs = usage_metrics_interval_secs();
@@ -1202,6 +1199,116 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// │  SIGTERM → shutting_down=true → readiness 503           │
 /// │         → graceful drain (30s) → exit                   │
 /// └─────────────────────────────────────────────────────────┘
+/// Start the production router with only embedded/process-local backends.
+async fn run_single_node(config: Config, tracer_init: telemetry::TracerInit) -> anyhow::Result<()> {
+    if !config.bind_addr.ip().is_loopback() {
+        return Err(anyhow::anyhow!(
+            "BUZZ_PROFILE=single-node requires a loopback BUZZ_BIND_ADDR, got {}",
+            config.bind_addr
+        ));
+    }
+    if config.require_relay_membership && config.relay_owner_pubkey.is_none() {
+        return Err(anyhow::anyhow!(
+            "RELAY_OWNER_PUBKEY required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true"
+        ));
+    }
+    if config.require_relay_membership && config.relay_private_key.is_none() {
+        return Err(anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true"
+        ));
+    }
+
+    relay_metrics::install_loopback(config.metrics_port, usage_metrics_idle_timeout_secs(60));
+    let db_path =
+        std::env::var("BUZZ_LOCAL_DB").unwrap_or_else(|_| "buzz-local.sqlite".to_string());
+    let media_root =
+        std::env::var("BUZZ_LOCAL_MEDIA_DIR").unwrap_or_else(|_| "buzz-local-media".to_string());
+    let db = Db::new_sqlite(&db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("SQLite initialization failed: {e}"))?;
+    let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
+    if host.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Cannot derive community host from BUZZ_RELAY_URL"
+        ));
+    }
+    let community = if let Some(owner) = config.relay_owner_pubkey.as_deref() {
+        match db.rebind_single_node_community_host(&host, owner).await? {
+            Some(record) => record.id,
+            None => db.ensure_configured_community(&host).await?.id,
+        }
+    } else {
+        db.ensure_configured_community(&host).await?.id
+    };
+    if let Some(owner) = config.relay_owner_pubkey.as_deref() {
+        db.bootstrap_owner(community, owner).await?;
+    }
+
+    let relay_keypair = if let Some(hex) = &config.relay_private_key {
+        nostr::Keys::parse(hex)
+            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
+    } else {
+        nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+            .expect("hardcoded development key")
+    };
+    let pubsub = Arc::new(PubSubManager::in_process());
+    let workflow_engine = Arc::new(WorkflowEngine::new(
+        db.clone(),
+        buzz_workflow::WorkflowConfig::default(),
+    ));
+    // Git routes and probes are disabled by the profile. A never-used store
+    // satisfies the concrete state field until GitStore gains a local backend.
+    let git_store = buzz_relay::api::git::store::GitStore::new(
+        "http://127.0.0.1:1",
+        "local",
+        "local",
+        "disabled",
+        "local",
+        buzz_media::S3AddressingStyle::Path,
+    )?;
+    let replay: Arc<dyn Nip98ReplayGuard> = Arc::new(InProcessNip98ReplayGuard::new());
+    let (app_state, audit_shutdown) = AppState::new_with_backends(
+        config,
+        AppBackends {
+            db,
+            redis_pool: None,
+            pubsub,
+            search: SearchService::unsupported(),
+            media_storage: buzz_media::MediaStorage::filesystem(&media_root),
+            git_store,
+            nip98_replay: replay,
+            admission_rate_limiter: Arc::new(AdmissionRateLimiter::permissive()),
+        },
+        None::<AuditService>,
+        AuthService::new(buzz_auth::AuthConfig::default()),
+        workflow_engine,
+        relay_keypair,
+    );
+    let state = Arc::new(app_state);
+
+    let state_for_fanout = Arc::clone(&state);
+    let mut events = state.pubsub.subscribe_local();
+    tokio::spawn(async move {
+        while let Ok(event) = events.recv().await {
+            buzz_relay::handlers::event::fan_out_pubsub_event(&state_for_fanout, event).await;
+        }
+    });
+
+    info!(database = %db_path, media = %media_root, community = %community,
+        "single-node profile ready; search, Git, push, workflows, reapers, usage and replica tasks disabled");
+    let router = build_router(Arc::clone(&state));
+    let health_router = build_health_router(Arc::clone(&state));
+    serve(router, health_router, Arc::clone(&state)).await?;
+    state.community_revalidator_cancel.cancel();
+    audit_shutdown
+        .drain(std::time::Duration::from_secs(5))
+        .await;
+    if let telemetry::TracerInit::Enabled(tp) = tracer_init {
+        let _ = tp.shutdown();
+    }
+    Ok(())
+}
+
 /// ```
 ///
 /// ## Shutdown budget
@@ -1234,6 +1341,24 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// roughly the 5s grace plus the ack wait.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn health_listener_ip(profile: RelayProfile) -> IpAddr {
+    match profile {
+        RelayProfile::SingleNode => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        RelayProfile::Production => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    }
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::{health_listener_ip, RelayProfile};
+
+    #[test]
+    fn single_node_health_listener_is_loopback_only() {
+        assert!(health_listener_ip(RelayProfile::SingleNode).is_loopback());
+        assert!(health_listener_ip(RelayProfile::Production).is_unspecified());
+    }
+}
+
 async fn serve(
     router: axum::Router,
     health_router: axum::Router,
@@ -1241,10 +1366,11 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
-    let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
+    let health_host = health_listener_ip(config.profile);
+    let health_listener = tokio::net::TcpListener::bind((health_host, config.health_port))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
-    info!(port = config.health_port, "Health probe listener started");
+    info!(host = %health_host, port = config.health_port, "Health probe listener started");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.ok();
     });

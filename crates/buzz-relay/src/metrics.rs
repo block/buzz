@@ -14,6 +14,7 @@
 //! recorded by [`track_metrics`] middleware on the app router. Buzz-specific
 //! metrics are recorded inline at their call sites.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -56,6 +57,17 @@ const GIT_PACK_BUCKETS: [f64; 9] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 1
 /// Integer-count buckets for fan-out recipient histograms.
 const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1000.0];
 
+fn prometheus_listener(port: u16, loopback_only: bool) -> SocketAddr {
+    SocketAddr::new(
+        IpAddr::V4(if loopback_only {
+            Ipv4Addr::LOCALHOST
+        } else {
+            Ipv4Addr::UNSPECIFIED
+        }),
+        port,
+    )
+}
+
 /// Install the global metrics recorder and spawn the Prometheus HTTP exporter.
 ///
 /// `build()` returns the recorder + exporter future and internally spawns
@@ -64,8 +76,17 @@ const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0,
 /// Must be called from within a Tokio runtime.
 /// Panics if a recorder is already installed or the port is in use.
 pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
+    install_on(prometheus_listener(port, false), gauge_idle_timeout_secs);
+}
+
+/// Install the metrics exporter on loopback for the single-node profile.
+pub fn install_loopback(port: u16, gauge_idle_timeout_secs: u64) {
+    install_on(prometheus_listener(port, true), gauge_idle_timeout_secs);
+}
+
+fn install_on(listener: SocketAddr, gauge_idle_timeout_secs: u64) {
     let (recorder, exporter) = PrometheusBuilder::new()
-        .with_http_listener(([0, 0, 0, 0], port))
+        .with_http_listener(listener)
         // Remove gauge series that the relay intentionally stops emitting.
         .idle_timeout(
             MetricKindMask::GAUGE,
@@ -204,4 +225,15 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
     metrics::histogram!("http_request_latency_ms", &labels).record(latency_ms);
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prometheus_listener;
+
+    #[test]
+    fn single_node_metrics_listener_is_loopback_only() {
+        assert!(prometheus_listener(9102, true).ip().is_loopback());
+        assert!(prometheus_listener(9102, false).ip().is_unspecified());
+    }
 }

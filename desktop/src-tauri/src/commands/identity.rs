@@ -51,8 +51,11 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
 }
 
 #[tauri::command]
-pub fn get_default_relay_url() -> String {
-    relay::relay_ws_url()
+pub fn get_default_relay_url(state: State<'_, AppState>) -> Result<String, String> {
+    // A hosted default remains just that: resolving it never spawns an unused
+    // local sidecar. The explicit local workspace sentinel starts its sidecar
+    // during `apply_workspace`.
+    Ok(relay::relay_ws_url_with_override(&state))
 }
 
 #[tauri::command]

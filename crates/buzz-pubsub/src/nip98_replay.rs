@@ -12,6 +12,76 @@ use buzz_auth::{
 };
 use nostr::EventId;
 
+/// Process-local NIP-98 replay seen-set for a single relay process.
+pub struct InProcessNip98ReplayGuard {
+    seen: dashmap::DashMap<String, std::time::Instant>,
+    max_entries: usize,
+}
+
+impl InProcessNip98ReplayGuard {
+    /// Create a bounded, expiring process-local replay guard.
+    pub fn new() -> Self {
+        Self {
+            seen: dashmap::DashMap::new(),
+            max_entries: 100_000,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            seen: dashmap::DashMap::new(),
+            max_entries,
+        }
+    }
+}
+
+impl Default for InProcessNip98ReplayGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Nip98ReplayGuard for InProcessNip98ReplayGuard {
+    fn try_mark_in_scope<'a>(
+        &'a self,
+        scope: &'a str,
+        event_id: &'a EventId,
+        ttl_secs: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, AuthError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let ttl = std::time::Duration::from_secs(
+                ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS),
+            );
+            let now = std::time::Instant::now();
+            let key = nip98_replay_key_for_scope(scope, event_id);
+            if self.seen.len() >= self.max_entries && !self.seen.contains_key(&key) {
+                self.seen
+                    .retain(|_, marked| now.duration_since(*marked) < ttl);
+                if self.seen.len() >= self.max_entries {
+                    return Err(AuthError::Internal(
+                        "process-local replay guard capacity exhausted".to_string(),
+                    ));
+                }
+            }
+            match self.seen.entry(key) {
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    entry.insert(now);
+                    Ok(true)
+                }
+                dashmap::mapref::entry::Entry::Occupied(mut entry)
+                    if now.duration_since(*entry.get()) >= ttl =>
+                {
+                    entry.insert(now);
+                    Ok(true)
+                }
+                dashmap::mapref::entry::Entry::Occupied(_) => Ok(false),
+            }
+        })
+    }
+}
+
 /// Redis-backed NIP-98 replay seen-set.
 ///
 /// Each `try_mark(ctx, event_id, ttl)` issues a single
@@ -122,6 +192,29 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign")
             .id
+    }
+
+    #[tokio::test]
+    async fn in_process_guard_rejects_replay_and_fails_closed_at_capacity() {
+        let guard = InProcessNip98ReplayGuard::with_capacity(1);
+        let ctx = fresh_ctx();
+        let first = fresh_event_id();
+        assert!(guard
+            .try_mark(&ctx, &first, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect("first mark"));
+        assert!(!guard
+            .try_mark(&ctx, &first, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect("replay"));
+
+        let second = fresh_event_id();
+        assert!(guard
+            .try_mark(&ctx, &second, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect_err("full guard must fail closed")
+            .to_string()
+            .contains("capacity exhausted"));
     }
 
     #[tokio::test]

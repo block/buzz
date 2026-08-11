@@ -17,6 +17,8 @@ export type Community = {
    * `REPOS` directory inside the nest.
    */
   reposDir?: string;
+  /** True only for the relay supervised by this desktop instance. */
+  local?: boolean;
   /**
    * @deprecated Never read. Kept on the type so old localStorage entries
    * deserialise without errors. New entries never set this field, and
