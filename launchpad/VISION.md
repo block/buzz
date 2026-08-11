@@ -49,9 +49,9 @@ promotes it.
 
 ## Why Buzz
 
-`DECIDED` — confirmed by a human on 2026-08-11, which is the confirmation
-[#42](https://github.com/launchpad-26/buzz/issues/42)'s closing note requires. Recorded
-here rather than in an ADR document, because no ADR issue was raised for this question.
+`PROPOSED` — a human confirmed these reasons on 2026-08-11, and no ADR issue was raised
+for the question, so there is no accepted decision record to link. Approving this
+document's pull request is what promotes them, exactly as for the Mission above.
 
 | Reason | Substance |
 |---|---|
@@ -59,6 +59,10 @@ here rather than in an ADR document, because no ADR issue was raised for this qu
 | Learning by operating it | The cohort learns DevOps, security and AgentOps by running a real internet-facing system. Operating it is the curriculum, not a side effect. |
 | We own the infrastructure and data | Self-hosting means the cohort controls the relay, identities, data and membership, with no dependence on a third party's terms, availability or export limits. |
 | One surface for humans, agents and knowledge | Answer "what is changing?" and "how does this work?" without first knowing which repository holds the answer. |
+
+The section-level marker above covers only the rows present when this section was
+written. A row added later does not inherit it — give any new reason its own status
+marker and its own link to evidence.
 
 The wording of "One surface for humans, agents and knowledge" comes from milestone M1,
 whose completion statement is the cohort being able to answer those two questions "without
@@ -81,14 +85,17 @@ contains the answer."
 ## What we are building
 
 The direction below is recorded in
-[#42](https://github.com/launchpad-26/buzz/issues/42) and was confirmed by a human on
-2026-08-11. It is agreed and unbuilt — nothing here is deployed.
+[#42](https://github.com/launchpad-26/buzz/issues/42), and a human confirmed it on
+2026-08-11. Nothing here is deployed, and #42 records the *requirement* for that
+confirmation rather than the confirmation itself, so each row stays `PROPOSED` until
+approving this document's pull request promotes it — the same promotion event the Mission
+section names.
 
 | Direction | Status |
 |---|---|
-| Migrate the cohort off Discord onto Buzz | `DECIDED` — [#42](https://github.com/launchpad-26/buzz/issues/42) |
-| Initiate agents on the relay that execute on cohort members' own machines | `DECIDED` — [#42](https://github.com/launchpad-26/buzz/issues/42); how execution is contained is `OPEN` — [#43](https://github.com/launchpad-26/buzz/issues/43) |
-| Direct that agent work at assisting development of `launchpad-26/rhizomorph` | `DECIDED` — [#42](https://github.com/launchpad-26/buzz/issues/42) |
+| Migrate the cohort off Discord onto Buzz | `PROPOSED` — [#42](https://github.com/launchpad-26/buzz/issues/42) |
+| Initiate agents on the relay that execute on cohort members' own machines | `PROPOSED` — [#42](https://github.com/launchpad-26/buzz/issues/42); how execution is contained is `OPEN` — [#43](https://github.com/launchpad-26/buzz/issues/43) |
+| Direct that agent work at assisting development of `launchpad-26/rhizomorph` | `PROPOSED` — [#42](https://github.com/launchpad-26/buzz/issues/42) |
 
 This changes what "secure" and "correctly sized" mean for the relay: it stops being only a
 service to protect and becomes an initiation point for code execution on other people's
@@ -105,7 +112,7 @@ Every row below is sourced, and every status was checked against the live issue 
 | Constraint | Status | Source |
 |---|---|---|
 | The repository is public; every tracked file is world-readable | `IMPLEMENTED` | `launchpad/AGENTS.md` §8 |
-| No secrets, keys, tokens, private hostnames or member rosters in tracked files | `IMPLEMENTED` | `launchpad/AGENTS.md` §8 |
+| No secrets, keys, tokens, private hostnames or member rosters in tracked files | `IMPLEMENTED` | `launchpad/AGENTS.md` §8 and [#42](https://github.com/launchpad-26/buzz/issues/42) |
 | The cohort operates Buzz and does not develop it; product bugs go upstream | `IMPLEMENTED` | `launchpad/AGENTS.md` §1 |
 | Upstream files are never moved or renamed; cohort files live under `launchpad/` | `IMPLEMENTED` | `launchpad/AGENTS.md` §3 |
 | Stable knowledge is a document; active work is an issue | `IMPLEMENTED` | `launchpad/AGENTS.md` §2 |
