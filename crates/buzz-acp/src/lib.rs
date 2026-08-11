@@ -2059,10 +2059,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let publish_final_if_unsent = config.publish_final_if_unsent;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        idx,
+                        observer,
+                        publish_final_if_unsent,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -3913,12 +3923,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let publish_final_if_unsent = config.publish_final_if_unsent;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            i,
+            observer,
+            publish_final_if_unsent,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4107,6 +4127,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let publish_final_if_unsent = config.publish_final_if_unsent;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4118,7 +4139,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            index,
+            observer,
+            publish_final_if_unsent,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4164,6 +4194,7 @@ struct PoolStartup {
     has_generated_codex_config: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
+    publish_final_if_unsent: bool,
 }
 
 impl PoolStartup {
@@ -4176,6 +4207,7 @@ impl PoolStartup {
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
+            publish_final_if_unsent: config.publish_final_if_unsent,
         }
     }
 }
@@ -4198,6 +4230,7 @@ async fn initialize_agent_pool(
         match spawn_result {
             Ok(mut acp) => {
                 acp.set_observer(startup.observer.clone(), i);
+                acp.set_publish_final_if_unsent(startup.publish_final_if_unsent);
                 let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
                 let initialize_result = match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
@@ -4288,6 +4321,7 @@ async fn initialize_agent_pool(
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
 /// borrowing `Config`. All respawn/refill paths use this.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_init(
     command: &str,
     args: &[String],
@@ -4295,11 +4329,13 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
+    publish_final_if_unsent: bool,
 ) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
+    acp.set_publish_final_if_unsent(publish_final_if_unsent);
 
     match acp.initialize().await {
         Ok(init_result) => {

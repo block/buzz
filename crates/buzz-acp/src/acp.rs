@@ -22,6 +22,19 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Cap on `AcpClient::final_text_buffer`'s accumulated byte length, for the
+/// opt-in `publish-final-if-unsent` fallback gate.
+///
+/// Matches the max message content size `buzz_sdk::builders::build_message`
+/// itself enforces (`check_content(content, 64 * 1024)` — see
+/// `crates/buzz-sdk/src/builders.rs`; there is no exported constant for it,
+/// it's inlined at each `check_content` call site in that crate). Buffering
+/// past this point is pointless even before considering memory growth: a
+/// [`pool::publish_fallback_final_text`](crate::pool::publish_fallback_final_text)
+/// call with more than this many bytes of content would be rejected by
+/// `build_message`'s own validation and never publish anyway.
+const FALLBACK_PUBLISH_MAX_BYTES: usize = 64 * 1024;
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -213,6 +226,17 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Whether the publish-final-if-unsent fallback gate is armed for THIS
+    /// client instance (mirrors `Config::publish_final_if_unsent`, set once
+    /// at spawn time via [`set_publish_final_if_unsent`](Self::set_publish_final_if_unsent) —
+    /// see that method's doc comment for why it's a post-construction setter
+    /// rather than a `spawn()` parameter). Gates whether
+    /// `final_text_buffer` is appended to at all: when `false` (the
+    /// default, and the case for every backend except `hermes` today), the
+    /// `agent_message_chunk` handler is a pure no-op with respect to this
+    /// feature — no buffer growth, no per-turn allocation cost, for backends
+    /// that will never read it.
+    publish_final_if_unsent: bool,
     /// Buffered `agent_message_chunk` text accumulated for the current (or
     /// most-recently-completed) turn. Reset at the top of every
     /// [`session_prompt_blocks_with_idle_timeout`](Self::session_prompt_blocks_with_idle_timeout)
@@ -222,6 +246,11 @@ pub struct AcpClient {
     /// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback-publish gate — see
     /// [`pending_unpublished_final_text`](Self::pending_unpublished_final_text)
     /// and `handle_prompt_result` in `lib.rs`.
+    ///
+    /// Only appended to when [`publish_final_if_unsent`](Self::publish_final_if_unsent)
+    /// is `true` for this client (see that field's docs), and capped at
+    /// [`FALLBACK_PUBLISH_MAX_BYTES`] even then — an unusually long turn
+    /// stops growing the buffer rather than accumulating without bound.
     final_text_buffer: String,
     /// `toolCallId`s from this turn whose `tool_call` title/`rawInput` looked
     /// like a `buzz messages send` invocation (see
@@ -243,6 +272,18 @@ pub struct AcpClient {
     /// `session_prompt_blocks_with_idle_timeout` — callers that don't have an
     /// anchor to give (heartbeats) must clear it explicitly via `set_pending_reply_anchor(None)`.
     pending_reply_anchor: Option<String>,
+    /// Channel id (stringified) the in-flight turn is processing, set by the
+    /// caller via [`set_pending_channel_id`](Self::set_pending_channel_id) at
+    /// the top of `pool::run_prompt_task`, alongside `set_observer_context`.
+    /// `None` for heartbeats (no channel). Used by
+    /// [`looks_like_buzz_messages_send`] to reject crediting publish
+    /// detection to a `buzz messages send --channel <other>` call that sent
+    /// to a DIFFERENT channel than this turn is processing — see that
+    /// function's doc comment. Not reset by
+    /// `session_prompt_blocks_with_idle_timeout` for the same reason
+    /// `pending_reply_anchor` isn't: the caller sets (or clears) it
+    /// explicitly before every turn.
+    pending_channel_id: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -419,36 +460,132 @@ enum SteerTransport {
     AcpExtension,
 }
 
+/// Whether a `tool_call`/`tool_call_update` payload represents an actually
+/// *successful* completion, not merely a completed tool-call lifecycle.
+///
+/// This crate has no typed ACP tool-call schema, but this codebase's own
+/// reference agent (`buzz-agent::agent::{emit_completed,emit_failed}`)
+/// already establishes a convention for this exact distinction: a tool call
+/// can reach `status: "completed"` while the underlying operation still
+/// failed, signaled by `rawOutput.isError: true` (a hard failure instead
+/// uses `status: "failed"` with `rawOutput.error`). We reuse that same
+/// convention here rather than inventing a new one.
+///
+/// Residual uncertainty: `buzz-agent` is the only backend in this repo
+/// guaranteed to follow this `rawOutput.isError` shape. Other ACP-speaking
+/// backends (including third-party ones, and `hermes` — the one this gate is
+/// actually enabled for) may report `status: "completed"` with no
+/// `rawOutput` at all, or a differently-shaped one; there is no ACP-spec
+/// guarantee here. When `rawOutput` is absent we fall back to trusting
+/// `status: "completed"` alone (the pre-existing behavior) rather than
+/// treating "unknown shape" as failure, since the latter would make the
+/// fallback gate MORE likely to double-publish (the worse of the two
+/// failure modes for this feature — see `looks_like_buzz_messages_send`'s
+/// own doc comment on that asymmetry). This is a best-effort signal, not a
+/// guarantee.
+fn tool_call_update_succeeded(update: &serde_json::Value) -> bool {
+    if update.get("status").and_then(|v| v.as_str()) != Some("completed") {
+        return false;
+    }
+    match update.get("rawOutput") {
+        None => true,
+        Some(raw) => raw.get("isError").and_then(|v| v.as_bool()) != Some(true),
+    }
+}
+
 /// Best-effort detection of a `buzz messages send` tool-call invocation from
-/// its ACP `title` and, if present, `rawInput` (some connectors surface the
-/// underlying shell command there instead of, or in addition to, the title).
+/// its ACP `rawInput` and, as a fallback, `title`.
 ///
 /// `buzz-acp` has no typed ACP tool-call schema — all `session/update`
 /// handling in this module is untyped JSON — and there is no dedicated "this
 /// turn published to the channel" signal anywhere else in the codebase (see
 /// `queue.rs` / `pool.rs`: `turn_started`/`turn_completed` and
 /// `PromptOutcome` track turn lifecycle, not channel side-effects). This
-/// substring heuristic is the most direct signal available.
+/// crate's own reference agent implementation, `buzz-agent`, already solves
+/// an analogous problem (nagging a turn that ends without a reply) with
+/// `agent::is_reply_shaped` — see `crates/buzz-agent/src/agent.rs`: it reads
+/// ONLY the structured `command` field of a shell tool call's arguments (never
+/// `title`/`description`/other metadata, which callers don't control and
+/// could stuff with decoy text) and substring-matches `"messages send"` on
+/// it. We follow that same convention here: prefer `rawInput.command` (the
+/// shape a real shell-tool invocation uses) over the raw `rawInput` blob or
+/// `title`, and require an ordered, adjacent match — `"buzz"` appearing
+/// somewhere before an adjacent `"messages send"` substring — rather than the
+/// previous revision's "all three words anywhere in any order," which could
+/// false-positive on an unrelated tool call whose title/args happened to
+/// mention all three words in an unrelated context.
 ///
-/// The check is intentionally loose rather than narrow: a false negative here
-/// (failing to recognize a real publish) causes the fallback gate to publish
-/// a duplicate — recreating exactly the failure mode this feature exists to
-/// avoid — while a false positive (wrongly crediting a non-publish as a
-/// publish) only matters if the agent's *actual* reply attempt also silently
-/// failed, which is already the pre-existing bug for the one backend
-/// (`hermes`) this gate is enabled for.
-fn looks_like_buzz_messages_send(update: &serde_json::Value) -> bool {
-    let mut haystack = String::new();
-    if let Some(t) = update.get("title").and_then(|v| v.as_str()) {
-        haystack.push_str(t);
-        haystack.push(' ');
+/// Also cross-checks a `--channel <id>` argument, when present, against
+/// `expected_channel_id`: a detected send to a DIFFERENT channel must not
+/// suppress this turn's fallback (the agent's reply to some other channel is
+/// not a reply to this one).
+///
+/// The match is intentionally still coarse rather than exact — this is a
+/// substring/token scan, not a real shell-argv parser, so a command
+/// assembled at runtime or hidden in a wrapper script can still be missed,
+/// and quoted text that merely mentions a send (`echo "buzz messages send"`)
+/// can still match. Missing a real post (false negative → possible
+/// duplicate) is the accepted-cheaper failure mode versus over-crediting a
+/// non-publish (false positive → a genuinely dropped reply stays dropped);
+/// see the module-level fallback-gate docs for that asymmetry. Known
+/// residual gap: `--channel` cross-checking only fires when the command text
+/// actually contains a parseable `--channel <value>` pair; a send with the
+/// channel supplied some other way (positional arg, env var, alias) is
+/// credited without the cross-check, same as before this fix.
+fn looks_like_buzz_messages_send(
+    update: &serde_json::Value,
+    expected_channel_id: Option<&str>,
+) -> bool {
+    let command = update
+        .get("rawInput")
+        .and_then(|raw| raw.get("command"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let haystack = command.clone().unwrap_or_else(|| {
+        update
+            .get("rawInput")
+            .map(|v| v.to_string())
+            .or_else(|| {
+                update
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    });
+    let lower = haystack.to_ascii_lowercase();
+
+    let Some(send_pos) = lower.find("messages send") else {
+        return false;
+    };
+    if !lower[..send_pos].contains("buzz") {
+        return false;
     }
-    if let Some(raw) = update.get("rawInput") {
-        haystack.push_str(&raw.to_string());
+
+    match extract_channel_flag(&haystack) {
+        Some(sent_channel) => expected_channel_id.is_none_or(|expected| sent_channel == expected),
+        None => true,
     }
-    let haystack = haystack.to_ascii_lowercase();
-    haystack.contains("buzz messages send")
-        || (haystack.contains("buzz") && haystack.contains("messages") && haystack.contains("send"))
+}
+
+/// Extract the value of a `--channel <value>` (or `--channel=<value>`)
+/// argument from a shell-command-shaped string, if present. Whitespace-token
+/// scan, not a real argv/shell parser — sufficient for the plain
+/// `--channel <uuid>` shape `buzz messages send` is documented to use (see
+/// `crates/buzz-acp/README.md`), not for quoted or escaped values.
+fn extract_channel_flag(command: &str) -> Option<String> {
+    let mut tokens = command.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if let Some(v) = tok.strip_prefix("--channel=") {
+            return Some(v.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+        if tok == "--channel" {
+            return tokens
+                .next()
+                .map(|v| v.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+    }
+    None
 }
 
 fn build_client_capabilities() -> serde_json::Value {
@@ -614,10 +751,12 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            publish_final_if_unsent: false,
             final_text_buffer: String::new(),
             pending_publish_tool_calls: HashSet::new(),
             channel_publish_detected: false,
             pending_reply_anchor: None,
+            pending_channel_id: None,
         })
     }
 
@@ -625,6 +764,25 @@ impl AcpClient {
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
+    }
+
+    /// Arm (or disarm) the publish-final-if-unsent fallback gate for this
+    /// client instance, mirroring `Config::publish_final_if_unsent`.
+    ///
+    /// A post-construction setter rather than a `spawn()` parameter,
+    /// following the same pattern as [`set_observer`](Self::set_observer):
+    /// callers set this immediately after `spawn()` (and before
+    /// `initialize()`/any prompt), once, for the process's lifetime — there
+    /// is currently no per-turn or per-backend reason to flip it after
+    /// startup, but it's cheap to keep settable rather than baking it into
+    /// the constructor's argument list.
+    ///
+    /// Controls whether `final_text_buffer` is appended to at all in
+    /// `handle_session_update`'s `agent_message_chunk` arm — see that
+    /// field's docs. Left at its default (`false`) this call is unnecessary;
+    /// only the `hermes` backend's spawn path calls this with `true` today.
+    pub fn set_publish_final_if_unsent(&mut self, armed: bool) {
+        self.publish_final_if_unsent = armed;
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
@@ -944,6 +1102,15 @@ impl AcpClient {
     /// it isn't reset automatically.
     pub fn set_pending_reply_anchor(&mut self, anchor: Option<String>) {
         self.pending_reply_anchor = anchor;
+    }
+
+    /// Set the channel id the in-flight turn is processing, for the
+    /// publish-final-if-unsent fallback gate's `--channel` cross-check — see
+    /// [`pending_channel_id`](Self::pending_channel_id) field docs. Call with
+    /// `None` for heartbeats. Like `set_pending_reply_anchor`, must be called
+    /// before the prompt is sent for the value to apply to that turn.
+    pub fn set_pending_channel_id(&mut self, channel_id: Option<String>) {
+        self.pending_channel_id = channel_id;
     }
 
     /// Returns the buffered final assistant text for the just-completed turn,
@@ -1842,9 +2009,28 @@ impl AcpClient {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                     // Accumulated for the opt-in publish-final-if-unsent fallback
-                    // gate — see `pending_unpublished_final_text`. No-op (just
-                    // grows a buffer nobody reads) when the gate is disabled.
-                    self.final_text_buffer.push_str(text);
+                    // gate — see `pending_unpublished_final_text`. Entirely
+                    // skipped (not even a no-op append) when the gate isn't
+                    // armed for this client, and capped at
+                    // `FALLBACK_PUBLISH_MAX_BYTES` even when armed, so an
+                    // unusually long turn can't grow this without bound.
+                    if self.publish_final_if_unsent
+                        && self.final_text_buffer.len() < FALLBACK_PUBLISH_MAX_BYTES
+                    {
+                        let remaining = FALLBACK_PUBLISH_MAX_BYTES - self.final_text_buffer.len();
+                        if text.len() <= remaining {
+                            self.final_text_buffer.push_str(text);
+                        } else {
+                            // Truncate to the remaining budget on a char
+                            // boundary (never split a multi-byte UTF-8
+                            // sequence) rather than dropping the whole chunk.
+                            let mut cut = remaining;
+                            while cut > 0 && !text.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            self.final_text_buffer.push_str(&text[..cut]);
+                        }
+                    }
                 }
                 false
             }
@@ -1858,14 +2044,14 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
-                if looks_like_buzz_messages_send(update) {
+                if looks_like_buzz_messages_send(update, self.pending_channel_id.as_deref()) {
                     if let Some(tool_id) = update.get("toolCallId").and_then(|v| v.as_str()) {
                         self.pending_publish_tool_calls.insert(tool_id.to_string());
                     }
                     // Some connectors report a terminal status inline on the
                     // creating `tool_call` for synchronous tools, with no
                     // follow-up `tool_call_update` at all.
-                    if update.get("status").and_then(|v| v.as_str()) == Some("completed") {
+                    if tool_call_update_succeeded(update) {
                         self.channel_publish_detected = true;
                     }
                 }
@@ -1878,7 +2064,9 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
-                if status == "completed" && self.pending_publish_tool_calls.contains(tool_id) {
+                if tool_call_update_succeeded(update)
+                    && self.pending_publish_tool_calls.contains(tool_id)
+                {
                     self.channel_publish_detected = true;
                 }
                 false

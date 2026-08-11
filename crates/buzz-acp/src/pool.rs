@@ -1405,6 +1405,16 @@ pub async fn run_prompt_task(
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
+    // Give the publish-final-if-unsent fallback gate's `--channel`
+    // cross-check (`acp::looks_like_buzz_messages_send`) this turn's channel
+    // id up front, alongside the observer context — set unconditionally
+    // (also when the gate is disabled for this client) for the same reason
+    // `set_pending_reply_anchor` below is: cheap, and keeps `AcpClient`'s
+    // pending-turn state correct regardless of config rather than coupling
+    // this call site to whether the gate happens to be armed.
+    agent
+        .acp
+        .set_pending_channel_id(observer_channel_id.map(|id| id.to_string()));
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
