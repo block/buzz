@@ -23,7 +23,8 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
 const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
-const DEBOUNCE_MS = 5_000;
+const PUBLISH_DEBOUNCE_MS = 5_000;
+const LOCAL_PERSIST_MAX_WAIT_MS = 1_000;
 
 function generateHex(bytes: number): string {
   const arr = new Uint8Array(bytes);
@@ -312,6 +313,7 @@ export class ReadStateManager {
   private publishableContextIds = new Set<string>();
   private lastPublishedContexts: Record<string, number> = {};
   private debounceTimer: number | null = null;
+  private localPersistTimer: number | null = null;
   private listeners = new Set<() => void>();
   private unsubscribeLive: (() => void) | null = null;
   private initialized = false;
@@ -331,6 +333,8 @@ export class ReadStateManager {
       generateHex(16),
     );
     this.extraSlotIds = loadExtraSlotIds(pubkey);
+    window.addEventListener("pagehide", this.flushLocalState);
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   async initialize(): Promise<void> {
@@ -377,6 +381,7 @@ export class ReadStateManager {
     unixTimestamp: number,
     options: { publishable: boolean },
   ): void {
+    if (this.destroyed) return;
     const current = this.effectiveState.get(contextId) ?? 0;
     if (unixTimestamp <= current) {
       if (!options.publishable || this.publishableContextIds.has(contextId)) {
@@ -438,7 +443,14 @@ export class ReadStateManager {
 
   destroy(): void {
     this.destroyed = true;
-    // Flush any pending writes immediately
+    window.removeEventListener("pagehide", this.flushLocalState);
+    document.removeEventListener(
+      "visibilitychange",
+      this.handleVisibilityChange,
+    );
+    this.flushLocalState();
+
+    // Flush any pending relay publish immediately
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -475,6 +487,7 @@ export class ReadStateManager {
   }
 
   private async mergeEvents(events: RelayEvent[]): Promise<void> {
+    if (this.destroyed) return;
     // Collect all own blobs (keyed by slot d-tag) to union them all.
     // NIP-RS: multiple own-slot blobs must be max-merged, not winner-takes-all.
     const ownBlobsBySlot = new Map<
@@ -484,6 +497,7 @@ export class ReadStateManager {
 
     for (const event of events) {
       const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (this.destroyed) return;
       if (!parsed) continue;
 
       this.maxFetchedCreatedAt = Math.max(
@@ -520,6 +534,7 @@ export class ReadStateManager {
     // d-tag coordinate. If so, rotate our slotId to avoid clobbering.
     for (const event of events) {
       const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (this.destroyed) return;
       if (!parsed || parsed.dTag !== `read-state:${this.slotId}`) continue;
       if (parsed.blob.client_id !== this.clientId) {
         this.slotId = generateHex(16);
@@ -572,14 +587,13 @@ export class ReadStateManager {
   }
 
   private async handleIncomingEvent(event: RelayEvent): Promise<void> {
-    if (event.pubkey !== this.pubkey) return;
-    if (this.destroyed) return;
+    if (this.destroyed || event.pubkey !== this.pubkey) return;
     console.debug(
       `[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.created_at}`,
     );
 
     const parsed = await parseReadStateEvent(event, this.pubkey);
-    if (!parsed) return;
+    if (!parsed || this.destroyed) return;
 
     this.maxFetchedCreatedAt = Math.max(
       this.maxFetchedCreatedAt,
@@ -622,18 +636,21 @@ export class ReadStateManager {
   }
 
   private schedulePublish(): void {
+    if (this.destroyed) return;
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
     }
     this.debounceTimer = window.setTimeout(() => {
       this.debounceTimer = null;
       void this.publish();
-    }, DEBOUNCE_MS);
+    }, PUBLISH_DEBOUNCE_MS);
   }
 
   private async publish(): Promise<void> {
     console.debug(`[ReadStateManager] publish starting slotId=${this.slotId}`);
     await this.fetchOwnBlobBeforePublish();
+    if (this.destroyed) return;
+    this.flushLocalState();
 
     // Build blob from contexts this client is allowed to publish.
     const contexts = this.currentContexts();
@@ -927,10 +944,33 @@ export class ReadStateManager {
     for (const [contextId, createdAt] of stored.contextSourceCreatedAt) {
       this.contextSourceCreatedAt.set(contextId, createdAt);
     }
-    this.persistLocalState();
+    this.writeLocalState();
   }
 
   private persistLocalState(): void {
+    if (this.destroyed || this.localPersistTimer !== null) return;
+
+    this.localPersistTimer = window.setTimeout(() => {
+      this.localPersistTimer = null;
+      this.writeLocalState();
+    }, LOCAL_PERSIST_MAX_WAIT_MS);
+  }
+
+  private readonly flushLocalState = (): void => {
+    if (this.localPersistTimer === null) return;
+
+    window.clearTimeout(this.localPersistTimer);
+    this.localPersistTimer = null;
+    this.writeLocalState();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") {
+      this.flushLocalState();
+    }
+  };
+
+  private writeLocalState(): void {
     writeStoredReadState(
       this.pubkey,
       this.effectiveState,
