@@ -1,5 +1,12 @@
 import * as React from "react";
-import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
+import { AlertTriangle, Bot, ChevronDown, Search, X } from "lucide-react";
+import {
+  type AllowlistMemberHint,
+  hintFromSearchResult,
+  resolveAllowlistChipAvatar,
+  resolveAllowlistChipIsAgent,
+  resolveAllowlistChipLabel,
+} from "@/features/agents/lib/allowlistMemberDisplay";
 import {
   mergeAllowlist,
   parsePubkeyInput,
@@ -7,9 +14,9 @@ import {
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import { useUserSearchQuery } from "@/features/profile/hooks";
+import { useUserSearchQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
-import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
+import type { RespondToMode, UserProfileSummary, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
@@ -120,6 +127,13 @@ export function CreateAgentRespondToField({
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
   const [pasteText, setPasteText] = React.useState("");
+  const [allowlistHints, setAllowlistHints] = React.useState<
+    Record<string, AllowlistMemberHint>
+  >({});
+
+  const allowlistProfilesQuery = useUsersBatchQuery(allowlist, {
+    enabled: mode === "allowlist" && allowlist.length > 0,
+  });
 
   const deferredQuery = React.useDeferredValue(query.trim());
   const allowlistSet = React.useMemo(
@@ -157,7 +171,12 @@ export function CreateAgentRespondToField({
   );
 
   function handleAddSearchResult(user: UserSearchResult) {
-    onAllowlistChange(mergeAllowlist(allowlist, [user.pubkey]));
+    const normalizedPubkey = user.pubkey.toLowerCase();
+    onAllowlistChange(mergeAllowlist(allowlist, [normalizedPubkey]));
+    setAllowlistHints((current) => ({
+      ...current,
+      [normalizedPubkey]: hintFromSearchResult(user),
+    }));
     setQuery("");
   }
 
@@ -167,9 +186,18 @@ export function CreateAgentRespondToField({
   }
 
   function handleRemove(pubkey: string) {
+    const normalizedPubkey = pubkey.toLowerCase();
     onAllowlistChange(
-      allowlist.filter((p) => p.toLowerCase() !== pubkey.toLowerCase()),
+      allowlist.filter((p) => p.toLowerCase() !== normalizedPubkey),
     );
+    setAllowlistHints((current) => {
+      if (!(normalizedPubkey in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[normalizedPubkey];
+      return next;
+    });
   }
 
   function handleAddFromPaste() {
@@ -261,6 +289,8 @@ export function CreateAgentRespondToField({
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
+          allowlistHints={allowlistHints}
+          allowlistProfiles={allowlistProfilesQuery.data?.profiles}
           deferredQuery={deferredQuery}
           disabled={disabled}
           isDirectEntryOpen={isDirectEntryOpen}
@@ -295,6 +325,8 @@ const HEX_64_RE = /^[0-9a-f]{64}$/i;
 
 function AllowlistPicker({
   allowlist,
+  allowlistHints,
+  allowlistProfiles,
   deferredQuery,
   disabled,
   isDirectEntryOpen,
@@ -316,6 +348,8 @@ function AllowlistPicker({
   variant = "default",
 }: {
   allowlist: string[];
+  allowlistHints: Record<string, AllowlistMemberHint>;
+  allowlistProfiles?: Record<string, UserProfileSummary>;
   deferredQuery: string;
   disabled?: boolean;
   isDirectEntryOpen: boolean;
@@ -387,29 +421,60 @@ function AllowlistPicker({
         </div>
         {allowlist.length > 0 ? (
           <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
-            {allowlist.map((pubkey) => (
-              <div
-                className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
-                data-testid={`agent-respond-to-chip-${pubkey}`}
-                key={pubkey}
-              >
-                <UserAvatar
-                  avatarUrl={null}
-                  displayName={truncatePubkey(pubkey)}
-                  size="xs"
-                />
-                <PubKey pubkey={pubkey} />
-                <button
-                  aria-label={`Remove ${truncatePubkey(pubkey)}`}
-                  className="text-muted-foreground transition-colors hover:text-foreground"
-                  disabled={disabled}
-                  onClick={() => onRemove(pubkey)}
-                  type="button"
+            {allowlist.map((pubkey) => {
+              const normalizedPubkey = pubkey.toLowerCase();
+              const hint = allowlistHints[normalizedPubkey];
+              const chipLabel = resolveAllowlistChipLabel({
+                pubkey,
+                hint,
+                profiles: allowlistProfiles,
+              });
+              const chipAvatar = resolveAllowlistChipAvatar({
+                pubkey,
+                hint,
+                profiles: allowlistProfiles,
+              });
+              const chipIsAgent = resolveAllowlistChipIsAgent({
+                pubkey,
+                hint,
+                profiles: allowlistProfiles,
+              });
+
+              return (
+                <div
+                  className="inline-flex max-w-56 items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
+                  data-testid={`agent-respond-to-chip-${pubkey}`}
+                  key={pubkey}
                 >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+                  <UserAvatar
+                    avatarUrl={chipAvatar}
+                    displayName={chipLabel}
+                    size="xs"
+                  />
+                  <span
+                    className="min-w-0 truncate font-medium"
+                    data-testid={`agent-respond-to-chip-label-${pubkey}`}
+                  >
+                    {chipLabel}
+                  </span>
+                  {chipIsAgent ? (
+                    <Bot
+                      aria-label="agent"
+                      className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                    />
+                  ) : null}
+                  <button
+                    aria-label={`Remove ${chipLabel}`}
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                    disabled={disabled}
+                    onClick={() => onRemove(pubkey)}
+                    type="button"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         ) : null}
         {deferredQuery.length > 0 ? (

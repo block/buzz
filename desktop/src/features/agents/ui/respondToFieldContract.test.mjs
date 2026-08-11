@@ -109,3 +109,27 @@ test("allowlist search ranks exact human matches ahead of similarly named agents
     /getLabel: formatSearchUserName,\s*\n\s*limit: ALLOWLIST_SEARCH_LIMIT/,
   );
 });
+
+test("allowlist chips show display names instead of truncated pubkeys", () => {
+  assert.match(respondToFieldSource, /resolveAllowlistChipLabel\(/);
+  assert.match(
+    respondToFieldSource,
+    /data-testid=\{`agent-respond-to-chip-label-\$\{pubkey\}`\}/,
+  );
+  assert.match(respondToFieldSource, /aria-label=\{`Remove \$\{chipLabel\}`\}/);
+  const chipBlock = respondToFieldSource.slice(
+    respondToFieldSource.indexOf("agent-respond-to-chip-label"),
+    respondToFieldSource.indexOf('{deferredQuery.length > 0 ? ('),
+  );
+  assert.doesNotMatch(chipBlock, /<PubKey pubkey=\{pubkey\} \/>/);
+});
+
+test("allowlist chips resolve profiles for edit-loaded pubkeys", () => {
+  assert.match(respondToFieldSource, /useUsersBatchQuery\(allowlist/);
+  assert.match(respondToFieldSource, /allowlistProfiles=\{allowlistProfilesQuery\.data\?\.profiles\}/);
+});
+
+test("search selection remembers display metadata for allowlist chips", () => {
+  assert.match(respondToFieldSource, /hintFromSearchResult\(user\)/);
+  assert.match(respondToFieldSource, /setAllowlistHints\(/);
+});
