@@ -4346,6 +4346,154 @@ void main() {
     });
 
     testWidgets(
+      'hydrated thread settles its tail above the overlaid composer',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        // Hydrate after the first layout pass so the composer dock is already
+        // measured when the tail settle runs — the dock-height callback cannot
+        // correct the alignment on that path.
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        // The newest reply must clear the composer painted over the list, not
+        // merely sit inside the list viewport.
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-29'),
+        );
+        final composerSurface = find.byKey(const ValueKey('composer-surface'));
+        expect(latestReply, findsOneWidget);
+        expect(
+          tester.getBottomLeft(latestReply).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+        );
+      },
+    );
+
+    testWidgets('thread Latest pill returns the tail above the composer', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.drag(
+        find.byKey(const ValueKey('thread-message-list')),
+        const Offset(0, 600),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+      await tester.pumpAndSettle();
+
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      final composerSurface = find.byKey(const ValueKey('composer-surface'));
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
+    });
+
+    testWidgets(
       'deep-linking an older reply does not resume tail following on keyboard resize',
       (tester) async {
         tester.view.physicalSize = const Size(400, 800);

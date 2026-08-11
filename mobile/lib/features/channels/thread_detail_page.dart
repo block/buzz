@@ -153,16 +153,32 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }, [itemPositionsListener, replies.length]);
 
+    // The composer is painted over the bottom of the list viewport, so the
+    // usable trailing edge sits above the dock rather than at the physical
+    // bottom (1.0). Matches `latestAlignment()` in the channel timeline.
+    double usableTrailingEdge() {
+      final viewportHeight = context.size?.height ?? 0;
+      if (viewportHeight <= 0) return 1.0;
+      final reserved = composerDockHeight.value + Grid.xs;
+      return (1.0 - reserved / viewportHeight).clamp(0.0, 1.0).toDouble();
+    }
+
     // Second pass of a tail jump: once the tail item has rendered and its
-    // extent is measurable, align its trailing edge with the viewport bottom.
-    void alignTailWithViewportBottom(int lastIndex) {
+    // extent is measurable, rest its trailing edge on that usable boundary.
+    // Aligning against 1.0 instead only cleared the composer when the list's
+    // bottom padding happened to cap the scroll — the animated pill path
+    // scrolls that padding offscreen and buried the newest reply.
+    void alignTailAboveComposer(int lastIndex) {
       final lastPosition = itemPositionsListener.itemPositions.value
           .where((position) => position.index == lastIndex)
           .firstOrNull;
       if (lastPosition == null) return;
-      final targetAlignment =
-          1.0 - (lastPosition.itemTrailingEdge - lastPosition.itemLeadingEdge);
-      itemScrollController.jumpTo(index: lastIndex, alignment: targetAlignment);
+      final extent =
+          lastPosition.itemTrailingEdge - lastPosition.itemLeadingEdge;
+      itemScrollController.jumpTo(
+        index: lastIndex,
+        alignment: usableTrailingEdge() - extent,
+      );
     }
 
     useEffect(() {
@@ -214,7 +230,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         itemScrollController.jumpTo(index: lastIndex);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!context.mounted || !itemScrollController.isAttached) return;
-          alignTailWithViewportBottom(lastIndex);
+          alignTailAboveComposer(lastIndex);
         });
       });
       return null;
@@ -234,7 +250,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        alignTailWithViewportBottom(lastIndex);
+        alignTailAboveComposer(lastIndex);
       });
     }
 
