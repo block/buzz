@@ -482,6 +482,27 @@ pub struct CliArgs {
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Opt-in best-effort fallback publish gate for agents that don't
+    /// reliably self-publish (e.g. the `hermes` backend). When a turn ends
+    /// with buffered `agent_message_chunk` text and no accepted
+    /// `buzz messages send` tool call was observed for that turn, the
+    /// harness publishes the buffered text itself. Default OFF — enabling
+    /// this for `claude-agent-acp`/`codex-acp`, which already self-publish
+    /// reliably, would double-post.
+    ///
+    /// Not a hard exactly-once guarantee: publish detection is heuristic
+    /// (see `acp::looks_like_buzz_messages_send`) and the fallback publish
+    /// itself is fire-and-forget with no retry (see
+    /// `crate::lib::spawn_fallback_publish`) — this is "best effort, with
+    /// duplicate suppression on a best-effort detection signal," not a
+    /// protocol-level guarantee against either drop or duplicate.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT",
+        default_value_t = false
+    )]
+    pub publish_final_if_unsent: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -559,6 +580,8 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Opt-in best-effort fallback publish gate — see `CliArgs::publish_final_if_unsent`.
+    pub publish_final_if_unsent: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1110,6 +1133,7 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            publish_final_if_unsent: args.publish_final_if_unsent,
         };
 
         Ok(config)
@@ -1481,6 +1505,7 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            publish_final_if_unsent: false,
         }
     }
 

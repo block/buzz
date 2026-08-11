@@ -8,6 +8,8 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use std::collections::HashSet;
+
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -19,6 +21,19 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Cap on `AcpClient::final_text_buffer`'s accumulated byte length, for the
+/// opt-in `publish-final-if-unsent` fallback gate.
+///
+/// Matches the max message content size `buzz_sdk::builders::build_message`
+/// itself enforces (`check_content(content, 64 * 1024)` — see
+/// `crates/buzz-sdk/src/builders.rs`; there is no exported constant for it,
+/// it's inlined at each `check_content` call site in that crate). Buffering
+/// past this point is pointless even before considering memory growth: a
+/// [`pool::publish_fallback_final_text`](crate::pool::publish_fallback_final_text)
+/// call with more than this many bytes of content would be rejected by
+/// `build_message`'s own validation and never publish anyway.
+const FALLBACK_PUBLISH_MAX_BYTES: usize = 64 * 1024;
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -211,6 +226,64 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Whether the publish-final-if-unsent fallback gate is armed for THIS
+    /// client instance (mirrors `Config::publish_final_if_unsent`, set once
+    /// at spawn time via [`set_publish_final_if_unsent`](Self::set_publish_final_if_unsent) —
+    /// see that method's doc comment for why it's a post-construction setter
+    /// rather than a `spawn()` parameter). Gates whether
+    /// `final_text_buffer` is appended to at all: when `false` (the
+    /// default, and the case for every backend except `hermes` today), the
+    /// `agent_message_chunk` handler is a pure no-op with respect to this
+    /// feature — no buffer growth, no per-turn allocation cost, for backends
+    /// that will never read it.
+    publish_final_if_unsent: bool,
+    /// Buffered `agent_message_chunk` text accumulated for the current (or
+    /// most-recently-completed) turn. Reset at the top of every
+    /// [`session_prompt_blocks_with_idle_timeout`](Self::session_prompt_blocks_with_idle_timeout)
+    /// call — i.e. once per turn, including the initial-message turn (whose
+    /// buffer is then overwritten by the real prompt's call before anything
+    /// reads it). Consumed by the harness's opt-in
+    /// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback-publish gate — see
+    /// [`pending_unpublished_final_text`](Self::pending_unpublished_final_text)
+    /// and `handle_prompt_result` in `lib.rs`.
+    ///
+    /// Only appended to when [`publish_final_if_unsent`](Self::publish_final_if_unsent)
+    /// is `true` for this client (see that field's docs), and capped at
+    /// [`FALLBACK_PUBLISH_MAX_BYTES`] even then — an unusually long turn
+    /// stops growing the buffer rather than accumulating without bound.
+    final_text_buffer: String,
+    /// `toolCallId`s from this turn whose `tool_call` title/`rawInput` looked
+    /// like a `buzz messages send` invocation (see
+    /// [`looks_like_buzz_messages_send`]), pending confirmation via a
+    /// `tool_call_update` (or an inline `status` on the `tool_call` itself)
+    /// before being credited to [`channel_publish_detected`](Self::channel_publish_detected).
+    pending_publish_tool_calls: HashSet<String>,
+    /// Set once this turn's stream shows an accepted (`status: "completed"`)
+    /// `buzz messages send` tool call — i.e. the agent already published to
+    /// the channel itself this turn. Reset alongside `final_text_buffer`.
+    channel_publish_detected: bool,
+    /// Pre-resolved `--reply-to` anchor for the in-flight turn, set by the
+    /// caller (`pool::run_prompt_task`) via
+    /// [`set_pending_reply_anchor`](Self::set_pending_reply_anchor) right
+    /// before the prompt is sent. Mirrors the anchor already computed for the
+    /// agent's own `[Context]` reply instruction
+    /// (`queue::reply_anchor_for_batch`), so a fallback publish threads
+    /// identically to what the agent was told to use. Not reset by
+    /// `session_prompt_blocks_with_idle_timeout` — callers that don't have an
+    /// anchor to give (heartbeats) must clear it explicitly via `set_pending_reply_anchor(None)`.
+    pending_reply_anchor: Option<String>,
+    /// Channel id (stringified) the in-flight turn is processing, set by the
+    /// caller via [`set_pending_channel_id`](Self::set_pending_channel_id) at
+    /// the top of `pool::run_prompt_task`, alongside `set_observer_context`.
+    /// `None` for heartbeats (no channel). Used by
+    /// [`looks_like_buzz_messages_send`] to reject crediting publish
+    /// detection to a `buzz messages send --channel <other>` call that sent
+    /// to a DIFFERENT channel than this turn is processing — see that
+    /// function's doc comment. Not reset by
+    /// `session_prompt_blocks_with_idle_timeout` for the same reason
+    /// `pending_reply_anchor` isn't: the caller sets (or clears) it
+    /// explicitly before every turn.
+    pending_channel_id: Option<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -387,6 +460,134 @@ enum SteerTransport {
     AcpExtension,
 }
 
+/// Whether a `tool_call`/`tool_call_update` payload represents an actually
+/// *successful* completion, not merely a completed tool-call lifecycle.
+///
+/// This crate has no typed ACP tool-call schema, but this codebase's own
+/// reference agent (`buzz-agent::agent::{emit_completed,emit_failed}`)
+/// already establishes a convention for this exact distinction: a tool call
+/// can reach `status: "completed"` while the underlying operation still
+/// failed, signaled by `rawOutput.isError: true` (a hard failure instead
+/// uses `status: "failed"` with `rawOutput.error`). We reuse that same
+/// convention here rather than inventing a new one.
+///
+/// Residual uncertainty: `buzz-agent` is the only backend in this repo
+/// guaranteed to follow this `rawOutput.isError` shape. Other ACP-speaking
+/// backends (including third-party ones, and `hermes` — the one this gate is
+/// actually enabled for) may report `status: "completed"` with no
+/// `rawOutput` at all, or a differently-shaped one; there is no ACP-spec
+/// guarantee here. When `rawOutput` is absent we fall back to trusting
+/// `status: "completed"` alone (the pre-existing behavior) rather than
+/// treating "unknown shape" as failure, since the latter would make the
+/// fallback gate MORE likely to double-publish (the worse of the two
+/// failure modes for this feature — see `looks_like_buzz_messages_send`'s
+/// own doc comment on that asymmetry). This is a best-effort signal, not a
+/// guarantee.
+fn tool_call_update_succeeded(update: &serde_json::Value) -> bool {
+    if update.get("status").and_then(|v| v.as_str()) != Some("completed") {
+        return false;
+    }
+    match update.get("rawOutput") {
+        None => true,
+        Some(raw) => raw.get("isError").and_then(|v| v.as_bool()) != Some(true),
+    }
+}
+
+/// Best-effort detection of a `buzz messages send` tool-call invocation from
+/// its ACP `rawInput` and, as a fallback, `title`.
+///
+/// `buzz-acp` has no typed ACP tool-call schema — all `session/update`
+/// handling in this module is untyped JSON — and there is no dedicated "this
+/// turn published to the channel" signal anywhere else in the codebase (see
+/// `queue.rs` / `pool.rs`: `turn_started`/`turn_completed` and
+/// `PromptOutcome` track turn lifecycle, not channel side-effects). This
+/// crate's own reference agent implementation, `buzz-agent`, already solves
+/// an analogous problem (nagging a turn that ends without a reply) with
+/// `agent::is_reply_shaped` — see `crates/buzz-agent/src/agent.rs`: it reads
+/// ONLY the structured `command` field of a shell tool call's arguments (never
+/// `title`/`description`/other metadata, which callers don't control and
+/// could stuff with decoy text) and substring-matches `"messages send"` on
+/// it. We follow that same convention here: prefer `rawInput.command` (the
+/// shape a real shell-tool invocation uses) over the raw `rawInput` blob or
+/// `title`, and require an ordered, adjacent match — `"buzz"` appearing
+/// somewhere before an adjacent `"messages send"` substring — rather than the
+/// previous revision's "all three words anywhere in any order," which could
+/// false-positive on an unrelated tool call whose title/args happened to
+/// mention all three words in an unrelated context.
+///
+/// Also cross-checks a `--channel <id>` argument, when present, against
+/// `expected_channel_id`: a detected send to a DIFFERENT channel must not
+/// suppress this turn's fallback (the agent's reply to some other channel is
+/// not a reply to this one).
+///
+/// The match is intentionally still coarse rather than exact — this is a
+/// substring/token scan, not a real shell-argv parser, so a command
+/// assembled at runtime or hidden in a wrapper script can still be missed,
+/// and quoted text that merely mentions a send (`echo "buzz messages send"`)
+/// can still match. Missing a real post (false negative → possible
+/// duplicate) is the accepted-cheaper failure mode versus over-crediting a
+/// non-publish (false positive → a genuinely dropped reply stays dropped);
+/// see the module-level fallback-gate docs for that asymmetry. Known
+/// residual gap: `--channel` cross-checking only fires when the command text
+/// actually contains a parseable `--channel <value>` pair; a send with the
+/// channel supplied some other way (positional arg, env var, alias) is
+/// credited without the cross-check, same as before this fix.
+fn looks_like_buzz_messages_send(
+    update: &serde_json::Value,
+    expected_channel_id: Option<&str>,
+) -> bool {
+    let command = update
+        .get("rawInput")
+        .and_then(|raw| raw.get("command"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let haystack = command.clone().unwrap_or_else(|| {
+        update
+            .get("rawInput")
+            .map(|v| v.to_string())
+            .or_else(|| {
+                update
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    });
+    let lower = haystack.to_ascii_lowercase();
+
+    let Some(send_pos) = lower.find("messages send") else {
+        return false;
+    };
+    if !lower[..send_pos].contains("buzz") {
+        return false;
+    }
+
+    match extract_channel_flag(&haystack) {
+        Some(sent_channel) => expected_channel_id.is_none_or(|expected| sent_channel == expected),
+        None => true,
+    }
+}
+
+/// Extract the value of a `--channel <value>` (or `--channel=<value>`)
+/// argument from a shell-command-shaped string, if present. Whitespace-token
+/// scan, not a real argv/shell parser — sufficient for the plain
+/// `--channel <uuid>` shape `buzz messages send` is documented to use (see
+/// `crates/buzz-acp/README.md`), not for quoted or escaped values.
+fn extract_channel_flag(command: &str) -> Option<String> {
+    let mut tokens = command.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if let Some(v) = tok.strip_prefix("--channel=") {
+            return Some(v.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+        if tok == "--channel" {
+            return tokens
+                .next()
+                .map(|v| v.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+    }
+    None
+}
+
 fn build_client_capabilities() -> serde_json::Value {
     serde_json::json!({
         // Signal to ACP adapters that Buzz can hand users to terminal-native
@@ -550,6 +751,12 @@ impl AcpClient {
             steering_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            publish_final_if_unsent: false,
+            final_text_buffer: String::new(),
+            pending_publish_tool_calls: HashSet::new(),
+            channel_publish_detected: false,
+            pending_reply_anchor: None,
+            pending_channel_id: None,
         })
     }
 
@@ -557,6 +764,25 @@ impl AcpClient {
     pub fn set_observer(&mut self, observer: Option<ObserverHandle>, agent_index: usize) {
         self.observer = observer;
         self.observer_agent_index = Some(agent_index);
+    }
+
+    /// Arm (or disarm) the publish-final-if-unsent fallback gate for this
+    /// client instance, mirroring `Config::publish_final_if_unsent`.
+    ///
+    /// A post-construction setter rather than a `spawn()` parameter,
+    /// following the same pattern as [`set_observer`](Self::set_observer):
+    /// callers set this immediately after `spawn()` (and before
+    /// `initialize()`/any prompt), once, for the process's lifetime — there
+    /// is currently no per-turn or per-backend reason to flip it after
+    /// startup, but it's cheap to keep settable rather than baking it into
+    /// the constructor's argument list.
+    ///
+    /// Controls whether `final_text_buffer` is appended to at all in
+    /// `handle_session_update`'s `agent_message_chunk` arm — see that
+    /// field's docs. Left at its default (`false`) this call is unnecessary;
+    /// only the `hermes` backend's spawn path calls this with `true` today.
+    pub fn set_publish_final_if_unsent(&mut self, armed: bool) {
+        self.publish_final_if_unsent = armed;
     }
 
     /// Update metadata that will be attached to subsequent raw wire events.
@@ -768,6 +994,14 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        // Fresh per-turn state for the publish-final-if-unsent fallback gate.
+        // `pending_reply_anchor` is intentionally NOT cleared here — the
+        // caller sets it (or explicitly clears it) immediately before this
+        // call via `set_pending_reply_anchor`.
+        self.final_text_buffer.clear();
+        self.pending_publish_tool_calls.clear();
+        self.channel_publish_detected = false;
+
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -856,6 +1090,48 @@ impl AcpClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    /// Set the `--reply-to` anchor the caller wants used if this turn falls
+    /// through to the publish-final-if-unsent fallback gate. Call with
+    /// `None` for turns with no anchor to give (heartbeats, or human-facing
+    /// scope decisions that intentionally leave no anchor). Must be called
+    /// before [`session_prompt_blocks_with_idle_timeout`](Self::session_prompt_blocks_with_idle_timeout)
+    /// for the value to apply to that turn — see
+    /// [`pending_reply_anchor`](Self::pending_reply_anchor) field docs for why
+    /// it isn't reset automatically.
+    pub fn set_pending_reply_anchor(&mut self, anchor: Option<String>) {
+        self.pending_reply_anchor = anchor;
+    }
+
+    /// Set the channel id the in-flight turn is processing, for the
+    /// publish-final-if-unsent fallback gate's `--channel` cross-check — see
+    /// [`pending_channel_id`](Self::pending_channel_id) field docs. Call with
+    /// `None` for heartbeats. Like `set_pending_reply_anchor`, must be called
+    /// before the prompt is sent for the value to apply to that turn.
+    pub fn set_pending_channel_id(&mut self, channel_id: Option<String>) {
+        self.pending_channel_id = channel_id;
+    }
+
+    /// Returns the buffered final assistant text for the just-completed turn,
+    /// paired with its reply anchor, IF (a) the text is non-blank after
+    /// trimming and (b) no accepted `buzz messages send` tool call was
+    /// observed during the turn (tracked internally as
+    /// `channel_publish_detected`).
+    ///
+    /// Read-only: does not consume or clear any state. Callers get a fresh
+    /// buffer each turn regardless (see `final_text_buffer` field docs), so
+    /// there is no double-publish risk from calling this more than once
+    /// after the same turn.
+    pub fn pending_unpublished_final_text(&self) -> Option<(&str, Option<&str>)> {
+        if self.channel_publish_detected {
+            return None;
+        }
+        let trimmed = self.final_text_buffer.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some((trimmed, self.pending_reply_anchor.as_deref()))
     }
 
     /// Whether the agent advertised the [`ACP_STEER_METHOD`] extension at
@@ -1746,6 +2022,29 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Accumulated for the opt-in publish-final-if-unsent fallback
+                    // gate — see `pending_unpublished_final_text`. Entirely
+                    // skipped (not even a no-op append) when the gate isn't
+                    // armed for this client, and capped at
+                    // `FALLBACK_PUBLISH_MAX_BYTES` even when armed, so an
+                    // unusually long turn can't grow this without bound.
+                    if self.publish_final_if_unsent
+                        && self.final_text_buffer.len() < FALLBACK_PUBLISH_MAX_BYTES
+                    {
+                        let remaining = FALLBACK_PUBLISH_MAX_BYTES - self.final_text_buffer.len();
+                        if text.len() <= remaining {
+                            self.final_text_buffer.push_str(text);
+                        } else {
+                            // Truncate to the remaining budget on a char
+                            // boundary (never split a multi-byte UTF-8
+                            // sequence) rather than dropping the whole chunk.
+                            let mut cut = remaining;
+                            while cut > 0 && !text.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            self.final_text_buffer.push_str(&text[..cut]);
+                        }
+                    }
                 }
                 false
             }
@@ -1759,6 +2058,17 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if looks_like_buzz_messages_send(update, self.pending_channel_id.as_deref()) {
+                    if let Some(tool_id) = update.get("toolCallId").and_then(|v| v.as_str()) {
+                        self.pending_publish_tool_calls.insert(tool_id.to_string());
+                    }
+                    // Some connectors report a terminal status inline on the
+                    // creating `tool_call` for synchronous tools, with no
+                    // follow-up `tool_call_update` at all.
+                    if tool_call_update_succeeded(update) {
+                        self.channel_publish_detected = true;
+                    }
+                }
                 true
             }
             "tool_call_update" => {
@@ -1768,6 +2078,11 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                if tool_call_update_succeeded(update)
+                    && self.pending_publish_tool_calls.contains(tool_id)
+                {
+                    self.channel_publish_detected = true;
+                }
                 false
             }
             "plan" => {
@@ -2269,6 +2584,166 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── tool_call_update_succeeded (item 2: success signal, not just
+    //    lifecycle status) ────────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_succeeded_completed_with_no_raw_output_is_success() {
+        // Pre-existing behavior for backends that never send rawOutput: an
+        // absent rawOutput must not be treated as failure.
+        let update = serde_json::json!({"status": "completed"});
+        assert!(tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_completed_with_is_error_false_is_success() {
+        let update = serde_json::json!({
+            "status": "completed",
+            "rawOutput": {"isError": false},
+        });
+        assert!(tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_completed_with_is_error_true_is_failure() {
+        // The core item-2 fix: "completed" lifecycle status with
+        // rawOutput.isError:true must NOT count as success.
+        let update = serde_json::json!({
+            "status": "completed",
+            "rawOutput": {"isError": true},
+        });
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_status_failed_is_failure() {
+        let update = serde_json::json!({
+            "status": "failed",
+            "rawOutput": {"error": "boom"},
+        });
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_in_progress_is_not_success() {
+        let update = serde_json::json!({"status": "in_progress"});
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_missing_status_is_not_success() {
+        let update = serde_json::json!({});
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    // ── extract_channel_flag ────────────────────────────────────────────
+
+    #[test]
+    fn extract_channel_flag_space_form() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --channel abc-123 --content hi"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_channel_flag_equals_form() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --channel=abc-123"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_channel_flag_absent_returns_none() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --content hi"),
+            None
+        );
+    }
+
+    // ── looks_like_buzz_messages_send (item 4: hardened heuristic) ───────
+
+    #[test]
+    fn looks_like_send_matches_documented_shapes() {
+        // Real send shapes this MUST still recognize (mirrors buzz-agent's
+        // own reply_shape_matches_documented_send_forms fixture).
+        for cmd in [
+            "buzz messages send --channel X --content Y",
+            "buzz --relay wss://r messages send --channel X --content Y",
+            "/abs/path/buzz messages send",
+            "printf 'hi' | buzz messages send --content -",
+        ] {
+            let update = serde_json::json!({"rawInput": {"command": cmd}});
+            assert!(
+                looks_like_buzz_messages_send(&update, None),
+                "expected {cmd:?} to be recognized as a publish attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_send_matches_via_title_fallback() {
+        // Connectors with no rawInput.command still match via title, as
+        // before this fix — just no longer via the loose any-order check.
+        let update = serde_json::json!({"title": "buzz messages send"});
+        assert!(looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_decoy_with_all_three_words_out_of_order() {
+        // The item-4 regression case: an unrelated tool call whose
+        // title/args happen to mention all three words, but not as an
+        // adjacent "messages send" preceded by "buzz".
+        let update = serde_json::json!({
+            "title": "Send a summary of buzz activity to #messages"
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_decoy_command_mentioning_all_three_words() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "grep -r buzz . | tee messages-and-send.log"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_messages_send_without_buzz_prefix() {
+        // "messages send" adjacent but nothing resembling "buzz" before it.
+        let update = serde_json::json!({
+            "rawInput": {"command": "some-other-tool messages send --x"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_accepts_when_no_expected_channel_given() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel other-channel"}
+        });
+        assert!(looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_accepts_matching_channel() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel chan-1 --content hi"}
+        });
+        assert!(looks_like_buzz_messages_send(&update, Some("chan-1")));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_mismatched_channel() {
+        // Core item-4 cross-check: a send to a DIFFERENT channel must not
+        // credit this turn's publish detection.
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel chan-OTHER --content hi"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, Some("chan-1")));
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -3566,6 +4041,218 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    // ── publish-final-if-unsent fallback gate: buffering + detection
+    //    integration (item 5) ─────────────────────────────────────────────
+
+    fn agent_message_chunk_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text},
+                },
+            }
+        })
+    }
+
+    fn tool_call_msg(tool_id: &str, command: &str, status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_id,
+                    "title": "shell",
+                    "kind": "other",
+                    "status": status,
+                    "rawInput": {"command": command},
+                },
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn buffer_disarmed_client_stays_empty() {
+        // Item 3: the gate must be a no-op for a client the caller never
+        // armed via `set_publish_final_if_unsent` — the default state.
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("hello world"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "disarmed client must never buffer agent_message_chunk text"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_armed_client_accumulates_text() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("hello "));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("world"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            Some(("hello world", None))
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_blank_text_does_not_fire() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("   \n\t  "));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "whitespace-only buffered text must not count as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_is_capped_at_fallback_publish_max_bytes() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        // First chunk fills to just under the cap, second chunk pushes well
+        // past it — the buffer must stop growing at the cap rather than
+        // accumulating without bound.
+        let first = "a".repeat(FALLBACK_PUBLISH_MAX_BYTES - 10);
+        let second = "b".repeat(1000);
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&first));
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&second));
+        let (text, _) = client
+            .pending_unpublished_final_text()
+            .expect("non-blank buffered text");
+        assert_eq!(
+            text.len(),
+            FALLBACK_PUBLISH_MAX_BYTES,
+            "buffer must stop exactly at the cap, not grow past it"
+        );
+        assert!(
+            text.starts_with(&"a".repeat(FALLBACK_PUBLISH_MAX_BYTES - 10)),
+            "content up to the cap must be preserved, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn detected_publish_suppresses_pending_text() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-1",
+            "buzz messages send --channel c1 --content hi",
+            "completed",
+        ));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "a detected buzz messages send must suppress the fallback, even \
+             though buffered text is non-blank"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_update_completes_publish_detection_started_by_tool_call() {
+        // The two-message tool_call → tool_call_update lifecycle: pending
+        // status on tool_call, confirmed via a later tool_call_update.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-2",
+            "buzz messages send --channel c1 --content hi",
+            "pending",
+        ));
+        // Still pending — the send hasn't been confirmed completed yet.
+        assert!(client.pending_unpublished_final_text().is_some());
+
+        let update_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-2",
+                    "status": "completed",
+                },
+            }
+        });
+        let _ = client.handle_session_update(&update_msg);
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "tool_call_update confirming completion must suppress the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_reporting_failed_send_does_not_suppress_fallback() {
+        // Item 2: a "completed" lifecycle status with rawOutput.isError:true
+        // must not be credited as a successful publish.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-3",
+                    "title": "shell",
+                    "kind": "other",
+                    "status": "completed",
+                    "rawInput": {"command": "buzz messages send --channel c1"},
+                    "rawOutput": {"isError": true},
+                },
+            }
+        });
+        let _ = client.handle_session_update(&tool_call);
+        assert!(
+            client.pending_unpublished_final_text().is_some(),
+            "a tool call that completed its lifecycle but reported \
+             rawOutput.isError:true must NOT suppress the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_different_channel_does_not_suppress_fallback() {
+        // Item 4's --channel cross-check, exercised end-to-end through
+        // handle_session_update + set_pending_channel_id.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        client.set_pending_channel_id(Some("this-channel".to_string()));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-4",
+            "buzz messages send --channel other-channel --content hi",
+            "completed",
+        ));
+        assert!(
+            client.pending_unpublished_final_text().is_some(),
+            "a send to a DIFFERENT channel must not suppress this turn's fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_text_carries_the_reply_anchor() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        client.set_pending_reply_anchor(Some("root-event-abc".to_string()));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            Some(("final reply text", Some("root-event-abc")))
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

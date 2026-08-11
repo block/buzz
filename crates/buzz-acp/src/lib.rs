@@ -2059,10 +2059,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let publish_final_if_unsent = config.publish_final_if_unsent;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        idx,
+                        observer,
+                        publish_final_if_unsent,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -3395,6 +3405,94 @@ fn spawn_failure_notice(
     }
 }
 
+/// Decide whether `handle_prompt_result` should fire the
+/// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback publish for this turn, and if
+/// so, with what content.
+///
+/// Pure and side-effect-free (unlike [`spawn_fallback_publish`], which this
+/// feeds) specifically so the gate's firing conditions are unit-testable
+/// without a live relay/rest client — see the `fallback_publish_target_*`
+/// tests below.
+///
+/// Fires only when ALL of:
+///   - the gate is armed for this config (`armed`, i.e.
+///     `Config::publish_final_if_unsent`)
+///   - the turn is a channel turn (`PromptSource::Channel`) — never a
+///     heartbeat, which has no channel to reply into
+///   - the turn ended with a clean `StopReason::EndTurn` — never
+///     `Refusal`/`MaxTokens`/`MaxTurnRequests`/`Cancelled`, which are
+///     distinct terminal outcomes this gate must not paper over with an
+///     auto-publish
+///   - `pending_final_text` is `Some` — i.e.
+///     `AcpClient::pending_unpublished_final_text` found non-blank buffered
+///     text AND no accepted `buzz messages send` tool call was observed this
+///     turn
+fn fallback_publish_target(
+    armed: bool,
+    stop_reason: acp::StopReason,
+    source: &PromptSource,
+    pending_final_text: Option<(&str, Option<&str>)>,
+) -> Option<(Uuid, String, Option<String>)> {
+    if !armed || stop_reason != acp::StopReason::EndTurn {
+        return None;
+    }
+    let PromptSource::Channel(channel_id) = source else {
+        return None;
+    };
+    let (text, anchor) = pending_final_text?;
+    Some((*channel_id, text.to_string(), anchor.map(str::to_string)))
+}
+
+/// Spawn a task publishing a `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback post
+/// for a channel turn that ended with buffered final text the agent never
+/// published itself. See [`pool::publish_fallback_final_text`] for the
+/// publish mechanism and reply-threading rationale.
+///
+/// Fire-and-forget, like [`spawn_failure_notice`]: spawned so a slow relay
+/// round-trip cannot block the pool's result-handling loop. Not retried on
+/// failure — a retry risks a duplicate post if the first attempt actually
+/// landed after a slow/errored response.
+fn spawn_fallback_publish(
+    rest_client: Option<&relay::RestClient>,
+    channel_id: Uuid,
+    content: String,
+    reply_anchor: Option<String>,
+) {
+    let Some(rest) = rest_client else {
+        tracing::warn!(
+            channel_id = %channel_id,
+            "publish_final_if_unsent: no rest_client available — cannot publish fallback"
+        );
+        return;
+    };
+    let rest = rest.clone();
+    tokio::spawn(async move {
+        match pool::publish_fallback_final_text(
+            &rest,
+            channel_id,
+            &content,
+            reply_anchor.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    reply_to = ?reply_anchor,
+                    "publish_final_if_unsent: agent ended its turn without publishing to the \
+                     channel — harness published the buffered final text on its behalf"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    channel_id = %channel_id,
+                    "publish_final_if_unsent: fallback publish failed: {e}"
+                );
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3614,12 +3712,25 @@ fn handle_prompt_result(
 
     match result.outcome {
         // Successful prompt — return agent to pool.
-        PromptOutcome::Ok(_) => {
+        PromptOutcome::Ok(stop_reason) => {
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
                 "agent_returned"
             );
+            // Opt-in best-effort fallback publish gate (default OFF; see
+            // `Config::publish_final_if_unsent`) — see
+            // `fallback_publish_target`'s doc comment for the exact firing
+            // conditions. Not a hard exactly-once guarantee: see that
+            // field's doc comment in config.rs.
+            if let Some((ch, text, anchor)) = fallback_publish_target(
+                config.publish_final_if_unsent,
+                stop_reason,
+                &result.source,
+                result.agent.acp.pending_unpublished_final_text(),
+            ) {
+                spawn_fallback_publish(rest_client, ch, text, anchor);
+            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
@@ -3873,12 +3984,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let publish_final_if_unsent = config.publish_final_if_unsent;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            i,
+            observer,
+            publish_final_if_unsent,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4068,6 +4189,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let publish_final_if_unsent = config.publish_final_if_unsent;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4079,7 +4201,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            index,
+            observer,
+            publish_final_if_unsent,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4125,6 +4256,7 @@ struct PoolStartup {
     has_generated_codex_config: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
+    publish_final_if_unsent: bool,
 }
 
 impl PoolStartup {
@@ -4137,6 +4269,7 @@ impl PoolStartup {
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
+            publish_final_if_unsent: config.publish_final_if_unsent,
         }
     }
 }
@@ -4159,6 +4292,7 @@ async fn initialize_agent_pool(
         match spawn_result {
             Ok(mut acp) => {
                 acp.set_observer(startup.observer.clone(), i);
+                acp.set_publish_final_if_unsent(startup.publish_final_if_unsent);
                 let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
                 let initialize_result = match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
@@ -4249,6 +4383,7 @@ async fn initialize_agent_pool(
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
 /// borrowing `Config`. All respawn/refill paths use this.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_init(
     command: &str,
     args: &[String],
@@ -4256,11 +4391,13 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
+    publish_final_if_unsent: bool,
 ) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
+    acp.set_publish_final_if_unsent(publish_final_if_unsent);
 
     match acp.initialize().await {
         Ok(init_result) => {
@@ -6252,6 +6389,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            publish_final_if_unsent: false,
         }
     }
 
@@ -6404,6 +6542,128 @@ mod build_mcp_servers_tests {
 }
 
 #[cfg(test)]
+mod fallback_publish_target_tests {
+    //! Unit tests for `fallback_publish_target`, the pure predicate behind
+    //! the `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback gate in
+    //! `handle_prompt_result`. Covers the enumerated cases from the
+    //! item-5 team-review requirement: armed/disarmed, every `StopReason`
+    //! variant, channel vs. heartbeat source, and presence/absence of
+    //! pending final text (which itself encodes "no publish detected" and
+    //! "non-blank buffered text" — see `AcpClient::pending_unpublished_final_text`).
+
+    use super::*;
+
+    fn ch() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    #[test]
+    fn fires_on_armed_end_turn_channel_with_pending_text() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("hello there", Some("anchor-1"))),
+        );
+        assert_eq!(
+            result,
+            Some((
+                channel_id,
+                "hello there".to_string(),
+                Some("anchor-1".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn does_not_fire_when_disarmed() {
+        let result = fallback_publish_target(
+            false,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(ch()),
+            Some(("hello", None)),
+        );
+        assert_eq!(result, None, "disarmed config must never fire the gate");
+    }
+
+    #[test]
+    fn does_not_fire_on_non_end_turn_stop_reasons() {
+        for stop_reason in [
+            acp::StopReason::Refusal,
+            acp::StopReason::MaxTokens,
+            acp::StopReason::MaxTurnRequests,
+            acp::StopReason::Cancelled,
+        ] {
+            let result = fallback_publish_target(
+                true,
+                stop_reason.clone(),
+                &PromptSource::Channel(ch()),
+                Some(("hello", None)),
+            );
+            assert_eq!(
+                result, None,
+                "{stop_reason:?} must never fire the fallback gate, regardless of buffered text"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_fire_for_heartbeat_source() {
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Heartbeat,
+            Some(("hello", None)),
+        );
+        assert_eq!(
+            result, None,
+            "heartbeat turns have no channel to publish a fallback into"
+        );
+    }
+
+    #[test]
+    fn does_not_fire_when_no_pending_final_text() {
+        // None covers both "publish already detected" and "blank/no buffered
+        // text" — both collapse to None from `pending_unpublished_final_text`.
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(ch()),
+            None,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn threads_the_reply_anchor_through_unchanged() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("final text", Some("root-event-id"))),
+        );
+        assert_eq!(
+            result.and_then(|(_, _, anchor)| anchor),
+            Some("root-event-id".to_string())
+        );
+    }
+
+    #[test]
+    fn no_anchor_still_fires_with_none_anchor() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("final text", None)),
+        );
+        assert_eq!(result, Some((channel_id, "final text".to_string(), None)));
+    }
+}
+
+#[cfg(test)]
 mod error_outcome_emission_tests {
     //! Pins the policy that error-class outcomes surface to the activity feed
     //! and never to the channel:
@@ -6474,6 +6734,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            publish_final_if_unsent: false,
         }
     }
 
