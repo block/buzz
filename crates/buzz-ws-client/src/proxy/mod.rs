@@ -15,6 +15,8 @@ use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::{client_async_tls, MaybeTlsStream, WebSocketStream};
 use tower_service::Service;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(any(windows, test))]
 mod windows;
 
@@ -35,34 +37,73 @@ where
     R: IntoClientRequest + Unpin,
 {
     let request = request.into_client_request()?;
-    let matcher = system_proxy_matcher();
-    connect_websocket_with(&matcher, request).await
+    let settings = system_proxy_settings();
+    connect_websocket_with_options(
+        &settings.matcher,
+        request,
+        settings.exclude_simple_hostnames,
+    )
+    .await
 }
 
-fn system_proxy_matcher() -> Matcher {
+struct SystemProxySettings {
+    matcher: Matcher,
+    exclude_simple_hostnames: bool,
+}
+
+impl SystemProxySettings {
+    fn new(matcher: Matcher) -> Self {
+        Self {
+            matcher,
+            exclude_simple_hostnames: false,
+        }
+    }
+}
+
+fn system_proxy_settings() -> SystemProxySettings {
+    #[cfg(target_os = "macos")]
+    {
+        macos::system_proxy_settings()
+    }
+
     #[cfg(windows)]
     {
-        windows::system_proxy_matcher()
+        SystemProxySettings::new(windows::system_proxy_matcher())
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        Matcher::from_system()
+        SystemProxySettings::new(Matcher::from_system())
     }
 }
 
+#[cfg(test)]
 async fn connect_websocket_with(
     matcher: &Matcher,
     request: Request,
 ) -> Result<(ProxyWebSocketStream, Response), Error> {
+    connect_websocket_with_options(matcher, request, false).await
+}
+
+async fn connect_websocket_with_options(
+    matcher: &Matcher,
+    request: Request,
+    exclude_simple_hostnames: bool,
+) -> Result<(ProxyWebSocketStream, Response), Error> {
     let target = proxy_target_uri(request.uri())?;
-    let stream = connect_tcp(matcher, &target).await?;
+    let stream = connect_tcp(matcher, &target, exclude_simple_hostnames).await?;
 
     client_async_tls(request, stream).await
 }
 
-async fn connect_tcp(matcher: &Matcher, target: &Uri) -> Result<TcpStream, Error> {
-    if target.host().is_some_and(is_loopback_host) {
+async fn connect_tcp(
+    matcher: &Matcher,
+    target: &Uri,
+    exclude_simple_hostnames: bool,
+) -> Result<TcpStream, Error> {
+    if target.host().is_some_and(|host| {
+        is_loopback_host(host) || (exclude_simple_hostnames && is_simple_hostname(host))
+    }) {
         return connect_direct(target).await;
     }
 
@@ -223,6 +264,11 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+fn is_simple_hostname(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    !host.contains('.') && host.parse::<std::net::IpAddr>().is_err()
+}
+
 fn transport_error(
     operation: &'static str,
     source: impl StdError + Send + Sync + 'static,
@@ -270,6 +316,14 @@ mod tests {
         assert!(is_loopback_host("[::1]"));
         assert!(!is_loopback_host("relay.example.com"));
         assert!(!is_loopback_host("127.0.0.2.example.com"));
+    }
+
+    #[test]
+    fn simple_hostnames_exclude_ip_addresses() {
+        assert!(is_simple_hostname("relay"));
+        assert!(!is_simple_hostname("relay.example.com"));
+        assert!(!is_simple_hostname("192.0.2.1"));
+        assert!(!is_simple_hostname("[2001:db8::1]"));
     }
 
     #[tokio::test]
