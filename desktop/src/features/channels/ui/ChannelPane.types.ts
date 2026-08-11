@@ -7,6 +7,7 @@ import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channel
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type {
   ProfilePanelTab,
@@ -42,6 +43,7 @@ export type ChannelPaneProps = {
     body: string;
     id: string;
     imetaMedia?: ImetaMedia[];
+    mentionRefs?: DraftMentionRef[];
   } | null;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
@@ -106,6 +108,11 @@ export type ChannelPaneProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
+  ) => Promise<void>;
+  onSendToChannel: (
+    message: TimelineMessage,
+    threadRoot: TimelineMessage,
+    channelId: string,
   ) => Promise<void>;
   onSendVideoReviewComment?: (
     message: TimelineMessage,

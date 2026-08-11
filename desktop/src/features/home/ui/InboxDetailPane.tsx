@@ -29,9 +29,11 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
+  startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { buildEditMentionState } from "@/features/messages/lib/draftMentionRefs";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -401,12 +403,21 @@ function InboxMessageDetailPane({
     displayMessages.find((message) => message.id === replyTargetId) ?? null;
   const editTarget =
     displayMessages.find((message) => message.id === editTargetId) ?? null;
+  const editMentionState = editTarget
+    ? buildEditMentionState(
+        editTarget.content,
+        editTarget.tags,
+        profiles,
+        (pubkey) => agentPubkeys?.has(pubkey) === true,
+      )
+    : null;
   const composerEditTarget = editTarget
     ? {
         author: editTarget.authorLabel,
         body: editTarget.content,
         id: editTarget.id,
         imetaMedia: imetaMediaFromTags(editTarget.tags),
+        ...editMentionState,
       }
     : null;
   // Explicit sub-message reply wins. Otherwise use the captured default parent
@@ -614,6 +625,7 @@ function InboxMessageDetailPane({
               const previousMessage = displayMessages[index - 1];
               const isContinuation =
                 !isAfterSeparator &&
+                !startsNewMessageGroup(message) &&
                 hasSameMessageAuthor(
                   { pubkey: previousMessage?.authorPubkey },
                   { pubkey: message.authorPubkey },
