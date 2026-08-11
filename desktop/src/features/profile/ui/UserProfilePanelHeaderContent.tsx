@@ -1,6 +1,8 @@
+import { Eraser } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { CopyButton } from "@/features/agents/ui/CopyButton";
+import { Button } from "@/shared/ui/button";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   PROFILE_PANEL_VIEW_TITLES,
@@ -15,17 +17,21 @@ import {
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
   effectivePubkey,
+  isLogClearPending,
   logCopyValue,
   logSubtitle,
   onBack,
+  onClearLog,
   view,
   viewerIsOwner,
 }: {
   agentSettingsMenu: ReactNode;
   effectivePubkey: string | null;
+  isLogClearPending?: boolean;
   logCopyValue?: string | null;
   logSubtitle?: string | null;
   onBack: () => void;
+  onClearLog?: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
@@ -56,6 +62,20 @@ export function getUserProfilePanelHeaderContent({
         />
       ) : null}
       {view === "summary" ? agentSettingsMenu : null}
+      {shouldShowLogDetails && onClearLog ? (
+        <Button
+          className="text-muted-foreground hover:text-foreground"
+          data-testid="user-profile-clear-log"
+          disabled={isLogClearPending}
+          onClick={onClearLog}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Eraser className="h-4 w-4" />
+          <span className="sr-only">Clear log</span>
+        </Button>
+      ) : null}
       {shouldShowLogDetails ? (
         <CopyButton
           className="text-muted-foreground hover:text-foreground"

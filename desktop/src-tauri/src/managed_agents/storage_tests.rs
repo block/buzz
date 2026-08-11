@@ -830,3 +830,40 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+#[test]
+fn truncate_log_file_empties_an_existing_log() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent.log");
+    std::fs::write(&path, b"noisy previous run\n").expect("seed log");
+
+    super::truncate_log_file(&path).expect("truncate");
+
+    assert!(path.exists(), "the file itself must survive the clear");
+    assert_eq!(std::fs::read(&path).expect("read back"), Vec::<u8>::new());
+}
+
+#[test]
+fn truncate_log_file_tolerates_a_missing_log() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // An agent that has never run has no log; that state is already clear.
+    assert!(super::truncate_log_file(&dir.path().join("absent.log")).is_ok());
+}
+
+#[test]
+fn appends_after_truncate_land_at_the_start() {
+    // Guards the reason clearing is safe mid-run: the harness holds an
+    // append-mode handle, so its next write must not leave a NUL hole at the
+    // pre-truncate offset.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent.log");
+    let mut held = super::open_log_file(&path).expect("open like the harness does");
+    writeln!(held, "before clear").expect("write");
+
+    super::truncate_log_file(&path).expect("truncate");
+    writeln!(held, "after clear").expect("write through the pre-existing handle");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read back"),
+        "after clear\n"
+    );
+}

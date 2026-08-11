@@ -94,3 +94,7 @@ export async function reconcileManagedAgentRuntimes(
 ): Promise<ManagedAgentRuntimeStatus[]> {
   return invokeTauri("reconcile_managed_agent_runtimes", { communities });
 }
+
+export async function clearManagedAgentLog(pubkey: string): Promise<void> {
+  return invokeTauri("clear_managed_agent_log", { pubkey });
+}

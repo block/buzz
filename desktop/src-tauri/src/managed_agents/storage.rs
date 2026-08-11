@@ -721,6 +721,25 @@ pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String
     writeln!(file, "{message}").map_err(|error| format!("failed to write log marker: {error}"))
 }
 
+/// Truncate `path` to zero length, leaving the file in place.
+///
+/// Safe while the harness is running: [`open_log_file`] hands the child an
+/// append-mode handle, so its next write seeks to the new end rather than
+/// leaving a NUL-filled hole at the old offset. A missing file is already
+/// clear, so it succeeds rather than reporting an error the user can't act on.
+pub(crate) fn truncate_log_file(path: &Path) -> Result<(), String> {
+    match OpenOptions::new().write(true).open(path) {
+        Ok(file) => file
+            .set_len(0)
+            .map_err(|error| format!("failed to clear log file {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to open log file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
 fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("agent-pids");
     fs::create_dir_all(&dir)
