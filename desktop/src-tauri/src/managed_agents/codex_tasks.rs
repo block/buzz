@@ -18,6 +18,7 @@ use super::{
 const STORE_VERSION: u32 = 3;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
+const EXCLUSIVE_TASK_LOCKED_ERROR: &str = "This Codex task still has an exclusive writer lock. A task can be idle and still open in Codex Desktop. Close or leave it in every Codex client, then Retry in Buzz. To use both apps at once, both must connect to the same shared app-server.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexTaskBinding {
@@ -333,14 +334,8 @@ pub fn ensure_codex_task_available(task_id: &str) -> Result<(), String> {
         .read(true)
         .write(true)
         .open(&lock_path)
-        .map_err(|_| {
-            "This Codex task is currently open elsewhere. Close or leave it in Codex Desktop, then start the Buzz agent again."
-                .to_string()
-        })?;
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-        "This Codex task is currently open elsewhere. Close or leave it in Codex Desktop, then start the Buzz agent again."
-            .to_string()
-    })?;
+        .map_err(|_| EXCLUSIVE_TASK_LOCKED_ERROR.to_string())?;
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| EXCLUSIVE_TASK_LOCKED_ERROR.to_string())?;
     let _ = fs2::FileExt::unlock(&file);
     Ok(())
 }
@@ -533,6 +528,13 @@ mod tests {
         );
         assert!(normalize_app_server_url(Some("http://127.0.0.1:51919")).is_err());
         assert!(normalize_app_server_url(Some("ws://user@127.0.0.1:51919")).is_err());
+    }
+
+    #[test]
+    fn exclusive_lock_error_explains_idle_and_shared_modes() {
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("idle and still open"));
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Retry in Buzz"));
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("same shared app-server"));
     }
 
     #[test]
