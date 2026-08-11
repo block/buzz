@@ -14,6 +14,7 @@ import {
 } from "@/shared/features/useFeatureEnabled";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { DEV_BUILD_LABEL } from "@/shared/lib/devBuildLabel";
 import {
   Sidebar,
   SidebarContent,
@@ -302,7 +303,8 @@ export function SettingsView({
               data-buzz-sidebar-secondary
               data-testid="settings-version"
             >
-              v{appVersion}
+              {appVersion}
+              {DEV_BUILD_LABEL ? `-${DEV_BUILD_LABEL}` : ""}
             </p>
           ) : null}
         </SidebarFooter>

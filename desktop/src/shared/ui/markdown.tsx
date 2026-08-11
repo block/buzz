@@ -154,14 +154,7 @@ function getImageLightboxFocusableElements(
 ): HTMLElement[] {
   return Array.from(
     container.querySelectorAll<HTMLElement>(
-      [
-        "a[href]",
-        "button:not(:disabled)",
-        "input:not(:disabled)",
-        "select:not(:disabled)",
-        "textarea:not(:disabled)",
-        "[tabindex]:not([tabindex='-1'])",
-      ].join(","),
+      "a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex='-1'])",
     ),
   ).filter(
     (element) =>
@@ -1349,7 +1342,12 @@ function createMarkdownComponents(
     );
     if (card) {
       return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
+        <FileCard
+          href={card.href}
+          filename={card.filename}
+          previewKind={card.previewKind}
+          size={card.size}
+        />
       );
     }
 

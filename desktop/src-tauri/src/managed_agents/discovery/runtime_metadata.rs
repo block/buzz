@@ -32,6 +32,7 @@ pub(crate) struct KnownAcpRuntime {
     /// `Some(dir)` → Buzz creates a symlink at `<nest>/<dir>/buzz-cli`
     /// pointing to the canonical `.agents/skills/buzz-cli`. `None` → this
     /// runtime reads the canonical path directly or has no skill support.
+    #[allow(dead_code)]
     pub skill_dir: Option<&'static str>,
     /// Whether this runtime handles model switching via ACP protocol natively.
     /// Currently unused — env var injection runs unconditionally regardless of

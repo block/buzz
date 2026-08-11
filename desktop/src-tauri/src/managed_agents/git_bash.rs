@@ -39,7 +39,7 @@ pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
         let env = GitBashEnv::from_process();
-        return resolve_git_bash(
+        resolve_git_bash(
             &env.path,
             env.shell_override,
             env.git_bash_override,
@@ -47,7 +47,7 @@ pub(crate) fn resolve_git_bash_path() -> Option<std::path::PathBuf> {
             env.program_files,
             env.program_files_x86,
             env.local_app_data,
-        );
+        )
     }
 
     #[cfg(not(windows))]
@@ -66,7 +66,7 @@ pub(crate) fn resolve_bash_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     {
         let env = GitBashEnv::from_process();
-        return resolve_git_bash(
+        resolve_git_bash(
             &env.path,
             None, // skip BUZZ_SHELL — install/login-shell callers require bash
             env.git_bash_override,
@@ -74,7 +74,7 @@ pub(crate) fn resolve_bash_path() -> Option<std::path::PathBuf> {
             env.program_files,
             env.program_files_x86,
             env.local_app_data,
-        );
+        )
     }
 
     #[cfg(not(windows))]
@@ -85,12 +85,12 @@ pub(crate) fn discover_git_bash() -> Option<GitBashPrerequisite> {
     #[cfg(windows)]
     {
         let path = resolve_git_bash_path();
-        return Some(GitBashPrerequisite {
+        Some(GitBashPrerequisite {
             available: path.is_some(),
             path: path.map(|path| path.display().to_string()),
             install_instructions_url: INSTALL_URL.to_string(),
             install_hint: INSTALL_HINT.to_string(),
-        });
+        })
     }
 
     #[cfg(not(windows))]
@@ -188,6 +188,7 @@ pub(crate) fn resolve_git_bash(
 /// Inner resolver with an explicit `check_registry` toggle so tests can
 /// disable the ambient `HKLM/HKCU\SOFTWARE\GitForWindows` lookup.
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn resolve_git_bash_inner(
     path_env: &str,
     shell_override: Option<PathBuf>,

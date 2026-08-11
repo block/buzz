@@ -386,7 +386,7 @@ fn build_thread_replies_filter(
 /// `extract_before_id` reads), else the keyset degrades to a bare `until`.
 fn build_channel_messages_before_filter(
     channel_id: &str,
-    before: i64,
+    before: Option<i64>,
     before_id: Option<&str>,
     cap: u32,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -396,11 +396,12 @@ fn build_channel_messages_before_filter(
     let mut filter = serde_json::Map::new();
     filter.insert("#h".to_string(), serde_json::json!([channel_id]));
     filter.insert("kinds".to_string(), serde_json::json!(TIMELINE_KINDS));
-    filter.insert("until".to_string(), serde_json::json!(before));
     filter.insert("limit".to_string(), serde_json::json!(cap));
-    // `before_id` is the bridge extension field for the composite tiebreak
-    // (relay `extract_before_id`); it requires `until` to be set alongside it.
-    if let Some(id) = before_id {
+    // The relay's top_level endpoint enforces a composite cursor rule:
+    // `until` and `before_id` MUST both be present for a keyset page, or both
+    // omitted for the head request.
+    if let (Some(b), Some(id)) = (before, before_id) {
+        filter.insert("until".to_string(), serde_json::json!(b));
         filter.insert("before_id".to_string(), serde_json::json!(id));
     }
     filter
@@ -424,12 +425,13 @@ fn build_channel_messages_before_filter(
 #[tauri::command]
 pub async fn get_channel_messages_before(
     channel_id: String,
-    before: i64,
+    before: Option<i64>,
     before_id: Option<String>,
     limit: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<crate::models::ChannelMessagesPageResponse, String> {
     let cap = limit.unwrap_or(200).min(500);
+    let before_id = before_id.filter(|id| !id.is_empty());
     let filter =
         build_channel_messages_before_filter(&channel_id, before, before_id.as_deref(), cap);
 
@@ -535,6 +537,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    supersedes_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -546,6 +549,7 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let supersedes_refs = supersedes_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
@@ -590,6 +594,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &supersedes_refs,
             )?
         }
     };
@@ -610,6 +615,30 @@ pub async fn send_channel_message(
         depth,
         created_at: chrono::Utc::now().timestamp(),
     })
+}
+
+/// Retroactively declare that `newer_event_id`'s file supersedes
+/// `older_event_id`'s file, without mutating either original (immutable)
+/// event. Publishes a small standalone kind:9 event via `build_supersedes_link`
+/// — see that function's doc comment for why this is a dedicated
+/// builder/command rather than an extension of `send_channel_message`'s
+/// `supersedes_tags` validator.
+#[tauri::command]
+pub async fn link_channel_file_versions(
+    channel_id: String,
+    newer_event_id: String,
+    older_event_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let channel_uuid = uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+    let newer_eid = EventId::from_hex(&newer_event_id)
+        .map_err(|e| format!("invalid newer event ID: {e}"))?;
+    let older_eid = EventId::from_hex(&older_event_id)
+        .map_err(|e| format!("invalid older event ID: {e}"))?;
+    let builder = events::build_supersedes_link(channel_uuid, newer_eid, older_eid)?;
+    submit_event(builder, &state).await?;
+    Ok(())
 }
 
 fn event_has_client_marker(event: &Event, marker: &str) -> bool {
@@ -753,6 +782,7 @@ fn build_managed_agent_channel_message(
         content,
         thread_ref,
         &mention_refs,
+        &[],
         &[],
         &[],
         &[],

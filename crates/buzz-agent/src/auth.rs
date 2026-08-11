@@ -455,7 +455,10 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
         Some(p) => p.join(&cfg.cache_namespace),
         None => {
             let home = std::env::var("HOME")
-                .map_err(|_| AgentError::Llm("oauth cache: $HOME not set".into()))?;
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map_err(|_| {
+                    AgentError::Llm("oauth cache: $HOME or $USERPROFILE not set".into())
+                })?;
             PathBuf::from(home)
                 .join(".config")
                 .join("buzz-agent")
@@ -693,7 +696,10 @@ mod tests {
             cache_dir_override: None,
         };
         let p = cache_path_for(&cfg).unwrap();
-        assert!(p.to_string_lossy().contains("/buzz-agent/oauth/demo/"));
+        assert!(p
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("/buzz-agent/oauth/demo/"));
         assert!(p.extension().and_then(|s| s.to_str()) == Some("json"));
     }
 

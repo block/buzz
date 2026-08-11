@@ -547,7 +547,11 @@ export function useMentionSendFlow({
           uploaded: ImetaMedia[],
           signal?: AbortSignal,
         ) => {
-          const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          const {
+            content: finalContent,
+            mediaTags,
+            supersedesTags,
+          } = buildOutgoingMessage(
             draft.trimmed,
             [...draft.savedImeta, ...uploaded],
             new Set([
@@ -559,10 +563,10 @@ export function useMentionSendFlow({
               ),
             ]),
           );
-          const finalOutgoingTags = mergeOutgoingTags(
-            mediaTags,
-            outgoingTags ?? [],
-          );
+          const finalOutgoingTags = mergeOutgoingTags(mediaTags, [
+            ...(outgoingTags ?? []),
+            ...supersedesTags,
+          ]);
           if (signal?.aborted) return;
           await send(
             finalContent,

@@ -10,7 +10,7 @@
       "wait": false
     },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "npx pnpm build",
     "frontendDist": "../dist"
   },
   "app": {

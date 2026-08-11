@@ -1,4 +1,4 @@
-import { EllipsisVertical, Settings2, Users } from "lucide-react";
+import { EllipsisVertical, Folder, Settings2, Users } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,6 +38,7 @@ type ChannelMembersBarProps = {
   isAddBotOpen?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
+  onToggleFiles?: () => void;
   onToggleMembers: () => void;
   variant?: "inline" | "compact";
 };
@@ -48,6 +49,7 @@ export function ChannelMembersBar({
   isAddBotOpen: isAddBotOpenProp,
   onAddBotOpenChange,
   onManageChannel,
+  onToggleFiles,
   onToggleMembers,
   variant = "inline",
 }: ChannelMembersBarProps) {
@@ -205,6 +207,15 @@ export function ChannelMembersBar({
               {memberCount}
             </span>
           </DropdownMenuItem>
+          {onToggleFiles ? (
+            <DropdownMenuItem
+              data-testid="channel-files-trigger"
+              onSelect={onToggleFiles}
+            >
+              <Folder />
+              <span>Files</span>
+            </DropdownMenuItem>
+          ) : null}
           {huddleIndicator}
           <DropdownMenuItem
             data-testid="channel-management-trigger"
@@ -235,6 +246,25 @@ export function ChannelMembersBar({
           </TooltipTrigger>
           <TooltipContent>Channel members</TooltipContent>
         </Tooltip>
+
+        {onToggleFiles ? (
+          <Tooltip disableHoverableContent>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="View channel files"
+                className="h-8 px-2.5"
+                data-testid="channel-files-trigger"
+                onClick={onToggleFiles}
+                type="button"
+                variant="outline"
+              >
+                <Folder />
+                <span className="text-xs font-medium">Files</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Channel files</TooltipContent>
+          </Tooltip>
+        ) : null}
 
         {huddleIndicator}
 

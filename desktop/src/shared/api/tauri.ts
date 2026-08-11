@@ -28,6 +28,7 @@ import type {
   SendChannelMessageResult,
   SetCanvasInput,
   SetCanvasResult,
+  SetPinnedMessagesInput,
   ThreadCursor,
   ThreadRepliesResponse,
   CreateManagedAgentInput,
@@ -435,6 +436,25 @@ export async function setCanvas(
   };
 }
 
+/** Reads kind:40004's `content.pinned` list for a channel/DM. Order = pin
+ *  order, oldest-pinned first (see `SetPinnedMessagesInput`). Empty array
+ *  when no pin event has been published yet. */
+export async function getPinnedMessages(channelId: string): Promise<string[]> {
+  return invokeTauri<string[]>("get_pinned_messages", { channelId });
+}
+
+/** Full-replace publish of the pinned-message list — the caller computes
+ *  the new complete list (after adding/removing one entry) and passes it
+ *  here; the Rust command also enforces the max-3 ceiling server-side. */
+export async function setPinnedMessages(
+  input: SetPinnedMessagesInput,
+): Promise<void> {
+  await invokeTauri<void>("set_pinned_messages", {
+    channelId: input.channelId,
+    pinnedEventIds: input.pinnedEventIds,
+  });
+}
+
 export async function getHomeFeed(
   input: GetHomeFeedInput = {},
 ): Promise<HomeFeedResponse> {
@@ -549,6 +569,13 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  /**
+   * `["e", "<id>", "", "supersedes"]` tags — one per attachment the user
+   * opted into linking as a new version of an earlier upload. Rides its own
+   * Tauri arg (not `mediaTags`) because the Rust `imeta_tags` validator
+   * rejects any non-`imeta`-prefixed tag.
+   */
+  supersedesTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -559,6 +586,7 @@ export async function sendChannelMessage(
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,
+      supersedesTags: supersedesTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -571,6 +599,25 @@ export async function sendChannelMessage(
     depth: response.depth,
     createdAt: response.created_at,
   };
+}
+
+/**
+ * Retroactively declare that the file attached to `newerEventId` supersedes
+ * the file attached to `olderEventId`, without editing either (immutable)
+ * original message. Publishes a small standalone link-declaration event via
+ * the Rust `link_channel_file_versions` command — see
+ * `desktop-tauri/src/events.rs`'s `build_supersedes_link` for the tag shape.
+ */
+export async function linkChannelFileVersions(
+  channelId: string,
+  newerEventId: string,
+  olderEventId: string,
+): Promise<void> {
+  await invokeTauri<void>("link_channel_file_versions", {
+    channelId,
+    newerEventId,
+    olderEventId,
+  });
 }
 
 export type BlobDescriptor = {

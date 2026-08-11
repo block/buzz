@@ -150,6 +150,27 @@ export async function getDesktopNotificationPermissionState(): Promise<DesktopNo
     }
   }
 
+  // `@tauri-apps/plugin-notification`'s injected init script special-cases
+  // Windows: `isPermissionGranted()` skips the real backend call entirely
+  // and just trusts its own in-memory `window.Notification.permission`,
+  // which starts at "default" on every cold start. Because "default" reads
+  // as not-granted, the script immediately latches its own permission to
+  // "denied" before Buzz's code ever runs — so the checks below would just
+  // read back that self-inflicted "denied" forever, without a real OS-level
+  // notification permission ever having been checked. The plugin's desktop
+  // backend (including Windows) always grants permission unconditionally,
+  // so ask it directly here instead of trusting the shim's cached value.
+  if (isTauri() && isWindowsPlatform()) {
+    try {
+      const granted = await invoke<boolean | null>(
+        "plugin:notification|is_permission_granted",
+      );
+      return granted === null ? "default" : granted ? "granted" : "denied";
+    } catch {
+      return "default";
+    }
+  }
+
   if (window.Notification.permission !== "default") {
     return window.Notification.permission;
   }

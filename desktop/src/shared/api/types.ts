@@ -89,6 +89,13 @@ export type SetCanvasResult = {
   eventId: string;
 };
 
+/** Pin order: oldest-pinned first, matching kind:40004's `content.pinned`
+ *  array order (see `build_set_pinned_messages` on the Rust side). */
+export type SetPinnedMessagesInput = {
+  channelId: string;
+  pinnedEventIds: string[];
+};
+
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];

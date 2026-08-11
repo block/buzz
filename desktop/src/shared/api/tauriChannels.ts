@@ -191,15 +191,16 @@ type RawChannelMessagesPageResponse = {
  */
 export async function getChannelMessagesBefore(
   channelId: string,
-  cursor: ChannelPageCursor,
+  cursor: ChannelPageCursor | null,
   limit?: number,
 ): Promise<ChannelMessagesPageResponse> {
   const response = await invokeTauri<RawChannelMessagesPageResponse>(
     "get_channel_messages_before",
     {
       channelId,
-      before: cursor.createdAt,
-      beforeId: cursor.eventId,
+      before: cursor ? cursor.createdAt : null,
+      beforeId:
+        cursor?.eventId && cursor.eventId.length > 0 ? cursor.eventId : null,
       limit: limit ?? null,
     },
   );

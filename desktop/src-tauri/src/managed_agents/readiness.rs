@@ -1211,6 +1211,7 @@ mod tests {
     /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
     /// when resolving via absolute path.  `underlying_cli` is a portable
     /// stand-in so the adapter is not misclassified as `CliMissing`.
+    #[allow(dead_code)]
     fn make_codex_runtime(
         adapter_commands: &'static [&'static str],
         underlying_cli: Option<&'static str>,

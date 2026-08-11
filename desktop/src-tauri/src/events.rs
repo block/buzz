@@ -126,6 +126,44 @@ fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Str
     Ok(())
 }
 
+/// Validate and append `supersedes` reference tags: `["e", "<64-hex-id>", "",
+/// "supersedes"]`. Mirrors `imeta_tags`/`emoji_tags`: rejects any tag that
+/// isn't this exact shape so this path can't be used to smuggle forged
+/// "h"/"p"/reply "e" tags. The target event id is NOT verified to exist —
+/// that check (`validate_supersedes_tag`) was deliberately removed as dead
+/// code tied to a now-removed custom endpoint; this tag rides through like
+/// any other well-formed, unvalidated `e` tag.
+fn supersedes_tags(supersedes_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for st in supersedes_tags {
+        if st.first().map(String::as_str) != Some("e") {
+            return Err(format!(
+                "supersedes tags must use 'e' prefix (got {:?})",
+                st.first()
+            ));
+        }
+        if st.len() != 4 || st[3] != "supersedes" {
+            return Err(
+                "supersedes tag must be exactly [\"e\", \"<id>\", \"\", \"supersedes\"]".into(),
+            );
+        }
+        check_event_id(&st[1])?;
+        let parts: Vec<&str> = st.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid supersedes tag: {e}"))?);
+    }
+    Ok(())
+}
+
+/// Validate a hex event id is exactly 64 hex characters.
+fn check_event_id(event_id: &str) -> Result<(), String> {
+    if event_id.len() != 64 || !event_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "event id must be a 64-character hex string (got {} chars)",
+            event_id.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a hex pubkey is exactly 64 hex characters.
 fn check_pubkey(pubkey: &str) -> Result<(), String> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -295,6 +333,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -303,6 +342,7 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    supersedes_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -312,6 +352,7 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        supersedes_ref_tags,
         &[],
     )
 }
@@ -330,6 +371,7 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    supersedes_ref_tags: &[Vec<String>],
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
@@ -341,6 +383,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    supersedes_tags(supersedes_ref_tags, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -440,6 +483,49 @@ pub fn build_delete_compat(
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
+/// Kind 9 — retroactive "file B supersedes file A" link declaration.
+///
+/// Nostr events are immutable, so retroactively linking two already-published
+/// file uploads can't add a tag to either original event. Instead this
+/// publishes a brand-new, empty-content kind:9 event carrying only the
+/// channel `h` tag and two `e` tags: `["e", newer_event_id, "",
+/// "supersedes-subject"]` and `["e", older_event_id, "", "supersedes"]`. It
+/// carries no `imeta` tag of its own, so it's never mistaken for a file
+/// upload — only for the *link* between two others.
+///
+/// `channelFiles.ts`'s `listChannelFiles` scans for this exact shape (an
+/// event with both markers and no imeta tag) and folds the declared link
+/// into the same `supersedes`/`supersededBy` graph it already builds from
+/// live-composer `supersedes` tags, so `FilesPanel.tsx` renders both cases
+/// identically without any changes.
+///
+/// Deliberately a dedicated builder + dedicated command (`link_channel_file_versions`,
+/// mirroring `build_reaction`/`add_reaction`) rather than threading a third
+/// tag marker through `supersedes_tags()`/`build_message`, which guards the
+/// main message-send path — this keeps that validator's contract (exactly
+/// `["e", "<id>", "", "supersedes"]`) unchanged for every existing caller,
+/// which is the lower-risk option.
+pub fn build_supersedes_link(
+    channel_id: Uuid,
+    newer_event_id: EventId,
+    older_event_id: EventId,
+) -> Result<EventBuilder, String> {
+    if newer_event_id == older_event_id {
+        return Err("a file cannot supersede itself".into());
+    }
+    let tags = vec![
+        tag(vec!["h", &channel_id.to_string()])?,
+        tag(vec![
+            "e",
+            &newer_event_id.to_hex(),
+            "",
+            "supersedes-subject",
+        ])?,
+        tag(vec!["e", &older_event_id.to_hex(), "", "supersedes"])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(9), "").tags(tags))
+}
+
 // ── Reactions ────────────────────────────────────────────────────────────────
 
 /// Kind 7 — NIP-25 reaction.
@@ -466,6 +552,24 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     check_content(content)?;
     let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+// ── Pinned messages ──────────────────────────────────────────────────────────
+
+/// Kind 40004 — the channel/DM-level pinned-message list. `content` is a
+/// small JSON payload `{"pinned": ["<eventId>", ...]}` (order = pin order,
+/// oldest-pinned first). "Latest wins" is enforced purely by the read-side
+/// query convention (`limit:1` + descending `created_at`), the same pattern
+/// `build_set_canvas`/`get_canvas` use for kind 40100 — this is a full
+/// replace of the list, not an incremental add/remove.
+pub fn build_set_pinned_messages(
+    channel_id: Uuid,
+    pinned_event_ids: &[String],
+) -> Result<EventBuilder, String> {
+    let content = serde_json::json!({ "pinned": pinned_event_ids }).to_string();
+    check_content(&content)?;
+    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(40004), content).tags(tags))
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────

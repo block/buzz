@@ -667,12 +667,24 @@ const MENTION_REF = [
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
 
-test("splitOutgoingTags: undefined input yields three empty arrays", () => {
+test("splitOutgoingTags: undefined input yields four empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
     mentionTags: [],
+    supersedesTags: [],
   });
+});
+
+test("splitOutgoingTags: separates supersedes tags from mediaTags and a plain reply/root e tag", () => {
+  const SUPERSEDES = ["e", "b".repeat(64), "", "supersedes"];
+  const REPLY = ["e", "c".repeat(64), "", "reply"];
+  const { mediaTags, emojiTags, mentionTags, supersedesTags } =
+    splitOutgoingTags([IMETA, SUPERSEDES, REPLY, EMOJI_A]);
+  assert.deepEqual(mediaTags, [IMETA, REPLY]);
+  assert.deepEqual(emojiTags, [EMOJI_A]);
+  assert.deepEqual(mentionTags, []);
+  assert.deepEqual(supersedesTags, [SUPERSEDES]);
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {

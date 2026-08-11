@@ -6,10 +6,13 @@ import {
   CornerUpLeft,
   EllipsisVertical,
   Flag,
+  Forward,
   Link2,
   MailCheck,
   MailOpen,
   Pencil,
+  Pin,
+  PinOff,
   SmilePlus,
   Trash2,
 } from "lucide-react";
@@ -37,6 +40,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { Button } from "@/shared/ui/button";
 import { DeleteMessageConfirmDialog } from "./DeleteMessageConfirmDialog";
+import { ForwardMessageDialog } from "./ForwardMessageDialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -60,10 +64,13 @@ function MoreActionsMenu({
   onMarkUnread,
   onMarkRead,
   onOpenChange,
+  onPin,
   onRemindLater,
   onUnfollowThread,
+  onUnpin,
   open,
   isFollowingThread,
+  isPinned,
   isUnread,
 }: {
   /** Channel UUID for the "Copy link" action. When null/undefined, the
@@ -76,10 +83,19 @@ function MoreActionsMenu({
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
+  /** Pin this message to the channel/DM's compact pinned area. Hidden when
+   *  omitted (e.g. no channel context) or when the message is already
+   *  pinned — see `onUnpin`. */
+  onPin?: (message: TimelineMessage) => void;
   onRemindLater?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
+  /** Unpin this message. Shown instead of `onPin` when `isPinned` is true. */
+  onUnpin?: (message: TimelineMessage) => void;
   open: boolean;
   isFollowingThread?: boolean;
+  /** Whether this message is currently in the channel/DM's pinned list —
+   *  toggles the "Pin message" / "Unpin message" label and handler. */
+  isPinned?: boolean;
   isUnread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
@@ -231,6 +247,26 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
+          {onPin || onUnpin ? (
+            <DropdownMenuItem
+              data-testid={`pin-toggle-${message.id}`}
+              onClick={() => {
+                if (isPinned) {
+                  onUnpin?.(message);
+                } else {
+                  onPin?.(message);
+                }
+              }}
+            >
+              {isPinned ? (
+                <PinOff className="h-4 w-4" />
+              ) : (
+                <Pin className="h-4 w-4" />
+              )}
+              {isPinned ? "Unpin message" : "Pin message"}
+            </DropdownMenuItem>
+          ) : null}
+
           {canReport || onDelete ? <DropdownMenuSeparator /> : null}
 
           {canReport ? (
@@ -283,6 +319,7 @@ function MoreActionsMenu({
           eventId={message.id}
         />
       ) : null}
+
     </>
   );
 }
@@ -340,14 +377,17 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onFollowThread,
   onMarkUnread,
   onMarkRead,
+  onPin,
   onReactionBadgeBurstRequest,
   onReactionSelect,
   onRemindLater,
   onReply,
   onUnfollowThread,
+  onUnpin,
   reactionErrorMessage = null,
   reactions,
   isFollowingThread,
+  isPinned,
   isUnread,
 }: {
   /** Channel UUID — required for the "Copy link" action; when omitted the
@@ -359,20 +399,33 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   onFollowThread?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
+  onPin?: (message: TimelineMessage) => void;
   onReactionBadgeBurstRequest?: (emoji: string) => void;
   onReactionSelect?: (emoji: string) => Promise<void>;
   onRemindLater?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
+  onUnpin?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
   isFollowingThread?: boolean;
+  /** Whether this message is currently pinned in the channel/DM's pinned
+   *  list. Drives the Pin/Unpin toggle label in the more-actions menu. */
+  isPinned?: boolean;
   /** Current read state of the clicked message, from the same predicate the
    *  unread badge uses. Drives the single mark-read/unread toggle label. */
   isUnread?: boolean;
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
+  const [isForwardDialogOpen, setIsForwardDialogOpen] = React.useState(false);
+  // Lazily mounted: `ForwardMessageDialog` runs the recipient-search hook
+  // (channel + user directory queries), which every message row's toolbar
+  // would otherwise instantiate whether or not it's ever opened. Mount it
+  // once the user actually opens it for this row, then leave it mounted so
+  // close-out state (error messages, animation) behaves normally.
+  const [hasOpenedForwardDialog, setHasOpenedForwardDialog] =
+    React.useState(false);
   const customEmoji = useCustomEmoji();
   const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
   const quickReactionItems = React.useMemo(
@@ -389,6 +442,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
+  const hasForwardAction =
+    !message.pending && message.kind !== KIND_HUDDLE_STARTED;
 
   const hasMoreMenuActions =
     Boolean(onEdit) ||
@@ -398,6 +453,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     Boolean(onFollowThread) ||
     Boolean(onUnfollowThread) ||
     Boolean(onRemindLater) ||
+    Boolean(onPin) ||
+    Boolean(onUnpin) ||
     !message.pending;
 
   const wouldAddReaction = React.useCallback(
@@ -431,7 +488,12 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     [onReactionBadgeBurstRequest, onReactionSelect, wouldAddReaction],
   );
 
-  if (!hasReplyAction && !hasReactionAction && !hasMoreMenuActions) {
+  if (
+    !hasReplyAction &&
+    !hasReactionAction &&
+    !hasForwardAction &&
+    !hasMoreMenuActions
+  ) {
     return null;
   }
 
@@ -534,6 +596,28 @@ export const MessageActionBar = React.memo(function MessageActionBar({
             </Tooltip>
           ) : null}
 
+          {hasForwardAction ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Forward"
+                  className={ACTION_BUTTON_CLASS}
+                  data-testid={`forward-message-${message.id}`}
+                  onClick={() => {
+                    setHasOpenedForwardDialog(true);
+                    setIsForwardDialogOpen(true);
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Forward className={ACTION_ICON_CLASS} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Forward</TooltipContent>
+            </Tooltip>
+          ) : null}
+
           {hasMoreMenuActions ? (
             <MoreActionsMenu
               channelId={channelId}
@@ -544,15 +628,26 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onOpenChange={setIsDropdownOpen}
+              onPin={onPin}
               onRemindLater={onRemindLater}
               onUnfollowThread={onUnfollowThread}
+              onUnpin={onUnpin}
               open={isDropdownOpen}
               isFollowingThread={isFollowingThread}
+              isPinned={isPinned}
               isUnread={isUnread}
             />
           ) : null}
         </div>
       </div>
+
+      {hasOpenedForwardDialog ? (
+        <ForwardMessageDialog
+          messages={[message]}
+          onOpenChange={setIsForwardDialogOpen}
+          open={isForwardDialogOpen}
+        />
+      ) : null}
     </div>
   );
 });

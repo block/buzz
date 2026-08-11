@@ -5,6 +5,7 @@ import {
   Bot,
   FileText,
   HatGlasses,
+  Link2,
   LineSquiggle,
   Pencil,
   Play,
@@ -15,6 +16,7 @@ import {
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { FileVersionPicker } from "@/features/messages/ui/FileVersionPicker";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
   shortHash,
@@ -82,8 +84,21 @@ export function DropZoneOverlay({ className }: { className?: string }) {
   );
 }
 
+/** A single filename-match "new version?" suggestion for a pending attachment. */
+export type SupersedesSuggestion = {
+  /** Display filename of the earlier upload this attachment might supersede. */
+  filename: string;
+  /** event_id of the earlier upload — becomes the `["e", id, "", "supersedes"]` tag target. */
+  eventId: string;
+  /** Whether the user has opted into the link (toggle is on). */
+  confirmed: boolean;
+};
+
 type ComposerAttachmentsProps = {
   attachments: ImetaMedia[];
+  /** Required to open the manual "Link to a different file…" picker — omit
+   * (e.g. a not-yet-created DM/channel draft) and the affordance hides. */
+  channelId?: string | null;
   isUploading?: boolean;
   onCancelUpload?: (previewId: number) => void;
   /** Remove a local attachment that has not started uploading yet. */
@@ -102,8 +117,132 @@ type ComposerAttachmentsProps = {
   /** Annotated attachment URL → original (pre-edit) URL. */
   originalUrlByUrl?: ReadonlyMap<string, string>;
   onToggleSpoiler?: (url: string) => void;
+  /** Flip a suggested supersedes link on/off for the attachment at `url`. */
+  onToggleSupersedes?: (
+    url: string,
+    eventId: string,
+    confirmed: boolean,
+  ) => void;
   spoileredUrls?: ReadonlySet<string>;
+  /** Attachment URL → filename-match "new version?" suggestion, when found. */
+  supersedesInfo?: ReadonlyMap<string, SupersedesSuggestion>;
 };
+
+/**
+ * Small inline "New version of {filename}?" affordance shown under an
+ * attachment when the filename-match heuristic found exactly one candidate
+ * in the channel's file history. Opt-in only — the toggle defaults off, and
+ * flipping it just records the link locally; nothing is sent until submit.
+ */
+function SupersedesToggleRow({
+  attachmentUrl,
+  onToggleSupersedes,
+  suggestion,
+}: {
+  attachmentUrl: string;
+  onToggleSupersedes?: (
+    url: string,
+    eventId: string,
+    confirmed: boolean,
+  ) => void;
+  suggestion: SupersedesSuggestion;
+}) {
+  return (
+    <Toggle
+      aria-label={`Mark as new version of ${suggestion.filename}`}
+      className="h-auto min-w-0 gap-1 rounded-md px-1 py-0.5 text-2xs font-normal text-muted-foreground data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
+      data-testid="composer-attachment-supersedes-toggle"
+      onPressedChange={(pressed) =>
+        onToggleSupersedes?.(attachmentUrl, suggestion.eventId, pressed)
+      }
+      pressed={suggestion.confirmed}
+      size="xs"
+      type="button"
+    >
+      New version of {suggestion.filename}?
+    </Toggle>
+  );
+}
+
+/**
+ * Manual override entry point for `attachment`'s supersedes link — available
+ * whether or not the filename-match auto-suggestion found a candidate.
+ * Opens the shared `FileVersionPicker` popover; picking a file calls the
+ * same `onToggleSupersedes` setter the auto-match `SupersedesToggleRow`
+ * already uses (confirmed=true), so whichever the user interacted with most
+ * recently wins — there's only one piece of state (`supersedesByUrl` in
+ * `useMediaUpload`), no separate "which source" bookkeeping.
+ */
+function ManualSupersedesPickerRow({
+  attachment,
+  channelId,
+  linkedFilename,
+  onLinkedFilenameChange,
+  onToggleSupersedes,
+}: {
+  attachment: ImetaMedia;
+  channelId: string;
+  /** Cached display filename for `attachment.supersedesEventId`, when it was
+   * set via this picker (vs. the auto-suggestion, which already has its own
+   * filename in `supersedesInfo`). */
+  linkedFilename?: string;
+  onLinkedFilenameChange: (url: string, filename: string | undefined) => void;
+  onToggleSupersedes?: (
+    url: string,
+    eventId: string,
+    confirmed: boolean,
+  ) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const isLinked = Boolean(attachment.supersedesEventId);
+
+  return (
+    <div className="flex items-center gap-1">
+      <FileVersionPicker
+        channelId={channelId}
+        exclude={{ sha256: attachment.sha256 }}
+        onOpenChange={setOpen}
+        onSelect={(file) => {
+          onToggleSupersedes?.(attachment.url, file.eventId, true);
+          onLinkedFilenameChange(attachment.url, file.filename ?? "file");
+        }}
+        open={open}
+        trigger={
+          <button
+            className="flex items-center gap-1 rounded-md px-1 py-0.5 text-2xs font-normal text-muted-foreground hover:bg-muted hover:text-foreground"
+            data-testid="composer-attachment-link-picker-trigger"
+            type="button"
+          >
+            <Link2 className="h-3 w-3" />
+            {isLinked
+              ? `New version of ${linkedFilename ?? "another file"}`
+              : "Link to a different file…"}
+          </button>
+        }
+      />
+      {isLinked ? (
+        <button
+          aria-label="Unlink from that file"
+          className="text-2xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          data-testid="composer-attachment-unlink"
+          onClick={() => {
+            if (attachment.supersedesEventId) {
+              onToggleSupersedes?.(
+                attachment.url,
+                attachment.supersedesEventId,
+                false,
+              );
+            }
+            onLinkedFilenameChange(attachment.url, undefined);
+          }}
+          type="button"
+        >
+          Remove
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 function formatAttachmentSize(size: number): string {
   if (size < 1024) return `${size} B`;
@@ -572,6 +711,7 @@ const MediaAttachmentItem = React.forwardRef<
  */
 export const ComposerAttachments = React.memo(function ComposerAttachments({
   attachments,
+  channelId,
   isUploading = false,
   uploadingCount = 0,
   uploadingPreviews = [],
@@ -584,8 +724,28 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   onRevert,
   originalUrlByUrl,
   onToggleSpoiler,
+  onToggleSupersedes,
   spoileredUrls,
+  supersedesInfo,
 }: ComposerAttachmentsProps) {
+  // Cached display filename for a manually-picked (not auto-suggested) link,
+  // keyed by attachment url — display-only, the source of truth for the
+  // link itself is `attachment.supersedesEventId` (via `onToggleSupersedes`).
+  const [manualLinkFilenameByUrl, setManualLinkFilenameByUrl] = React.useState<
+    Map<string, string>
+  >(() => new Map());
+  const handleManualLinkFilenameChange = React.useCallback(
+    (url: string, filename: string | undefined) => {
+      setManualLinkFilenameByUrl((prev) => {
+        const next = new Map(prev);
+        if (filename) next.set(url, filename);
+        else next.delete(url);
+        return next;
+      });
+    },
+    [],
+  );
+
   if (attachments.length === 0 && queuedPreviews.length === 0 && !isUploading)
     return null;
 
@@ -629,6 +789,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 attachment.filename ||
                 attachment.url.split("/").pop() ||
                 `file ${hash}`;
+              const suggestion = supersedesInfo?.get(attachment.url);
               return (
                 <motion.div
                   key={attachment.url}
@@ -637,7 +798,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
                   transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                  className="group relative"
+                  className="group relative flex flex-col items-start gap-1"
                 >
                   <div className="flex h-5 max-w-40 items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
                     <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -645,6 +806,27 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       {label}
                     </span>
                   </div>
+                  {suggestion ? (
+                    <SupersedesToggleRow
+                      attachmentUrl={attachment.url}
+                      onToggleSupersedes={onToggleSupersedes}
+                      suggestion={suggestion}
+                    />
+                  ) : null}
+                  {channelId ? (
+                    <ManualSupersedesPickerRow
+                      attachment={attachment}
+                      channelId={channelId}
+                      linkedFilename={
+                        manualLinkFilenameByUrl.get(attachment.url) ??
+                        (suggestion?.eventId === attachment.supersedesEventId
+                          ? suggestion?.filename
+                          : undefined)
+                      }
+                      onLinkedFilenameChange={handleManualLinkFilenameChange}
+                      onToggleSupersedes={onToggleSupersedes}
+                    />
+                  ) : null}
                   <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button

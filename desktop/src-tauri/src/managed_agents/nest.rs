@@ -17,6 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+#[allow(unused_imports)]
 use crate::managed_agents::discovery::known_skill_dirs;
 #[cfg(unix)]
 use crate::util::create_symlink;

@@ -69,6 +69,9 @@ url = { workspace = true }
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
 
+# OAuth PKCE engine for Google Drive auth tool
+buzz-agent = { path = "../buzz-agent" }
+
 # Platform app-data dir resolution — locates the desktop app's
 # channel-templates.json store for `channels create --template`
 dirs = "6"

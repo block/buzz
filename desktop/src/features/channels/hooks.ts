@@ -10,6 +10,7 @@ import {
   getChannelDetails,
   getChannelMembers,
   getChannels,
+  getPinnedMessages,
   hideDm,
   joinChannel,
   leaveChannel,
@@ -18,6 +19,7 @@ import {
   removeChannelMember,
   setCanvas,
   setChannelPurpose,
+  setPinnedMessages,
   setChannelTopic,
   unarchiveChannel,
   updateChannel,
@@ -696,6 +698,53 @@ export function useSetCanvasMutation(channelId: string | null) {
       if (channelId) {
         void queryClient.invalidateQueries({
           queryKey: ["channel-canvas", channelId],
+        });
+      }
+    },
+  });
+}
+
+// ── Pinned messages ──────────────────────────────────────────────────────────
+
+/** Max pins per channel/DM — mirrors the ceiling `set_pinned_messages`
+ *  enforces server-side. Exported so UI callers (the pin action, the
+ *  compact pin bar) share a single source of truth. */
+export const MAX_PINNED_MESSAGES = 3;
+
+export function pinnedMessagesQueryKey(channelId: string | null) {
+  return ["pinned-messages", channelId] as const;
+}
+
+export function usePinnedMessagesQuery(
+  channelId: string | null,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: pinnedMessagesQueryKey(channelId),
+    queryFn: () => {
+      if (!channelId) {
+        return Promise.reject(new Error("No channel selected"));
+      }
+      return getPinnedMessages(channelId);
+    },
+    enabled: enabled && channelId !== null,
+  });
+}
+
+export function useSetPinnedMessagesMutation(channelId: string | null) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (pinnedEventIds: string[]) => {
+      if (!channelId) {
+        return Promise.reject(new Error("No channel selected"));
+      }
+      return setPinnedMessages({ channelId, pinnedEventIds });
+    },
+    onSuccess: () => {
+      if (channelId) {
+        void queryClient.invalidateQueries({
+          queryKey: pinnedMessagesQueryKey(channelId),
         });
       }
     },

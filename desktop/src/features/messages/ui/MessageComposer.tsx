@@ -18,6 +18,10 @@ import {
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import {
+  type ChannelFileEntry,
+  listChannelFiles,
+} from "@/shared/api/channelFiles";
+import {
   cancelBackgroundMediaUploads,
   saveQueuedAttachmentsForDraft,
   takeQueuedAttachmentsForDraft,
@@ -143,6 +147,105 @@ function MessageComposerImpl({
   );
   const internalMedia = useMediaUpload({ deferUploadsUntilSend: true });
   const media = mediaController ?? internalMedia;
+
+  // ── Filename-match "new version" suggestion (client-side heuristic only:
+  // no AI/content matching — see AGENTS.md task notes) ──────────────────
+  // After each newly-uploaded attachment lands in `pendingImeta`, check the
+  // channel's existing files for a same-filename, different-hash, not-yet-
+  // superseded candidate. Exactly one match surfaces a suggestion the user
+  // can opt into via a toggle in `ComposerAttachments`; zero or multiple
+  // matches surface nothing (no forced disambiguation).
+  const [supersedesCandidates, setSupersedesCandidates] = React.useState<
+    Map<string, ChannelFileEntry>
+  >(() => new Map());
+  const checkedSupersedesUrlsRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const liveUrls = new Set(media.pendingImeta.map((d) => d.url));
+    // Prune suggestion/checked state for attachments no longer pending
+    // (removed before send, or the composer cleared after a successful
+    // send) so nothing leaks into the next message.
+    checkedSupersedesUrlsRef.current = new Set(
+      [...checkedSupersedesUrlsRef.current].filter((url) => liveUrls.has(url)),
+    );
+    setSupersedesCandidates((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Map<string, ChannelFileEntry>();
+      for (const [url, candidate] of prev) {
+        if (liveUrls.has(url)) {
+          next.set(url, candidate);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    if (!channelId) return;
+    const newAttachments = media.pendingImeta.filter(
+      (d) => d.filename && !checkedSupersedesUrlsRef.current.has(d.url),
+    );
+    if (newAttachments.length === 0) return;
+    for (const d of newAttachments) checkedSupersedesUrlsRef.current.add(d.url);
+
+    let cancelled = false;
+    void (async () => {
+      let files: ChannelFileEntry[] | null = null;
+      for (const attachment of newAttachments) {
+        const filename = attachment.filename;
+        if (!filename) continue;
+        if (files === null) {
+          try {
+            files = await listChannelFiles(channelId);
+          } catch {
+            files = [];
+          }
+        }
+        if (cancelled) return;
+        const normalized = filename.trim().toLowerCase();
+        const candidates = files.filter(
+          (f) =>
+            f.filename != null &&
+            f.filename.trim().toLowerCase() === normalized &&
+            f.sha256 !== attachment.sha256 &&
+            f.supersededBy == null,
+        );
+        if (candidates.length === 1) {
+          const candidate = candidates[0];
+          setSupersedesCandidates((prev) => {
+            const next = new Map(prev);
+            next.set(attachment.url, candidate);
+            return next;
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [channelId, media.pendingImeta]);
+
+  const supersedesInfo = React.useMemo(() => {
+    const map = new Map<
+      string,
+      { filename: string; eventId: string; confirmed: boolean }
+    >();
+    for (const [url, candidate] of supersedesCandidates) {
+      map.set(url, {
+        filename: candidate.filename ?? "file",
+        eventId: candidate.eventId,
+        confirmed: media.supersedesByUrl.get(url) === candidate.eventId,
+      });
+    }
+    return map;
+  }, [supersedesCandidates, media.supersedesByUrl]);
+
+  const handleToggleSupersedes = React.useCallback(
+    (url: string, eventId: string, confirmed: boolean) => {
+      media.setAttachmentSupersedesEventId(url, confirmed ? eventId : null);
+    },
+    [media.setAttachmentSupersedesEventId],
+  );
   const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
   const composerDisabled = disabled || isDeferredEditPending;
   const isEditSubmissionLocked =
@@ -957,6 +1060,7 @@ function MessageComposerImpl({
               <div className="mb-2 flex items-center gap-2">
                 <ComposerAttachments
                   attachments={media.pendingImeta}
+                  channelId={channelId}
                   isUploading={media.isUploading}
                   onCancelUpload={media.cancelUpload}
                   onRemoveQueued={media.removeQueuedAttachment}
@@ -969,7 +1073,9 @@ function MessageComposerImpl({
                   onRevert={handleAttachmentRevert}
                   originalUrlByUrl={media.originalUrlByUrl}
                   onToggleSpoiler={handleToggleAttachmentSpoiler}
+                  onToggleSupersedes={handleToggleSupersedes}
                   spoileredUrls={spoileredAttachmentUrls}
+                  supersedesInfo={supersedesInfo}
                 />
               </div>
             )}

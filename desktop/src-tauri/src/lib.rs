@@ -39,7 +39,6 @@ mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
 mod terminal_transport;
-#[cfg(target_os = "macos")]
 mod tray_menu;
 mod util;
 #[cfg(target_os = "linux")]
@@ -310,9 +309,12 @@ pub fn run() {
         .manage(terminal_runtime::TerminalSessions::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            // The tray icon and its close-to-tray behavior are shared across
+            // desktop platforms; only the native notification-center wiring
+            // below is macOS-specific.
+            tray_menu::init(&app_handle)?;
             #[cfg(target_os = "macos")]
             {
-                tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
 
@@ -709,9 +711,12 @@ pub fn run() {
             leave_channel,
             get_canvas,
             set_canvas,
+            get_pinned_messages,
+            set_pinned_messages,
             get_feed,
             search_messages,
             send_channel_message,
+            link_channel_file_versions,
             send_managed_agent_channel_message,
             has_managed_agent_channel_message_marker,
             get_forum_posts,
@@ -741,6 +746,8 @@ pub fn run() {
             save_png_data_url,
             download_file,
             fetch_media_bytes,
+            check_libreoffice_available,
+            convert_pptx_to_pdf,
             copy_image_to_clipboard,
             copy_text_to_clipboard,
             read_clipboard_text,
@@ -906,13 +913,9 @@ pub fn run() {
             archive::read_unindexed_observer_rows,
             is_auto_update_supported,
             set_window_vibrancy,
-            #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
-            #[cfg(target_os = "macos")]
             tray_menu::requeue_tray_actions,
-            #[cfg(target_os = "macos")]
             tray_menu::take_tray_actions,
-            #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
         ])
         .build(tauri::generate_context!())
@@ -927,7 +930,7 @@ pub fn run() {
     app.run(move |app_handle, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app_handle),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },

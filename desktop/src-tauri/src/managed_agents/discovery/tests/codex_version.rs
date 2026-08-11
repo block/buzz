@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use super::super::probe_codex_acp_version_with_path;
 
 #[cfg(unix)]

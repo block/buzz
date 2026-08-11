@@ -73,7 +73,7 @@ const ASSET_SPECIFIER = /\.(?:png|jpe?g|gif|svg|webp|avif|ico)(?:\?[^/]*)?$/;
 const ASSET_URL_PREFIX = "buzz-test-asset:";
 
 export function resolve(specifier, context, nextResolve) {
-  if (ASSET_SPECIFIER.test(specifier)) {
+  if (specifier.endsWith("?url") || ASSET_SPECIFIER.test(specifier)) {
     return {
       shortCircuit: true,
       url: `${ASSET_URL_PREFIX}${specifier}`,

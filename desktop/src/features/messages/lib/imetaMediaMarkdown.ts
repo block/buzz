@@ -31,6 +31,13 @@ import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 export type ImetaMedia = BlobDescriptor & {
   /** Composer-only label used for attachment links; not emitted in imeta. */
   displayLabel?: string;
+  /**
+   * Composer-only: event id of an earlier file this attachment was confirmed
+   * (opt-in) to supersede. Not part of the imeta tag itself — emitted as a
+   * separate `["e", id, "", "supersedes"]` tag by `buildSupersedesTags`, same
+   * shape `channelFiles.ts`'s `supersedesTarget` reads back on the read side.
+   */
+  supersedesEventId?: string;
 };
 
 /**
@@ -307,6 +314,29 @@ export function formatImetaMediaLine(
 }
 
 /**
+ * Build the `["e", "<id>", "", "supersedes"]` tag set for attachments the
+ * user opted into linking as a new version of an earlier upload.
+ *
+ * Tag shape matches `supersedesTarget` in `channelFiles.ts` exactly (the
+ * established read-side contract) — one tag per confirmed link, deduped by
+ * target id since two attachments in the same message could theoretically
+ * point at the same earlier file.
+ */
+export function buildSupersedesTags(
+  imetaMedia: ReadonlyArray<ImetaMedia>,
+): string[][] {
+  const seen = new Set<string>();
+  const tags: string[][] = [];
+  for (const d of imetaMedia) {
+    const target = d.supersedesEventId;
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
+    tags.push(["e", target, "", "supersedes"]);
+  }
+  return tags;
+}
+
+/**
  * Build the body + tags pair for an outgoing message (initial send or
  * edit). Appends `![image|video](url)` markdown lines for each attachment
  * to the body so the renderer (which keys on URLs literally present in
@@ -316,12 +346,19 @@ export function formatImetaMediaLine(
  * that need an explicit "wipe attachments" signal (the edit path, where
  * `[]` instructs the receiver overlay to drop existing imeta) should
  * coerce with `?? []`.
+ *
+ * `supersedesTags` is always an array (possibly empty) — callers fold it
+ * into the outgoing tag set via `mergeOutgoingTags` alongside emoji tags.
  */
 export function buildOutgoingMessage(
   body: string,
   pendingImeta: ReadonlyArray<ImetaMedia>,
   spoileredMediaUrls: ReadonlySet<string> = new Set(),
-): { content: string; mediaTags: string[][] | undefined } {
+): {
+  content: string;
+  mediaTags: string[][] | undefined;
+  supersedesTags: string[][];
+} {
   let content = body;
   for (const d of pendingImeta) {
     content += formatImetaMediaLine(d, {
@@ -331,7 +368,8 @@ export function buildOutgoingMessage(
   }
   const mediaTags =
     pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
-  return { content, mediaTags };
+  const supersedesTags = buildSupersedesTags(pendingImeta);
+  return { content, mediaTags, supersedesTags };
 }
 
 /**
@@ -349,28 +387,41 @@ export function mergeOutgoingTags(
 
 /**
  * Inverse of `mergeOutgoingTags`: split a merged outgoing tag set back into
- * imeta media tags, NIP-30 `["emoji", ...]` tags, and reference-only mention
- * tags, so the send path can route each to its own validated Tauri arg. Emoji
- * and mention tags must never ride the imeta-only `media` channel (its guard
- * rejects any non-imeta prefix). Any other prefix stays with `mediaTags` — the
- * imeta guard will reject it, which is the intended injection defense.
+ * imeta media tags, NIP-30 `["emoji", ...]` tags, reference-only mention
+ * tags, and `supersedes` reference tags, so the send path can route each to
+ * its own validated Tauri arg. Emoji, mention, and supersedes tags must
+ * never ride the imeta-only `media` channel (its guard rejects any
+ * non-imeta prefix — a `["e", ...]` supersedes tag would be rejected there
+ * just like any other non-imeta tag). Any other prefix stays with
+ * `mediaTags` — the imeta guard will reject it, which is the intended
+ * injection defense.
+ *
+ * A supersedes tag is `["e", "<id>", "", "supersedes"]` — same shape
+ * `channelFiles.ts` reads back client-side. Matched by prefix `"e"` +
+ * 4th element `"supersedes"` so an ordinary NIP-10 reply/root `e` tag
+ * (marker `"reply"`/`"root"`, added separately via `parentEventId`) is never
+ * mistaken for one.
  */
 export function splitOutgoingTags(tags: string[][] | undefined): {
   mediaTags: string[][];
   emojiTags: string[][];
   mentionTags: string[][];
+  supersedesTags: string[][];
 } {
   const mediaTags: string[][] = [];
   const emojiTags: string[][] = [];
   const mentionTags: string[][] = [];
+  const supersedesTags: string[][] = [];
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
     } else if (tag[0] === "mention") {
       mentionTags.push(tag);
+    } else if (tag[0] === "e" && tag[3] === "supersedes") {
+      supersedesTags.push(tag);
     } else {
       mediaTags.push(tag);
     }
   }
-  return { mediaTags, emojiTags, mentionTags };
+  return { mediaTags, emojiTags, mentionTags, supersedesTags };
 }

@@ -413,6 +413,7 @@ mod tests {
             .path
             .to_str()
             .unwrap()
+            .replace('\\', "/")
             .contains(".agents/skills/shared"));
     }
 
