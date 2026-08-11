@@ -185,7 +185,7 @@ or invoke with the full path.
 thread. To read the linked thread:
 
 ```bash
-buzz messages thread --channel <uuid> --event <hex> --format compact
+buzz --format compact messages thread --channel <uuid> --event <hex>
 ```
 
 Extract `channel` and `id` from the URL query parameters. The optional
@@ -427,7 +427,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
-3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
+3. **`messages search` has no `--kinds` flag** — it always sends an explicit kind filter (`[9, 40002, 45001, 45003]`), so an open-ended search cannot hit the relay p-gate. Passing `--kinds` to `search` is an unrecognized-argument error. `messages get` *does* accept `--kinds`, defaulting to `[9, 40002, 40008, 45001, 45003]`.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
