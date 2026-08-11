@@ -16,7 +16,7 @@
 //! calls hit the cache and silently refresh when expired.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -465,9 +465,62 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
     Ok(dir.join(format!("{hash}.json")))
 }
 
-fn read_cache(path: &PathBuf) -> Option<CachedToken> {
-    let body = fs::read(path).ok()?;
+/// Load a cached token, enforcing the owner-only invariant on load.
+///
+/// Owner-only permissions are a cache *lifecycle* invariant, not just a
+/// write-path property: a world-readable cache left by an older buzz-agent
+/// (or any tampering) must be tightened the moment we touch it, before the
+/// tokens are used — otherwise a file that never expires stays exposed until
+/// some future refresh happens to rewrite it. Every load path (initial and
+/// cross-process re-reads) funnels through here, so the repair covers them
+/// all. Returns `None` when the cache is absent, unreadable, unparseable, or
+/// cannot be secured; the caller then falls through to refresh/browser.
+fn read_cache(path: &Path) -> Option<CachedToken> {
+    let body = read_private_cache(path).ok()?;
     serde_json::from_slice(&body).ok()
+}
+
+/// Open the cache, reject symlinks, tighten loose permissions to `0o600`, and
+/// return its bytes.
+///
+/// On Unix `O_NOFOLLOW` rejects a symlinked cache path at the kernel level
+/// (no stat/open TOCTOU), and `fchmod` on the already-open handle repairs a
+/// loose mode against the pinned inode rather than re-resolving the path.
+/// A cache that exists but cannot be secured is an error, so the caller fails
+/// closed instead of using an exposed file.
+#[cfg(unix)]
+fn read_private_cache(path: &Path) -> io::Result<Vec<u8>> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "oauth cache is not a regular file",
+        ));
+    }
+    // Tighten in place on the open fd if any group/other bit is set. fchmod
+    // targets the inode we already hold, so no attacker can swap the path
+    // between the check and the repair.
+    if meta.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+
+    let mut body = Vec::new();
+    file.read_to_end(&mut body)?;
+    Ok(body)
+}
+
+/// Non-Unix fallback: read the cache as-is. Owner-only enforcement is the
+/// Windows DACL work deferred behind the [`create_private_temp_file`] seam.
+#[cfg(not(unix))]
+fn read_private_cache(path: &Path) -> io::Result<Vec<u8>> {
+    fs::read(path)
 }
 
 /// Removes a temp file on drop unless it was already renamed away. Keeps a
@@ -1211,5 +1264,81 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+    }
+
+    // ---- owner-only is a load-time invariant, not just a save-time one ----
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_bearer_cache_hit_tightens_preexisting_loose_mode_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // A world-readable cache left by an older buzz-agent must be tightened
+        // the moment we load it — on the plain cache-hit path, with no refresh
+        // or save. Otherwise the pre-bug population stays exposed indefinitely.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://example.com/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let cache_path = cache_path_for(&cfg).unwrap();
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+
+        // A valid, unexpired token so bearer() takes the cache hit and never
+        // touches the network or save path.
+        let future_exp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 7200;
+        let token = CachedToken {
+            access_token: "loose-but-valid".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(future_exp),
+        };
+        fs::write(&cache_path, serde_json::to_vec_pretty(&token).unwrap()).unwrap();
+        fs::set_permissions(&cache_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let old_inode = fs::metadata(&cache_path).unwrap().ino();
+
+        // Constructing the source loads the cache — repair happens here.
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+        let bearer = source.bearer().await.unwrap();
+        assert_eq!(bearer, "loose-but-valid");
+
+        let meta = fs::metadata(&cache_path).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "existing loose-mode cache was not tightened on load"
+        );
+        // Repaired in place on the open fd — same inode, no rewrite/rename.
+        assert_eq!(
+            meta.ino(),
+            old_inode,
+            "load-time repair should fchmod in place, not replace the inode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_cache_refuses_symlinked_cache_path() {
+        // A cache path that is a symlink must be rejected, not followed — a
+        // hostile symlink could redirect the read (and our chmod) at an
+        // arbitrary file. `read_cache` returns None so the caller falls
+        // through to a fresh flow instead of trusting the link target.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-token.json");
+        fs::write(&target, b"{\"access_token\":\"via-symlink\"}").unwrap();
+
+        let link = dir.path().join("cache.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(
+            read_cache(&link).is_none(),
+            "read_cache followed a symlinked cache path"
+        );
     }
 }
