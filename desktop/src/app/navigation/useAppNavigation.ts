@@ -8,6 +8,7 @@ import {
 
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { recallChannelThread } from "@/features/channels/channelPanelMemory";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -161,6 +162,14 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  /**
+   * Navigate to a channel. A navigation with no explicit target restores the
+   * channel's remembered thread panel (`channelPanelMemory.ts`) by seeding
+   * `thread` into the URL it builds — the entry is right the first time, so
+   * a switch stays one history entry, and back/forward (which bypasses this
+   * builder) keeps carrying each entry's own params. Explicit targets
+   * (`thread`, `messageId`, `agentSession`, `autoSend`) win over memory.
+   */
   const goChannel = React.useCallback(
     (
       channelId: string,
@@ -179,8 +188,18 @@ export function useAppNavigation() {
         thread?: string;
         threadRootId?: string | null;
       },
-    ) =>
-      commitNavigation(
+    ) => {
+      const hasExplicitTarget = Boolean(
+        options?.thread ||
+          options?.messageId ||
+          options?.agentSession ||
+          options?.autoSend,
+      );
+      const thread = hasExplicitTarget
+        ? options?.thread
+        : (recallChannelThread(channelId) ?? undefined);
+
+      return commitNavigation(
         {
           to: "/channels/$channelId",
           params: {
@@ -196,7 +215,7 @@ export function useAppNavigation() {
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
-            ...(options?.thread ? { thread: options.thread } : {}),
+            ...(thread ? { thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },
@@ -204,7 +223,8 @@ export function useAppNavigation() {
           replace: options?.replace,
           resetScroll: options?.messageId ? true : undefined,
         },
-      ),
+      );
+    },
     [commitNavigation],
   );
 
