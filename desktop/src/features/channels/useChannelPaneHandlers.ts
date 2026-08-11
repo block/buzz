@@ -11,6 +11,8 @@ import { getSendToChannelSemantics } from "@/features/messages/lib/sendToChannel
 import { summarizeThreadRoot } from "@/features/messages/lib/sentFromThread";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { Channel } from "@/shared/api/types";
+import { useAgentReplyAutoOpen } from "@/features/channels/useAgentReplyAutoOpen";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -21,6 +23,8 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
  * rather than listing the whole mutation as a dependency.
  */
 export function useChannelPaneHandlers({
+  agentReplyAutoOpen,
+  hasActiveAuxiliaryPanel,
   deleteMessageMutation,
   editMessageMutation,
   editTargetId,
@@ -42,6 +46,12 @@ export function useChannelPaneHandlers({
   threadReplyTargetId,
   toggleReactionMutation,
 }: {
+  agentReplyAutoOpen: readonly [
+    activeChannel: Channel | null,
+    agentPubkeys: ReadonlySet<string>,
+    relaySelfPubkey: string | null | undefined,
+  ];
+  hasActiveAuxiliaryPanel: boolean;
   deleteMessageMutation: ReturnType<typeof useDeleteMessageMutation>;
   editMessageMutation: ReturnType<typeof useEditMessageMutation>;
   editTargetId: string | null;
@@ -65,6 +75,19 @@ export function useChannelPaneHandlers({
   threadReplyTargetId: string | null;
   toggleReactionMutation: ReturnType<typeof useToggleReactionMutation>;
 }) {
+  const [activeChannel, agentPubkeys, relaySelfPubkey] = agentReplyAutoOpen;
+  const { handleTopLevelMessageSent } = useAgentReplyAutoOpen({
+    activeChannel,
+    agentPubkeys,
+    hasActiveAuxiliaryPanel,
+    relaySelfPubkey,
+    setExpandedThreadReplyIds,
+    setOpenThreadHeadId,
+    setOptimisticOpenThreadHeadId: onOptimisticOpenThreadHeadIdChange,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+  });
+
   // Keep mutable values in refs so callbacks never need to list them as deps.
   const openThreadHeadIdRef = React.useRef(openThreadHeadId);
   openThreadHeadIdRef.current = openThreadHeadId;
@@ -278,6 +301,9 @@ export function useChannelPaneHandlers({
     [setExpandedThreadReplyIds, setThreadScrollTargetId],
   );
 
+  const onTopLevelMessageSentRef = React.useRef(handleTopLevelMessageSent);
+  onTopLevelMessageSentRef.current = handleTopLevelMessageSent;
+
   const handleSendMessage = React.useCallback(
     async (
       content: string,
@@ -290,13 +316,19 @@ export function useChannelPaneHandlers({
       } | null,
       forceRest?: boolean,
     ) => {
-      await sendMutateRef.current({
-        content,
-        mentionPubkeys,
-        mediaTags,
-        channelId: channelId ?? undefined,
-        forceRest,
-      });
+      try {
+        const event = await sendMutateRef.current({
+          content,
+          mentionPubkeys,
+          mediaTags,
+          channelId: channelId ?? undefined,
+          forceRest,
+        });
+        onTopLevelMessageSentRef.current?.(event);
+      } catch (error) {
+        onTopLevelMessageSentRef.current?.(null);
+        throw error;
+      }
     },
     [],
   );
