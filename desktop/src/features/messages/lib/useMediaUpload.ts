@@ -8,6 +8,7 @@ import {
 import { uploadMediaFile } from "@/shared/api/tauriMedia";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
+import { useFilePicker } from "./useFilePicker";
 import { isVideoFile, videoMimeForFile } from "./videoFileType";
 
 /**
@@ -617,21 +618,14 @@ export function useMediaUpload({
     [fillSlot, onUploadError, reserveSlots, reserveUploadingPreview],
   );
 
+  const openFilePicker = useFilePicker();
+
   const handlePaperclip = React.useCallback(async () => {
     if (queueUntilSend) {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.multiple = true;
-      input.addEventListener(
-        "change",
-        () => {
-          const files = Array.from(input.files ?? []);
-          queueFiles(files.filter(shouldQueueFile));
-          uploadFiles(files.filter((file) => !shouldQueueFile(file)));
-        },
-        { once: true },
-      );
-      input.click();
+      openFilePicker({ multiple: true }, (files) => {
+        queueFiles(files.filter(shouldQueueFile));
+        uploadFiles(files.filter((file) => !shouldQueueFile(file)));
+      });
       return;
     }
 
@@ -661,6 +655,7 @@ export function useMediaUpload({
     isUploadCanceled,
     isUploadStale,
     onUploadError,
+    openFilePicker,
     queueFiles,
     reserveUploadingPreview,
     shouldQueueFile,
