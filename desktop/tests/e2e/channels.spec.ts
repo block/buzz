@@ -2775,6 +2775,109 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("Inbox type labels keep the same height with and without a channel chip", async ({
+  page,
+}) => {
+  const dmId = "inbox-type-label-dm";
+  const mentionId = "inbox-type-label-mention";
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({
+      channelId,
+      currentPubkey,
+      dmChannelId: directChannelId,
+      dmId: directId,
+      mentionId: channelMentionId,
+      senderPubkey,
+    }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      const createdAt = Math.floor(Date.now() / 1_000);
+      const directMessage = emitMessage({
+        channelName: "alice-tyler",
+        content: "A direct message without a channel chip",
+        createdAt,
+        id: directId,
+        pubkey: senderPubkey,
+      });
+      pushFeedItem({
+        category: "activity",
+        channel_id: directChannelId,
+        channel_name: "alice-tyler",
+        channel_type: null,
+        content: directMessage.content,
+        created_at: directMessage.created_at,
+        id: directMessage.id,
+        kind: directMessage.kind,
+        pubkey: directMessage.pubkey,
+        tags: directMessage.tags,
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "A channel mention with a channel chip",
+        created_at: createdAt + 1,
+        id: channelMentionId,
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      dmChannelId,
+      dmId,
+      mentionId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const dmLabel = page
+    .getByTestId(`home-inbox-item-${dmId}`)
+    .locator('[data-inbox-type-label=""]');
+  const mentionLabel = page
+    .getByTestId(`home-inbox-item-${mentionId}`)
+    .locator('[data-inbox-type-label=""]');
+  await expect(dmLabel).toContainText("DM from alice");
+  await expect(dmLabel.locator('[data-channel-link=""]')).toHaveCount(0);
+  await expect(mentionLabel).toContainText("Mentioned in");
+  await expect(mentionLabel.locator('[data-channel-link=""]')).toHaveText(
+    "#general",
+  );
+
+  const [dmBox, mentionBox] = await Promise.all([
+    dmLabel.boundingBox(),
+    mentionLabel.boundingBox(),
+  ]);
+  expect(dmBox).not.toBeNull();
+  expect(mentionBox).not.toBeNull();
+  expect(
+    Math.abs((dmBox?.height ?? 0) - (mentionBox?.height ?? 0)),
+  ).toBeLessThan(0.5);
+});
+
 test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
