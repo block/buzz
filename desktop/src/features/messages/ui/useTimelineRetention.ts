@@ -7,8 +7,11 @@ export function useTimelineRetention(
   listRef: React.RefObject<VListHandle | null>,
   isPrepend: boolean,
 ) {
+  // Let Virtua mount only its visible range on first render. Retention is
+  // populated from the measured viewport on the first scroll-end notification;
+  // seeding every key here turns `keepMounted` into an all-history mount.
   const [retainedKeys, setRetainedKeys] = React.useState<ReadonlySet<string>>(
-    () => new Set(keys),
+    () => new Set(),
   );
   const evictionNotBeforeRef = React.useRef(0);
   const refreshTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
