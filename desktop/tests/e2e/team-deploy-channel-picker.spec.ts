@@ -134,8 +134,11 @@ test("channel picker lists joined channels first and exposes the selection to AT
     firstOptionId ?? "",
   );
 
-  // Mouse selection must preserve focus on the combobox so keyboard
-  // navigation can continue without an extra click back into the input.
+  // Mouse selection must move focus to the combobox from another control so
+  // keyboard navigation continues in the channel list rather than that field.
+  const roleSelect = dialog.getByRole("combobox", { name: "Role" });
+  await roleSelect.focus();
+  await expect(roleSelect).toBeFocused();
   await options.nth(1).click();
   await expect(searchInput).toBeFocused();
   await page.keyboard.press("ArrowUp");

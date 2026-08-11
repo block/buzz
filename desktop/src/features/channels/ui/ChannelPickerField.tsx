@@ -34,6 +34,7 @@ export function ChannelPickerField({
   value,
 }: ChannelPickerFieldProps) {
   const [query, setQuery] = React.useState("");
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
 
   const visibleChannels = React.useMemo(
@@ -131,6 +132,7 @@ export function ChannelPickerField({
             }
           }}
           placeholder="Search channels"
+          ref={inputRef}
           role="combobox"
           spellCheck={false}
           type="text"
@@ -165,7 +167,10 @@ export function ChannelPickerField({
                 id={optionId(channel.id)}
                 key={channel.id}
                 onClick={() => onChange(channel.id)}
-                onMouseDown={(event) => event.preventDefault()}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  inputRef.current?.focus();
+                }}
                 role="option"
                 tabIndex={-1}
                 type="button"
