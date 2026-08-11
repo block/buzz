@@ -18,6 +18,7 @@ let channel;
 let resizeCallback;
 let canvasWidth = 840;
 let attachResolver = null;
+let attachRejection = null;
 let deferResizes = false;
 let deferClose = false;
 let closeResolver = null;
@@ -84,6 +85,7 @@ before(async () => {
     invoke(command, args) {
       calls.push({ command, args });
       if (command === "terminal_attach") {
+        if (attachRejection) return Promise.reject(attachRejection);
         channel = args.onFrame;
         const sessionNumber = calls.filter(
           ({ command }) => command === "terminal_attach",
@@ -137,6 +139,7 @@ afterEach(async () => {
   calls.length = 0;
   canvasWidth = 840;
   attachResolver = null;
+  attachRejection = null;
   deferResizes = false;
   deferClose = false;
   closeResolver = null;
@@ -651,5 +654,168 @@ test("a non-channel route closes the panel and ignores the terminal shortcut", a
     window.dispatchEvent(new KeyboardEvent("keyup", chord));
   });
   assert.equal(getTerminalPanelSnapshotForTests().mode, "closed");
+  view.unmount();
+});
+
+test("surfaces attach failures as a visible notice with a working retry", async () => {
+  const { StrictMode, createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  attachRejection = "conpty spawn failed";
+  const view = render(
+    createElement(
+      StrictMode,
+      null,
+      createElement(
+        ThemeProvider,
+        null,
+        createElement(TerminalBootstrap, {
+          channelId: "channel-1",
+          channelName: "general",
+          npub: "npub1owner",
+          relayUrl: "wss://relay.example",
+          threadId: null,
+        }),
+      ),
+    ),
+  );
+
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  assert.match(
+    view.getByTestId("terminal-notice").textContent,
+    /Terminal unavailable: conpty spawn failed/,
+  );
+
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+  assert.ok(failedAttachCount >= 1);
+
+  attachRejection = null;
+  const retryButton = view.getByRole("button", { name: "Retry" });
+  await act(async () => {
+    fireEvent.click(retryButton);
+  });
+
+  await waitFor(() =>
+    assert.ok(
+      calls.filter(({ command }) => command === "terminal_attach").length >
+        failedAttachCount,
+    ),
+  );
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
+  view.unmount();
+});
+
+test("retry reattaches a failed new tab while another session remains", async () => {
+  const { createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const view = render(
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId: "channel-1",
+        channelName: "general",
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    ),
+  );
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 1));
+
+  attachRejection = "second conpty spawn failed";
+  fireEvent.click(view.getByLabelText("New Buzz Term tab"));
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 1));
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+  assert.equal(failedAttachCount, 2);
+
+  attachRejection = null;
+  await act(async () => {
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+  });
+
+  await waitFor(() =>
+    assert.equal(
+      calls.filter(({ command }) => command === "terminal_attach").length,
+      failedAttachCount + 1,
+    ),
+  );
+  await waitFor(() => assert.equal(view.getAllByRole("tab").length, 2));
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
+  view.unmount();
+});
+
+test("retry waits for the channel whose attachment failed", async () => {
+  const { createElement } = await import("react");
+  const { act, fireEvent, render, waitFor } = await import(
+    "@testing-library/react"
+  );
+  const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
+  const { TerminalBootstrap } = await import("./TerminalBootstrap.tsx");
+
+  const tree = (channelId, channelName) =>
+    createElement(
+      ThemeProvider,
+      null,
+      createElement(TerminalBootstrap, {
+        channelId,
+        channelName,
+        npub: "npub1owner",
+        relayUrl: "wss://relay.example",
+        threadId: null,
+      }),
+    );
+  const attachCount = (channelId) =>
+    calls.filter(
+      ({ command, args }) =>
+        command === "terminal_attach" && args.request.channelId === channelId,
+    ).length;
+
+  const view = render(tree("channel-a", "alpha"));
+  await waitFor(() => assert.equal(attachCount("channel-a"), 1));
+
+  attachRejection = "channel-b conpty spawn failed";
+  view.rerender(tree("channel-b", "beta"));
+  await waitFor(() => assert.ok(view.getByTestId("terminal-notice")));
+  assert.equal(attachCount("channel-b"), 1);
+  const failedAttachCount = calls.filter(
+    ({ command }) => command === "terminal_attach",
+  ).length;
+
+  view.rerender(tree("channel-a", "alpha"));
+  attachRejection = null;
+  await act(async () => {
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+  });
+  await waitFor(() =>
+    assert.equal(view.queryByTestId("terminal-notice"), null),
+  );
+
+  assert.equal(attachCount("channel-a"), 1);
+  assert.equal(
+    calls.filter(({ command }) => command === "terminal_attach").length,
+    failedAttachCount,
+  );
+
+  view.rerender(tree("channel-b", "beta"));
+  await waitFor(() => assert.equal(attachCount("channel-b"), 2));
   view.unmount();
 });

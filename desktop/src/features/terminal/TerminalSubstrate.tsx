@@ -37,6 +37,12 @@ export type TerminalSessionTab = {
   active: boolean;
 };
 
+/** Centered viewport message shown when no session can render. */
+export type TerminalNotice = {
+  message: string;
+  action?: { label: string; onAction: () => void };
+};
+
 type TerminalSubstrateProps = {
   channelName: string | null;
   frame?: TerminalFrame;
@@ -46,6 +52,7 @@ type TerminalSubstrateProps = {
   focusReportingEnabled: boolean;
   enabled?: boolean;
   mode?: "docked" | "maximized";
+  notice?: TerminalNotice | null;
   visible?: boolean;
   onHide?: () => void;
   onModeChange?: (mode: "docked" | "maximized") => void;
@@ -85,6 +92,7 @@ export function TerminalSubstrate({
   focusReportingEnabled,
   enabled = true,
   mode = "docked",
+  notice = null,
   visible = true,
   onHide = NOOP,
   onModeChange = NOOP,
@@ -757,6 +765,24 @@ export function TerminalSubstrate({
         </div>
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
+        ) : null}
+        {notice ? (
+          <div
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-6 text-center"
+            data-testid="terminal-notice"
+            role="status"
+          >
+            <p className="max-w-md text-sm opacity-80">{notice.message}</p>
+            {notice.action ? (
+              <button
+                className="buzz-terminal-designator rounded border border-current px-3 py-1 text-xs"
+                onClick={notice.action.onAction}
+                type="button"
+              >
+                {notice.action.label}
+              </button>
+            ) : null}
+          </div>
         ) : null}
         <textarea
           aria-label="Terminal input"

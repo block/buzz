@@ -47,6 +47,15 @@ function report(error: unknown) {
   console.error("terminal session failed", error);
 }
 
+function isSameTerminalContext(left: TerminalContext, right: TerminalContext) {
+  return (
+    left.channelId === right.channelId &&
+    left.threadId === right.threadId &&
+    left.npub === right.npub &&
+    left.relayUrl === right.relayUrl
+  );
+}
+
 export function TerminalBootstrap({
   channelId,
   channelName,
@@ -79,9 +88,12 @@ export function TerminalBootstrap({
     new WeakMap<TerminalConnection, TerminalViewportSize>(),
   );
   const closedSessionKeysRef = React.useRef(new Set<string>());
+  const failedAttachContextRef = React.useRef<TerminalContext | null>(null);
+  const attachRetryContextRef = React.useRef<TerminalContext | null>(null);
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   const [available, setAvailable] = React.useState(() => isTauri());
+  const [attachError, setAttachError] = React.useState<string | null>(null);
   const panel = useTerminalPanel();
   const [renderedMode, setRenderedMode] = React.useState<
     "docked" | "maximized"
@@ -169,7 +181,18 @@ export function TerminalBootstrap({
 
   const fail = React.useCallback((error: unknown) => {
     report(error);
+    setAttachError(error instanceof Error ? error.message : String(error));
     setAvailable(false);
+  }, []);
+
+  const retry = React.useCallback(() => {
+    const nextAvailable = isTauri();
+    attachRetryContextRef.current = nextAvailable
+      ? failedAttachContextRef.current
+      : null;
+    failedAttachContextRef.current = null;
+    setAttachError(null);
+    setAvailable(nextAvailable);
   }, []);
 
   const removeSession = React.useCallback((key: string) => {
@@ -258,6 +281,7 @@ export function TerminalBootstrap({
       })
       .catch((error) => {
         if (closedSessionKeysRef.current.delete(key)) return;
+        failedAttachContextRef.current = spawnContext;
         removeSession(key);
         fail(error);
       });
@@ -282,7 +306,11 @@ export function TerminalBootstrap({
 
   React.useEffect(() => {
     if (panel.mode === "closed" || !available || !context) return;
-    if (channelSessions.length === 0) createSession();
+    const retryContext = attachRetryContextRef.current;
+    if (retryContext && isSameTerminalContext(retryContext, context)) {
+      attachRetryContextRef.current = null;
+      createSession();
+    } else if (channelSessions.length === 0) createSession();
     else if (!channelSessions.some((session) => session.key === activeKey))
       setActiveKey(channelSessions.at(-1)?.key ?? null);
   }, [
@@ -358,12 +386,29 @@ export function TerminalBootstrap({
 
   if (!panelMounted) return null;
 
+  // Silent gray panels are undiagnosable in production builds — no devtools,
+  // and on Windows no log file either. An unavailable terminal must say so,
+  // and say what the backend actually reported.
+  //
+  // A missing `context` needs no notice: the Cmd/Ctrl+J toggle refuses to open
+  // the panel without a channel, and the effect above closes it if the channel
+  // goes away. Rendering one there would only flash during navigation.
+  const notice = available
+    ? null
+    : {
+        message: attachError
+          ? `Terminal unavailable: ${attachError}`
+          : "Terminal is unavailable in this environment.",
+        action: isTauri() ? { label: "Retry", onAction: retry } : undefined,
+      };
+
   return (
     <TerminalSubstrate
       bracketedPaste={active?.frame?.bracketedPaste ?? false}
       channelName={active?.context.channelName ?? channelName}
       enabled={available && Boolean(context)}
       mode={renderedMode}
+      notice={notice}
       visible={panelVisible}
       onHide={() => setTerminalPanelMode("closed")}
       onModeChange={setTerminalPanelMode}
