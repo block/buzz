@@ -23,7 +23,8 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
 const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
-const DEBOUNCE_MS = 5_000;
+const PUBLISH_DEBOUNCE_MS = 5_000;
+const LOCAL_PERSIST_DEBOUNCE_MS = 1_000;
 
 function generateHex(bytes: number): string {
   const arr = new Uint8Array(bytes);
@@ -312,6 +313,7 @@ export class ReadStateManager {
   private publishableContextIds = new Set<string>();
   private lastPublishedContexts: Record<string, number> = {};
   private debounceTimer: number | null = null;
+  private localPersistTimer: number | null = null;
   private listeners = new Set<() => void>();
   private unsubscribeLive: (() => void) | null = null;
   private initialized = false;
@@ -331,6 +333,8 @@ export class ReadStateManager {
       generateHex(16),
     );
     this.extraSlotIds = loadExtraSlotIds(pubkey);
+    window.addEventListener("pagehide", this.flushLocalState);
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   async initialize(): Promise<void> {
@@ -438,7 +442,14 @@ export class ReadStateManager {
 
   destroy(): void {
     this.destroyed = true;
-    // Flush any pending writes immediately
+    window.removeEventListener("pagehide", this.flushLocalState);
+    document.removeEventListener(
+      "visibilitychange",
+      this.handleVisibilityChange,
+    );
+    this.flushLocalState();
+
+    // Flush any pending relay publish immediately
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -628,12 +639,13 @@ export class ReadStateManager {
     this.debounceTimer = window.setTimeout(() => {
       this.debounceTimer = null;
       void this.publish();
-    }, DEBOUNCE_MS);
+    }, PUBLISH_DEBOUNCE_MS);
   }
 
   private async publish(): Promise<void> {
     console.debug(`[ReadStateManager] publish starting slotId=${this.slotId}`);
     await this.fetchOwnBlobBeforePublish();
+    this.flushLocalState();
 
     // Build blob from contexts this client is allowed to publish.
     const contexts = this.currentContexts();
@@ -927,10 +939,35 @@ export class ReadStateManager {
     for (const [contextId, createdAt] of stored.contextSourceCreatedAt) {
       this.contextSourceCreatedAt.set(contextId, createdAt);
     }
-    this.persistLocalState();
+    this.writeLocalState();
   }
 
   private persistLocalState(): void {
+    if (this.localPersistTimer !== null) {
+      window.clearTimeout(this.localPersistTimer);
+    }
+
+    this.localPersistTimer = window.setTimeout(() => {
+      this.localPersistTimer = null;
+      this.writeLocalState();
+    }, LOCAL_PERSIST_DEBOUNCE_MS);
+  }
+
+  private readonly flushLocalState = (): void => {
+    if (this.localPersistTimer === null) return;
+
+    window.clearTimeout(this.localPersistTimer);
+    this.localPersistTimer = null;
+    this.writeLocalState();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") {
+      this.flushLocalState();
+    }
+  };
+
+  private writeLocalState(): void {
     writeStoredReadState(
       this.pubkey,
       this.effectiveState,
