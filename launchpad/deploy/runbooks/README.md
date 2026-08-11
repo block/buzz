@@ -17,6 +17,7 @@ cannot make (which hostname the cohort uses, who is on the roster).
 |---|---|
 | `dev-deployment-SOP.md` | **Start here.** Nothing to a working dev environment, one step at a time, no scripts. Beginner audience |
 | `relay-build-list.md` | Why the pieces behave as they do — source references and the reasoning behind the SOP's steps |
+| `hardening-spec.md` | Specification for the PRD #5 hardening roles (#29–#34). Nothing implemented. Buzz-specific findings read from source, the host baseline, and the dev/prod parity model |
 
 `dev-deployment-SOP.md` is also the **specification the automation is written against**. If an
 Ansible role does something the SOP does not describe, one of the two is wrong. Changes to how the
