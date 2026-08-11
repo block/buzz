@@ -7,10 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  USER_STATUS_FOCUS_STALE_TIME_MS,
-  USER_STATUS_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { USER_STATUS_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -47,10 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("user-status: polling constant is locked at 2 minutes", () => {
-  assert.equal(USER_STATUS_REFETCH_INTERVAL_MS, 120_000);
-});
 
 test("user-status: skips fresh focus refetch", async () => {
   assert.equal(

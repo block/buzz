@@ -7,7 +7,10 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import { AGENTS_FOCUS_STALE_TIME_MS } from "./hooks.ts";
+import {
+  AGENTS_FOCUS_STALE_TIME_MS,
+  MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+} from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -60,6 +63,26 @@ test("agents: refetches genuinely stale data on focus", async () => {
     await focusRefetchCount({
       ageMs: AGENTS_FOCUS_STALE_TIME_MS + 1,
       staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+    }),
+    1,
+  );
+});
+
+test("managed-agent-log: skips focus refetch when data is fresher than one poll tick", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS - 1_000,
+      staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
+    }),
+    0,
+  );
+});
+
+test("managed-agent-log: refetches on focus when data is older than one poll tick", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS + 1,
+      staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
     }),
     1,
   );

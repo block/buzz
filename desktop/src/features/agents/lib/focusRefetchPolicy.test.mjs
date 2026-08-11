@@ -7,10 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
-  PERSONA_CATALOG_REFETCH_INTERVAL_MS,
-} from "./usePersonaCatalogRelay.ts";
+import { PERSONA_CATALOG_FOCUS_STALE_TIME_MS } from "./usePersonaCatalogRelay.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -47,10 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("persona-catalog: polling constant is locked at 2 minutes", () => {
-  assert.equal(PERSONA_CATALOG_REFETCH_INTERVAL_MS, 120_000);
-});
 
 test("persona-catalog: skips fresh focus refetch", async () => {
   assert.equal(

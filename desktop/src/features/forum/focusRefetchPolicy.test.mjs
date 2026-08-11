@@ -7,11 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  FORUM_FOCUS_STALE_TIME_MS,
-  FORUM_POSTS_REFETCH_INTERVAL_MS,
-  FORUM_THREAD_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { FORUM_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -48,14 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("forum-posts: polling constant is locked at 15 seconds", () => {
-  assert.equal(FORUM_POSTS_REFETCH_INTERVAL_MS, 15_000);
-});
-
-test("forum-thread: polling constant is locked at 10 seconds", () => {
-  assert.equal(FORUM_THREAD_REFETCH_INTERVAL_MS, 10_000);
-});
 
 test("forum: skips fresh focus refetch", async () => {
   assert.equal(

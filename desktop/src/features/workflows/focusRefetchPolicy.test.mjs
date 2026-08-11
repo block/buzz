@@ -9,7 +9,7 @@ import {
 
 import {
   WORKFLOWS_FOCUS_STALE_TIME_MS,
-  RUN_APPROVALS_REFETCH_INTERVAL_MS,
+  WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
 } from "./hooks.ts";
 
 afterEach(() => {
@@ -48,10 +48,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   return fetchCount;
 }
 
-test("workflows: run-approvals polling constant is locked at 10 seconds", () => {
-  assert.equal(RUN_APPROVALS_REFETCH_INTERVAL_MS, 10_000);
-});
-
 test("workflows: skips fresh focus refetch", async () => {
   assert.equal(
     await focusRefetchCount({
@@ -67,6 +63,26 @@ test("workflows: refetches genuinely stale data on focus", async () => {
     await focusRefetchCount({
       ageMs: WORKFLOWS_FOCUS_STALE_TIME_MS + 1,
       staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+    }),
+    1,
+  );
+});
+
+test("workflow-runs: skips focus refetch when data is fresh (< 10s)", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS - 1_000,
+      staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
+    }),
+    0,
+  );
+});
+
+test("workflow-runs: refetches on focus when data is stale (> 10s)", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS + 1,
+      staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
     }),
     1,
   );

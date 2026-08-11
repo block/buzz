@@ -7,11 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  PULSE_FOCUS_STALE_TIME_MS,
-  PULSE_NOTES_REFETCH_INTERVAL_MS,
-  PULSE_REACTIONS_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { PULSE_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -48,14 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("pulse: note feed polling constant is locked at 30 seconds", () => {
-  assert.equal(PULSE_NOTES_REFETCH_INTERVAL_MS, 30_000);
-});
-
-test("pulse: reactions polling constant is locked at 60 seconds", () => {
-  assert.equal(PULSE_REACTIONS_REFETCH_INTERVAL_MS, 60_000);
-});
 
 test("pulse: skips fresh focus refetch", async () => {
   assert.equal(

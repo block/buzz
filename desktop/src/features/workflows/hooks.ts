@@ -24,6 +24,16 @@ import {
 export const WORKFLOWS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Keeps focused polling for run approvals at the established 10-second cadence. */
 export const RUN_APPROVALS_REFETCH_INTERVAL_MS = 10_000;
+/** Tighter stale gate for the workflow-runs detail query.
+ * The refetchInterval is conditional — 1 s while any run is active, false
+ * otherwise — so when there are no active runs the poll stops.  Remote-started
+ * runs (webhook / another user) do not push an invalidation, meaning a 5-min
+ * focus gate would leave the detail view stale for up to 5 minutes.  10 s
+ * restores the pre-PR behavior and surfaces remote starts quickly without
+ * excess load.  (Completed runs self-heal: the stale "active" cache keeps the
+ * 1 s poll alive until the run finishes, so the fix only matters for the
+ * "no active runs" → "new remote run" transition.) */
+export const WORKFLOW_RUNS_FOCUS_STALE_TIME_MS = 10_000;
 
 export const allWorkflowsQueryKey = (channelIdKey: string) =>
   ["workflows-all", channelIdKey] as const;
@@ -82,7 +92,7 @@ export function useWorkflowRunsQuery(workflowId: string | null) {
     queryFn: ({ queryKey: [, resolvedWorkflowId] }) =>
       getWorkflowRuns(resolvedWorkflowId),
     enabled: workflowId !== null,
-    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+    staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
     refetchInterval: (query) => {
       if (!appFocused) return false;
       const runs = query.state.data as WorkflowRun[] | undefined;

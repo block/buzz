@@ -11,7 +11,6 @@ import {
   ensureChannelAgentPresetInChannel,
   provisionChannelManagedAgent,
 } from "@/features/agents/channelAgents";
-import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
 import {
   channelsQueryKey,
   upsertCachedChannelMember,
@@ -54,16 +53,6 @@ import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgen
 import {
   createPersona,
   deletePersona,
-  exportAgentSnapshot,
-  encodeAgentSnapshotForSend,
-  previewAgentSnapshotImport,
-  confirmAgentSnapshotImport,
-  type AgentSnapshotImportPreview,
-  type AgentSnapshotImportConfirm,
-  type AgentSnapshotImportResult,
-  type EncodedSnapshotPayload,
-  type SnapshotMemoryLevel,
-  type SnapshotFormat,
   listPersonas,
   setPersonaActive,
   updatePersona,
@@ -97,6 +86,7 @@ export {
   useTeamsQuery,
   useUpdateTeamMutation,
 } from "@/features/agents/teamHooks";
+export * from "@/features/agents/snapshotHooks";
 export type {
   AttachManagedAgentToChannelInput,
   AttachManagedAgentToChannelResult,
@@ -110,6 +100,13 @@ export type {
 } from "@/features/agents/channelAgents";
 
 export const AGENTS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/**
+ * Matches the query's 30 s poll so a focus-return refetches anything older
+ * than one poll tick. This detail-view query mounts only on the agent-detail
+ * surface and is not part of the app-wide focus storm.
+ */
+export const MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS = 30_000;
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
@@ -328,7 +325,7 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
-  const refetchInterval = useFocusedRefetchInterval(5 * 60_000);
+  const refetchInterval = useFocusedRefetchInterval(AGENTS_FOCUS_STALE_TIME_MS);
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
@@ -819,99 +816,19 @@ export function useCreateChannelManagedAgentsMutation(
   });
 }
 
-export function useExportAgentSnapshotMutation() {
-  return useMutation({
-    mutationFn: async ({
-      id,
-      memoryLevel,
-      format,
-      memorySourcePubkey,
-      avatarUrl,
-    }: {
-      id: string;
-      memoryLevel: SnapshotMemoryLevel;
-      format: SnapshotFormat;
-      memorySourcePubkey?: string | null;
-      avatarUrl?: string | null;
-    }) => {
-      const avatarPngDataUrl =
-        format === "png"
-          ? await resolveSnapshotAvatarPng(avatarUrl)
-          : undefined;
-      return exportAgentSnapshot(
-        id,
-        memoryLevel,
-        format,
-        memorySourcePubkey,
-        avatarPngDataUrl,
-      );
-    },
-  });
-}
-
-export function useEncodeAgentSnapshotForSendMutation() {
-  return useMutation({
-    mutationFn: ({
-      id,
-      memoryLevel,
-      format,
-      memorySourcePubkey,
-      avatarPngDataUrl,
-    }: {
-      id: string;
-      memoryLevel: SnapshotMemoryLevel;
-      format: SnapshotFormat;
-      memorySourcePubkey?: string | null;
-      avatarPngDataUrl?: string;
-    }) =>
-      encodeAgentSnapshotForSend(
-        id,
-        memoryLevel,
-        format,
-        memorySourcePubkey,
-        avatarPngDataUrl,
-      ),
-  });
-}
-
-export function usePreviewAgentSnapshotImportMutation() {
-  return useMutation({
-    mutationFn: ({
-      fileBytes,
-      fileName,
-    }: {
-      fileBytes: number[];
-      fileName: string;
-    }) => previewAgentSnapshotImport(fileBytes, fileName),
-  });
-}
-
-export function useConfirmAgentSnapshotImportMutation() {
-  return useMutation({
-    mutationFn: (input: AgentSnapshotImportConfirm) =>
-      confirmAgentSnapshotImport(input),
-  });
-}
-
-// Re-export import types for consumers that import from hooks.
-export type {
-  AgentSnapshotImportPreview,
-  AgentSnapshotImportConfirm,
-  AgentSnapshotImportResult,
-  EncodedSnapshotPayload,
-};
-
 export function useManagedAgentLogQuery(
   pubkey: string | null,
   lineCount = 120,
 ) {
-  const refetchInterval = useFocusedRefetchInterval(pubkey ? 30_000 : false);
+  const refetchInterval = useFocusedRefetchInterval(
+    pubkey ? MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS : false,
+  );
   return useQuery({
     queryKey: ["managed-agent-log", pubkey, lineCount],
     queryFn: () => getManagedAgentLog(pubkey as string, lineCount),
     enabled: pubkey !== null,
     retry: false,
-    staleTime: AGENTS_FOCUS_STALE_TIME_MS,
+    staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });

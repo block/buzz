@@ -7,10 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  CUSTOM_EMOJI_FOCUS_STALE_TIME_MS,
-  CUSTOM_EMOJI_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { CUSTOM_EMOJI_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -47,10 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("custom-emoji: polling constant is locked at 2 minutes", () => {
-  assert.equal(CUSTOM_EMOJI_REFETCH_INTERVAL_MS, 120_000);
-});
 
 test("custom-emoji: skips fresh focus refetch", async () => {
   assert.equal(

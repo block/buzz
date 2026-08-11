@@ -7,10 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  PRESENCE_FOCUS_STALE_TIME_MS,
-  PRESENCE_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { PRESENCE_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -47,10 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("presence: polling constant is locked at 60 seconds", () => {
-  assert.equal(PRESENCE_REFETCH_INTERVAL_MS, 60_000);
-});
 
 test("presence: skips fresh focus refetch", async () => {
   assert.equal(

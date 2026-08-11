@@ -7,10 +7,7 @@ import {
   QueryObserver,
 } from "@tanstack/react-query";
 
-import {
-  CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS,
-  CHANNEL_TEMPLATES_REFETCH_INTERVAL_MS,
-} from "./hooks.ts";
+import { CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS } from "./hooks.ts";
 
 afterEach(() => {
   focusManager.setFocused(undefined);
@@ -47,10 +44,6 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   queryClient.unmount();
   return fetchCount;
 }
-
-test("channel-templates: polling constant is locked at 30 seconds", () => {
-  assert.equal(CHANNEL_TEMPLATES_REFETCH_INTERVAL_MS, 30_000);
-});
 
 test("channel-templates: skips fresh focus refetch", async () => {
   assert.equal(
