@@ -115,13 +115,9 @@ fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
 
 /// MIME types blocked from upload — mirrors the server's generic-file deny-list.
 ///
-/// Active-content XSS carriers (JS, SVG) and native executables. Everything
-/// else (images, video, documents, archives, audio, text, data, HTML) is
-/// accepted; un-sniffable files fall back to `application/octet-stream` and are
-/// served as downloads. HTML is deliberately absent — it is an inert download
-/// (never rendered in the webview), matching the relay's `BLOCKED_FILE_MIME_TYPES`.
-/// `application/xhtml+xml` stays as dormant defence in depth (unreachable via
-/// `infer`, which has no XHTML matcher), kept in lockstep with the relay list.
+/// Active-content XSS carriers (JS, SVG) and native executables. Other types,
+/// including HTML, are accepted as downloads; un-sniffable files fall back to
+/// `application/octet-stream`. XHTML remains blocked in lockstep with the relay.
 const BLOCKED_MIME: &[&str] = &[
     "application/xhtml+xml",
     "image/svg+xml",
@@ -899,25 +895,18 @@ mod tests {
 
     #[test]
     fn test_detect_and_validate_mime_accepts_html_as_inert_download() {
-        // HTML is accepted (matching the relay's generic-file policy): it is
-        // never rendered in the webview — the FileCard downloads it via the
-        // native save dialog — so a recognized HTML payload is inert.
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
         assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
     }
 
     #[test]
     fn test_detect_and_validate_mime_still_rejects_executable() {
-        // Dropping HTML from BLOCKED_MIME must not weaken the executable block.
-        // `infer`'s ELF matcher needs the magic plus >52 bytes of header.
-        let mut elf = b"\x7fELF".to_vec();
-        elf.extend_from_slice(&[0u8; 60]);
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
         assert!(detect_and_validate_mime(&elf).is_err());
     }
 
     #[test]
     fn test_blocked_mime_keeps_active_content_and_executables() {
-        assert!(!BLOCKED_MIME.contains(&"text/html"));
         for kept in [
             "image/svg+xml",
             "application/xhtml+xml",
