@@ -40,6 +40,12 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
 
+  if (agent.codexTaskBinding) {
+    return isManagedAgentActive(agent)
+      ? "Return to Codex"
+      : "Take over in Buzz";
+  }
+
   if (isManagedAgentActive(agent)) {
     return "Stop";
   }
@@ -138,7 +144,11 @@ export async function stopManagedAgentWithRules({
   }
 
   await stopManagedAgent(agent.pubkey);
-  return {};
+  return agent.codexTaskBinding
+    ? {
+        noticeMessage: `Returned ${agent.codexTaskBinding.threadName} to Codex Desktop. Its Buzz identity and task binding are preserved.`,
+      }
+    : {};
 }
 
 export async function deleteManagedAgentWithRules({

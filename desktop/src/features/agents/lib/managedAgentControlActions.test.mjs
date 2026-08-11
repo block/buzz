@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
+  stopManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -79,6 +81,58 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("Codex task agents describe ownership handoff actions", () => {
+  const binding = {
+    taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
+    threadName: "Inspect DoE dataset results",
+    workspace: "C:\\repo",
+    updatedAt: new Date(0).toISOString(),
+    model: "gpt-5.4-mini[xhigh]",
+    appServerUrl: null,
+  };
+
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({ codexTaskBinding: binding, status: "stopped" }),
+    ),
+    "Take over in Buzz",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(
+      agent({ codexTaskBinding: binding, status: "running" }),
+    ),
+    "Return to Codex",
+  );
+});
+
+test("returning a Codex task preserves its identity and binding", async () => {
+  const taskAgent = agent({
+    codexTaskBinding: {
+      taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
+      threadName: "Inspect DoE dataset results",
+      workspace: "C:\\repo",
+      updatedAt: new Date(0).toISOString(),
+      model: "gpt-5.4-mini[xhigh]",
+      appServerUrl: null,
+    },
+    status: "running",
+  });
+  let stoppedPubkey = null;
+
+  const result = await stopManagedAgentWithRules({
+    agent: taskAgent,
+    channels: [],
+    relayAgents: [],
+    stopManagedAgent: async (pubkey) => {
+      stoppedPubkey = pubkey;
+    },
+  });
+
+  assert.equal(stoppedPubkey, taskAgent.pubkey);
+  assert.match(result.noticeMessage, /Returned Inspect DoE dataset results/);
+  assert.match(result.noticeMessage, /binding are preserved/);
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

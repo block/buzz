@@ -335,7 +335,9 @@ export function CodexTaskAgentDialog({
                     role="radio"
                     type="button"
                   >
-                    {option === "exclusive" ? "Exclusive ACP" : "Shared app-server"}
+                    {option === "exclusive"
+                      ? "Exclusive ACP"
+                      : "Shared app-server"}
                   </button>
                 ))}
               </div>
@@ -353,7 +355,7 @@ export function CodexTaskAgentDialog({
             <p className="text-sm leading-6 text-muted-foreground">
               {transport === "shared"
                 ? "The agent is created offline and joins the existing app-server when started. Codex clients on that same server can keep this task open."
-                : "The agent is created offline. Close or leave this task in Codex Desktop before starting the Buzz agent; stop the Buzz agent before resuming the task locally."}{" "}
+                : "Binding preserves this Buzz identity without taking the task lock. To hand off from Codex Desktop, archive and restore the task without reopening it, then choose Take over in Buzz. Choose Return to Codex before opening the task locally again."}{" "}
               Task history and workspace files stay on this computer.
             </p>
 
