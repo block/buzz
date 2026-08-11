@@ -5,18 +5,11 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         delete_team_with_cascade, ensure_persona_ids_are_active, load_personas, load_teams,
-        save_teams, try_regenerate_nest, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
+        save_teams, try_regenerate_nest, validate_team_name, CreateTeamRequest, TeamRecord,
+        UpdateTeamRequest,
     },
     util::now_iso,
 };
-
-fn trim_required(value: &str, label: &str) -> Result<String, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{label} is required"));
-    }
-    Ok(trimmed.to_string())
-}
 
 fn trim_optional(value: Option<String>) -> Option<String> {
     value.and_then(|candidate| {
@@ -145,7 +138,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let name = trim_required(&input.name, "Team name")?;
+        let name = validate_team_name(&input.name)?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
         let now = now_iso();
@@ -186,7 +179,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let name = trim_required(&input.name, "Team name")?;
+        let name = validate_team_name(&input.name)?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
 

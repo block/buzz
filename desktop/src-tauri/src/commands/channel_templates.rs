@@ -5,7 +5,8 @@ use crate::{
     app_state::AppState,
     templates::{
         load_channel_templates, save_channel_templates, validate_channel_template_deletion,
-        ChannelTemplateRecord, CreateChannelTemplateRequest, UpdateChannelTemplateRequest,
+        ChannelTemplateRecord, CreateChannelTemplateRequest, TemplateWorktreeConfig,
+        UpdateChannelTemplateRequest,
     },
     util::now_iso,
 };
@@ -25,6 +26,33 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_project_folders(
+    project_folders: Vec<String>,
+    project_folder: Option<String>,
+) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for candidate in project_folders.into_iter().chain(project_folder) {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && !normalized.iter().any(|folder| folder == trimmed) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    normalized
+}
+
+fn normalize_worktree(
+    worktree: Option<TemplateWorktreeConfig>,
+) -> Result<Option<TemplateWorktreeConfig>, String> {
+    worktree
+        .map(|worktree| {
+            Ok(TemplateWorktreeConfig {
+                location: trim_required(&worktree.location, "Worktree location")?,
+                base_branch: trim_required(&worktree.base_branch, "Base branch")?,
+            })
+        })
+        .transpose()
+}
+
 fn validate_channel_type(value: &str) -> Result<(), String> {
     match value {
         "stream" | "forum" => Ok(()),
@@ -41,6 +69,34 @@ fn validate_visibility(value: &str) -> Result<(), String> {
             "invalid visibility: {value:?} (expected \"open\" or \"private\")"
         )),
     }
+}
+
+#[tauri::command]
+/// Open a native multi-folder picker for channel-template project folders.
+///
+/// Returns an empty list when the user cancels. Returns an error if the dialog
+/// closes unexpectedly or any selected folder cannot be represented as a local
+/// filesystem path.
+pub async fn pick_channel_template_project_folder(app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folders(move |paths| {
+        let _ = tx.send(paths);
+    });
+
+    let Some(folder_paths) = rx.await.map_err(|_| "dialog cancelled".to_string())? else {
+        return Ok(Vec::new());
+    };
+    folder_paths
+        .into_iter()
+        .map(|folder_path| {
+            folder_path
+                .as_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok_or_else(|| "Folder picker returned an invalid path".to_string())
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -66,6 +122,10 @@ pub async fn create_channel_template(
         let name = trim_required(&input.name, "Template name")?;
         let description = trim_optional(input.description);
         let canvas_template = trim_optional(input.canvas_template);
+        let project_folders =
+            normalize_project_folders(input.project_folders, input.project_folder);
+        let project_folder = project_folders.first().cloned();
+        let worktree = normalize_worktree(input.worktree)?;
         let channel_type = input.channel_type.unwrap_or_else(|| "stream".to_string());
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
@@ -86,6 +146,9 @@ pub async fn create_channel_template(
             channel_type,
             visibility,
             canvas_template,
+            project_folders,
+            project_folder,
+            worktree,
             agents: input.agents,
             is_builtin: false,
             created_at: now.clone(),
@@ -109,6 +172,10 @@ pub async fn update_channel_template(
         let name = trim_required(&input.name, "Template name")?;
         let description = trim_optional(input.description);
         let canvas_template = trim_optional(input.canvas_template);
+        let project_folders =
+            normalize_project_folders(input.project_folders, input.project_folder);
+        let project_folder = project_folders.first().cloned();
+        let worktree = normalize_worktree(input.worktree)?;
         let channel_type = input.channel_type.unwrap_or_else(|| "stream".to_string());
         let visibility = input.visibility.unwrap_or_else(|| "open".to_string());
         validate_channel_type(&channel_type)?;
@@ -130,6 +197,9 @@ pub async fn update_channel_template(
         template.channel_type = channel_type;
         template.visibility = visibility;
         template.canvas_template = canvas_template;
+        template.project_folders = project_folders;
+        template.project_folder = project_folder;
+        template.worktree = worktree;
         template.agents = input.agents;
         template.updated_at = now_iso();
 

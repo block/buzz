@@ -285,9 +285,6 @@ export function AgentsView() {
               onEdit={teamActions.openEditDialog}
               onAddToChannel={teamActions.setTeamToAddToChannel}
               onShare={teamActions.openShare}
-              onImport={() => {
-                teamImportInputRef.current?.click();
-              }}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
             />
@@ -539,6 +536,11 @@ export function AgentsView() {
               teamActions.setTeamDialogState(null);
             }
           }}
+          onImport={
+            teamActions.teamDialogState.allowImport
+              ? () => teamImportInputRef.current?.click()
+              : undefined
+          }
           onDeleteRemovedPersonas={teamActions.handleDeleteRemovedPersonas}
           onSubmit={teamActions.handleTeamSubmit}
           open={teamActions.teamDialogState !== null}
@@ -649,6 +651,7 @@ export function AgentsView() {
           reader.onload = () => {
             const buffer = reader.result as ArrayBuffer;
             const fileBytes = Array.from(new Uint8Array(buffer));
+            teamActions.setTeamDialogState(null);
             void teamActions.handleImportTeamSnapshotFile(fileBytes, file.name);
           };
           reader.readAsArrayBuffer(file);

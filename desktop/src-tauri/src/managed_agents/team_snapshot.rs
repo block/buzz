@@ -206,9 +206,8 @@ pub(crate) fn validate_team_snapshot(snapshot: &TeamSnapshot) -> Result<(), Stri
             snapshot.version
         ));
     }
-    if snapshot.team.name.trim().is_empty() {
-        return Err("Team snapshot team.name is empty".to_string());
-    }
+    crate::managed_agents::validate_team_name(&snapshot.team.name)
+        .map_err(|error| format!("Invalid team snapshot: {error}"))?;
     if snapshot.members.is_empty() {
         return Err("Team snapshot must have at least one member".to_string());
     }
@@ -423,7 +422,18 @@ mod tests {
         let bytes = serde_json::to_vec(&snapshot).unwrap();
         let result = decode_team_snapshot_json(&bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("team.name is empty"));
+        assert!(result.unwrap_err().contains("Team name is required"));
+    }
+
+    #[test]
+    fn validate_rejects_team_name_that_cannot_be_mentioned() {
+        for invalid_name in ["x".repeat(201), "Review\nTeam".to_string()] {
+            let mut snapshot = two_member_team();
+            snapshot.team.name = invalid_name;
+            let bytes = serde_json::to_vec(&snapshot).unwrap();
+            let error = decode_team_snapshot_json(&bytes).unwrap_err();
+            assert!(error.starts_with("Invalid team snapshot: Team name"));
+        }
     }
 
     #[test]

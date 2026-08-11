@@ -162,6 +162,7 @@ export class ChannelSectionSyncManager {
         last.id !== current.id ||
         last.name !== current.name ||
         last.icon !== current.icon ||
+        last.templateId !== current.templateId ||
         last.order !== current.order
       )
         return false;

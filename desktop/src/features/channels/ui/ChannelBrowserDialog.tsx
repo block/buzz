@@ -97,6 +97,7 @@ type ChannelBrowserDialogProps = {
    */
   onCreateChannel?: (input: CreateChannelInput) => Promise<void>;
   isCreatingChannel?: boolean;
+  initialTemplateId?: string;
 };
 
 export function ChannelBrowserDialog({
@@ -108,6 +109,7 @@ export function ChannelBrowserDialog({
   onSelectChannel,
   onCreateChannel,
   isCreatingChannel = false,
+  initialTemplateId,
 }: ChannelBrowserDialogProps) {
   const [query, setQuery] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
@@ -157,6 +159,7 @@ export function ChannelBrowserDialog({
     channelKind: createKind,
     active: open && mode === "create",
     initialName: createInitialName,
+    initialTemplateId,
     isCreating: isCreatingChannel,
     onCreate: onCreateChannel ?? noopCreate,
     onCreated: () => onOpenChange(false),

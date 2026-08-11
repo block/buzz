@@ -126,9 +126,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               type="button"
             >
               {suggestion.kind === "team" ? (
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                  <Users aria-hidden="true" className="h-4 w-4" />
-                </span>
+                <TeamMentionAvatarStack
+                  members={suggestion.teamMembers ?? []}
+                  teamName={suggestion.displayName}
+                />
               ) : (
                 <UserAvatar
                   avatarUrl={suggestion.avatarUrl ?? null}
@@ -158,8 +159,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     )}
                   >
                     {suggestion.kind === "team" ? (
-                      <span className="inline-flex shrink-0 items-center gap-1">
-                        <Users aria-hidden="true" className="h-3.5 w-3.5" />
+                      <span className="inline-flex shrink-0 items-center">
                         team · {suggestion.teamMembers?.length ?? 0} agents
                       </span>
                     ) : suggestion.isAgent ? (
@@ -221,3 +221,75 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     </div>
   );
 });
+
+const MAX_TEAM_MENTION_AVATARS = 3;
+
+function TeamMentionAvatarStack({
+  members,
+  teamName,
+}: {
+  members: readonly TeamMentionMember[];
+  teamName: string;
+}) {
+  const visibleLimit =
+    members.length > MAX_TEAM_MENTION_AVATARS
+      ? MAX_TEAM_MENTION_AVATARS - 1
+      : MAX_TEAM_MENTION_AVATARS;
+  const visibleMembers = members.slice(0, visibleLimit);
+  const overflowCount = Math.max(0, members.length - visibleMembers.length);
+  const stackItemCount = visibleMembers.length + (overflowCount > 0 ? 1 : 0);
+
+  if (stackItemCount === 0) {
+    return (
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Users aria-hidden="true" className="h-4 w-4" />
+      </span>
+    );
+  }
+
+  return (
+    <span
+      aria-label={`${teamName} members: ${members.map((member) => member.displayName).join(", ")}`}
+      className="flex h-6 shrink-0 items-center"
+      data-testid="team-mention-avatar-stack"
+      role="img"
+    >
+      {visibleMembers.map((member, index) => (
+        <span
+          className={cn("h-6 w-6", index > 0 && "-ml-2")}
+          data-team-mention-member={member.displayName}
+          key={member.personaId ?? member.pubkey ?? member.displayName}
+          style={{
+            zIndex: index + 1,
+            ...(index < stackItemCount - 1 && {
+              mask: "radial-gradient(circle 14px at calc(100% + 5px) 50%, transparent 99%, #fff 100%)",
+              WebkitMask:
+                "radial-gradient(circle 14px at calc(100% + 5px) 50%, transparent 99%, #fff 100%)",
+            }),
+          }}
+          title={member.displayName}
+        >
+          <UserAvatar
+            avatarUrl={member.avatarUrl ?? null}
+            className="bg-muted ring-1 ring-background"
+            displayName={member.displayName}
+            fallbackDelayMs={0}
+            size="sm"
+          />
+        </span>
+      ))}
+      {overflowCount > 0 ? (
+        <span
+          className={cn(
+            "flex h-6 w-6 items-center justify-center rounded-full bg-muted text-3xs font-semibold text-muted-foreground",
+            visibleMembers.length > 0 && "-ml-2",
+          )}
+          data-testid="team-mention-avatar-overflow"
+          style={{ zIndex: stackItemCount }}
+        >
+          +{overflowCount}
+        </span>
+      ) : null}
+    </span>
+  );
+}

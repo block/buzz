@@ -12,6 +12,9 @@ type RawChannelTemplate = {
   channel_type: string;
   visibility: string;
   canvas_template?: string | null;
+  project_folders?: string[];
+  project_folder?: string | null;
+  worktree?: { location: string; baseBranch: string } | null;
   agents?: {
     personas?: Array<{
       personaId: string;
@@ -33,6 +36,17 @@ type RawChannelTemplate = {
 };
 
 function fromRawChannelTemplate(raw: RawChannelTemplate): ChannelTemplate {
+  const projectFolders = Array.from(
+    new Set(
+      [
+        ...(raw.project_folders ?? []),
+        ...(raw.project_folder ? [raw.project_folder] : []),
+      ]
+        .map((folder) => folder.trim())
+        .filter(Boolean),
+    ),
+  );
+
   return {
     id: raw.id,
     name: raw.name,
@@ -40,6 +54,9 @@ function fromRawChannelTemplate(raw: RawChannelTemplate): ChannelTemplate {
     channelType: raw.channel_type as "stream" | "forum",
     visibility: raw.visibility as "open" | "private",
     canvasTemplate: raw.canvas_template ?? null,
+    projectFolders,
+    projectFolder: projectFolders[0] ?? null,
+    worktree: raw.worktree ?? null,
     agents: {
       personas: (raw.agents?.personas ?? []).map((p) => ({
         personaId: p.personaId,
@@ -67,6 +84,10 @@ export async function listChannelTemplates(): Promise<ChannelTemplate[]> {
   ).map(fromRawChannelTemplate);
 }
 
+export async function pickChannelTemplateProjectFolder(): Promise<string[]> {
+  return invokeTauri<string[]>("pick_channel_template_project_folder");
+}
+
 export async function createChannelTemplate(
   input: CreateChannelTemplateInput,
 ): Promise<ChannelTemplate> {
@@ -78,6 +99,9 @@ export async function createChannelTemplate(
         channelType: input.channelType,
         visibility: input.visibility,
         canvasTemplate: input.canvasTemplate,
+        projectFolders: input.projectFolders,
+        projectFolder: input.projectFolder ?? input.projectFolders?.[0],
+        worktree: input.worktree,
         agents: input.agents ?? { personas: [], teams: [] },
       },
     }),
@@ -96,6 +120,9 @@ export async function updateChannelTemplate(
         channelType: input.channelType,
         visibility: input.visibility,
         canvasTemplate: input.canvasTemplate,
+        projectFolders: input.projectFolders,
+        projectFolder: input.projectFolder ?? input.projectFolders?.[0],
+        worktree: input.worktree,
         agents: input.agents ?? { personas: [], teams: [] },
       },
     }),

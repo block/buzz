@@ -42,6 +42,15 @@ pub fn load_channel_templates(app: &AppHandle) -> Result<Vec<ChannelTemplateReco
         Vec::new()
     };
 
+    for record in &mut records {
+        if record.project_folders.is_empty() {
+            if let Some(project_folder) = record.project_folder.clone() {
+                record.project_folders.push(project_folder);
+            }
+        }
+        record.project_folder = record.project_folders.first().cloned();
+    }
+
     sort_channel_templates(&mut records);
     Ok(records)
 }
@@ -82,6 +91,9 @@ mod tests {
             channel_type: "stream".to_string(),
             visibility: "open".to_string(),
             canvas_template: None,
+            project_folders: Vec::new(),
+            project_folder: None,
+            worktree: None,
             agents: TemplateAgentRoster::default(),
             is_builtin: false,
             created_at: "2026-05-11T00:00:00Z".to_string(),
@@ -134,7 +146,9 @@ mod tests {
 
     #[test]
     fn serialization_round_trip() {
-        use crate::templates::{TemplateAgentEntry, TemplateBackend, TemplateTeamEntry};
+        use crate::templates::{
+            TemplateAgentEntry, TemplateBackend, TemplateTeamEntry, TemplateWorktreeConfig,
+        };
 
         let original = ChannelTemplateRecord {
             id: "t1".to_string(),
@@ -143,6 +157,15 @@ mod tests {
             channel_type: "stream".to_string(),
             visibility: "private".to_string(),
             canvas_template: Some("# {channel.name}\n\nSprint goals here".to_string()),
+            project_folders: vec![
+                "/Users/dev/projects/sprint".to_string(),
+                "/Users/dev/projects/docs".to_string(),
+            ],
+            project_folder: Some("/Users/dev/projects/sprint".to_string()),
+            worktree: Some(TemplateWorktreeConfig {
+                location: "~/.buzz/worktrees".to_string(),
+                base_branch: "main".to_string(),
+            }),
             agents: TemplateAgentRoster {
                 personas: vec![TemplateAgentEntry {
                     persona_id: "builtin:fizz".to_string(),
@@ -174,12 +197,47 @@ mod tests {
         assert_eq!(parsed.channel_type, original.channel_type);
         assert_eq!(parsed.visibility, original.visibility);
         assert_eq!(parsed.canvas_template, original.canvas_template);
+        assert_eq!(parsed.project_folders, original.project_folders);
+        assert_eq!(parsed.project_folder, original.project_folder);
+        assert_eq!(
+            parsed
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.location.as_str()),
+            Some("~/.buzz/worktrees")
+        );
+        assert_eq!(
+            parsed
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.base_branch.as_str()),
+            Some("main")
+        );
         assert_eq!(parsed.agents.personas.len(), 1);
         assert_eq!(parsed.agents.teams.len(), 1);
         assert_eq!(parsed.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(parsed.agents.personas[0].runtime.as_deref(), Some("claude"));
         assert_eq!(parsed.agents.teams[0].team_id, "team-1");
         assert!(!parsed.is_builtin);
+    }
+
+    #[test]
+    fn legacy_template_type_is_ignored() {
+        let json = serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy template",
+            "template_type": "section",
+            "channel_type": "stream",
+            "visibility": "open",
+            "agents": {},
+            "is_builtin": false,
+            "created_at": "2026-05-11T00:00:00Z",
+            "updated_at": "2026-05-11T00:00:00Z"
+        });
+
+        let parsed: ChannelTemplateRecord = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_value(parsed).unwrap();
+        assert!(serialized.get("template_type").is_none());
     }
 
     #[test]
@@ -192,6 +250,9 @@ mod tests {
         assert!(!parsed.is_builtin);
         assert!(parsed.description.is_none());
         assert!(parsed.canvas_template.is_none());
+        assert!(parsed.project_folders.is_empty());
+        assert!(parsed.project_folder.is_none());
+        assert!(parsed.worktree.is_none());
         assert!(parsed.agents.personas.is_empty());
         assert!(parsed.agents.teams.is_empty());
     }

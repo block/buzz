@@ -29,7 +29,6 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 import type {
-  AgentPersona,
   ChannelMember,
   ChannelType,
   UserSearchResult,
@@ -39,24 +38,25 @@ import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
-import { hasMention } from "./hasMention";
-import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import {
+  extractMentionPersonasFromCandidates,
+  extractMentionPubkeysFromCandidates,
+  type PersonaMentionTarget,
+} from "./mentionExtraction";
 import {
   buildTeamMentionCandidates,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
   mentionCandidateLabel,
+  resolveTeamMentions,
 } from "./mentionCandidates";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-export type PersonaMentionTarget = {
-  displayName: string;
-  persona: AgentPersona;
-};
+export type { PersonaMentionTarget } from "./mentionExtraction";
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
@@ -625,7 +625,7 @@ export function useMentions(
 
       const mentions = mentionMapRef.current;
       const personaMentions = personaMentionMapRef.current;
-      const selectedMentions = teamMembers ?? [suggestion];
+      const selectedMentions = [suggestion];
       for (const selected of selectedMentions) {
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);
@@ -793,39 +793,33 @@ export function useMentions(
     [],
   );
 
-  const extractMentionPubkeysForCurrentMentions = React.useCallback(
+  const extractMentionPubkeys = React.useCallback(
     (text: string): string[] =>
-      extractMentionPubkeys({
+      extractMentionPubkeysFromCandidates({
+        candidates: mentionCandidates,
+        candidatesWithTeams: mentionCandidatesWithTeams,
+        mentionMap: mentionMapRef.current,
+        personaMentionMap: personaMentionMapRef.current,
         text,
-        selectedMentions: mentionMapRef.current,
-        selectedDisplayNames: personaMentionMapRef.current.keys(),
-        memberCandidates: mentionCandidates,
       }),
-    [mentionCandidates],
+    [mentionCandidates, mentionCandidatesWithTeams],
   );
 
   const extractMentionPersonas = React.useCallback(
-    (text: string): PersonaMentionTarget[] => {
-      const targets: PersonaMentionTarget[] = [];
-      const seen = new Set<string>();
+    (text: string): PersonaMentionTarget[] =>
+      extractMentionPersonasFromCandidates({
+        activePersonaById,
+        candidatesWithTeams: mentionCandidatesWithTeams,
+        personaMentionMap: personaMentionMapRef.current,
+        text,
+      }),
+    [activePersonaById, mentionCandidatesWithTeams],
+  );
 
-      for (const [displayName, personaId] of personaMentionMapRef.current) {
-        if (seen.has(personaId) || !hasMention(text, displayName)) {
-          continue;
-        }
-
-        const persona = activePersonaById.get(personaId);
-        if (!persona) {
-          continue;
-        }
-
-        targets.push({ displayName, persona });
-        seen.add(personaId);
-      }
-
-      return targets;
-    },
-    [activePersonaById],
+  const getTeamMentionTags = React.useCallback(
+    (text: string): string[][] =>
+      resolveTeamMentions(text, mentionCandidatesWithTeams).tags,
+    [mentionCandidatesWithTeams],
   );
 
   const cancelMentionAutocomplete = React.useCallback(() => {
@@ -945,7 +939,8 @@ export function useMentions(
     cancelMentionAutocomplete,
     clearMentions,
     extractMentionPersonas,
-    extractMentionPubkeys: extractMentionPubkeysForCurrentMentions,
+    extractMentionPubkeys,
+    getTeamMentionTags,
     getDraftMentionRefs,
     getMentionDisplayName,
     handleMentionKeyDown,

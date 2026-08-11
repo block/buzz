@@ -27,6 +27,7 @@ export type MessageLinkPillProps = {
 };
 
 export type MarkdownRuntime = {
+  agentMentionNames?: string[];
   agentMentionPubkeysByName?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
@@ -58,6 +59,7 @@ export type MarkdownRuntime = {
 };
 
 export type MarkdownProps = {
+  agentMentionNames?: string[];
   channelNames?: string[];
   className?: string;
   content: string;

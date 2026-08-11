@@ -5,7 +5,7 @@
 
 use super::{
     agents_referencing_team, load_teams_readonly, merge_teams, merge_teams_impl, sort_teams,
-    validate_team_deletion, BuiltInTeam,
+    validate_team_deletion, validate_team_name, BuiltInTeam, MAX_TEAM_NAME_CHARS,
 };
 use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
 
@@ -24,6 +24,31 @@ fn team(id: &str, name: &str) -> TeamRecord {
         created_at: "2026-03-20T00:00:00Z".to_string(),
         updated_at: "2026-03-20T00:00:00Z".to_string(),
     }
+}
+
+#[test]
+fn validate_team_name_normalizes_valid_names() {
+    assert_eq!(
+        validate_team_name("  Review Team  ").unwrap(),
+        "Review Team"
+    );
+    assert!(validate_team_name(&"é".repeat(MAX_TEAM_NAME_CHARS)).is_ok());
+}
+
+#[test]
+fn validate_team_name_rejects_unmentionable_names() {
+    assert_eq!(
+        validate_team_name(" \t ").unwrap_err(),
+        "Team name is required"
+    );
+    assert_eq!(
+        validate_team_name(&"x".repeat(MAX_TEAM_NAME_CHARS + 1)).unwrap_err(),
+        "Team name must be at most 200 characters"
+    );
+    assert_eq!(
+        validate_team_name("Review\nTeam").unwrap_err(),
+        "Team name must not contain control characters"
+    );
 }
 
 #[test]

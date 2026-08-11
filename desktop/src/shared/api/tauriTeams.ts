@@ -84,8 +84,12 @@ export type EncodedTeamSnapshotPayload = {
 
 export type TeamSnapshotMemberPreview = {
   displayName: string;
+  summary?: string | null;
   systemPrompt: string | null;
   avatarUrl: string | null;
+  isBuiltIn?: boolean;
+  model?: string | null;
+  runtime?: string | null;
   hasSourceAllowlist: boolean;
   sourceAllowlistCount: number;
 };

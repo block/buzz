@@ -1,23 +1,23 @@
 import * as React from "react";
-import { AlertCircle, Upload } from "lucide-react";
+import { AlertCircle, ChevronDown, Upload } from "lucide-react";
 
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
   TeamSnapshotImportPreview,
   TeamSnapshotImportResult,
 } from "@/shared/api/tauriTeams";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
-import { Separator } from "@/shared/ui/separator";
+import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import { Dialog, DialogClose } from "@/shared/ui/dialog";
 import {
   deriveImportPhase,
   getProfileSyncFailures,
 } from "./teamSnapshotImport.lib";
+import {
+  AgentDefinitionDetails,
+  DefinitionMarkdown,
+  getAgentInstructionSummary,
+} from "./AgentDefinitionDetails";
 
 type TeamSnapshotImportDialogProps = {
   open: boolean;
@@ -58,55 +58,27 @@ export function TeamSnapshotImportDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent
+      <ChooserDialogContent
         aria-describedby={undefined}
-        className="max-w-md"
+        className="max-w-xl"
+        contentClassName="pt-3"
         data-testid="team-snapshot-import-dialog"
+        footer={
+          <ImportDialogFooter
+            isConfirming={isConfirming}
+            keepAllowlist={keepAllowlist}
+            onConfirm={onConfirm}
+            phase={phase}
+          />
+        }
+        footerClassName="border-t-0 pt-0"
+        footerTestId="team-snapshot-import-footer"
+        headerClassName="pb-2"
+        scrollAreaTestId="team-snapshot-import-scroll-area"
         showCloseButton={false}
+        style={{ maxHeight: "min(42rem, 85vh)" }}
+        title={phase === "result" ? "Team imported" : "Import team snapshot"}
       >
-        <DialogHeader className="space-y-0">
-          <div className="flex items-center justify-between gap-4">
-            <DialogTitle>
-              {phase === "result" ? "Team imported" : "Import team snapshot"}
-            </DialogTitle>
-            <div className="flex items-center gap-2">
-              {phase === "preview" ? (
-                <>
-                  <Button
-                    data-testid="team-snapshot-import-confirm"
-                    disabled={isConfirming}
-                    onClick={() => onConfirm(keepAllowlist)}
-                    size="sm"
-                    type="button"
-                    variant="default"
-                  >
-                    <Upload className="h-4 w-4" />
-                    Import
-                  </Button>
-                  <DialogClose asChild>
-                    <Button
-                      disabled={isConfirming}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                  </DialogClose>
-                </>
-              ) : (
-                <DialogClose asChild>
-                  <Button size="sm" type="button" variant="ghost">
-                    Close
-                  </Button>
-                </DialogClose>
-              )}
-            </div>
-          </div>
-        </DialogHeader>
-
-        <Separator />
-
         {phase === "preview" ? (
           <div className="space-y-3">
             <PreviewBody
@@ -131,8 +103,49 @@ export function TeamSnapshotImportDialog({
         ) : result !== null ? (
           <ResultBody result={result} />
         ) : null}
-      </DialogContent>
+      </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+function ImportDialogFooter({
+  phase,
+  isConfirming,
+  keepAllowlist,
+  onConfirm,
+}: {
+  phase: ReturnType<typeof deriveImportPhase>;
+  isConfirming: boolean;
+  keepAllowlist: boolean;
+  onConfirm: (keepAllowlist: boolean) => void;
+}) {
+  if (phase === "result") {
+    return (
+      <div className="flex w-full justify-end">
+        <DialogClose asChild>
+          <Button type="button">Close</Button>
+        </DialogClose>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex w-full items-center justify-end gap-3">
+      <DialogClose asChild>
+        <Button disabled={isConfirming} type="button" variant="outline">
+          Cancel
+        </Button>
+      </DialogClose>
+      <Button
+        data-testid="team-snapshot-import-confirm"
+        disabled={isConfirming}
+        onClick={() => onConfirm(keepAllowlist)}
+        type="button"
+      >
+        <Upload className="h-4 w-4" />
+        {phase === "confirming" ? "Importing…" : "Import"}
+      </Button>
+    </div>
   );
 }
 
@@ -148,43 +161,87 @@ function PreviewBody({
   onKeepAllowlistChange: (v: boolean) => void;
 }) {
   return (
-    <div className="space-y-4 py-1">
-      {/* Team identity */}
-      <div className="space-y-1">
-        <p className="text-sm font-medium">{preview.name}</p>
+    <div className="space-y-5 py-1">
+      <div className="space-y-2" data-testid="team-snapshot-import-details">
+        <p className="text-base font-semibold tracking-tight">{preview.name}</p>
         {preview.description ? (
-          <p className="text-xs text-muted-foreground">{preview.description}</p>
+          <div data-testid="team-snapshot-import-description">
+            <DefinitionMarkdown content={preview.description} />
+          </div>
         ) : null}
         {preview.instructions ? (
-          <p className="line-clamp-3 text-xs text-muted-foreground">
-            {preview.instructions}
-          </p>
+          <div className="space-y-1 pt-1">
+            <p className="text-xs font-medium text-foreground">
+              Team instructions
+            </p>
+            <div data-testid="team-snapshot-import-instructions">
+              <DefinitionMarkdown content={preview.instructions} />
+            </div>
+          </div>
         ) : null}
       </div>
 
-      <p className="text-sm text-muted-foreground">
+      <p className="text-xs leading-5 text-muted-foreground">
         A new team will be created with fresh keypairs for all members. The
         imported team is independent of the source — identity never travels.
       </p>
 
-      {/* Member list */}
       {preview.members.length > 0 ? (
-        <div className="space-y-1">
-          <p className="text-sm font-medium">
-            Members ({preview.members.length})
-          </p>
-          <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-border p-2">
-            {preview.members.map((member, idx) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: member names may duplicate
-              <div key={idx} className="flex flex-col gap-0.5 px-1 py-0.5">
-                <p className="text-sm font-medium">{member.displayName}</p>
-                {member.systemPrompt ? (
-                  <p className="line-clamp-1 text-xs text-muted-foreground">
-                    {member.systemPrompt}
-                  </p>
-                ) : null}
-              </div>
-            ))}
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-foreground">Members</p>
+          <div
+            className="overflow-hidden rounded-xl border border-border/70 bg-background/70"
+            data-testid="team-snapshot-import-members"
+          >
+            {preview.members.map((member, idx) => {
+              const summary = getAgentInstructionSummary(
+                member.summary,
+                member.systemPrompt,
+              );
+
+              return (
+                <details
+                  className="group/member relative after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden"
+                  data-testid={`team-snapshot-import-member-${idx}`}
+                  // biome-ignore lint/suspicious/noArrayIndexKey: snapshots do not include a stable member id and names may duplicate
+                  key={idx}
+                >
+                  <summary className="flex min-h-14 cursor-pointer list-none items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                    <ProfileAvatar
+                      avatarUrl={member.avatarUrl}
+                      className="h-8 w-8 text-xs shadow-none"
+                      label={member.displayName}
+                      testId={`team-snapshot-import-member-avatar-${idx}`}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium tracking-tight">
+                        {member.displayName}
+                      </p>
+                      {summary ? (
+                        <p
+                          className="line-clamp-1 text-xs leading-5 text-muted-foreground"
+                          data-testid={`team-snapshot-import-member-summary-${idx}`}
+                        >
+                          {summary}
+                        </p>
+                      ) : null}
+                    </div>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/member:rotate-180" />
+                  </summary>
+                  <div
+                    className="space-y-6 border-t border-border/60 px-4 py-4"
+                    data-testid={`team-snapshot-import-member-details-${idx}`}
+                  >
+                    <AgentDefinitionDetails
+                      isBuiltIn={member.isBuiltIn ?? false}
+                      model={member.model ?? null}
+                      runtime={member.runtime ?? null}
+                      systemPrompt={member.systemPrompt ?? ""}
+                    />
+                  </div>
+                </details>
+              );
+            })}
           </div>
         </div>
       ) : null}

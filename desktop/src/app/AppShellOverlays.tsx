@@ -24,6 +24,7 @@ type AppShellOverlaysProps = {
   currentPubkey?: string;
   isChannelManagementOpen: boolean;
   isCreatingBrowseChannel?: boolean;
+  initialTemplateId?: string;
   onBrowseChannelJoin: (channelId: string) => Promise<void>;
   onBrowseChannelCreate?: (input: CreateChannelInput) => Promise<void>;
   onBrowseDialogOpenChange: (open: boolean) => void;
@@ -39,6 +40,7 @@ export function AppShellOverlays({
   currentPubkey,
   isChannelManagementOpen,
   isCreatingBrowseChannel,
+  initialTemplateId,
   onBrowseChannelJoin,
   onBrowseChannelCreate,
   onBrowseDialogOpenChange,
@@ -74,6 +76,7 @@ export function AppShellOverlays({
             channels={channels}
             channelTypeFilter={renderedBrowseDialogType ?? browseDialogType}
             isCreatingChannel={isCreatingBrowseChannel}
+            initialTemplateId={initialTemplateId}
             onCreateChannel={onBrowseChannelCreate}
             onJoinChannel={onBrowseChannelJoin}
             onOpenChange={onBrowseDialogOpenChange}

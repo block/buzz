@@ -12,6 +12,13 @@ pub struct ChannelTemplateRecord {
     pub visibility: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_folders: Vec<String>,
+    /// Legacy first-folder alias retained for older saved templates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<TemplateWorktreeConfig>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
     #[serde(default)]
@@ -27,6 +34,18 @@ pub struct TemplateAgentRoster {
     pub personas: Vec<TemplateAgentEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub teams: Vec<TemplateTeamEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Workspace settings applied when creating a worktree from a channel template.
+/// `location` is the parent directory for new worktrees; `base_branch` is the
+/// branch fetched from origin and used as each worktree's starting point.
+pub struct TemplateWorktreeConfig {
+    /// Parent directory where new worktrees are created.
+    pub location: String,
+    /// Branch used as the base for each new worktree.
+    pub base_branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +98,10 @@ pub struct CreateChannelTemplateRequest {
     pub visibility: Option<String>,
     pub canvas_template: Option<String>,
     #[serde(default)]
+    pub project_folders: Vec<String>,
+    pub project_folder: Option<String>,
+    pub worktree: Option<TemplateWorktreeConfig>,
+    #[serde(default)]
     pub agents: TemplateAgentRoster,
 }
 
@@ -91,6 +114,10 @@ pub struct UpdateChannelTemplateRequest {
     pub channel_type: Option<String>,
     pub visibility: Option<String>,
     pub canvas_template: Option<String>,
+    #[serde(default)]
+    pub project_folders: Vec<String>,
+    pub project_folder: Option<String>,
+    pub worktree: Option<TemplateWorktreeConfig>,
     #[serde(default)]
     pub agents: TemplateAgentRoster,
 }

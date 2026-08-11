@@ -9,6 +9,27 @@ use crate::{
 
 use super::team_repair::team_persona_key;
 
+/// Maximum team-name length accepted by the `team_mention` event tag.
+pub const MAX_TEAM_NAME_CHARS: usize = 200;
+
+/// Normalize and validate a team name before it can reach storage or event
+/// construction.
+pub fn validate_team_name(value: &str) -> Result<String, String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err("Team name is required".to_string());
+    }
+    if name.chars().count() > MAX_TEAM_NAME_CHARS {
+        return Err(format!(
+            "Team name must be at most {MAX_TEAM_NAME_CHARS} characters"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("Team name must not contain control characters".to_string());
+    }
+    Ok(name.to_string())
+}
+
 pub(crate) fn teams_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("teams.json"))
 }

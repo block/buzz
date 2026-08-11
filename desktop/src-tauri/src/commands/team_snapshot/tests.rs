@@ -330,6 +330,17 @@ fn team_import_definitions_are_built_for_all_members() {
 }
 
 #[test]
+fn team_import_rejects_names_that_cannot_be_mentioned() {
+    for invalid_name in ["x".repeat(201), "Review\nTeam".to_string()] {
+        let mut source = snapshot(vec![member("Alice")]);
+        source.team.name = invalid_name;
+
+        let error = build_import_team(&source, vec!["alice".to_string()], "now").unwrap_err();
+        assert!(error.starts_with("Invalid team snapshot: Team name"));
+    }
+}
+
+#[test]
 fn team_import_keeps_or_clears_every_member_allowlist_with_one_toggle() {
     let source = snapshot(vec![member("Alice"), member("Bob")]);
     let kept = build_import_definitions(&source, true, "now").unwrap();

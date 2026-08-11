@@ -26,6 +26,7 @@
  */
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
+import { TEAM_MENTION_TAG } from "@/shared/lib/resolveMentionNames";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 
 export type ImetaMedia = BlobDescriptor & {
@@ -368,7 +369,7 @@ export function splitOutgoingTags(tags: string[][] | undefined): {
   for (const tag of tags ?? []) {
     if (tag[0] === "emoji") {
       emojiTags.push(tag);
-    } else if (tag[0] === "mention") {
+    } else if (tag[0] === "mention" || tag[0] === TEAM_MENTION_TAG) {
       mentionTags.push(tag);
     } else if (tag[0] === "link-preview") {
       linkPreviewTags.push(tag);

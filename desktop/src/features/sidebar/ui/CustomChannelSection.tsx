@@ -128,6 +128,7 @@ export function SectionActionsMenu({
   browseLabel,
   onCreate,
   createLabel,
+  onCreateSection,
   onNewMessage,
   newMessageLabel,
   onRenameSection,
@@ -149,6 +150,7 @@ export function SectionActionsMenu({
   browseLabel?: string;
   onCreate?: () => void;
   createLabel?: string;
+  onCreateSection?: () => void;
   onNewMessage?: () => void;
   newMessageLabel?: string;
   onRenameSection?: () => void;
@@ -213,6 +215,12 @@ export function SectionActionsMenu({
             <span>{createLabel ?? "Create channel"}</span>
           </DropdownMenuItem>
         ) : null}
+        {onCreateSection ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onCreateSection)}>
+            <Plus className="h-4 w-4" />
+            <span>Create section</span>
+          </DropdownMenuItem>
+        ) : null}
         {showSectionManagement ? (
           <>
             {onRenameSection ? (
@@ -220,7 +228,7 @@ export function SectionActionsMenu({
                 onSelect={() => deferMenuAction(onRenameSection)}
               >
                 <Pencil className="h-4 w-4" />
-                <span>Rename section</span>
+                <span>Edit section</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionUp ? (
@@ -365,6 +373,7 @@ export function ChannelGroupSection({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  onCreateSection,
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
@@ -415,6 +424,7 @@ export function ChannelGroupSection({
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
+  onCreateSection?: () => void;
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
@@ -521,6 +531,7 @@ export function ChannelGroupSection({
               browseLabel={browseLabel}
               onCreate={onCreateClick}
               createLabel={createLabel}
+              onCreateSection={onCreateSection}
               sortMode={sortMode}
               onSortModeChange={onSortModeChange}
             />
@@ -708,7 +719,7 @@ export function CustomChannelSection({
               <ContextMenuContent>
                 <ContextMenuItem onClick={onRenameSection}>
                   <Pencil className="h-4 w-4" />
-                  Rename section
+                  Edit section
                 </ContextMenuItem>
                 <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
                   <ArrowUp className="h-4 w-4" />
