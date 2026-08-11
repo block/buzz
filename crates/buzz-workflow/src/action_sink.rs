@@ -66,4 +66,44 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Announce a pending approval as a kind:46010 event (WF-08).
+    ///
+    /// The event carries the raw token in its JSON content (approvers hash it
+    /// into the grant's `d` tag via `buzz workflows approve --token …`), a
+    /// `d` tag holding the SHA-256 token hash so relay handlers and clients
+    /// can correlate it with grant/deny events, and a `p` tag for the notify
+    /// pubkey so the request surfaces in that user's needs-action feed.
+    ///
+    /// Returns the event ID hex string on success.
+    fn emit_approval_requested(
+        &self,
+        community_id: CommunityId,
+        notice: ApprovalRequestNotice,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+}
+
+/// Everything the sink needs to announce a pending approval (kind:46010).
+#[derive(Debug, Clone)]
+pub struct ApprovalRequestNotice {
+    /// Channel to post into (the workflow's channel), if the workflow is
+    /// channel-scoped. `None` emits an unscoped event that still reaches the
+    /// notify pubkey's feed.
+    pub channel_id: Option<uuid::Uuid>,
+    /// Raw approval token — never persisted raw; delivered so approvers can
+    /// present it back to the grant endpoint.
+    pub raw_token: String,
+    /// Template-resolved, human-facing approval message.
+    pub message: String,
+    /// Pubkey (hex) to `p`-tag: the resolved approver, or the workflow owner
+    /// when the spec is `"any"`.
+    pub notify_pubkey_hex: String,
+    /// The workflow the suspended run belongs to.
+    pub workflow_id: uuid::Uuid,
+    /// The suspended run awaiting this approval.
+    pub run_id: uuid::Uuid,
+    /// The step that requested approval.
+    pub step_id: String,
+    /// When the approval window closes.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
