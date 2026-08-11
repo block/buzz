@@ -66,6 +66,134 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Runtime bounds for automatic thread participation. The relay receives only
+/// these roots as an additional `#e` filter; ordinary channel traffic remains
+/// mention-gated in Mentions mode.
+const ACTIVE_THREAD_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MAX_ACTIVE_THREAD_ROOTS_PER_CHANNEL: usize = 32;
+const MAX_ACTIVE_THREAD_CHANNELS: usize = 128;
+
+/// Bounded local state for threads in which this agent has participated.
+///
+/// A root is added only after the event has passed the existing author and
+/// subscription gates. The relay subscription is updated from this state, but
+/// `filter::match_event_with_thread_follow` remains the final fail-closed gate.
+struct ActiveThreadRoots {
+    roots: HashMap<Uuid, HashMap<String, std::time::Instant>>,
+}
+
+impl ActiveThreadRoots {
+    fn new() -> Self {
+        Self {
+            roots: HashMap::new(),
+        }
+    }
+
+    fn contains(&mut self, channel_id: Uuid, root: &str, now: std::time::Instant) -> bool {
+        self.prune_channel(channel_id, now);
+        self.roots
+            .get(&channel_id)
+            .is_some_and(|roots| roots.contains_key(root))
+    }
+
+    /// Record a successfully accepted event and return the complete root set
+    /// only when the relay's subscription needs to change.
+    fn observe(
+        &mut self,
+        channel_id: Uuid,
+        event: &nostr::Event,
+        now: std::time::Instant,
+    ) -> Option<Vec<String>> {
+        self.prune_channel(channel_id, now);
+        let root = queue::parse_thread_tags(event)
+            .root_event_id
+            .unwrap_or_else(|| event.id.to_hex());
+
+        if !self.roots.contains_key(&channel_id) {
+            if self.roots.len() >= MAX_ACTIVE_THREAD_CHANNELS {
+                return None;
+            }
+            self.roots.insert(channel_id, HashMap::new());
+        }
+
+        let channel_roots = self.roots.get_mut(&channel_id)?;
+        let existed = channel_roots.contains_key(&root);
+        channel_roots.insert(root, now);
+        if !existed && channel_roots.len() > MAX_ACTIVE_THREAD_ROOTS_PER_CHANNEL {
+            if let Some(oldest) = channel_roots
+                .iter()
+                .min_by_key(|(_, seen_at)| **seen_at)
+                .map(|(root, _)| root.clone())
+            {
+                channel_roots.remove(&oldest);
+            }
+        }
+
+        if existed {
+            None
+        } else {
+            Some(Self::sorted_roots(channel_roots))
+        }
+    }
+
+    /// Prune expired roots and return channels whose relay filter changed.
+    fn prune(&mut self, now: std::time::Instant) -> Vec<(Uuid, Vec<String>)> {
+        let mut changed = Vec::new();
+        let channel_ids: Vec<Uuid> = self.roots.keys().copied().collect();
+        for channel_id in channel_ids {
+            if self.prune_channel(channel_id, now) {
+                if let Some(roots) = self.roots.get(&channel_id) {
+                    changed.push((channel_id, Self::sorted_roots(roots)));
+                }
+            }
+        }
+        self.roots.retain(|_, roots| !roots.is_empty());
+        changed
+    }
+
+    fn prune_channel(&mut self, channel_id: Uuid, now: std::time::Instant) -> bool {
+        let Some(roots) = self.roots.get_mut(&channel_id) else {
+            return false;
+        };
+        let before = roots.len();
+        roots.retain(|_, seen_at| now.duration_since(*seen_at) < ACTIVE_THREAD_TTL);
+        before != roots.len()
+    }
+
+    fn sorted_roots(roots: &HashMap<String, std::time::Instant>) -> Vec<String> {
+        let mut roots: Vec<String> = roots.keys().cloned().collect();
+        roots.sort_unstable();
+        roots
+    }
+}
+
+#[cfg(test)]
+mod active_thread_roots_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    #[test]
+    fn followed_root_expires_and_returns_an_empty_relay_set() {
+        let mut followed = ActiveThreadRoots::new();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::TextNote, "root")
+            .tags([])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign root event");
+        let started = std::time::Instant::now();
+
+        let roots = followed
+            .observe(channel_id, &event, started)
+            .expect("first accepted event adds its root");
+        assert_eq!(roots, vec![event.id.to_hex()]);
+        assert!(followed.contains(channel_id, &event.id.to_hex(), started));
+
+        let expired = followed.prune(started + ACTIVE_THREAD_TTL);
+        assert_eq!(expired, vec![(channel_id, Vec::new())]);
+        assert!(!followed.contains(channel_id, &event.id.to_hex(), started + ACTIVE_THREAD_TTL));
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1883,6 +2011,7 @@ async fn tokio_main() -> Result<()> {
         None
     };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
+    let mut active_thread_roots = ActiveThreadRoots::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Independent of pool readiness: a never-mentioned lazy agent must still
@@ -1905,6 +2034,7 @@ async fn tokio_main() -> Result<()> {
     // spawn_and_init never blocks the main loop.
     let maintenance_interval = Duration::from_secs(30);
     let mut last_maintenance = std::time::Instant::now();
+    let mut last_thread_cleanup = std::time::Instant::now();
 
     // Channel for background respawn tasks to return completed agents.
     // Bounded to agent count — at most one respawn per slot in flight.
@@ -2036,6 +2166,15 @@ async fn tokio_main() -> Result<()> {
                         }
                     }
                 });
+            }
+        }
+
+        if last_thread_cleanup.elapsed() >= maintenance_interval {
+            last_thread_cleanup = std::time::Instant::now();
+            for (channel_id, roots) in active_thread_roots.prune(std::time::Instant::now()) {
+                if let Err(error) = relay.update_thread_roots(channel_id, roots, None).await {
+                    tracing::debug!(channel_id = %channel_id, %error, "failed to prune followed thread subscription");
+                }
             }
         }
 
@@ -2473,7 +2612,22 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let thread_tags = queue::parse_thread_tags(&buzz_event.event);
+                            let followed_thread = thread_tags.root_event_id.as_deref().is_some_and(|root| {
+                                active_thread_roots.contains(
+                                    buzz_event.channel_id,
+                                    root,
+                                    std::time::Instant::now(),
+                                )
+                            });
+                            let matched = filter::match_event_with_thread_follow(
+                                &buzz_event.event,
+                                buzz_event.channel_id,
+                                &rules,
+                                &pubkey_hex,
+                                followed_thread,
+                            )
+                            .await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -2496,9 +2650,11 @@ async fn tokio_main() -> Result<()> {
                             // first. `nostr::Event::clone` is cheap (Arc-
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
+                            let event_for_thread_follow = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            let channel_id = buzz_event.channel_id;
                             let accepted = queue.push(QueuedEvent {
-                                channel_id: buzz_event.channel_id,
+                                channel_id,
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
@@ -2509,6 +2665,22 @@ async fn tokio_main() -> Result<()> {
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
+                                if let Some(roots) = active_thread_roots.observe(
+                                    channel_id,
+                                    &event_for_thread_follow,
+                                    std::time::Instant::now(),
+                                ) {
+                                    if let Err(error) = relay
+                                        .update_thread_roots(channel_id, roots, None)
+                                        .await
+                                    {
+                                        tracing::debug!(
+                                            channel_id = %channel_id,
+                                            %error,
+                                            "failed to add followed thread subscription"
+                                        );
+                                    }
+                                }
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -2518,7 +2690,7 @@ async fn tokio_main() -> Result<()> {
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
+                            if accepted && queue.is_channel_in_flight(channel_id) {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
                                 // above, so the mid-turn signal fires for every
@@ -2545,7 +2717,7 @@ async fn tokio_main() -> Result<()> {
                                         && try_native_steer(
                                             &mut pool,
                                             &mut queue,
-                                            buzz_event.channel_id,
+                                            channel_id,
                                             event_for_steer,
                                             prompt_tag_for_steer,
                                             &steer_ack_tx,
@@ -2553,7 +2725,7 @@ async fn tokio_main() -> Result<()> {
                                     if !native_attempted {
                                         signal_in_flight_task(
                                             &mut pool,
-                                            buzz_event.channel_id,
+                                            channel_id,
                                             signal,
                                         );
                                     }

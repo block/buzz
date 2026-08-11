@@ -522,6 +522,13 @@ enum RelayCommand {
         filter: ChannelFilter,
         replay_since: Option<u64>,
     },
+    /// Replace the bounded set of actively followed NIP-10 thread roots for
+    /// an existing channel subscription.
+    UpdateThreadRoots {
+        channel_id: Uuid,
+        roots: Vec<String>,
+        replay_since: Option<u64>,
+    },
     /// Unsubscribe from a channel (sends a NIP-01 CLOSE).
     Unsubscribe { channel_id: Uuid },
     /// Reconnect to the relay (re-authenticate and resubscribe).
@@ -778,6 +785,26 @@ impl HarnessRelay {
             .map_err(|_| RelayError::ConnectionClosed)?;
         debug!("queued subscribe for channel {channel_id}");
         Ok(())
+    }
+
+    /// Replace the bounded set of actively followed thread roots for a
+    /// channel. The background task keeps the normal mention filter and adds
+    /// a separate `#e` filter for these roots, so replies do not widen the
+    /// channel subscription.
+    pub async fn update_thread_roots(
+        &mut self,
+        channel_id: Uuid,
+        roots: Vec<String>,
+        replay_since: Option<u64>,
+    ) -> Result<(), RelayError> {
+        self.cmd_tx
+            .send(RelayCommand::UpdateThreadRoots {
+                channel_id,
+                roots,
+                replay_since,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
     }
 
     /// Subscribe to membership notifications for this agent.
@@ -1277,6 +1304,20 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                     .unwrap_or_else(unix_now_secs)
             });
         }
+        RelayCommand::UpdateThreadRoots {
+            channel_id,
+            roots,
+            replay_since,
+        } => {
+            if let Some(filter) = state.active_filters.get_mut(&channel_id) {
+                filter.thread_roots = sanitize_thread_roots(roots);
+                state.subscribe_since.entry(channel_id).or_insert_with(|| {
+                    replay_since
+                        .or(state.startup_watermark)
+                        .unwrap_or_else(unix_now_secs)
+                });
+            }
+        }
         RelayCommand::Unsubscribe { channel_id } => {
             state.active_subscriptions.remove(&channel_id);
             state.clear_channel_state(&channel_id);
@@ -1422,6 +1463,69 @@ async fn execute_connected_command(
                     RelayCommand::Subscribe {
                         channel_id,
                         filter,
+                        replay_since,
+                    },
+                );
+                false
+            }
+        }
+        RelayCommand::UpdateThreadRoots {
+            channel_id,
+            roots,
+            replay_since,
+        } => {
+            let Some(mut filter) = state.active_filters.get(&channel_id).cloned() else {
+                apply_command_to_state(
+                    state,
+                    RelayCommand::UpdateThreadRoots {
+                        channel_id,
+                        roots,
+                        replay_since,
+                    },
+                );
+                return true;
+            };
+            filter.thread_roots = sanitize_thread_roots(roots);
+
+            if let Some(retry_after) = state.check_rate_gate() {
+                apply_command_to_state(
+                    state,
+                    RelayCommand::UpdateThreadRoots {
+                        channel_id,
+                        roots: filter.thread_roots,
+                        replay_since,
+                    },
+                );
+                state.rate_limited_pending.insert(channel_id, retry_after);
+                return true;
+            }
+
+            // Keep one stable subscription ID. CLOSE then REQ makes the
+            // relay's OR-of-filters semantics explicit and avoids duplicate
+            // subscriptions while the root set changes.
+            if let Some(sub_id) = state.active_subscriptions.get(&channel_id) {
+                let close = json!(["CLOSE", sub_id]);
+                if let Ok(text) = serde_json::to_string(&close) {
+                    let _ =
+                        ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await;
+                }
+            }
+            let since = state
+                .last_seen
+                .get(&channel_id)
+                .copied()
+                .or_else(|| state.subscribe_since.get(&channel_id).copied())
+                .or(replay_since);
+            if send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await {
+                state.active_filters.insert(channel_id, filter);
+                state.rate_limited_pending.remove(&channel_id);
+                true
+            } else {
+                apply_command_to_state(
+                    state,
+                    RelayCommand::UpdateThreadRoots {
+                        channel_id,
+                        roots: filter.thread_roots,
                         replay_since,
                     },
                 );
@@ -2848,6 +2952,7 @@ async fn drain_commands(
                 return ReconnectOutcome::Shutdown;
             }
             RelayCommand::Subscribe { .. }
+            | RelayCommand::UpdateThreadRoots { .. }
             | RelayCommand::SubscribeMembership
             | RelayCommand::SubscribeObserverControls => {
                 // A gated subscription is only parked in state; pace only an
@@ -3169,6 +3274,8 @@ async fn wait_for_reconnect(
 /// - `kinds` is included only when `filter.kinds` is `Some`; `None` = wildcard.
 /// - `#p` is included only when `filter.require_mention` is `true`.
 /// - `#h` is always included (channel-scoped subscription).
+/// - Actively followed roots are a second filter object using `#e`, keeping
+///   mention delivery and thread delivery as bounded OR branches.
 /// - On first subscribe (`since` is `None`) adds `since=now` to avoid replaying
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
@@ -3183,6 +3290,7 @@ async fn send_subscribe(
 ) -> bool {
     let sub_id = channel_sub_id(channel_id);
 
+    let mut req_filters = Vec::with_capacity(if filter.thread_roots.is_empty() { 1 } else { 2 });
     let mut req_filter = serde_json::Map::new();
 
     // kinds — omit entirely for wildcard subscriptions.
@@ -3208,8 +3316,23 @@ async fn send_subscribe(
             .as_secs(),
     };
     req_filter.insert("since".into(), json!(since_ts));
+    req_filters.push(Value::Object(req_filter));
 
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let roots = sanitize_thread_roots(filter.thread_roots.clone());
+    if !roots.is_empty() {
+        let mut thread_filter = serde_json::Map::new();
+        if let Some(ref kinds) = filter.kinds {
+            thread_filter.insert("kinds".into(), json!(kinds));
+        }
+        thread_filter.insert("#h".into(), json!([channel_id.to_string()]));
+        thread_filter.insert("#e".into(), json!(roots));
+        thread_filter.insert("since".into(), json!(since_ts));
+        req_filters.push(Value::Object(thread_filter));
+    }
+
+    let mut req = vec![json!("REQ"), json!(sub_id)];
+    req.extend(req_filters);
+    let req = Value::Array(req);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -3236,6 +3359,17 @@ async fn send_subscribe(
             false
         }
     }
+}
+
+/// Keep relay-side thread filters bounded and fail closed for malformed IDs.
+/// Event IDs are 32-byte lowercase hex values in NIP-01/NIP-10.
+fn sanitize_thread_roots(mut roots: Vec<String>) -> Vec<String> {
+    const MAX_ROOTS_PER_CHANNEL: usize = 32;
+    roots.retain(|root| root.len() == 64 && root.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    roots.sort_unstable();
+    roots.dedup();
+    roots.truncate(MAX_ROOTS_PER_CHANNEL);
+    roots
 }
 
 /// Send a NIP-01 REQ for membership notifications (kind:44100+44101, global, #p=[agent_pubkey]).
@@ -4386,7 +4520,57 @@ mod tests {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
+            thread_roots: Vec::new(),
         }
+    }
+
+    #[test]
+    fn thread_roots_are_validated_deduplicated_and_bounded() {
+        let mut roots = vec!["z".repeat(64), "a".repeat(64), "a".repeat(64)];
+        roots.extend((0..40).map(|n| format!("{n:064x}")));
+        roots.push("not-an-event-id".into());
+
+        let sanitized = sanitize_thread_roots(roots);
+
+        assert_eq!(sanitized.len(), 32);
+        assert!(sanitized.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(sanitized
+            .iter()
+            .all(|root| { root.len() == 64 && root.bytes().all(|byte| byte.is_ascii_hexdigit()) }));
+    }
+
+    #[tokio::test]
+    async fn followed_roots_use_a_second_bounded_req_filter() {
+        let (mut client, mut server) = test_ws_pair().await;
+        let state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+            thread_roots: vec![root.clone()],
+        };
+
+        assert!(
+            send_subscribe(
+                &mut client,
+                &state,
+                channel_id,
+                "agent-pubkey",
+                Some(1_000),
+                &filter,
+            )
+            .await
+        );
+        let frame = next_test_frame(&mut server).await;
+        assert_eq!(frame[0], "REQ");
+        assert_eq!(frame[1], channel_sub_id(channel_id));
+        let filters = frame.as_array().expect("REQ array");
+        assert_eq!(filters.len(), 4, "REQ, sub id, mention filter, #e filter");
+        assert!(filters[2].get("#p").is_some());
+        assert!(filters[2].get("#e").is_none());
+        assert_eq!(filters[3]["#e"][0], root);
+        assert_eq!(filters[3]["#h"][0], channel_id.to_string());
     }
 
     fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
@@ -4856,6 +5040,7 @@ mod tests {
         let filter = ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: true,
+            thread_roots: Vec::new(),
         };
 
         apply_command_to_state(
@@ -4947,6 +5132,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: Some(1_000),
             },
@@ -6061,6 +6247,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: Some(1_000),
             },
@@ -6152,6 +6339,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },
@@ -6191,6 +6379,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },
@@ -6226,6 +6415,7 @@ mod tests {
                 filter: ChannelFilter {
                     kinds: Some(vec![9]),
                     require_mention: false,
+                    thread_roots: Vec::new(),
                 },
                 replay_since: None,
             },

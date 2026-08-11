@@ -491,6 +491,12 @@ pub struct ChannelFilter {
     pub kinds: Option<Vec<u32>>,
     /// Whether to include `#p` tag filter for agent pubkey.
     pub require_mention: bool,
+    /// NIP-10 root event IDs for actively followed threads.
+    ///
+    /// These are runtime-only additions to the ordinary channel filter. They
+    /// are bounded and expire in the event loop; an empty list preserves the
+    /// normal mention/all subscription behavior.
+    pub thread_roots: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1275,6 +1281,7 @@ pub fn resolve_channel_filters(
                     ChannelFilter {
                         kinds: Some(kinds.clone()),
                         require_mention,
+                        thread_roots: Vec::new(),
                     },
                 );
             }
@@ -1286,6 +1293,7 @@ pub fn resolve_channel_filters(
                     ChannelFilter {
                         kinds: config.kinds_override.clone(),
                         require_mention: false,
+                        thread_roots: Vec::new(),
                     },
                 );
             }
@@ -1321,6 +1329,7 @@ pub fn resolve_channel_filters(
                         ChannelFilter {
                             kinds: merged_kinds,
                             require_mention,
+                            thread_roots: Vec::new(),
                         },
                     );
                 }
@@ -1374,10 +1383,12 @@ pub fn resolve_dynamic_channel_filter(
                 ]
             })),
             require_mention: !config.no_mention_filter,
+            thread_roots: Vec::new(),
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
             require_mention: false,
+            thread_roots: Vec::new(),
         }),
         SubscribeMode::Config => {
             // Same merge logic as resolve_channel_filters() Config branch:
@@ -1415,6 +1426,7 @@ pub fn resolve_dynamic_channel_filter(
             Some(ChannelFilter {
                 kinds: merged_kinds,
                 require_mention,
+                thread_roots: Vec::new(),
             })
         }
     }
