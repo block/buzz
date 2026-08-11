@@ -42,6 +42,23 @@ import {
 } from "@/features/channels/channelSnapshot";
 
 export const channelsQueryKey = ["channels"] as const;
+/** Keeps focused polling at the established one-minute cadence. */
+export const CHANNELS_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the expensive focus refetch until the channel list is old. */
+export const CHANNELS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the channels query; consumed by focusRefetchPolicy.test.mjs. */
+export const channelsFocusRefetchPolicy = {
+  staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+/**
+ * Query-cache key for the channels payload hash. Stored alongside the channel
+ * list so its lifecycle is tied to the channel cache — a community switch that
+ * evicts the channel cache implicitly invalidates the stored hash, preventing a
+ * stale hash from short-circuiting into an empty list.
+ */
+const channelsHashKey = ["channels", "_hash"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
 const channelMembersQueryKey = (channelId: string) =>
@@ -191,20 +208,74 @@ function setChannelArchivedState(
   );
 }
 
+/**
+ * Overlays `last_messages` timestamps onto channels without creating new object
+ * references for channels whose `lastMessageAt` is unchanged. Preserving
+ * references lets React Query's structural sharing skip re-renders for
+ * channels that received no new messages. Exported for unit testing.
+ */
+export function applyLastMessages(
+  channels: Channel[],
+  lastMessages: Record<string, string>,
+): Channel[] {
+  return channels.map((channel) => {
+    const newTs = lastMessages[channel.id] ?? null;
+    if (channel.lastMessageAt === newTs) {
+      return channel;
+    }
+    return { ...channel, lastMessageAt: newTs };
+  });
+}
+
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
-  const refetchInterval = useFocusedRefetchInterval(60_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    CHANNELS_REFETCH_INTERVAL_MS,
+  );
+  const queryClient = useQueryClient();
 
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
     queryFn: async () => {
-      const channels = sortChannels(await getChannels());
-      if (relayUrl) {
-        writeChannelSnapshot(relayUrl, channels);
+      // Supply the stored hash only when the channel list is still in cache.
+      // If cache is absent (community switch, eviction) we send null so the
+      // Rust side never short-circuits into an empty list.
+      const cachedChannels =
+        queryClient.getQueryData<Channel[]>(channelsQueryKey);
+      const knownHash = cachedChannels
+        ? (queryClient.getQueryData<string>(channelsHashKey) ?? null)
+        : null;
+
+      const payload = await getChannels(knownHash);
+
+      // Pin the hash alongside the channel cache so it is implicitly
+      // invalidated whenever the channel list is evicted.
+      queryClient.setQueryData(channelsHashKey, payload.hash);
+
+      // Determine the base channel list: full payload on a normal response,
+      // or the still-valid cached list on a not-modified (channels === null) response.
+      const base = payload.channels ?? cachedChannels;
+
+      if (!base) {
+        // hash-match but cache somehow empty — shouldn't happen given the
+        // null-hash guard above, but handle defensively by re-fetching without
+        // the stale hash so we always have a channel list to return.
+        const full = await getChannels(null);
+        queryClient.setQueryData(channelsHashKey, full.hash);
+        const sorted = sortChannels(
+          applyLastMessages(full.channels ?? [], full.lastMessages),
+        );
+        if (relayUrl) writeChannelSnapshot(relayUrl, sorted);
+        return sorted;
       }
-      return channels;
+
+      const sorted = sortChannels(
+        applyLastMessages(base, payload.lastMessages),
+      );
+      if (relayUrl) writeChannelSnapshot(relayUrl, sorted);
+      return sorted;
     },
     // Paint the sidebar instantly from the last-known list for this relay, then
     // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
@@ -216,9 +287,8 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         }
       : undefined,
     initialDataUpdatedAt: 0,
-    staleTime: 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...channelsFocusRefetchPolicy,
   });
 }
 

@@ -524,6 +524,7 @@ impl ChannelInfoResolver {
                     PromptChannelInfo {
                         name: info.name,
                         channel_type: info.channel_type,
+                        description: info.description,
                     },
                 ))
             })
@@ -2577,17 +2578,25 @@ pub(crate) async fn fetch_channel_info(
                 let ev = events.first()?;
                 let tags = ev.get("tags")?.as_array()?;
                 let mut name = None;
+                let mut description = None;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
-                        if arr.first().and_then(|v| v.as_str()) == Some("name") {
-                            name = arr.get(1).and_then(|v| v.as_str());
+                        match arr.first().and_then(|v| v.as_str()) {
+                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                            Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
+                            _ => {}
                         }
                     }
                 }
                 let channel_type = crate::relay::channel_type_from_tags(tags);
+                let description = description
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 Some(PromptChannelInfo {
                     name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
                     channel_type,
+                    description,
                 })
             }
             Ok(Err(e)) => {
@@ -5803,6 +5812,7 @@ done"#
                 crate::relay::ChannelInfo {
                     name: "test-dm".into(),
                     channel_type: "dm".into(),
+                    description: None,
                 },
             )]),
             RestClient {
@@ -5964,6 +5974,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 crate::relay::ChannelInfo {
                     name: "test-dm".into(),
                     channel_type: "dm".into(),
+                    description: None,
                 },
             )]),
             RestClient {
@@ -7852,6 +7863,38 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             1,
             "a resolved channel is cached — no second lookup"
         );
+        server.abort();
+    }
+
+    /// A channel's `about` tag is parsed through the lazy-fetch path and
+    /// delivered as the resolved description.
+    #[tokio::test]
+    async fn test_channel_resolver_delivers_description() {
+        let id = Uuid::new_v4();
+        let response = channel_metadata_response(
+            id,
+            &[
+                ["name", "team-chat"],
+                ["t", "stream"],
+                ["about", "Engineering discussions"],
+            ],
+        );
+        let (resolver, _requests, server) = counting_resolver(response).await;
+
+        let info = resolver.resolve(id).await.expect("should resolve");
+        assert_eq!(info.description.as_deref(), Some("Engineering discussions"));
+        server.abort();
+    }
+
+    /// A metadata event with no `about` tag yields no description.
+    #[tokio::test]
+    async fn test_channel_resolver_absent_description_when_no_about_tag() {
+        let id = Uuid::new_v4();
+        let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
+        let (resolver, _requests, server) = counting_resolver(response).await;
+
+        let info = resolver.resolve(id).await.expect("should resolve");
+        assert_eq!(info.description, None);
         server.abort();
     }
 

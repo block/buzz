@@ -31,13 +31,13 @@ export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
 
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
-  instructions: "Instructions",
+  instructions: "Agent instructions",
   info: "Agent info",
   configuration: "Runtime",
-  diagnostics: "Harness Log",
+  diagnostics: "Harness log",
   memories: "Memories",
   channels: "Channels",
-  logs: "Harness Log",
+  logs: "Harness log",
 };
 
 const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(

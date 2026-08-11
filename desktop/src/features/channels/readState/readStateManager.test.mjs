@@ -16,10 +16,72 @@ import {
 
 function makeLocalStorage() {
   const store = new Map();
+  const writes = [];
   return {
     getItem: (key) => store.get(key) ?? null,
-    setItem: (key, value) => store.set(key, value),
+    setItem: (key, value) => {
+      writes.push([key, value]);
+      store.set(key, value);
+    },
     removeItem: (key) => store.delete(key),
+    writes,
+  };
+}
+
+function makeFakeTimers() {
+  let nextId = 1;
+  let now = 0;
+  const timers = new Map();
+
+  function runThrough(targetTime) {
+    while (true) {
+      const next = [...timers.entries()]
+        .filter(([, timer]) => timer.dueAt <= targetTime)
+        .sort(
+          ([firstId, first], [secondId, second]) =>
+            first.dueAt - second.dueAt || firstId - secondId,
+        )[0];
+      if (!next) break;
+
+      const [id, timer] = next;
+      timers.delete(id);
+      now = timer.dueAt;
+      timer.fn();
+    }
+    now = targetTime;
+  }
+
+  return {
+    setTimeout(fn, delay = 0) {
+      const id = nextId++;
+      timers.set(id, { fn, dueAt: now + delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    advanceBy(ms) {
+      runThrough(now + ms);
+    },
+    runAll() {
+      while (timers.size > 0) {
+        const nextDueAt = Math.min(
+          ...[...timers.values()].map((timer) => timer.dueAt),
+        );
+        runThrough(nextDueAt);
+      }
+    },
+    get size() {
+      return timers.size;
+    },
+  };
+}
+
+function makeFakeRelay() {
+  return {
+    fetchEvents: async () => [],
+    publishEvent: async () => {},
+    subscribeLive: () => () => {},
   };
 }
 
@@ -27,19 +89,23 @@ function makeLocalStorage() {
 // replaced per-test for isolation; the bare `localStorage` global proxies to it.
 {
   const ls = makeLocalStorage();
-  if (typeof globalThis.window === "undefined") {
-    globalThis.window = {
-      localStorage: ls,
-      clearTimeout: (id) => clearTimeout(id),
-      setTimeout: (fn, ms) => setTimeout(fn, ms),
-    };
-  } else {
-    globalThis.window.localStorage = ls;
-    if (!globalThis.window.clearTimeout) {
-      globalThis.window.clearTimeout = (id) => clearTimeout(id);
-      globalThis.window.setTimeout = (fn, ms) => setTimeout(fn, ms);
-    }
-  }
+  const windowEvents = new EventTarget();
+  const documentEvents = new EventTarget();
+  globalThis.window = {
+    localStorage: ls,
+    clearTimeout: (id) => clearTimeout(id),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    addEventListener: (...args) => windowEvents.addEventListener(...args),
+    removeEventListener: (...args) => windowEvents.removeEventListener(...args),
+    dispatchEvent: (...args) => windowEvents.dispatchEvent(...args),
+  };
+  globalThis.document = {
+    visibilityState: "visible",
+    addEventListener: (...args) => documentEvents.addEventListener(...args),
+    removeEventListener: (...args) =>
+      documentEvents.removeEventListener(...args),
+    dispatchEvent: (...args) => documentEvents.dispatchEvent(...args),
+  };
   // Ensure bare `localStorage` always proxies to window.localStorage.
   Object.defineProperty(globalThis, "localStorage", {
     get: () => globalThis.window.localStorage,
@@ -51,6 +117,204 @@ const threadKey = `thread:${"a".repeat(64)}`;
 const channelKey = "channel-1";
 const channelResolver = (ctx) =>
   ctx.startsWith("thread:") ? channelKey : null;
+
+// ── ReadStateManager local persistence ────────────────────────────────────────
+
+function withFakeTimers() {
+  const timers = makeFakeTimers();
+  const originalSetTimeout = globalThis.window.setTimeout;
+  const originalClearTimeout = globalThis.window.clearTimeout;
+  globalThis.window.setTimeout = (fn, ms) => timers.setTimeout(fn, ms);
+  globalThis.window.clearTimeout = (id) => timers.clearTimeout(id);
+  return {
+    timers,
+    restore() {
+      globalThis.window.setTimeout = originalSetTimeout;
+      globalThis.window.clearTimeout = originalClearTimeout;
+    },
+  };
+}
+
+test("advanceContext burst coalesces local persistence into one write", () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager("1".repeat(64), makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.seedContextRead("channel-1", 100);
+    manager.seedContextRead("channel-2", 200);
+    manager.seedContextRead("channel-3", 300);
+
+    assert.equal(timers.size, 1, "burst should leave one trailing timer");
+    assert.equal(storage.writes.length, baselineWrites);
+
+    timers.runAll();
+    assert.equal(
+      storage.writes.length - baselineWrites,
+      3,
+      "one writeStoredReadState call writes its three blobs once",
+    );
+  } finally {
+    manager.destroy();
+    restore();
+  }
+});
+
+test("sustained advances persist within each one-second window", () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager("5".repeat(64), makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.seedContextRead("channel-1", 100);
+
+    for (let timestamp = 200; timestamp <= 3_200; timestamp += 200) {
+      timers.advanceBy(200);
+      manager.seedContextRead("channel-1", timestamp);
+
+      if (timestamp % 1_000 === 0) {
+        assert.equal(
+          storage.writes.length - baselineWrites,
+          (timestamp / 1_000) * 3,
+          "latest state should persist once per one-second window",
+        );
+      }
+    }
+
+    const contexts = JSON.parse(
+      storage.getItem(`buzz.channel-read-state.v2:${"5".repeat(64)}`),
+    );
+    assert.equal(contexts["channel-1"], new Date(2_800_000).toISOString());
+    assert.equal(timers.size, 1, "latest advance should open the next window");
+  } finally {
+    manager.destroy();
+    restore();
+  }
+});
+
+test("visibility hidden flushes pending local state", () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager("2".repeat(64), makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.seedContextRead("channel-1", 100);
+    assert.equal(storage.writes.length, baselineWrites);
+
+    globalThis.document.visibilityState = "hidden";
+    globalThis.document.dispatchEvent(new Event("visibilitychange"));
+
+    assert.equal(timers.size, 0, "flush should cancel the trailing timer");
+    assert.equal(storage.writes.length - baselineWrites, 3);
+    const contexts = JSON.parse(
+      storage.getItem(`buzz.channel-read-state.v2:${"2".repeat(64)}`),
+    );
+    assert.equal(contexts["channel-1"], new Date(100_000).toISOString());
+  } finally {
+    globalThis.document.visibilityState = "visible";
+    manager.destroy();
+    restore();
+  }
+});
+
+test("hydrateFromLocalStorage persists immediately", () => {
+  const storage = makeLocalStorage();
+  const pubkey = "3".repeat(64);
+  storage.setItem(
+    `buzz.channel-read-state.v2:${pubkey}`,
+    JSON.stringify({ "channel-1": new Date(100_000).toISOString() }),
+  );
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager(pubkey, makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.hydrateFromLocalStorage();
+
+    assert.equal(timers.size, 0);
+    assert.equal(storage.writes.length - baselineWrites, 3);
+    assert.equal(manager.getOwnTimestamp("channel-1"), 100);
+  } finally {
+    manager.destroy();
+    restore();
+  }
+});
+
+test("publish flushes pending local state first", async () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const manager = new ReadStateManager("4".repeat(64), makeFakeRelay());
+  const baselineWrites = storage.writes.length;
+
+  try {
+    manager.seedContextRead("channel-1", 100);
+    manager.fetchOwnBlobBeforePublish = async () => {};
+
+    await manager.publish();
+
+    assert.equal(timers.size, 0);
+    assert.equal(storage.writes.length - baselineWrites, 3);
+  } finally {
+    manager.destroy();
+    restore();
+  }
+});
+
+test("destroyed manager cannot persist after an in-flight fetch resolves", async () => {
+  const storage = makeLocalStorage();
+  globalThis.window.localStorage = storage;
+  const { timers, restore } = withFakeTimers();
+  const pubkey = "6".repeat(64);
+  let resolveFetch;
+  const fetchPending = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  const staleManager = new ReadStateManager(pubkey, {
+    ...makeFakeRelay(),
+    fetchEvents: () => fetchPending,
+  });
+
+  try {
+    const initialization = staleManager.initialize();
+    staleManager.seedContextRead("channel-1", 100);
+    staleManager.destroy();
+
+    const replacementManager = new ReadStateManager(pubkey, makeFakeRelay());
+    replacementManager.seedContextRead("channel-1", 200);
+    timers.advanceBy(1_000);
+    const writesAfterReplacement = storage.writes.length;
+
+    resolveFetch([]);
+    await initialization;
+    timers.runAll();
+
+    assert.equal(
+      storage.writes.length,
+      writesAfterReplacement,
+      "the stale manager must not schedule persistence after destruction",
+    );
+    const contexts = JSON.parse(
+      storage.getItem(`buzz.channel-read-state.v2:${pubkey}`),
+    );
+    assert.equal(
+      contexts["channel-1"],
+      new Date(200_000).toISOString(),
+      "the stale manager must not overwrite the replacement manager",
+    );
+    replacementManager.destroy();
+  } finally {
+    staleManager.destroy();
+    restore();
+  }
+});
 
 test("resolveEffectiveTimestamp returns own value when context has no parent", () => {
   const effectiveState = new Map([[channelKey, 200]]);

@@ -2580,12 +2580,20 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   ).toHaveCount(0);
 
   await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page.getByTestId("user-profile-tab-runtime").click();
   await page.getByTestId("user-profile-instances").click();
   await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
-  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await expect(page.getByTestId("user-profile-delete-agent-row")).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-settings-menu-trigger"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("user-profile-duplicate-agent-row"),
+  ).toBeVisible();
+  await expect(page.getByTestId("user-profile-export-agent-row")).toBeVisible();
   await expect(
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });

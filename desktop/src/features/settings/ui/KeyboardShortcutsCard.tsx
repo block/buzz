@@ -40,29 +40,27 @@ export function KeyboardShortcutsCard() {
 
       <div className="space-y-4">
         {[...categories.entries()].map(([category, shortcuts]) => (
-          <div key={category}>
-            <h2 className="mb-2 text-lg font-semibold tracking-tight">
-              {category}
-            </h2>
-            <SettingsOptionGroup>
-              {shortcuts.map((shortcut) => (
-                <SettingsOptionRow
-                  className="min-h-12 px-3 py-2"
-                  key={shortcut.id}
-                >
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-foreground">
-                      {shortcut.label}
-                    </span>
-                    <span className="ml-2 text-muted-foreground">
-                      {shortcut.description}
-                    </span>
-                  </div>
-                  <KeyCombo shortcut={shortcut} />
-                </SettingsOptionRow>
-              ))}
-            </SettingsOptionGroup>
-          </div>
+          <SettingsOptionGroup key={category} title={category}>
+            {shortcuts.map((shortcut) => (
+              <SettingsOptionRow
+                className="min-h-12 px-3 py-2"
+                key={shortcut.id}
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="text-sm font-medium text-foreground">
+                    {shortcut.label}
+                  </span>
+                  <span
+                    className="ml-2 text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
+                    {shortcut.description}
+                  </span>
+                </div>
+                <KeyCombo shortcut={shortcut} />
+              </SettingsOptionRow>
+            ))}
+          </SettingsOptionGroup>
         ))}
       </div>
     </section>

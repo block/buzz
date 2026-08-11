@@ -63,6 +63,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use buzz_datastore_tracing::datastore_span;
+
 /// Seconds of `created_at` history the commit-time floor guard tolerates.
 ///
 /// Must exceed the relay's ingest envelope (±900 s) by enough slack that a
@@ -315,6 +317,7 @@ impl ReplicaFence {
 ///
 /// This is a name-and-shape check only; it cannot detect a sabotaged
 /// function body. [`verify_floor_guard_behavior`] proves the semantics.
+#[datastore_span(name = "replica_fence_verify_catalog", system = "postgresql")]
 pub async fn verify_floor_guard_catalog(pool: &PgPool) -> crate::Result<()> {
     // tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE, 64 = INSTEAD.
     // Required: ROW + INSERT + UPDATE set, BEFORE + INSTEAD clear.
@@ -369,6 +372,7 @@ pub async fn verify_floor_guard_catalog(pool: &PgPool) -> crate::Result<()> {
 /// `SET CONSTRAINTS ALL IMMEDIATE` makes the deferred trigger fire per
 /// statement so each adversary is observable under a savepoint; deferral to
 /// COMMIT is separately pinned by the held-transaction fixture.
+#[datastore_span(name = "replica_fence_verify_behavior", system = "postgresql")]
 pub async fn verify_floor_guard_behavior(pool: &PgPool) -> crate::Result<()> {
     use crate::error::DbError;
 
@@ -698,6 +702,10 @@ pub const AURORA_IDENTITY_FN: &str = "aurora_db_instance_identifier";
 /// (undefined_function, SQLSTATE 42883); transient errors surface as `Err`
 /// so the caller can retry the probe on a later request instead of caching
 /// a wrong answer.
+#[datastore_span(
+    name = "replica_fence_reader_supports_aurora_identity",
+    system = "postgresql"
+)]
 pub async fn reader_supports_aurora_identity(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     match sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {AURORA_IDENTITY_FN}()"

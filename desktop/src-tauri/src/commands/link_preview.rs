@@ -1,9 +1,8 @@
 use std::{io::Cursor, net::IpAddr, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use image::ImageDecoder;
-
 use futures_util::StreamExt;
+use image::ImageDecoder;
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT},
     redirect::Policy,
@@ -13,6 +12,8 @@ use url::Url;
 
 #[path = "link_preview_rate_limit.rs"]
 mod rate_limit;
+#[path = "link_preview_youtube.rs"]
+mod youtube;
 
 use rate_limit::{image_host_cooldown_remaining, retry_after_duration, set_image_host_cooldown};
 
@@ -66,6 +67,10 @@ async fn fetch_link_preview_metadata_inner(
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
     validate_public_https_url(&url).await?;
+
+    if youtube::is_video_url(&url) {
+        return youtube::fetch_oembed_metadata(&url).await;
+    }
 
     for redirect_count in 0..=MAX_REDIRECTS {
         let response = send_pinned_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
