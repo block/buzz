@@ -120,10 +120,9 @@ export function useMentions(
     relayAgentsQuery.data !== undefined ||
     !relayAgentsQuery.isLoading ||
     relayAgentsQuery.error !== null;
-  const canSearchGlobalUsers =
-    canSearchGlobalPeople &&
-    managedAgentDirectoryReady &&
-    relayAgentDirectoryReady;
+  const agentDirectoriesReady =
+    managedAgentDirectoryReady && relayAgentDirectoryReady;
+  const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
   const userSearchQuery = useInfiniteUserSearchQuery(mentionQuery ?? "", {
     allowEmpty: true,
     enabled: canSearchGlobalUsers && mentionQuery !== null,
@@ -257,7 +256,12 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)) {
+      // Channel members must reach the directory-aware policy below. A remote
+      // agent can be a real member before its relay directory entry is known.
+      if (
+        candidate.isMember !== true &&
+        !isAgentIdentityInAllowedList(candidate, mentionableAgentPubkeys)
+      ) {
         return;
       }
       if (
@@ -267,6 +271,7 @@ export function useMentions(
           pubkey,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
+          directoryReady: agentDirectoriesReady,
         })
       ) {
         return;
@@ -423,6 +428,7 @@ export function useMentions(
   }, [
     activePersonaById,
     activePersonas,
+    agentDirectoriesReady,
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,

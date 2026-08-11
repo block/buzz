@@ -98,12 +98,14 @@ export function shouldHideAgentFromMentions({
   pubkey,
   mentionableAgentPubkeys,
   directoryAgentPubkeys,
+  directoryReady = true,
 }: {
   isAgent: boolean;
   isMember: boolean;
   pubkey: string;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryAgentPubkeys: ReadonlySet<string>;
+  directoryReady?: boolean;
 }) {
   if (!isAgent) return false;
   const normalized = normalizePubkey(pubkey);
@@ -111,18 +113,11 @@ export function shouldHideAgentFromMentions({
   if (mentionableAgentPubkeys.has(normalized)) return false;
   // Non-member, non-invocable => hide (preserves prior behavior).
   if (!isMember) return true;
-  // Member (Option B): hide only when we have an explicit not-invocable
-  // signal — a relay directory (kind:10100) entry that excludes us.
-  // Unknown invocability (not in directory) => show.
-  //
-  // NOTE: this assumes `directoryAgentPubkeys` and `mentionableAgentPubkeys`
-  // share the same source query (`relayAgentsQuery.data`), so directory
-  // presence without membership in `mentionableAgentPubkeys` is a real
-  // explicit-exclusion signal. If a future change sources the directory set
-  // from a different query, an agent that's directory-present but whose
-  // mentionability is still loading could be hidden prematurely — keep the
-  // two sets derived from the same query.
-  return directoryAgentPubkeys.has(normalized);
+  // A member agent with no directory result is unknown while either directory
+  // is loading, so wait for the complete answer before showing it. Once both
+  // directories are settled, directory presence without mentionability is an
+  // explicit exclusion; an empty directory remains an unknown, shown member.
+  return !directoryReady || directoryAgentPubkeys.has(normalized);
 }
 
 export function isAgentMentionChannelType(type?: string | null) {
