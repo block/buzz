@@ -909,20 +909,20 @@ pub async fn reap_terminal_identity_handoffs(pool: &PgPool) -> Result<u64> {
         .await?;
     }
 
-    let mut deleted = 0;
-    for (community_id, handoff_id) in rows {
-        deleted += sqlx::query(
-            "DELETE FROM identity_handoffs \
-             WHERE community_id = $1 AND id = $2 \
-               AND terminal_at < transaction_timestamp() - make_interval(days => $3)",
-        )
-        .bind(community_id)
-        .bind(handoff_id)
-        .bind(IDENTITY_HANDOFF_RETENTION_DAYS)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    }
+    let (community_ids, handoff_ids): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+    let deleted = sqlx::query(
+        "DELETE FROM identity_handoffs AS handoff \
+         USING UNNEST($1::uuid[], $2::uuid[]) AS target(community_id, handoff_id) \
+         WHERE handoff.community_id = target.community_id \
+           AND handoff.id = target.handoff_id \
+           AND handoff.terminal_at < transaction_timestamp() - make_interval(days => $3)",
+    )
+    .bind(community_ids)
+    .bind(handoff_ids)
+    .bind(IDENTITY_HANDOFF_RETENTION_DAYS)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     tx.commit().await?;
     Ok(deleted)
 }
