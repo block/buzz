@@ -1181,6 +1181,19 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append the DM delivery rule.
+///
+/// DMs are already private conversations. Keeping agent responses top-level
+/// makes them visible in the main DM timeline instead of hiding them in reply
+/// panes.
+fn append_dm_response_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: Send ordinary DM responses as top-level messages. Use \
+         `buzz messages send --channel <UUID> --content ...` without a reply \
+         anchor so the response stays directly visible in the DM conversation.",
+    );
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1278,10 +1291,10 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
-/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
+/// [`resolve_reply_anchor`]). In the thread branch it threads ordinary
 /// replies; in the channel branch a `Some` anchor means a human-facing
 /// top-level mention whose reply should open a new thread rooted at the
-/// triggering event.
+/// triggering event. DMs intentionally ignore reply anchors and stay top-level.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -1329,10 +1342,8 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
-            }
         }
+        append_dm_response_instruction(&mut s);
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
@@ -1562,17 +1573,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
+    // Human-facing channel turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. DMs stay top-level so replies remain visible in the main timeline.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        None
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4163,14 +4171,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_present_for_dm_thread_reply() {
+    fn test_dm_thread_reply_instructs_top_level_send_without_reply_to() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
             vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -4196,8 +4203,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            !prompt.contains("--reply-to"),
+            "DM replies must remain top-level in the conversation; prompt was:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Send ordinary DM responses as top-level messages"),
+            "DM prompt must state the flat-conversation rule; prompt was:\n{prompt}"
         );
     }
 
