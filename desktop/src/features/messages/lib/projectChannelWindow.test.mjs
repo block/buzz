@@ -11,8 +11,10 @@ import {
   replaceNewestChannelWindow,
 } from "./channelWindowStore.ts";
 import {
+  CHANNEL_WINDOW_FRESH_MS,
   projectChannelWindowMessages,
   refreshChannelWindowMessages,
+  shouldRefreshChannelWindowAfterSubscribe,
 } from "./projectChannelWindow.ts";
 import { reconcileChannelWindowMessages } from "./channelWindowReconciliation.ts";
 
@@ -272,4 +274,94 @@ test("test_live_projection_retains_pending_send_and_non_broadcast_thread_reply",
     "thread-reply",
     "live",
   ]);
+});
+
+test("test_subscribe_refresh_skips_fresh_populated_window", () => {
+  const harness = createHarness();
+  const updatedAt = harness.client.getQueryState(
+    harness.windowKey,
+  ).dataUpdatedAt;
+
+  assert.equal(
+    shouldRefreshChannelWindowAfterSubscribe(
+      harness.client,
+      harness.channelId,
+      updatedAt + CHANNEL_WINDOW_FRESH_MS - 1,
+    ),
+    false,
+  );
+});
+
+test("test_subscribe_refresh_runs_for_stale_window", () => {
+  const harness = createHarness();
+  const updatedAt = harness.client.getQueryState(
+    harness.windowKey,
+  ).dataUpdatedAt;
+
+  assert.equal(
+    shouldRefreshChannelWindowAfterSubscribe(
+      harness.client,
+      harness.channelId,
+      updatedAt + CHANNEL_WINDOW_FRESH_MS,
+    ),
+    true,
+  );
+});
+
+test("test_live_cache_merge_does_not_extend_window_freshness", () => {
+  const harness = createHarness();
+  const windowUpdatedAt = harness.client.getQueryState(
+    harness.windowKey,
+  ).dataUpdatedAt;
+
+  harness.client.setQueryData(harness.messagesKey, (messages) => [
+    ...messages,
+    event("live-cache-only", 110),
+  ]);
+
+  assert.equal(
+    shouldRefreshChannelWindowAfterSubscribe(
+      harness.client,
+      harness.channelId,
+      windowUpdatedAt + CHANNEL_WINDOW_FRESH_MS,
+    ),
+    true,
+  );
+});
+
+test("test_subscribe_refresh_runs_without_a_message_query", () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  assert.equal(
+    shouldRefreshChannelWindowAfterSubscribe(client, "missing-channel"),
+    true,
+  );
+});
+
+test("test_subscribe_refresh_does_not_duplicate_inflight_initial_fetch", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const channelId = "pending-channel";
+  const queryKey = channelMessagesKey(channelId);
+  let resolveFetch;
+  const observer = new QueryObserver(client, {
+    queryKey,
+    queryFn: () =>
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  assert.equal(
+    shouldRefreshChannelWindowAfterSubscribe(client, channelId),
+    false,
+  );
+
+  resolveFetch([]);
+  await client.getQueryCache().find({ queryKey })?.promise;
+  unsubscribe();
 });
