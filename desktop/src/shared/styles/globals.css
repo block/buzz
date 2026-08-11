@@ -34,3 +34,14 @@
 /* The app persists its selected theme on the root `.dark` class. Use that
    class, rather than the system preference, for every `dark:` utility. */
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* Bidirectional text in chat content: each block resolves its own base
+   direction from its first strong character, so RTL (Hebrew, Arabic, …)
+   paragraphs read right-to-left while English prose and code stay LTR.
+   `plaintext` is per-element; `start` alignment follows the resolved
+   direction. The composer instead sets `dir="auto"` on the ProseMirror
+   root (see useRichTextEditor.ts) for native caret/punctuation handling. */
+.message-markdown :is(p, li, h1, h2, h3, h4, h5, h6, blockquote) {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
