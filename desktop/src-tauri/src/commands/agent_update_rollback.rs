@@ -20,6 +20,11 @@ impl AgentUpdateRollback {
             previous_record,
         }
     }
+
+    fn changes_runtime_security_authority(&self) -> bool {
+        self.attempted_record.acp_command != self.previous_record.acp_command
+            || self.attempted_record.heartbeat_preflight != self.previous_record.heartbeat_preflight
+    }
 }
 
 fn copy_runtime_state(from: &ManagedAgentRecord, to: &mut ManagedAgentRecord) {
@@ -79,12 +84,30 @@ pub(super) fn rollback_failed_agent_update(
     rollback: AgentUpdateRollback,
 ) -> Result<(), String> {
     {
+        // A failed relay rename can arrive after another command has spawned
+        // the attempted local configuration. Serialize rollback with every
+        // lifecycle transition, then stop that generation before restoring a
+        // different harness/preflight authority on disk.
+        let _runtime_transition = crate::managed_agents::runtime_transition::lock(state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(app)?;
+        let stop_runtime = rollback.changes_runtime_security_authority();
         restore_agent_update(&mut records, pubkey, rollback)?;
+        if stop_runtime {
+            let mut runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let restored = records
+                .iter_mut()
+                .find(|record| record.pubkey == pubkey)
+                .ok_or_else(|| format!("agent {pubkey} not found after failed rename rollback"))?;
+            crate::managed_agents::stop_managed_agent_process(app, restored, &mut runtimes)?;
+            state.clear_agent_session_caches(pubkey);
+        }
         save_managed_agents(app, &records)?;
         let restored = records
             .iter()
@@ -193,5 +216,34 @@ mod tests {
         assert_eq!(records[0].last_exit_code, Some(1));
         assert_eq!(records[0].last_error.as_deref(), Some("harness exited"));
         assert_eq!(records[0].updated_at, "runtime-change");
+    }
+
+    #[test]
+    fn rollback_stops_a_generation_when_harness_authority_changed() {
+        let previous = record("Old name", "before");
+        let mut attempted = previous.clone();
+        attempted.acp_command = "different-acp".to_string();
+        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        assert!(rollback.changes_runtime_security_authority());
+
+        let previous = record("Old name", "before");
+        let mut attempted = previous.clone();
+        attempted.heartbeat_preflight =
+            Some(crate::managed_agents::HeartbeatPreflightDesignation {
+                policy_file: "/private/owner/policy.json".into(),
+                policy_sha256: "a".repeat(64),
+                heartbeat_interval_seconds: 3_600,
+            });
+        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        assert!(rollback.changes_runtime_security_authority());
+    }
+
+    #[test]
+    fn rename_only_rollback_does_not_stop_a_matching_generation() {
+        let previous = record("Old name", "before");
+        let mut attempted = previous.clone();
+        attempted.name = "New name".to_string();
+        let rollback = AgentUpdateRollback::new(previous, &attempted);
+        assert!(!rollback.changes_runtime_security_authority());
     }
 }

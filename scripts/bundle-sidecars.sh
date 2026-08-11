@@ -39,6 +39,13 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     exit 1
 fi
 
+CAPABILITY_JSON=$("$SRC_DIR/buzz-acp${EXE}" heartbeat-preflight-capability)
+EXPECTED_CAPABILITY='{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+if [[ "$CAPABILITY_JSON" != "$EXPECTED_CAPABILITY" ]]; then
+    echo "Error: buzz-acp lacks the exact heartbeat-preflight capability" >&2
+    exit 1
+fi
+
 mkdir -p "$BINARIES_DIR"
 for bin in "${SIDECARS[@]}"; do
     destination="$BINARIES_DIR/${bin}-${TARGET}${EXE}"
@@ -51,4 +58,6 @@ for bin in "${SIDECARS[@]}"; do
         chmod 755 "$destination"
     fi
 done
+printf '%s\n' "$CAPABILITY_JSON" > \
+    "$BINARIES_DIR/buzz-acp-${TARGET}${EXE}.heartbeat-preflight-capability.json"
 echo "Sidecars bundled for $TARGET"

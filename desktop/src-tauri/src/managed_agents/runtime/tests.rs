@@ -882,8 +882,6 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     let _ = intermediate.wait();
 }
 
-// ── pair receipt validation tests ───────────────────────────────────────
-
 fn receipt_fixture(
     key: crate::managed_agents::ManagedAgentRuntimeKey,
 ) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
@@ -892,6 +890,7 @@ fn receipt_fixture(
         pid: std::process::id(),
         desktop_instance_id: "test-instance".into(),
         started_at: "now".into(),
+        heartbeat_harness: None,
     }
 }
 
@@ -1242,8 +1241,8 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     //
     // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
     // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    // bare `true` lookup during that window fails with NotFound; Windows
+    // keeps the PATH lookup because no test there swaps PATH.
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
@@ -1267,6 +1266,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
+        heartbeat_harness: None,
         #[cfg(windows)]
         job: None,
     };

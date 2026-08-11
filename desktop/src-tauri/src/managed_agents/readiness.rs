@@ -1530,8 +1530,8 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            heartbeat_preflight: None,
         };
-
         let runtime = known_acp_runtime_exact("buzz-agent");
         let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 

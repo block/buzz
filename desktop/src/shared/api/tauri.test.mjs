@@ -121,6 +121,54 @@ test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowe
 
 const { fromRawAcpRuntimeCatalogEntry } = await import("./tauri.ts");
 
+const { fromRawManagedAgent } = await import("./tauri.ts");
+
+test("fromRawManagedAgent maps durable heartbeat designation", () => {
+  const raw = {
+    pubkey: "a".repeat(64),
+    name: "KJ",
+    persona_id: null,
+    relay_url: "wss://relay.example",
+    acp_command: "buzz-acp",
+    agent_command: "buzz-agent",
+    agent_args: [],
+    mcp_command: "",
+    turn_timeout_seconds: 320,
+    idle_timeout_seconds: null,
+    max_turn_duration_seconds: null,
+    parallelism: 1,
+    system_prompt: null,
+    model: null,
+    provider: null,
+    persona_out_of_date: false,
+    persona_orphaned: false,
+    needs_restart: false,
+    status: "stopped",
+    pid: null,
+    created_at: "2026-08-11T00:00:00Z",
+    updated_at: "2026-08-11T00:00:00Z",
+    last_started_at: null,
+    last_stopped_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_error_code: null,
+    log_path: "",
+    start_on_app_launch: true,
+    backend: { type: "local" },
+    backend_agent_id: null,
+    heartbeat_preflight: {
+      policy_file: "/owner/policy.json",
+      policy_sha256: "b".repeat(64),
+      heartbeat_interval_seconds: 3600,
+    },
+  };
+  assert.deepStrictEqual(fromRawManagedAgent(raw).heartbeatPreflight, {
+    policyFile: "/owner/policy.json",
+    policySha256: "b".repeat(64),
+    heartbeatIntervalSeconds: 3600,
+  });
+});
+
 test("fromRawAcpRuntimeCatalogEntry maps definition_env to definitionEnv", () => {
   const raw = {
     id: "my-harness",

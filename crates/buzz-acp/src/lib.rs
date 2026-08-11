@@ -4,6 +4,8 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod heartbeat_capability;
+mod heartbeat_preflight;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -1513,6 +1515,9 @@ mod inactivity_tests {
 }
 
 pub fn run() -> Result<()> {
+    if heartbeat_capability::emit_if_requested()? {
+        return Ok(());
+    }
     config::propagate_legacy_env_vars();
     tokio_main()
 }
@@ -1827,6 +1832,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
+        heartbeat_preflight: config.heartbeat_preflight.clone(),
         cwd: std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
             .to_string_lossy()
@@ -3711,9 +3717,9 @@ fn handle_prompt_result(
         //    to the agent regardless of whether they occurred during session
         //    creation or an active prompt — respawn unconditionally.
         //
-        // 2. Application-class (IdleTimeout, HardTimeout, Json): the pipe is
-        //    intact but the prompt failed. Return the agent to the pool so it
-        //    can be reused for the next event.
+        // 2. Application-class (IdleTimeout, HardTimeout, Json, heartbeat
+        //    preflight): the pipe is intact or was never touched. Return the
+        //    agent to the pool so it can be reused for the next event.
 
         // Intentional cancel — agent is healthy, return it to the pool.
         // No respawn, no retry penalty. The cancelled batch was already stored
@@ -6222,6 +6228,7 @@ mod build_mcp_servers_tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
@@ -6444,6 +6451,7 @@ mod error_outcome_emission_tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,
@@ -7681,6 +7689,77 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_preflight_failure_returns_healthy_agent_without_respawn() {
+        let mut agent = dummy_agent(0).await;
+        agent.state.heartbeat_session = Some("existing-heartbeat-session".to_string());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "preflight-blocked-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = true;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Heartbeat,
+            turn_id: "preflight-blocked-turn".to_string(),
+            outcome: PromptOutcome::Error(AcpError::HeartbeatPreflight(
+                "gmail:blocked".to_string(),
+            )),
+            batch: None,
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+        assert!(!heartbeat_in_flight, "heartbeat latch must be released");
+        assert_eq!(pool.live_count(), 1, "healthy model process must be reused");
+        assert_eq!(respawn_tasks.len(), 0, "preflight block must not respawn");
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(crash_history[0].open_until.is_none());
+        assert!(!crash_history[0].respawn_in_flight);
+        let mut returned_agent = pool.agents_mut()[0].take().expect("returned agent");
+        assert_eq!(
+            returned_agent.state.heartbeat_session.as_deref(),
+            Some("existing-heartbeat-session"),
+            "preflight failure must preserve the reusable heartbeat session"
+        );
+        returned_agent.acp.shutdown().await;
     }
 
     // ── is_auth_error classification ───────────────────────────────────────

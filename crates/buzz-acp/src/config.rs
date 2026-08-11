@@ -14,6 +14,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
+use crate::heartbeat_preflight::{HeartbeatPreflightAuthority, HeartbeatPreflightConfig};
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -318,6 +319,36 @@ pub struct CliArgs {
     )]
     pub heartbeat_prompt_file: Option<PathBuf>,
 
+    /// Versioned JSON configuration for a trusted executable invoked before
+    /// every heartbeat model prompt. The value is owner/supervisor policy and
+    /// is scrubbed from the agent subprocess environment.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG",
+        hide_env_values = true
+    )]
+    pub heartbeat_preflight_config: Option<String>,
+
+    /// Durable managed-agent latch. When true, startup and every heartbeat
+    /// require the exact hash-pinned policy file below; inline/absent policy is
+    /// never accepted as a fallback.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED",
+        default_value_t = false
+    )]
+    pub heartbeat_preflight_required: bool,
+
+    #[arg(long, env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE")]
+    pub heartbeat_preflight_policy_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        env = "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256",
+        hide_env_values = true
+    )]
+    pub heartbeat_preflight_policy_sha256: Option<String>,
+
     #[arg(long, env = "BUZZ_ACP_INITIAL_MESSAGE")]
     pub initial_message: Option<String>,
 
@@ -509,6 +540,9 @@ pub struct Config {
     /// crash-backstop signal.
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
+    /// Owner/supervisor-controlled trusted heartbeat preflight. `None` keeps
+    /// legacy heartbeat behavior byte-for-byte compatible.
+    pub heartbeat_preflight: Option<HeartbeatPreflightAuthority>,
     pub system_prompt: Option<String>,
     /// Team-owned instructions layered separately from the agent system prompt.
     pub team_instructions: Option<String>,
@@ -876,6 +910,51 @@ impl Config {
             None
         };
 
+        let heartbeat_preflight = if args.heartbeat_preflight_required {
+            if args.heartbeat_preflight_config.is_some() {
+                return Err(ConfigError::ConfigFile(
+                    "a required heartbeat preflight cannot use legacy inline configuration".into(),
+                ));
+            }
+            let path = args.heartbeat_preflight_policy_file.ok_or_else(|| {
+                ConfigError::ConfigFile(
+                    "required heartbeat preflight is missing its durable policy file".into(),
+                )
+            })?;
+            let sha256 = args.heartbeat_preflight_policy_sha256.ok_or_else(|| {
+                ConfigError::ConfigFile(
+                    "required heartbeat preflight is missing its policy digest".into(),
+                )
+            })?;
+            Some(
+                HeartbeatPreflightAuthority::required_file(
+                    path,
+                    sha256,
+                    &keys.public_key().to_hex(),
+                    args.heartbeat_interval,
+                )
+                .map_err(|error| ConfigError::ConfigFile(error.to_string()))?,
+            )
+        } else {
+            if args.heartbeat_preflight_policy_file.is_some()
+                || args.heartbeat_preflight_policy_sha256.is_some()
+            {
+                return Err(ConfigError::ConfigFile(
+                    "heartbeat preflight policy file/digest requires the durable required latch"
+                        .into(),
+                ));
+            }
+            args.heartbeat_preflight_config
+                .as_deref()
+                .map(|raw| {
+                    HeartbeatPreflightConfig::parse_for_agent(raw, &keys.public_key().to_hex())
+                })
+                .transpose()
+                .map_err(|error| ConfigError::ConfigFile(error.to_string()))?
+                .flatten()
+                .map(HeartbeatPreflightAuthority::legacy_inline)
+        };
+
         let base_prompt_content = if args.no_base_prompt {
             None
         } else if let Some(ref path) = args.base_prompt_file {
@@ -1072,6 +1151,7 @@ impl Config {
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
             heartbeat_prompt,
+            heartbeat_preflight,
             system_prompt,
             team_instructions: args
                 .team_instructions
@@ -1451,6 +1531,7 @@ mod tests {
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             system_prompt: None,
             team_instructions: None,
             initial_message: None,

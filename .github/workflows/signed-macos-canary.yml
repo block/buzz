@@ -163,6 +163,9 @@ jobs:
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR: "1"
+          BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER: EYF346PHUG
+          BUZZ_BUILD_SOURCE_REVISION: ${{ github.sha }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
@@ -212,15 +215,147 @@ jobs:
           spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Buzz.app"
           desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Buzz.app"
 
+      - name: Verify trusted heartbeat harness installation
+        id: verified_harness
+        env:
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="${RUNNER_TEMP}/trusted-heartbeat-install"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          SOURCE="$EXTRACT_DIR/Buzz.app/Contents/MacOS/buzz-acp"
+          SYSTEM_PARENT="/Library/Application Support"
+          TARGET_PARENT="/Library/Application Support/Buzz"
+          TARGET_DIRECTORY="$TARGET_PARENT/TrustedHeartbeat"
+          TARGET="$TARGET_DIRECTORY/buzz-acp"
+          TEAM_IDENTIFIER="EYF346PHUG"
+          APP_REQUIREMENT="identifier \"xyz.block.buzz.app\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"$TEAM_IDENTIFIER\""
+          HARNESS_REQUIREMENT="identifier \"buzz-acp\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"$TEAM_IDENTIFIER\""
+          codesign --verify --deep --strict --verbose=2 -R="$APP_REQUIREMENT" "$EXTRACT_DIR/Buzz.app"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$SOURCE"
+          test ! -L "$SOURCE"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$SOURCE"
+          SIGNED_DMG_SHA256=$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')
+          hdiutil verify "$SIGNED_DMG"
+          spctl -a -t open --context context:primary-signature -v "$SIGNED_DMG"
+          xcrun stapler validate "$SIGNED_DMG"
+          MOUNT_POINT=$(mktemp -d "${RUNNER_TEMP}/signed-canary-dmg-mount.XXXXXX")
+          DMG_MOUNTED=0
+          cleanup_dmg() {
+            if [[ "$DMG_MOUNTED" = 1 ]]; then
+              hdiutil detach "$MOUNT_POINT"
+            fi
+            rm -rf "$MOUNT_POINT"
+          }
+          trap cleanup_dmg EXIT HUP INT TERM
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$SIGNED_DMG" >/dev/null
+          DMG_MOUNTED=1
+          DMG_APP="$MOUNT_POINT/Buzz.app"
+          DMG_HARNESS="$DMG_APP/Contents/MacOS/buzz-acp"
+          BUZZ_BUILD_REQUIRE_HEARTBEAT_PREFLIGHT_SIDECAR=1 \
+            BUZZ_BUILD_HEARTBEAT_HARNESS_MACOS_TEAM_IDENTIFIER=EYF346PHUG \
+            BUZZ_BUILD_SOURCE_REVISION="$GITHUB_SHA" \
+            cargo run --quiet --manifest-path desktop/src-tauri/Cargo.toml \
+              --release --features harness-verifier \
+              --bin verify-heartbeat-harness-identity -- "$DMG_HARNESS"
+          codesign --verify --deep --strict --verbose=2 -R="$APP_REQUIREMENT" "$DMG_APP"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$DMG_HARNESS"
+          codesign -dv --verbose=4 "$DMG_HARNESS" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$DMG_HARNESS" 2>/dev/null)"
+          test "$("$DMG_HARNESS" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+          hdiutil detach "$MOUNT_POINT"
+          DMG_MOUNTED=0
+          rm -rf "$MOUNT_POINT"
+          trap - EXIT HUP INT TERM
+          test "$(shasum -a 256 "$SIGNED_DMG" | awk '{print $1}')" = "$SIGNED_DMG_SHA256"
+          echo "dmg_sha256=$SIGNED_DMG_SHA256" >> "$GITHUB_OUTPUT"
+          SOURCE_SHA=$(shasum -a 256 "$SOURCE" | awk '{print $1}')
+          test ! -L "$SYSTEM_PARENT"
+          test "$(stat -f '%u %Lp %HT' "$SYSTEM_PARENT")" = "0 755 Directory"
+          # Fixed path; `ls -lde` is used only to count ACL rows.
+          # shellcheck disable=SC2012
+          test "$(ls -lde "$SYSTEM_PARENT" | wc -l | tr -d ' ')" = "1"
+          if [[ ! -e "$TARGET_PARENT" && ! -L "$TARGET_PARENT" ]]; then
+            sudo /usr/bin/install -d -o root -g wheel -m 0755 "$TARGET_PARENT"
+          fi
+          test ! -L "$TARGET_PARENT"
+          test "$(stat -f '%u %Lp %HT' "$TARGET_PARENT")" = "0 755 Directory"
+          sudo /bin/chmod -N "$TARGET_PARENT"
+          sudo /usr/sbin/chown root:wheel "$TARGET_PARENT"
+          sudo /bin/chmod 0755 "$TARGET_PARENT"
+          if [[ ! -e "$TARGET_DIRECTORY" && ! -L "$TARGET_DIRECTORY" ]]; then
+            sudo /usr/bin/install -d -o root -g wheel -m 0755 "$TARGET_DIRECTORY"
+          fi
+          test ! -L "$TARGET_DIRECTORY"
+          test "$(stat -f '%u %Lp %HT' "$TARGET_DIRECTORY")" = "0 755 Directory"
+          sudo /bin/chmod -N "$TARGET_DIRECTORY"
+          sudo /usr/sbin/chown root:wheel "$TARGET_DIRECTORY"
+          sudo /bin/chmod 0755 "$TARGET_DIRECTORY"
+          # Fixed paths; `ls -lde` is used only to count ACL rows.
+          # shellcheck disable=SC2012
+          test "$(ls -lde "$TARGET_PARENT" | wc -l | tr -d ' ')" = "1"
+          # shellcheck disable=SC2012
+          test "$(ls -lde "$TARGET_DIRECTORY" | wc -l | tr -d ' ')" = "1"
+          TARGET_NEW=$(sudo /usr/bin/mktemp "$TARGET_DIRECTORY/.buzz-acp.XXXXXX")
+          case "$TARGET_NEW" in
+            "$TARGET_DIRECTORY"/.buzz-acp.*) ;;
+            *) exit 1 ;;
+          esac
+          cleanup() {
+            if [[ -n "${TARGET_NEW:-}" ]]; then
+              sudo /bin/rm -f "$TARGET_NEW"
+            fi
+          }
+          trap cleanup EXIT HUP INT TERM
+          cat "$SOURCE" | sudo /usr/bin/tee "$TARGET_NEW" >/dev/null
+          sudo /bin/chmod -N "$TARGET_NEW"
+          sudo /usr/sbin/chown root:wheel "$TARGET_NEW"
+          sudo /bin/chmod 0755 "$TARGET_NEW"
+          TARGET_SHA=$(shasum -a 256 "$TARGET_NEW" | awk '{print $1}')
+          test "$SOURCE_SHA" = "$TARGET_SHA"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$TARGET_NEW"
+          codesign -dv --verbose=4 "$TARGET_NEW" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$TARGET_NEW" 2>/dev/null)"
+          # Fixed path; `ls -lde` is used only to count ACL rows.
+          # shellcheck disable=SC2012
+          test "$(ls -lde "$TARGET_NEW" | wc -l | tr -d ' ')" = "1"
+          if [[ -d "$TARGET" && ! -L "$TARGET" ]]; then
+            exit 1
+          fi
+          sudo /bin/mv -fh "$TARGET_NEW" "$TARGET"
+          TARGET_NEW=""
+          test ! -L "$TARGET"
+          test "$(stat -f '%u %Lp %HT' "$TARGET")" = "0 755 Regular File"
+          test "$SOURCE_SHA" = "$(shasum -a 256 "$TARGET" | awk '{print $1}')"
+          codesign --verify --strict --verbose=2 -R="$HARNESS_REQUIREMENT" "$TARGET"
+          codesign -dv --verbose=4 "$TARGET" 2>&1 | grep -Eq 'flags=0x[[:xdigit:]]+\([^)]*runtime[^)]*\)'
+          test -z "$(codesign -d --entitlements - --xml "$TARGET" 2>/dev/null)"
+          # Fixed path; `ls -lde` is used only to count ACL rows.
+          # shellcheck disable=SC2012
+          test "$(ls -lde "$TARGET" | wc -l | tr -d ' ')" = "1"
+          test "$("$TARGET" heartbeat-preflight-capability)" = \
+            '{"kind":"buzz_acp_heartbeat_preflight_capability","protocol_version":1,"build_capability":"buzz-acp-source-witness-gateway-v1"}'
+
       - name: Stage signed DMG
         id: artifact
         env:
           SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+          EXPECTED_DMG_SHA256: ${{ steps.verified_harness.outputs.dmg_sha256 }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           NAME="Buzz_${VERSION}_aarch64-signed.dmg"
           cp "$SIGNED_DMG" "$RUNNER_TEMP/$NAME"
+          test "$(shasum -a 256 "$RUNNER_TEMP/$NAME" | awk '{print $1}')" = \
+            "$EXPECTED_DMG_SHA256"
           echo "path=$RUNNER_TEMP/$NAME" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 

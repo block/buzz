@@ -268,10 +268,7 @@ fn start_pair(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    if runtimes
-        .get_mut(&key)
-        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
-    {
+    if super::reuse_if_verified(&app, record, &mut runtimes, &key)? {
         let status = status_for(&app, record, &key, runtimes.get(&key), None);
         return Ok(status);
     }
@@ -290,6 +287,7 @@ fn start_pair(
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(&app),
         started_at: now.clone(),
+        heartbeat_harness: process.heartbeat_harness.clone(),
     };
     if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
         let _ = terminate_process(process.child.id());

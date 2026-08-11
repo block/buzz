@@ -104,6 +104,11 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
+    /// Trusted source preflight suppressed a heartbeat before any ACP request.
+    /// The model process and its sessions remain healthy and reusable.
+    #[error("Trusted heartbeat preflight failed: {0}")]
+    HeartbeatPreflight(String),
+
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
 }
@@ -512,6 +517,11 @@ impl AcpClient {
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
+
+        // Heartbeat preflight policy belongs to the harness/supervisor, never
+        // the model subprocess. Also remove every credential key the owner
+        // explicitly allowed into the preflight's otherwise-empty environment.
+        crate::heartbeat_preflight::scrub_agent_subprocess_env(&mut cmd);
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.

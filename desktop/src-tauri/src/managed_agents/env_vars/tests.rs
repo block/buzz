@@ -185,6 +185,30 @@ fn reserved_keys_include_code_execution_surface() {
 }
 
 #[test]
+fn reserved_keys_include_trusted_heartbeat_preflight_policy() {
+    for key in [
+        "BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG",
+        "BUZZ_ACP_HEARTBEAT_PREFLIGHT_REQUIRED",
+        "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_FILE",
+        "BUZZ_ACP_HEARTBEAT_PREFLIGHT_POLICY_SHA256",
+        "BUZZ_ACP_HEARTBEAT_INTERVAL",
+        "buzz_acp_heartbeat_interval",
+        "BUZZ_HEARTBEAT_GATEWAY_SOCKET",
+        "BUZZ_HEARTBEAT_GATEWAY_PIPE",
+        "BUZZ_HEARTBEAT_GATEWAY_ENDPOINT",
+        "BUZZ_HEARTBEAT_GATEWAY_CLIENT_ID",
+        "buzz_heartbeat_gateway_socket",
+    ] {
+        assert!(is_reserved_env_key(key));
+        let agent = map(&[(key, "forged")]);
+        assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
+        assert!(validate_user_env_keys(&agent)
+            .expect_err("agent preflight override must be rejected")
+            .contains("reserved"));
+    }
+}
+
+#[test]
 fn reserved_keys_include_relay_url() {
     // Overriding the relay URL could redirect the agent to an
     // attacker-controlled relay.

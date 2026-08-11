@@ -78,6 +78,14 @@ pub(super) fn build_launch_block(
         "BUZZ_ACP_AGENTS".into(),
         crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
     );
+    // Remote providers receive the same owner/supervisor policy as local
+    // Desktop launches. The key is reserved from launch.env, so the later
+    // user-environment layer cannot remove or replace it.
+    if let Ok(value) = std::env::var("BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG") {
+        if !value.trim().is_empty() {
+            policy_env.insert("BUZZ_ACP_HEARTBEAT_PREFLIGHT_CONFIG".into(), value);
+        }
+    }
 
     if let Some(value) = effective_prompt {
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
@@ -120,12 +128,23 @@ pub(super) fn ensure_remote_provider_supported(provider: Option<&str>) -> Result
     Ok(())
 }
 
+fn ensure_remote_heartbeat_preflight_supported(record: &ManagedAgentRecord) -> Result<(), String> {
+    if record.heartbeat_preflight.is_some() {
+        return Err(
+            "heartbeat-preflight-designated agents cannot deploy remotely until the provider exposes an equivalent durable, per-run policy authority"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Build the standard agent JSON payload for provider deploy calls.
 pub(super) fn build_deploy_payload(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
+    ensure_remote_heartbeat_preflight_supported(record)?;
     if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
         return Err(err);
     }
@@ -243,6 +262,19 @@ mod tests {
             "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn designated_agent_remote_deploy_fails_closed() {
+        let mut record = record();
+        record.heartbeat_preflight = Some(crate::managed_agents::HeartbeatPreflightDesignation {
+            policy_file: "/owner/policies/agent.json".into(),
+            policy_sha256: "a".repeat(64),
+            heartbeat_interval_seconds: 3_600,
+        });
+        assert!(ensure_remote_heartbeat_preflight_supported(&record)
+            .expect_err("remote provider has no durable policy authority")
+            .contains("cannot deploy remotely"));
     }
 
     #[test]

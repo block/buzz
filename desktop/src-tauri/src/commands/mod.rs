@@ -5,6 +5,7 @@ mod agent_discovery;
 mod agent_logs;
 mod agent_metric_archive;
 mod agent_model_process;
+mod agent_model_update;
 mod agent_models;
 mod agent_models_env;
 mod agent_providers;

@@ -28,6 +28,11 @@ fn base() -> SpawnConfigSnapshot {
         idle_timeout_seconds: Some(600),
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
+        heartbeat_preflight: Some(crate::managed_agents::HeartbeatPreflightDesignation {
+            policy_file: "/owner/policies/agent.json".into(),
+            policy_sha256: "a".repeat(64),
+            heartbeat_interval_seconds: 3_600,
+        }),
     }
 }
 
@@ -70,6 +75,7 @@ fn mutations() -> Vec<Mutation> {
             s.max_turn_duration_seconds = None
         }),
         ("parallelism", |s| s.parallelism = 8),
+        ("heartbeat_preflight", |s| s.heartbeat_preflight = None),
     ]
 }
 
@@ -442,6 +448,7 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
+        heartbeat_harness: None,
         #[cfg(windows)]
         job: None,
     };

@@ -394,7 +394,7 @@ pub(super) async fn start_local_agent_with_preflight(
             &global,
         );
     ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
-
+    let _runtime_transition = crate::managed_agents::runtime_transition::lock(state)?;
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -534,7 +534,6 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
-
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
@@ -651,8 +650,7 @@ pub async fn create_managed_agent(
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
-
-    // ── Pre-Phase 2: validate provider config BEFORE any side effects ────────
+    input.validate_heartbeat_preflight(&pubkey)?;
     if let BackendKind::Provider { ref config, ref id } = input.backend {
         validate_provider_config(config)?;
         // Validate via discovered candidates — not raw resolve_command.
@@ -913,6 +911,7 @@ pub async fn create_managed_agent(
             } else {
                 relay_mesh.clone()
             },
+            heartbeat_preflight: input.heartbeat_preflight.clone(),
         };
 
         records.push(record);
@@ -1220,6 +1219,7 @@ pub async fn stop_managed_agent(
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let _runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1282,6 +1282,7 @@ pub async fn delete_managed_agent(
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         {
+            let _runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
             let _store_guard = state
                 .managed_agents_store_lock
                 .lock()
@@ -1291,7 +1292,6 @@ pub async fn delete_managed_agent(
                 .managed_agent_processes
                 .lock()
                 .map_err(|error| error.to_string())?;
-
             let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
                 &mut records,
                 &mut runtimes,

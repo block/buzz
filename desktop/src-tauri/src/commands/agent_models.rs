@@ -7,6 +7,7 @@ use tauri::{AppHandle, State};
 use super::agent_model_process::run_agent_models_command;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
+pub(super) use super::agent_model_update::apply_model_provider_prompt_update;
 #[cfg(test)]
 use super::agent_models_env::env_value;
 use super::agent_models_env::{
@@ -17,10 +18,11 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
-        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
-        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
+        apply_heartbeat_preflight_update, build_managed_agent_summary, current_instance_id,
+        discovery_env_with_baked_floor, find_managed_agent_mut, known_acp_runtime,
+        load_global_agent_config, load_managed_agents, load_personas, managed_agent_avatar_url,
+        missing_command_message, normalize_agent_args, resolve_command, save_managed_agents,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
         AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
         DEFAULT_ACP_COMMAND,
     },
@@ -696,39 +698,12 @@ use databricks::{
 };
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
-/// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
-/// to `record`, enforcing the linked-instance write guard: a definition-linked
-/// record's model/provider/prompt are definition-authoritative (see
-/// `effective_config::resolve_linked`), so writes to these three fields are
-/// silently dropped for a linked instance rather than persisting a byte the
-/// resolver will never read. Definition-less instances accept the patch
-/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
-/// and its regression tests — a test that reimplements this check instead of
-/// calling it can go green after the real guard is deleted.
-fn apply_model_provider_prompt_update(
-    record: &mut crate::managed_agents::ManagedAgentRecord,
-    model: Option<Option<String>>,
-    provider: Option<Option<String>>,
-    system_prompt: Option<Option<String>>,
-) {
-    if record.persona_id.is_some() {
-        return;
-    }
-    if let Some(model_update) = model {
-        record.model = model_update;
-    }
-    if let Some(provider_update) = provider {
-        record.provider = provider_update;
-    }
-    if let Some(prompt_update) = system_prompt {
-        record.system_prompt = prompt_update;
-    }
-}
-
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
+/// parallelism, commands, toolsets) take effect on the next agent spawn. A
+/// heartbeat-preflight designation or designated ACP command change instead
+/// stops the old process before save so an obsolete gate cannot survive.
 /// Name changes are synced to the relay immediately via a kind:0 re-publish.
 #[tauri::command]
 pub async fn update_managed_agent(
@@ -736,6 +711,11 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    // Serialize the record mutation with restore/start/stop registration. The
+    // transition guard is released before the relay await below; lock order is
+    // transition -> store -> runtimes everywhere.
+    let runtime_transition = crate::managed_agents::runtime_transition::lock(&state)?;
+
     // Phase 1: local save (synchronous, under lock)
     let (summary, sync_params, rollback) = {
         let _store_guard = state
@@ -782,9 +762,8 @@ pub async fn update_managed_agent(
         if let Some(relay_url) = input.relay_url {
             record.relay_url = relay_url.trim().to_string();
         }
-        if let Some(acp_command) = input.acp_command {
-            record.acp_command = acp_command;
-        }
+        let stop_for_preflight_change =
+            apply_heartbeat_preflight_update(record, input.acp_command, input.heartbeat_preflight)?;
         // Harness edit: the persona's runtime is authoritative, so an explicit
         // `agent_command_override` is persisted ONLY when the user picks a
         // command that diverges from the persona, and the empty/whitespace
@@ -852,6 +831,11 @@ pub async fn update_managed_agent(
             record.respond_to_allowlist = prospective_allowlist;
         }
 
+        if stop_for_preflight_change {
+            stop_managed_agent_process(&app, record, &mut runtimes)?;
+            state.clear_agent_session_caches(&record.pubkey);
+        }
+
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;
@@ -903,7 +887,8 @@ pub async fn update_managed_agent(
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
         (summary, sync_params, rollback)
-    }; // lock dropped here
+    }; // store/runtime locks dropped here
+    drop(runtime_transition);
 
     try_regenerate_nest(&app);
 

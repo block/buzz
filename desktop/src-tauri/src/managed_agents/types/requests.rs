@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    default_start_on_app_launch, validate_heartbeat_preflight_configuration,
+    validate_respond_to_allowlist, AgentDefinition, BackendKind, CatalogSource,
+    HeartbeatPreflightDesignation, RelayMeshConfig, RespondTo, DEFAULT_ACP_COMMAND,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -188,6 +189,26 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// Owner-authoritative, per-agent must-preflight designation.
+    #[serde(default)]
+    pub heartbeat_preflight: Option<HeartbeatPreflightDesignation>,
+}
+
+impl CreateManagedAgentRequest {
+    pub(crate) fn validate_heartbeat_preflight(&self, agent_pubkey: &str) -> Result<(), String> {
+        let acp_command = self
+            .acp_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_ACP_COMMAND);
+        validate_heartbeat_preflight_configuration(
+            self.heartbeat_preflight.as_ref(),
+            &self.backend,
+            acp_command,
+            agent_pubkey,
+        )
+    }
 }
 
 /// Patch request for updating a managed agent's mutable fields.
@@ -224,6 +245,9 @@ pub struct UpdateManagedAgentRequest {
     pub relay_url: Option<String>,
     #[serde(default)]
     pub acp_command: Option<String>,
+    /// Absent = don't touch; null = remove designation; object = set it.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub heartbeat_preflight: Option<Option<HeartbeatPreflightDesignation>>,
     #[serde(default)]
     pub agent_command: Option<String>,
     /// True when the accompanying `agent_command` is a runtime/Custom command

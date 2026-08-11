@@ -27,7 +27,7 @@ pub(crate) use metadata::{
 };
 
 mod stop;
-pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::{managed_agent_runtime_keys, stop_managed_agent_pair};
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -60,6 +60,9 @@ mod instance_reaper;
 pub(crate) use instance_reaper::reap_dead_instance_agents;
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
+
+mod heartbeat_preflight;
+pub(crate) use heartbeat_preflight::reuse_if_verified;
 
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
@@ -338,6 +341,7 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        heartbeat_preflight: record.heartbeat_preflight.clone(),
     })
 }
 
@@ -457,6 +461,7 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
+    let heartbeat_harness = heartbeat_preflight::verify(record)?;
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -473,8 +478,11 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
-        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
+    let resolved_acp_command = match heartbeat_harness.as_ref() {
+        Some(verified) => verified.path.clone(),
+        None => resolve_command(&record.acp_command)
+            .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?,
+    };
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
@@ -809,6 +817,7 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    heartbeat_preflight::configure_env(&mut command, record)?;
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
@@ -864,6 +873,9 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    if heartbeat_preflight::verify(record)? != heartbeat_harness {
+        return Err("bundled buzz-acp changed before designated spawn".into());
+    }
     let child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
@@ -898,6 +910,9 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        heartbeat_harness
+            .as_ref()
+            .map(|verified| verified.stamp.clone()),
         &record.name,
     ));
     #[cfg(not(windows))]
@@ -908,6 +923,7 @@ pub fn spawn_agent_child(
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,
+        heartbeat_harness: heartbeat_harness.map(|verified| verified.stamp),
     })
 }
 
@@ -934,17 +950,10 @@ pub fn start_managed_agent_process(
         )
     };
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
-    if let Some(runtime) = runtimes.get_mut(&key) {
-        if runtime
-            .child
-            .try_wait()
-            .map_err(|error| format!("failed to inspect running process: {error}"))?
-            .is_none()
-        {
-            return Ok(());
-        }
-
-        runtimes.remove(&key);
+    if heartbeat_preflight::reuse_if_verified(app, record, runtimes, &key)? {
+        return Ok(());
+    }
+    if runtimes.remove(&key).is_some() {
         super::remove_agent_runtime_receipt(app, &key);
     }
 
@@ -958,6 +967,7 @@ pub fn start_managed_agent_process(
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(app),
         started_at: now.clone(),
+        heartbeat_harness: process.heartbeat_harness.clone(),
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());

@@ -568,6 +568,9 @@ pub struct PromptContext {
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
+    /// Owner/supervisor-controlled executable gate run before every heartbeat
+    /// ACP interaction. Ordinary channel turns never consult it.
+    pub heartbeat_preflight: Option<crate::heartbeat_preflight::HeartbeatPreflightAuthority>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
     /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
@@ -1463,6 +1466,77 @@ pub async fn run_prompt_task(
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
+    };
+    // A configured heartbeat preflight is a hard gate before session creation
+    // or any ACP/model prompt. The child receives a harness-minted identity and
+    // the owner-configured source manifest. Raw stdout is never injected; only
+    // the validated typed result below crosses the prompt boundary.
+    let prompt_text = if matches!(source, PromptSource::Heartbeat) {
+        match ctx.heartbeat_preflight.as_ref() {
+            Some(config) => {
+                let heartbeat_preflight_invocation =
+                    crate::heartbeat_preflight::HeartbeatPreflightInvocation::new(turn_id.clone());
+                let result = match crate::heartbeat_preflight::run_heartbeat_preflight(
+                    config,
+                    &ctx.agent_keys.public_key().to_hex(),
+                    &heartbeat_preflight_invocation,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::error!(
+                            turn_id = %turn_id,
+                            error = %error,
+                            "heartbeat_preflight_failed — suppressing model turn"
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(AcpError::HeartbeatPreflight(error.to_string())),
+                            None,
+                        );
+                        return;
+                    }
+                };
+                let section = match result.prompt_section() {
+                    Ok(section) => section,
+                    Err(error) => {
+                        tracing::error!(
+                            turn_id = %turn_id,
+                            error = %error,
+                            "heartbeat_preflight_render_failed — suppressing model turn"
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(AcpError::HeartbeatPreflight(error.to_string())),
+                            None,
+                        );
+                        return;
+                    }
+                };
+                tracing::info!(
+                    turn_id = %turn_id,
+                    invocation_id = %result.invocation_id,
+                    sources = result.required_sources.len(),
+                    "heartbeat_preflight_passed"
+                );
+                let base = prompt_text.unwrap_or_default();
+                Some(if base.is_empty() {
+                    section
+                } else {
+                    format!("{base}\n\n{section}")
+                })
+            }
+            None => prompt_text,
+        }
+    } else {
+        prompt_text
     };
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
@@ -4268,6 +4342,104 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    #[cfg(unix)]
+    fn heartbeat_preflight_test_script(
+        name: &str,
+        body: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::current_dir()
+            .expect("current directory")
+            .join("target")
+            .join("heartbeat-preflight-pool-tests")
+            .join(format!("{}-{}", name, Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create preflight test directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("secure preflight test directory");
+        let path = directory.join(format!("helper;{name} script"));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write preflight helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make preflight helper executable");
+        (directory, path)
+    }
+
+    #[cfg(unix)]
+    fn heartbeat_preflight_test_config(
+        program: &std::path::Path,
+        args: Vec<String>,
+        target_agent_pubkey: String,
+    ) -> crate::heartbeat_preflight::HeartbeatPreflightAuthority {
+        crate::heartbeat_preflight::HeartbeatPreflightAuthority::legacy_inline(
+            heartbeat_preflight_raw_test_config(program, args, target_agent_pubkey),
+        )
+    }
+
+    #[cfg(unix)]
+    fn heartbeat_preflight_raw_test_config(
+        program: &std::path::Path,
+        args: Vec<String>,
+        target_agent_pubkey: String,
+    ) -> crate::heartbeat_preflight::HeartbeatPreflightConfig {
+        use sha2::{Digest, Sha256};
+
+        let bytes = std::fs::read(program).expect("read preflight helper for owner pin");
+        crate::heartbeat_preflight::HeartbeatPreflightConfig {
+            version: 1,
+            target_agent_pubkey,
+            target_channel: "5e06068b-0c7d-444c-9a48-080c45b65931".into(),
+            declaration_manifest_digest: "d".repeat(64),
+            heartbeat_interval_seconds: Some(3_600),
+            program: program.to_string_lossy().into_owned(),
+            program_sha256: hex::encode(Sha256::digest(bytes)),
+            macos_designated_requirement: None,
+            macos_team_identifier: None,
+            args,
+            required_sources: vec![crate::heartbeat_preflight::RequiredSourceScope {
+                source: "gmail".into(),
+                account: "owner@example.com".into(),
+                scope: "inbox".into(),
+                policy_id: "gmail.required".into(),
+            }],
+            ledger_instance_id: "ledger-primary".into(),
+            timeout_ms: 10_000,
+            max_output_bytes: 4_096,
+            forward_env: vec![],
+        }
+    }
+
+    #[cfg(unix)]
+    fn trusted_checked_preflight_body(trace_path: &std::path::Path) -> String {
+        let trace = trace_path.to_string_lossy().replace('\'', "'\\''");
+        format!(
+            r#"printf '%s\n' preflight >> '{trace}'
+printf '%s\n' 'RAW-CONNECTOR-TRANSCRIPT-MUST-NOT-ENTER-PROMPT' >&2
+run_number=$(/usr/bin/wc -l < '{trace}')
+case "$run_number" in
+  *1) commit=1111111111111111111111111111111111111111 ;;
+  *) commit=2222222222222222222222222222222222222222 ;;
+esac
+IFS= read -r request
+turn=${{request#*\"turn_id\":\"}}; turn=${{turn%%\"*}}
+invocation=${{request#*\"invocation_id\":\"}}; invocation=${{invocation%%\"*}}
+target=${{request#*\"target_agent_pubkey\":\"}}; target=${{target%%\"*}}
+requested=${{request#*\"requested_at\":\"}}; requested=${{requested%%\"*}}
+printf '{{\"version\":1,\"turn_id\":\"%s\",\"invocation_id\":\"%s\",\"target_agent_pubkey\":\"%s\",\"target_channel\":\"5e06068b-0c7d-444c-9a48-080c45b65931\",\"declaration_manifest_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"required_sources\":[{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}}],\"ledger_instance_id\":\"ledger-primary\",\"authority_commit\":\"%s\",\"remote_readback_commit\":\"%s\",\"outcomes\":[{{\"required_source\":{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}},\"status\":\"checked\",\"checked_at\":\"%s\",\"receipt_id\":\"gmail:receipt\",\"witness_run_id\":\"gmail-run-%s\",\"receipt_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"acceptance_context\":\"%s\",\"item_count\":1}}],\"committed_material\":[{{\"required_source\":{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}},\"entry_id\":\"gmail:item-1\",\"authority_commit\":\"%s\",\"content_sha256\":\"9670b2da38856cc749c0f95882318c3e9ce35aae9805a97059b9c8032b203928\",\"sanitized_text\":\"Mail from Corryn: revised estimate is ready.\"}}]}}\n' "$turn" "$invocation" "$target" "$commit" "$commit" "$requested" "$invocation" "$invocation" "$commit""#
+        )
+    }
+
+    #[cfg(unix)]
+    fn trusted_blocked_preflight_body(reason_code: &str) -> String {
+        format!(
+            r#"IFS= read -r request
+turn=${{request#*\"turn_id\":\"}}; turn=${{turn%%\"*}}
+invocation=${{request#*\"invocation_id\":\"}}; invocation=${{invocation%%\"*}}
+target=${{request#*\"target_agent_pubkey\":\"}}; target=${{target%%\"*}}
+requested=${{request#*\"requested_at\":\"}}; requested=${{requested%%\"*}}
+printf '{{\"version\":1,\"turn_id\":\"%s\",\"invocation_id\":\"%s\",\"target_agent_pubkey\":\"%s\",\"target_channel\":\"5e06068b-0c7d-444c-9a48-080c45b65931\",\"declaration_manifest_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"required_sources\":[{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}}],\"ledger_instance_id\":\"ledger-primary\",\"authority_commit\":\"1111111111111111111111111111111111111111\",\"remote_readback_commit\":\"1111111111111111111111111111111111111111\",\"outcomes\":[{{\"required_source\":{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}},\"status\":\"blocked\",\"checked_at\":\"%s\",\"receipt_id\":\"gmail:receipt\",\"reason_code\":\"{reason_code}\"}}],\"committed_material\":[]}}\n' "$turn" "$invocation" "$target" "$requested""#
+        )
+    }
+
     fn test_mcp_server() -> McpServer {
         McpServer {
             name: "dev".into(),
@@ -5577,6 +5749,361 @@ done"#
             "heartbeat-3",
             "turn after ACP success must omit standing context"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_heartbeat_preflight_suppresses_model_prompt() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-preflight-invalid-model-capture-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let acp_script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), acp_script], &[], false)
+            .await
+            .expect("spawn ACP capture script");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "preflight-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent.state.heartbeat_session = Some("live-session".into());
+
+        let (directory, program) = heartbeat_preflight_test_script("invalid", "printf not-json");
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.heartbeat_preflight = Some(heartbeat_preflight_test_config(
+            &program,
+            vec![],
+            ctx.agent_keys.public_key().to_hex(),
+        ));
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            None,
+            Some("heartbeat".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-invalid-preflight".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("preflight result");
+        assert!(matches!(result.outcome, PromptOutcome::Error(_)));
+        result.agent.acp.shutdown().await;
+        assert!(
+            !capture.exists()
+                || std::fs::read_to_string(&capture)
+                    .expect("read empty ACP capture")
+                    .is_empty(),
+            "model ACP must receive no request when preflight is invalid"
+        );
+
+        if capture.exists() {
+            std::fs::remove_file(capture).expect("remove ACP capture");
+        }
+        std::fs::remove_dir_all(directory).expect("remove preflight directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lost_required_policy_suppresses_model_prompt() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-preflight-lost-policy-capture-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let acp_script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), acp_script], &[], false)
+            .await
+            .expect("spawn ACP capture script");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "preflight-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let trace = std::env::temp_dir().join(format!("lost-policy-trace-{}", Uuid::new_v4()));
+        let (directory, program) =
+            heartbeat_preflight_test_script("lost-policy", &trusted_checked_preflight_body(&trace));
+        let mut ctx = make_prompt_context_no_owner();
+        let policy = heartbeat_preflight_raw_test_config(
+            &program,
+            vec![],
+            ctx.agent_keys.public_key().to_hex(),
+        );
+        let policy_bytes = serde_json::to_vec(&policy).expect("serialize owner policy");
+        let policy_path = directory.join("owner-policy.json");
+        std::fs::write(&policy_path, &policy_bytes).expect("write owner policy");
+        std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure owner policy");
+        ctx.heartbeat_preflight = Some(
+            crate::heartbeat_preflight::HeartbeatPreflightAuthority::required_file(
+                policy_path.clone(),
+                hex::encode(Sha256::digest(&policy_bytes)),
+                &ctx.agent_keys.public_key().to_hex(),
+                3_600,
+            )
+            .expect("valid required authority"),
+        );
+        std::fs::remove_file(policy_path).expect("remove required owner policy");
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            None,
+            Some("heartbeat".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-lost-policy".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("preflight result");
+        assert!(matches!(result.outcome, PromptOutcome::Error(_)));
+        result.agent.acp.shutdown().await;
+        assert!(
+            !capture.exists()
+                || std::fs::read_to_string(&capture)
+                    .expect("read empty ACP capture")
+                    .is_empty(),
+            "model ACP must receive no request when required policy disappears"
+        );
+        assert!(!trace.exists(), "gateway must not run after policy loss");
+
+        if capture.exists() {
+            std::fs::remove_file(capture).expect("remove ACP capture");
+        }
+        std::fs::remove_dir_all(directory).expect("remove preflight directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_heartbeat_preflight_suppresses_model_prompt() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-preflight-blocked-model-capture-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let acp_script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), acp_script], &[], false)
+            .await
+            .expect("spawn ACP capture script");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "preflight-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent.state.heartbeat_session = Some("live-session".into());
+
+        let (directory, program) = heartbeat_preflight_test_script(
+            "blocked",
+            &trusted_blocked_preflight_body("not_configured"),
+        );
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.heartbeat_preflight = Some(heartbeat_preflight_test_config(
+            &program,
+            vec![],
+            ctx.agent_keys.public_key().to_hex(),
+        ));
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            None,
+            Some("heartbeat".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-blocked-preflight".into(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("preflight result");
+        let error = match result.outcome {
+            PromptOutcome::Error(AcpError::HeartbeatPreflight(error)) => error,
+            _ => panic!("blocked preflight must return a dedicated preflight error"),
+        };
+        assert!(
+            error.contains("gmail:not_configured"),
+            "the blocked source and reason must remain visible"
+        );
+        assert_eq!(
+            result.agent.state.heartbeat_session.as_deref(),
+            Some("live-session"),
+            "a blocked preflight must not mutate the existing ACP session"
+        );
+        result.agent.acp.shutdown().await;
+        assert!(
+            !capture.exists()
+                || std::fs::read_to_string(&capture)
+                    .expect("read empty ACP capture")
+                    .is_empty(),
+            "model ACP must receive no request when a required source is blocked"
+        );
+
+        if capture.exists() {
+            std::fs::remove_file(capture).expect("remove ACP capture");
+        }
+        std::fs::remove_dir_all(directory).expect("remove preflight directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checked_preflight_injects_committed_material_before_each_reused_session_prompt() {
+        let trace =
+            std::env::temp_dir().join(format!("buzz-acp-preflight-order-trace-{}", Uuid::new_v4()));
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-preflight-prompt-capture-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_trace = trace.to_string_lossy().replace('\'', "'\\''");
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let acp_script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' prompt >> '{quoted_trace}'
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '{{"jsonrpc":"2.0","id":%s,"result":{{"stopReason":"end_turn"}}}}\n' "$count"
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), acp_script], &[], false)
+            .await
+            .expect("spawn ACP order script");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "preflight-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent.state.heartbeat_session = Some("reused-session".into());
+
+        let (directory, program) =
+            heartbeat_preflight_test_script("ordered", &trusted_checked_preflight_body(&trace));
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.heartbeat_preflight = Some(heartbeat_preflight_test_config(
+            &program,
+            vec![],
+            ctx.agent_keys.public_key().to_hex(),
+        ));
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 1..=2 {
+            run_prompt_task(
+                agent,
+                None,
+                Some(format!("heartbeat-{turn}")),
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-valid-preflight-{turn}"),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            assert_eq!(
+                result.agent.state.heartbeat_session.as_deref(),
+                Some("reused-session")
+            );
+            agent = result.agent;
+        }
+        agent.acp.shutdown().await;
+
+        assert_eq!(
+            std::fs::read_to_string(&trace)
+                .expect("read execution trace")
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["preflight", "prompt", "preflight", "prompt"],
+            "each model prompt must be preceded by its own trusted preflight"
+        );
+        let prompts: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
+            .expect("read prompt capture")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
+            .collect();
+        assert_eq!(prompts.len(), 2);
+        for (index, request) in prompts.iter().enumerate() {
+            let text = request["params"]["prompt"][0]["text"]
+                .as_str()
+                .expect("text prompt");
+            assert!(text.contains(&format!("heartbeat-{}", index + 1)));
+            assert!(text.contains("[Trusted Heartbeat Preflight]"));
+            let commit = if index == 0 {
+                "1111111111111111111111111111111111111111"
+            } else {
+                "2222222222222222222222222222222222222222"
+            };
+            assert!(text.contains(&format!("\"authority_commit\":\"{commit}\"")));
+            assert!(text.contains(&format!("\"remote_readback_commit\":\"{commit}\"")));
+            assert!(text.contains("\"target_channel\":\"5e06068b-0c7d-444c-9a48-080c45b65931\""));
+            assert!(text.contains(&format!(
+                "\"declaration_manifest_digest\":\"{}\"",
+                "d".repeat(64)
+            )));
+            assert!(text.contains(&format!(
+                "\"committed_material\":[{{\"required_source\":{{\"source\":\"gmail\",\"account\":\"owner@example.com\",\"scope\":\"inbox\",\"policy_id\":\"gmail.required\"}},\"entry_id\":\"gmail:item-1\",\"authority_commit\":\"{commit}\""
+            )));
+            assert!(text
+                .contains("\"sanitized_text\":\"Mail from Corryn: revised estimate is ready.\""));
+            assert!(text.contains(
+                "committed_material contains only gateway-sanitized, already-committed data"
+            ));
+            assert!(
+                !text.contains("RAW-CONNECTOR-TRANSCRIPT-MUST-NOT-ENTER-PROMPT"),
+                "raw gateway stdout/stderr must never cross into the model prompt"
+            );
+        }
+
+        std::fs::remove_file(trace).expect("remove execution trace");
+        std::fs::remove_file(capture).expect("remove prompt capture");
+        std::fs::remove_dir_all(directory).expect("remove preflight directory");
     }
 
     #[tokio::test]
@@ -7437,6 +7964,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             session_title: None,
             team_instructions: None,
             heartbeat_prompt: None,
+            heartbeat_preflight: None,
             base_prompt: None,
             cwd: ".".to_string(),
             rest_client: RestClient {

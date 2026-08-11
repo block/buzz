@@ -37,7 +37,7 @@ pub(crate) fn managed_agent_runtime_relay_urls<T>(
 /// runtime is reinserted so the pair stays visible and stoppable instead of
 /// becoming an invisible orphan. Touches no other pair for the agent and
 /// does no record-level stop bookkeeping — callers own that.
-fn stop_managed_agent_pair(
+pub(crate) fn stop_managed_agent_pair(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
