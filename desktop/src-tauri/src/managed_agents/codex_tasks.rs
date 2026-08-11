@@ -18,7 +18,7 @@ use super::{
 const STORE_VERSION: u32 = 3;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
-const EXCLUSIVE_TASK_LOCKED_ERROR: &str = "This Codex task still has an exclusive writer lock. A task can be idle and still open in Codex Desktop. Close or leave it in every Codex client, then Retry in Buzz. To use both apps at once, both must connect to the same shared app-server.";
+const EXCLUSIVE_TASK_LOCKED_ERROR: &str = "This Codex task still has an exclusive writer lock. A task can be idle and still open in Codex Desktop. In Codex Desktop, archive the task and then restore it without reopening it. Return to Buzz and Retry. Stop the Buzz agent before opening the task in Codex Desktop again. To use both apps at once, both must connect to the same shared app-server.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexTaskBinding {
@@ -533,7 +533,9 @@ mod tests {
     #[test]
     fn exclusive_lock_error_explains_idle_and_shared_modes() {
         assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("idle and still open"));
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Retry in Buzz"));
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("archive the task and then restore it"));
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Return to Buzz and Retry"));
+        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Stop the Buzz agent"));
         assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("same shared app-server"));
     }
 
