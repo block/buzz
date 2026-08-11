@@ -16,6 +16,18 @@ export type CodexTaskSummary = {
   model: string | null;
 };
 
+export type CodexSharedRuntimeState =
+  | "setup_required"
+  | "ready"
+  | "unavailable";
+
+export type CodexSharedRuntimeStatus = {
+  enabled: boolean;
+  state: CodexSharedRuntimeState;
+  url: string;
+  detail: string | null;
+};
+
 export type RawCodexTaskBinding = {
   task_id: string;
   thread_name: string;

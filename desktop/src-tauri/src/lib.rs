@@ -455,6 +455,8 @@ pub fn run() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
 
+            tauri::async_runtime::spawn(managed_agents::restore_codex_runtime(app_handle.clone()));
+
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
             // agents are restored below, and decide whether restore is safe.
             // The frontend's apply_workspace runs only after React mounts —
@@ -760,6 +762,9 @@ pub fn run() {
             list_relay_agents,
             list_managed_agents,
             list_codex_tasks,
+            get_codex_shared_runtime_status,
+            enable_codex_shared_runtime,
+            launch_codex_desktop_shared,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,

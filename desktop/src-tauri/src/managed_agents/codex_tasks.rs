@@ -1,13 +1,18 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
+    time::Duration,
 };
 
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 use super::{
@@ -15,10 +20,13 @@ use super::{
     ManagedAgentRecord,
 };
 
-const STORE_VERSION: u32 = 3;
+const STORE_VERSION: u32 = 4;
+const SHARED_RUNTIME_CONFIG_VERSION: u32 = 1;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
-const EXCLUSIVE_TASK_LOCKED_ERROR: &str = "This Codex task still has an exclusive writer lock. A task can be idle and still open in Codex Desktop. In Codex Desktop, archive the task and then restore it without reopening it. Return to Buzz and Retry. Stop the Buzz agent before opening the task in Codex Desktop again. To use both apps at once, both must connect to the same shared app-server.";
+pub const DEFAULT_CODEX_SHARED_APP_SERVER_URL: &str = "ws://127.0.0.1:51919";
+const SHARED_RUNTIME_URL_ENV: &str = "BUZZ_CODEX_SHARED_APP_SERVER_URL";
+const SHARED_RUNTIME_COMMAND_ENV: &str = "BUZZ_CODEX_APP_SERVER_COMMAND";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexTaskBinding {
@@ -48,6 +56,37 @@ pub struct CodexTaskSummary {
 struct CodexTaskBindingStore {
     version: u32,
     bindings: HashMap<String, CodexTaskBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CodexSharedRuntimeConfig {
+    version: u32,
+    enabled: bool,
+}
+
+impl Default for CodexSharedRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            version: SHARED_RUNTIME_CONFIG_VERSION,
+            enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexSharedRuntimeState {
+    SetupRequired,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexSharedRuntimeStatus {
+    pub enabled: bool,
+    pub state: CodexSharedRuntimeState,
+    pub url: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +121,41 @@ fn binding_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("codex-task-bindings.json"))
 }
 
+fn shared_runtime_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(managed_agents_base_dir(app)?.join("codex-shared-runtime.json"))
+}
+
+fn load_shared_runtime_config(app: &AppHandle) -> Result<CodexSharedRuntimeConfig, String> {
+    let path = shared_runtime_config_path(app)?;
+    if !path.exists() {
+        return Ok(CodexSharedRuntimeConfig::default());
+    }
+    let bytes =
+        fs::read(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn save_shared_runtime_config(
+    app: &AppHandle,
+    config: &CodexSharedRuntimeConfig,
+) -> Result<(), String> {
+    let path = shared_runtime_config_path(app)?;
+    let payload = serde_json::to_vec_pretty(config)
+        .map_err(|error| format!("failed to serialize Codex shared runtime: {error}"))?;
+    atomic_write_json_restricted(&path, &payload)
+}
+
+pub fn codex_shared_app_server_url() -> Result<String, String> {
+    let configured = std::env::var(SHARED_RUNTIME_URL_ENV).ok();
+    normalize_app_server_url(
+        configured
+            .as_deref()
+            .or(Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL)),
+    )?
+    .ok_or_else(|| "Codex shared app-server URL is not configured".to_string())
+}
+
 fn load_binding_store(app: &AppHandle) -> Result<CodexTaskBindingStore, String> {
     let path = binding_store_path(app)?;
     if !path.exists() {
@@ -96,6 +170,7 @@ fn load_binding_store(app: &AppHandle) -> Result<CodexTaskBindingStore, String> 
     let mut store: CodexTaskBindingStore = serde_json::from_slice(&bytes)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
     if store.version < STORE_VERSION {
+        let shared_url = codex_shared_app_server_url()?;
         if let Ok(tasks) = list_codex_tasks() {
             let models = tasks
                 .into_iter()
@@ -106,6 +181,9 @@ fn load_binding_store(app: &AppHandle) -> Result<CodexTaskBindingStore, String> 
                     binding.model = models.get(&binding.task_id).cloned().flatten();
                 }
             }
+        }
+        for binding in store.bindings.values_mut() {
+            binding.app_server_url = Some(shared_url.clone());
         }
         store.version = STORE_VERSION;
         save_binding_store(app, &store)?;
@@ -133,6 +211,11 @@ pub fn save_codex_task_binding(
     binding: CodexTaskBinding,
 ) -> Result<(), String> {
     let mut store = load_binding_store(app)?;
+    let active_agent_pubkeys = super::load_managed_agents(app)?
+        .into_iter()
+        .map(|record| record.pubkey)
+        .collect::<HashSet<_>>();
+    prune_stale_codex_task_bindings(&mut store, &active_agent_pubkeys);
     if let Some((existing_pubkey, _)) = store
         .bindings
         .iter()
@@ -146,6 +229,17 @@ pub fn save_codex_task_binding(
     store.version = STORE_VERSION;
     store.bindings.insert(agent_pubkey.to_string(), binding);
     save_binding_store(app, &store)
+}
+
+fn prune_stale_codex_task_bindings(
+    store: &mut CodexTaskBindingStore,
+    active_agent_pubkeys: &HashSet<String>,
+) -> bool {
+    let original_len = store.bindings.len();
+    store
+        .bindings
+        .retain(|pubkey, _| active_agent_pubkeys.contains(pubkey));
+    store.bindings.len() != original_len
 }
 
 pub fn remove_codex_task_binding(app: &AppHandle, agent_pubkey: &str) -> Result<(), String> {
@@ -186,8 +280,8 @@ fn normalize_app_server_url(value: Option<&str>) -> Result<Option<String>, Strin
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    let parsed = url::Url::parse(value)
-        .map_err(|error| format!("invalid Codex app-server URL: {error}"))?;
+    let parsed =
+        url::Url::parse(value).map_err(|error| format!("invalid Codex app-server URL: {error}"))?;
     if !matches!(parsed.scheme(), "ws" | "wss") {
         return Err("Codex app-server URL must use ws:// or wss://".to_string());
     }
@@ -200,17 +294,326 @@ fn normalize_app_server_url(value: Option<&str>) -> Result<Option<String>, Strin
     Ok(Some(parsed.to_string().trim_end_matches('/').to_string()))
 }
 
+fn resolve_codex_task_app_server_url(requested: Option<&str>) -> Result<String, String> {
+    let requested = normalize_app_server_url(requested)?;
+    let shared_url = codex_shared_app_server_url()?;
+    if requested.as_deref().is_some_and(|url| url != shared_url) {
+        return Err(format!(
+            "Codex task agents use the computer shared runtime at {shared_url}; per-agent app-server URLs are not supported"
+        ));
+    }
+    Ok(shared_url)
+}
+
+async fn probe_codex_shared_runtime(url: &str) -> Result<(), String> {
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(2), connect_async(url))
+        .await
+        .map_err(|_| format!("timed out connecting to {url}"))?
+        .map_err(|error| format!("could not connect to {url}: {error}"))?;
+    let initialize = serde_json::json!({
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "clientInfo": {
+                "name": "buzz_shared_runtime_probe",
+                "title": "Buzz shared runtime probe",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": { "experimentalApi": true }
+        }
+    });
+    socket
+        .send(Message::Text(initialize.to_string().into()))
+        .await
+        .map_err(|error| format!("failed to initialize {url}: {error}"))?;
+
+    let initialized = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = socket.next().await {
+            let message = message.map_err(|error| error.to_string())?;
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let payload: serde_json::Value =
+                serde_json::from_str(text.as_str()).map_err(|error| error.to_string())?;
+            if payload.get("id").and_then(serde_json::Value::as_u64) == Some(1) {
+                if let Some(error) = payload.get("error") {
+                    return Err(format!("initialize was rejected: {error}"));
+                }
+                return payload
+                    .get("result")
+                    .is_some()
+                    .then_some(())
+                    .ok_or_else(|| "initialize response had no result".to_string());
+            }
+        }
+        Err("connection closed before initialize completed".to_string())
+    })
+    .await
+    .map_err(|_| format!("timed out initializing {url}"))??;
+    let _ = socket.close(None).await;
+    Ok(initialized)
+}
+
+pub async fn codex_shared_runtime_status(
+    app: &AppHandle,
+) -> Result<CodexSharedRuntimeStatus, String> {
+    let config = load_shared_runtime_config(app)?;
+    let url = codex_shared_app_server_url()?;
+    if !config.enabled {
+        return Ok(CodexSharedRuntimeStatus {
+            enabled: false,
+            state: CodexSharedRuntimeState::SetupRequired,
+            url,
+            detail: None,
+        });
+    }
+    match probe_codex_shared_runtime(&url).await {
+        Ok(()) => Ok(CodexSharedRuntimeStatus {
+            enabled: true,
+            state: CodexSharedRuntimeState::Ready,
+            url,
+            detail: None,
+        }),
+        Err(error) => Ok(CodexSharedRuntimeStatus {
+            enabled: true,
+            state: CodexSharedRuntimeState::Unavailable,
+            url,
+            detail: Some(error),
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn is_usable_codex_app_server_executable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .parent()
+            .map(|parent| parent.join("codex-code-mode-host.exe").is_file())
+            .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_usable_codex_app_server_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn find_codex_app_server_executable() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os(SHARED_RUNTIME_COMMAND_ENV) {
+        let path = PathBuf::from(path);
+        if is_usable_codex_app_server_executable(&path) {
+            return Ok(path);
+        }
+        return Err(format!(
+            "{SHARED_RUNTIME_COMMAND_ENV} does not point to a complete Codex runtime: {}",
+            path.display()
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        // Codex Desktop materializes an executable runtime bundle here. Requiring
+        // the matching sidecar avoids selecting a partial update while it is
+        // still being installed.
+        if let Some(local_data) = dirs::data_local_dir() {
+            let bin_dir = local_data.join("OpenAI").join("Codex").join("bin");
+            let mut candidates = fs::read_dir(&bin_dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("codex.exe"))
+                .filter(|path| is_usable_codex_app_server_executable(path))
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|path| {
+                path.metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+            });
+            if let Some(path) = candidates.pop() {
+                return Ok(path);
+            }
+        }
+    }
+
+    let executable = if cfg!(windows) { "codex.exe" } else { "codex" };
+    if let Some(path) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(executable))
+            .find(|candidate| is_usable_codex_app_server_executable(candidate))
+    }) {
+        return Ok(path);
+    }
+
+    Err(
+        "A complete Codex runtime was not found. Open Codex Desktop normally once to finish runtime setup, then retry."
+            .to_string(),
+    )
+}
+
+fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> {
+    let executable = find_codex_app_server_executable()?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // Create the long-lived server through WMI so closing or updating Buzz
+        // does not tear down the backend currently shared with Codex Desktop.
+        let command_line = format!(
+            "\"{}\" -c features.code_mode_host=true app-server --listen \"{url}\"",
+            executable.display()
+        );
+        let script = "$result=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE}; if ($result.ReturnValue -ne 0) { throw \"Win32_Process.Create returned $($result.ReturnValue)\" }; $result.ProcessId";
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("BUZZ_CODEX_SHARED_RUNTIME_COMMAND_LINE", command_line)
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|error| format!("failed to request Codex runtime start: {error}"))?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                "Windows could not start the Codex shared runtime".to_string()
+            } else {
+                detail
+            });
+        }
+        let _ = app;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::process::Stdio;
+
+        let logs_dir = managed_agents_base_dir(app)?.join("logs");
+        fs::create_dir_all(&logs_dir)
+            .map_err(|error| format!("failed to create {}: {error}", logs_dir.display()))?;
+        let stdout = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join("codex-shared-runtime.stdout.log"))
+            .map_err(|error| format!("failed to open Codex runtime log: {error}"))?;
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join("codex-shared-runtime.stderr.log"))
+            .map_err(|error| format!("failed to open Codex runtime error log: {error}"))?;
+        let mut command = Command::new(&executable);
+        command
+            .args(["app-server", "--listen", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        command
+            .spawn()
+            .map_err(|error| format!("failed to start {}: {error}", executable.display()))?;
+        Ok(())
+    }
+}
+
+pub async fn enable_codex_shared_runtime(
+    app: &AppHandle,
+) -> Result<CodexSharedRuntimeStatus, String> {
+    static START_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _guard = START_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    save_shared_runtime_config(
+        app,
+        &CodexSharedRuntimeConfig {
+            version: SHARED_RUNTIME_CONFIG_VERSION,
+            enabled: true,
+        },
+    )?;
+    let url = codex_shared_app_server_url()?;
+    if probe_codex_shared_runtime(&url).await.is_err() {
+        spawn_codex_shared_runtime(app, &url)?;
+        let mut last_error = None;
+        for _ in 0..50 {
+            match probe_codex_shared_runtime(&url).await {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if let Some(error) = last_error {
+            return Ok(CodexSharedRuntimeStatus {
+                enabled: true,
+                state: CodexSharedRuntimeState::Unavailable,
+                url,
+                detail: Some(error),
+            });
+        }
+    }
+    Ok(CodexSharedRuntimeStatus {
+        enabled: true,
+        state: CodexSharedRuntimeState::Ready,
+        url,
+        detail: None,
+    })
+}
+
+pub async fn restore_codex_runtime(app: AppHandle) {
+    if load_shared_runtime_config(&app)
+        .map(|config| config.enabled)
+        .unwrap_or(false)
+    {
+        if let Err(error) = enable_codex_shared_runtime(&app).await {
+            eprintln!("buzz-desktop: failed to restore Codex shared runtime: {error}");
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn launch_codex_desktop_shared() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let url = codex_shared_app_server_url()?
+        .replace('`', "``")
+        .replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $env:CODEX_APP_SERVER_WS_URL='{url}'; \
+         $package=Get-AppxPackage | Where-Object {{ $_.Name -in @('OpenAI.Codex','OpenAI.CodexBeta') }} | Sort-Object @{{Expression={{if ($_.Name -eq 'OpenAI.Codex') {{0}} else {{1}}}};Ascending=$true}},@{{Expression={{$_.Version}};Descending=$true}} | Select-Object -First 1; \
+         if (-not $package) {{ throw 'Codex Desktop is not installed' }}; \
+         $app=@((Get-AppxPackageManifest -Package $package).Package.Applications.Application)[0]; \
+         $exe=Join-Path $package.InstallLocation ([string]$app.Executable); \
+         Start-Process -FilePath $exe"
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|error| format!("failed to launch Codex Desktop: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn launch_codex_desktop_shared() -> Result<(), String> {
+    Err("Automatic Codex Desktop relaunch is currently available on Windows only.".to_string())
+}
+
 pub fn prepare_codex_task_binding(
     input: &CreateManagedAgentRequest,
 ) -> Result<Option<CodexTaskBinding>, String> {
-    let app_server_url = normalize_app_server_url(input.codex_app_server_url.as_deref())?;
+    let requested_url = normalize_app_server_url(input.codex_app_server_url.as_deref())?;
     let mut binding = input
         .codex_task_id
         .as_deref()
         .map(binding_for_task_id)
         .transpose()?;
     if let Some(binding) = binding.as_mut() {
-        binding.app_server_url = app_server_url;
+        binding.app_server_url = Some(resolve_codex_task_app_server_url(
+            input.codex_app_server_url.as_deref(),
+        )?);
         if input.backend != BackendKind::Local {
             return Err("Codex tasks can only be bound to local agents".to_string());
         }
@@ -220,7 +623,7 @@ pub fn prepare_codex_task_binding(
         {
             return Err("Codex task-bound agents require parallelism 1".to_string());
         }
-    } else if app_server_url.is_some() {
+    } else if requested_url.is_some() {
         return Err("A shared Codex app-server requires a Codex task binding".to_string());
     }
     Ok(binding)
@@ -263,9 +666,11 @@ pub fn task_binding_for_spawn(
                 binding.workspace
             ));
         }
-        if binding.app_server_url.is_none() {
-            ensure_codex_task_available(&binding.task_id)?;
-        }
+        let url = binding.app_server_url.as_deref().ok_or_else(|| {
+            "This Codex task binding predates shared runtime setup. Reopen Buzz to migrate it."
+                .to_string()
+        })?;
+        ensure_codex_shared_runtime_reachable(url)?;
     }
     Ok(binding)
 }
@@ -301,7 +706,12 @@ pub fn configure_shared_app_server(
     binding: Option<&CodexTaskBinding>,
     proxy_executable: &Path,
 ) {
-    if let Some(url) = binding.and_then(|binding| binding.app_server_url.as_deref()) {
+    if let Some(binding) = binding {
+        let url = binding
+            .app_server_url
+            .clone()
+            .or_else(|| codex_shared_app_server_url().ok())
+            .unwrap_or_else(|| DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string());
         command.env("CODEX_PATH", proxy_executable);
         command.env("CODEX_SHARED_APP_SERVER_URL", url);
     } else {
@@ -321,23 +731,26 @@ pub fn task_bound_worker_count(
     }
 }
 
-pub fn ensure_codex_task_available(task_id: &str) -> Result<(), String> {
-    let codex_home = codex_home_dir()?;
-    let lock_path = codex_home
-        .join("thread-writer-locks")
-        .join(format!("{task_id}.lock"));
-    if !lock_path.exists() {
-        return Ok(());
+fn ensure_codex_shared_runtime_reachable(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url)
+        .map_err(|error| format!("invalid Codex shared runtime URL: {error}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Codex shared runtime URL has no host".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "Codex shared runtime URL has no port".to_string())?;
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("could not resolve Codex shared runtime: {error}"))?;
+    for address in addresses {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(750)).is_ok() {
+            return Ok(());
+        }
     }
-
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|_| EXCLUSIVE_TASK_LOCKED_ERROR.to_string())?;
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| EXCLUSIVE_TASK_LOCKED_ERROR.to_string())?;
-    let _ = fs2::FileExt::unlock(&file);
-    Ok(())
+    Err(format!(
+        "Codex shared runtime is unavailable at {url}. Open Agent settings and start the shared runtime, then retry."
+    ))
 }
 
 pub fn list_codex_tasks() -> Result<Vec<CodexTaskSummary>, String> {
@@ -531,12 +944,54 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_lock_error_explains_idle_and_shared_modes() {
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("idle and still open"));
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("archive the task and then restore it"));
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Return to Buzz and Retry"));
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("Stop the Buzz agent"));
-        assert!(EXCLUSIVE_TASK_LOCKED_ERROR.contains("same shared app-server"));
+    fn shared_runtime_has_one_computer_level_default() {
+        assert_eq!(
+            normalize_app_server_url(Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL)).unwrap(),
+            Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string())
+        );
+        assert_eq!(
+            resolve_codex_task_app_server_url(None).unwrap(),
+            DEFAULT_CODEX_SHARED_APP_SERVER_URL
+        );
+        assert!(resolve_codex_task_app_server_url(Some("ws://127.0.0.1:59999")).is_err());
+    }
+
+    #[test]
+    fn stale_agent_bindings_are_pruned_before_rebinding() {
+        let binding = CodexTaskBinding {
+            task_id: "019febeb-ae12-71d3-88c4-25c04a461042".to_string(),
+            thread_name: "Deleted task agent".to_string(),
+            workspace: r"C:\repo".to_string(),
+            updated_at: "2026-08-11T00:00:00Z".to_string(),
+            model: None,
+            app_server_url: Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string()),
+        };
+        let mut store = CodexTaskBindingStore {
+            version: STORE_VERSION,
+            bindings: HashMap::from([
+                ("active-agent".to_string(), binding.clone()),
+                ("deleted-agent".to_string(), binding),
+            ]),
+        };
+        let active = HashSet::from(["active-agent".to_string()]);
+
+        assert!(prune_stale_codex_task_bindings(&mut store, &active));
+        assert!(store.bindings.contains_key("active-agent"));
+        assert!(!store.bindings.contains_key("deleted-agent"));
+        assert!(!prune_stale_codex_task_bindings(&mut store, &active));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_runtime_requires_matching_code_mode_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex.exe");
+        fs::write(&codex, []).unwrap();
+
+        assert!(!is_usable_codex_app_server_executable(&codex));
+
+        fs::write(dir.path().join("codex-code-mode-host.exe"), []).unwrap();
+        assert!(is_usable_codex_app_server_executable(&codex));
     }
 
     #[test]
@@ -577,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_task_keeps_inherited_codex_path() {
+    fn ordinary_agent_keeps_inherited_codex_path() {
         let mut command = Command::new("buzz-acp");
 
         configure_shared_app_server(&mut command, None, Path::new(r"C:\Buzz\buzz-acp.exe"));

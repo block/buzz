@@ -303,6 +303,12 @@ fn reconcile_inbound_tombstone(
             let mut agents = load_managed_agents(app)?;
             agents.retain(|record| record.pubkey != target_d_tag);
             save_managed_agents(app, &agents)?;
+            if let Err(error) = crate::managed_agents::remove_codex_task_binding(app, &target_d_tag)
+            {
+                eprintln!(
+                    "buzz-desktop: inbound deletion: failed to remove Codex task binding for {target_d_tag}: {error}"
+                );
+            }
         }
         _ => unreachable!("target kind gated above"),
     }

@@ -7,6 +7,7 @@ import {
   useCodexTasksQuery,
   useCreateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { useCodexSharedRuntimeQuery } from "@/features/agents/codexSharedRuntimeHooks";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import type { CodexTaskSummary } from "@/shared/api/codexTaskTypes";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -19,6 +20,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { CodexSharedRuntimePanel } from "./CodexSharedRuntimePanel";
 
 function taskLabel(task: CodexTaskSummary) {
   return task.threadName.trim() || `Codex task ${task.id.slice(0, 8)}`;
@@ -33,7 +35,11 @@ export function CodexTaskAgentDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
-  const tasksQuery = useCodexTasksQuery({ enabled: open });
+  const sharedRuntimeQuery = useCodexSharedRuntimeQuery({ enabled: open });
+  const sharedRuntimeReady = sharedRuntimeQuery.data?.state === "ready";
+  const tasksQuery = useCodexTasksQuery({
+    enabled: open && sharedRuntimeReady,
+  });
   const runtimesQuery = useAvailableAcpRuntimes({ enabled: open });
   const channelsQuery = useChannelsQuery({ enabled: open });
   const createMutation = useCreateManagedAgentMutation();
@@ -42,12 +48,6 @@ export function CodexTaskAgentDialog({
   const [taskId, setTaskId] = React.useState("");
   const [name, setName] = React.useState("");
   const [channelId, setChannelId] = React.useState("");
-  const [transport, setTransport] = React.useState<"exclusive" | "shared">(
-    "exclusive",
-  );
-  const [appServerUrl, setAppServerUrl] = React.useState(
-    "ws://127.0.0.1:51919",
-  );
 
   const tasks = tasksQuery.data ?? [];
   const filteredTasks = React.useMemo(() => {
@@ -101,8 +101,6 @@ export function CodexTaskAgentDialog({
     setTaskId("");
     setName("");
     setChannelId("");
-    setTransport("exclusive");
-    setAppServerUrl("ws://127.0.0.1:51919");
     createMutation.reset();
     attachMutation.reset();
   }
@@ -124,8 +122,7 @@ export function CodexTaskAgentDialog({
       const created = await createMutation.mutateAsync({
         name: name.trim(),
         codexTaskId: selectedTask.id,
-        codexAppServerUrl:
-          transport === "shared" ? appServerUrl.trim() : undefined,
+        codexAppServerUrl: sharedRuntimeQuery.data?.url,
         agentCommand: codexRuntime.command,
         agentArgs: codexRuntime.defaultArgs,
         avatarUrl: codexRuntime.avatarUrl,
@@ -168,17 +165,19 @@ export function CodexTaskAgentDialog({
   }
 
   const error =
-    tasksQuery.error instanceof Error
-      ? tasksQuery.error
-      : runtimesQuery.error instanceof Error
-        ? runtimesQuery.error
-        : channelsQuery.error instanceof Error
-          ? channelsQuery.error
-          : createMutation.error instanceof Error
-            ? createMutation.error
-            : attachMutation.error instanceof Error
-              ? attachMutation.error
-              : null;
+    sharedRuntimeQuery.error instanceof Error
+      ? sharedRuntimeQuery.error
+      : tasksQuery.error instanceof Error
+        ? tasksQuery.error
+        : runtimesQuery.error instanceof Error
+          ? runtimesQuery.error
+          : channelsQuery.error instanceof Error
+            ? channelsQuery.error
+            : createMutation.error instanceof Error
+              ? createMutation.error
+              : attachMutation.error instanceof Error
+                ? attachMutation.error
+                : null;
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
@@ -193,183 +192,169 @@ export function CodexTaskAgentDialog({
           </DialogHeader>
 
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="codex-task-search"
-              >
-                Find task
-              </label>
-              <Input
-                id="codex-task-search"
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search by task name, workspace, or UUID"
-                value={search}
-              />
-            </div>
+            {!sharedRuntimeReady ? (
+              <CodexSharedRuntimePanel enabled={open} />
+            ) : (
+              <>
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm">
+                  Connected through the Codex shared runtime
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {sharedRuntimeQuery.data?.url}
+                  </span>
+                </div>
 
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="codex-channel-id">
-                Channel (optional)
-              </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={channelsQuery.isLoading || attachMutation.isPending}
-                id="codex-channel-id"
-                onChange={(event) => setChannelId(event.target.value)}
-                value={channelId}
-              >
-                <option value="">Do not add to a channel yet</option>
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    #{channel.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="codex-task-id">
-                Codex task
-              </label>
-              <div
-                aria-label="Codex task"
-                className="max-h-64 overflow-y-auto rounded-md border border-input bg-background shadow-xs"
-                id="codex-task-id"
-                role="listbox"
-              >
-                {filteredTasks.map((task) => {
-                  const selected = task.id === taskId;
-                  return (
-                    <button
-                      aria-selected={selected}
-                      className={`flex w-full items-start gap-3 border-b border-border/50 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50 ${
-                        selected ? "bg-primary/10" : ""
-                      }`}
-                      disabled={
-                        tasksQuery.isLoading || createMutation.isPending
-                      }
-                      key={task.id}
-                      onClick={() => selectTask(task.id)}
-                      role="option"
-                      type="button"
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium">
-                            {taskLabel(task)}
-                          </span>
-                          {task.archived ? (
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              Archived
-                            </span>
-                          ) : null}
-                        </span>
-                        <span
-                          className="mt-0.5 block truncate text-xs text-muted-foreground"
-                          title={task.workspace}
-                        >
-                          {task.workspace}
-                        </span>
-                        {task.model ? (
-                          <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
-                            {task.model}
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="shrink-0 pt-0.5 font-mono text-xs text-muted-foreground">
-                        {task.id.slice(0, 8)}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              {tasksQuery.isLoading ? (
-                <p className="text-xs text-muted-foreground">
-                  Loading Codex tasks...
-                </p>
-              ) : filteredTasks.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  No matching tasks.
-                </p>
-              ) : null}
-            </div>
-
-            {selectedTask ? (
-              <div className="space-y-1 text-xs text-muted-foreground">
-                <p className="break-all">{selectedTask.workspace}</p>
-                <p className="font-mono">{selectedTask.id}</p>
-                <p>Codex model: {selectedTask.model ?? "Not recorded"}</p>
-              </div>
-            ) : null}
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="codex-agent-name">
-                Agent name
-              </label>
-              <Input
-                id="codex-agent-name"
-                maxLength={80}
-                onChange={(event) => setName(event.target.value)}
-                value={name}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <span className="text-sm font-medium">Codex connection</span>
-              <div
-                aria-label="Codex connection"
-                className="grid h-9 grid-cols-2 overflow-hidden rounded-md border border-input bg-background p-0.5"
-                role="radiogroup"
-              >
-                {(["exclusive", "shared"] as const).map((option) => (
-                  <button
-                    aria-checked={transport === option}
-                    className={`h-8 px-3 text-sm transition-colors ${
-                      transport === option
-                        ? "bg-muted font-medium text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                    key={option}
-                    onClick={() => setTransport(option)}
-                    role="radio"
-                    type="button"
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="codex-task-search"
                   >
-                    {option === "exclusive"
-                      ? "Exclusive ACP"
-                      : "Shared app-server"}
-                  </button>
-                ))}
-              </div>
-              {transport === "shared" ? (
-                <Input
-                  aria-label="Codex app-server URL"
-                  onChange={(event) => setAppServerUrl(event.target.value)}
-                  placeholder="ws://127.0.0.1:51919"
-                  spellCheck={false}
-                  value={appServerUrl}
-                />
-              ) : null}
-            </div>
+                    Find task
+                  </label>
+                  <Input
+                    id="codex-task-search"
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search by task name, workspace, or UUID"
+                    value={search}
+                  />
+                </div>
 
-            <p className="text-sm leading-6 text-muted-foreground">
-              {transport === "shared"
-                ? "The agent is created offline and joins the existing app-server when started. Codex clients on that same server can keep this task open."
-                : "Binding preserves this Buzz identity without taking the task lock. To hand off from Codex Desktop, archive and restore the task without reopening it, then choose Take over in Buzz. Choose Return to Codex before opening the task locally again."}{" "}
-              Task history and workspace files stay on this computer.
-            </p>
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="codex-channel-id"
+                  >
+                    Channel (optional)
+                  </label>
+                  <select
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+                    disabled={
+                      channelsQuery.isLoading || attachMutation.isPending
+                    }
+                    id="codex-channel-id"
+                    onChange={(event) => setChannelId(event.target.value)}
+                    value={channelId}
+                  >
+                    <option value="">Do not add to a channel yet</option>
+                    {channels.map((channel) => (
+                      <option key={channel.id} value={channel.id}>
+                        #{channel.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-            {!runtimesQuery.isLoading && !codexRuntime ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                The Codex ACP adapter is unavailable. Install or repair Codex in
-                Agent defaults before creating this identity.
-              </p>
-            ) : null}
-            {error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                {error.message}
-              </p>
-            ) : null}
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="codex-task-id"
+                  >
+                    Codex task
+                  </label>
+                  <div
+                    aria-label="Codex task"
+                    className="max-h-64 overflow-y-auto rounded-md border border-input bg-background shadow-xs"
+                    id="codex-task-id"
+                    role="listbox"
+                  >
+                    {filteredTasks.map((task) => {
+                      const selected = task.id === taskId;
+                      return (
+                        <button
+                          aria-selected={selected}
+                          className={`flex w-full items-start gap-3 border-b border-border/50 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/50 ${
+                            selected ? "bg-primary/10" : ""
+                          }`}
+                          disabled={
+                            tasksQuery.isLoading || createMutation.isPending
+                          }
+                          key={task.id}
+                          onClick={() => selectTask(task.id)}
+                          role="option"
+                          type="button"
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center gap-2">
+                              <span className="truncate text-sm font-medium">
+                                {taskLabel(task)}
+                              </span>
+                              {task.archived ? (
+                                <span className="shrink-0 text-xs text-muted-foreground">
+                                  Archived
+                                </span>
+                              ) : null}
+                            </span>
+                            <span
+                              className="mt-0.5 block truncate text-xs text-muted-foreground"
+                              title={task.workspace}
+                            >
+                              {task.workspace}
+                            </span>
+                            {task.model ? (
+                              <span className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">
+                                {task.model}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="shrink-0 pt-0.5 font-mono text-xs text-muted-foreground">
+                            {task.id.slice(0, 8)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {tasksQuery.isLoading ? (
+                    <p className="text-xs text-muted-foreground">
+                      Loading Codex tasks...
+                    </p>
+                  ) : filteredTasks.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      No matching tasks.
+                    </p>
+                  ) : null}
+                </div>
+
+                {selectedTask ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p className="break-all">{selectedTask.workspace}</p>
+                    <p className="font-mono">{selectedTask.id}</p>
+                    <p>Codex model: {selectedTask.model ?? "Not recorded"}</p>
+                  </div>
+                ) : null}
+
+                <div className="space-y-1.5">
+                  <label
+                    className="text-sm font-medium"
+                    htmlFor="codex-agent-name"
+                  >
+                    Agent name
+                  </label>
+                  <Input
+                    id="codex-agent-name"
+                    maxLength={80}
+                    onChange={(event) => setName(event.target.value)}
+                    value={name}
+                  />
+                </div>
+
+                <p className="text-sm leading-6 text-muted-foreground">
+                  The agent is created offline and connects this task to Buzz
+                  through the computer shared runtime. Task history and
+                  workspace files stay on this computer.
+                </p>
+
+                {!runtimesQuery.isLoading && !codexRuntime ? (
+                  <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    The Codex ACP adapter is unavailable. Install or repair
+                    Codex in Agent defaults before creating this identity.
+                  </p>
+                ) : null}
+                {error ? (
+                  <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {error.message}
+                  </p>
+                ) : null}
+              </>
+            )}
           </div>
 
           <div className="flex shrink-0 justify-end gap-2 border-t border-border/60 px-6 py-4">
@@ -383,10 +368,10 @@ export function CodexTaskAgentDialog({
             </Button>
             <Button
               disabled={
+                !sharedRuntimeReady ||
                 !selectedTask ||
                 !codexRuntime ||
                 !name.trim() ||
-                (transport === "shared" && !appServerUrl.trim()) ||
                 createMutation.isPending ||
                 attachMutation.isPending
               }

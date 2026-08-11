@@ -1,5 +1,31 @@
 use crate::managed_agents::discovery::{clear_resolve_cache, resolve_command};
 
+#[test]
+fn release_command_search_prefers_installed_sidecars() {
+    use std::path::Path;
+
+    let workspace = Path::new("workspace");
+    let current_dir = Path::new("current");
+    let executable_parent = Path::new("installed");
+
+    let dirs = super::super::command_search_dirs_for(
+        workspace,
+        Some(current_dir),
+        Some(executable_parent),
+        false,
+    );
+
+    assert_eq!(
+        dirs.first().map(|path| path.as_path()),
+        Some(executable_parent)
+    );
+    assert!(
+        dirs.iter().position(|path| path == executable_parent)
+            < dirs.iter().position(|path| path.starts_with(workspace)),
+        "release builds must prefer the installed sidecar over stale workspace artifacts: {dirs:?}"
+    );
+}
+
 /// The legacy Goose Windows installer wrote `%USERPROFILE%\goose\goose.exe`,
 /// a directory on no standard PATH. `resolve_command_uncached` finds binaries
 /// outside PATH only by scanning `common_binary_paths()`, so that directory

@@ -83,7 +83,7 @@ test("ordinary local agents still start normally", async () => {
   assert.equal(calledWith, "deadbeef".repeat(8));
 });
 
-test("Codex task agents describe ownership handoff actions", () => {
+test("Codex task agents always use shared-runtime connection actions", () => {
   const binding = {
     taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
     threadName: "Inspect DoE dataset results",
@@ -97,13 +97,13 @@ test("Codex task agents describe ownership handoff actions", () => {
     getManagedAgentPrimaryActionLabel(
       agent({ codexTaskBinding: binding, status: "stopped" }),
     ),
-    "Take over in Buzz",
+    "Connect Buzz",
   );
   assert.equal(
     getManagedAgentPrimaryActionLabel(
       agent({ codexTaskBinding: binding, status: "running" }),
     ),
-    "Return to Codex",
+    "Disconnect Buzz",
   );
 
   const sharedBinding = {
@@ -124,7 +124,7 @@ test("Codex task agents describe ownership handoff actions", () => {
   );
 });
 
-test("returning a Codex task preserves its identity and binding", async () => {
+test("legacy Codex task bindings use shared-runtime disconnect copy", async () => {
   const taskAgent = agent({
     codexTaskBinding: {
       taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
@@ -148,11 +148,11 @@ test("returning a Codex task preserves its identity and binding", async () => {
   });
 
   assert.equal(stoppedPubkey, taskAgent.pubkey);
-  assert.match(result.noticeMessage, /Returned Inspect DoE dataset results/);
-  assert.match(result.noticeMessage, /binding are preserved/);
+  assert.match(result.noticeMessage, /Disconnected Buzz/);
+  assert.match(result.noticeMessage, /Other clients connected/);
 });
 
-test("disconnecting shared mode leaves task ownership with the app-server", async () => {
+test("disconnecting Buzz leaves other shared-runtime clients connected", async () => {
   const taskAgent = agent({
     codexTaskBinding: {
       taskId: "019febeb-ae12-71d3-88c4-25c04a461042",
@@ -173,10 +173,7 @@ test("disconnecting shared mode leaves task ownership with the app-server", asyn
   });
 
   assert.match(result.noticeMessage, /Disconnected Buzz/);
-  assert.match(
-    result.noticeMessage,
-    /shared app-server remains the task owner/,
-  );
+  assert.match(result.noticeMessage, /Other clients connected/);
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

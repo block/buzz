@@ -1,4 +1,7 @@
-import type { CodexTaskSummary } from "@/shared/api/codexTaskTypes";
+import type {
+  CodexSharedRuntimeStatus,
+  CodexTaskSummary,
+} from "@/shared/api/codexTaskTypes";
 import { invokeTauri } from "@/shared/api/tauri";
 
 type RawCodexTaskSummary = {
@@ -20,4 +23,18 @@ export async function listCodexTasks(): Promise<CodexTaskSummary[]> {
     archived: task.archived,
     model: task.model ?? null,
   }));
+}
+
+export function getCodexSharedRuntimeStatus() {
+  return invokeTauri<CodexSharedRuntimeStatus>(
+    "get_codex_shared_runtime_status",
+  );
+}
+
+export function enableCodexSharedRuntime() {
+  return invokeTauri<CodexSharedRuntimeStatus>("enable_codex_shared_runtime");
+}
+
+export function launchCodexDesktopShared() {
+  return invokeTauri<void>("launch_codex_desktop_shared");
 }

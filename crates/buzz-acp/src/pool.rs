@@ -485,7 +485,7 @@ impl OwnedAgent {
         let session_id = loaded.session_id;
         self.state.identity_session = Some(session_id.clone());
         self.state.identity_handoff_pending = true;
-        self.state.identity_standing_context_sent = false;
+        self.state.identity_standing_context_sent = loaded.loaded_buzz_standing_context;
         self.state.identity_turn_count = 0;
         tracing::info!(
             target: "pool::session",
@@ -1243,6 +1243,7 @@ struct LoadedSession {
     session_id: String,
     workspace: Option<String>,
     source_session_id: Option<String>,
+    loaded_buzz_standing_context: bool,
 }
 
 async fn apply_loaded_session_settings(
@@ -1319,6 +1320,7 @@ async fn restore_identity_session(
         session_id: response.session_id,
         workspace: Some(binding.workspace.clone()),
         source_session_id: None,
+        loaded_buzz_standing_context: response.loaded_buzz_standing_context,
     })
 }
 
@@ -1378,6 +1380,7 @@ async fn try_restore_persisted_session(
                 session_id: resp.session_id,
                 workspace: stored.workspace,
                 source_session_id,
+                loaded_buzz_standing_context: resp.loaded_buzz_standing_context,
             }))
         }
         Err(e) if !is_fork && load_failure_is_definitive(&e) => {
@@ -2238,7 +2241,7 @@ pub async fn run_prompt_task(
                 );
                 agent.state.identity_session = Some(sid.clone());
                 agent.state.identity_handoff_pending = false;
-                agent.state.identity_standing_context_sent = false;
+                agent.state.identity_standing_context_sent = loaded.loaded_buzz_standing_context;
                 agent.state.sessions.insert(*cid, sid.clone());
                 if let Some((pending_cid, section)) = pending_canvas.take() {
                     agent.state.canvas_sections.insert(pending_cid, section);
@@ -2279,6 +2282,14 @@ pub async fn run_prompt_task(
                     "restored session {sid} for channel {cid}"
                 );
                 agent.state.sessions.insert(*cid, sid.clone());
+                if loaded.loaded_buzz_standing_context {
+                    agent
+                        .state
+                        .deliveries
+                        .entry(*cid)
+                        .or_default()
+                        .standing_context_sent = true;
+                }
                 if let Some((pending_cid, section)) = pending_canvas.take() {
                     agent.state.canvas_sections.insert(pending_cid, section);
                 }
@@ -2661,6 +2672,7 @@ pub async fn run_prompt_task(
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
                 task_handoff: task_handoff.as_deref(),
+                task_bound_auto_delivery: ctx.codex_task_binding.is_some(),
             },
         )
     } else {
@@ -2952,6 +2964,10 @@ pub async fn run_prompt_task(
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
+
+            let final_answer = agent.acp.take_turn_final_answer();
+            publish_task_bound_final_answer(&ctx, &source, batch.as_ref(), final_answer.as_deref())
+                .await;
 
             let should_rotate = matches!(
                 stop_reason,
@@ -4794,6 +4810,74 @@ pub(crate) async fn post_failure_notice(
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+/// Publish the final ACP answer for a task-bound Codex identity.
+///
+/// The harness already owns this managed agent's signing key. Keeping delivery
+/// here avoids placing a per-agent private key in the long-lived shared Codex
+/// app-server while preserving the same flat reply anchoring used by Buzz.
+async fn publish_task_bound_final_answer(
+    ctx: &PromptContext,
+    source: &PromptSource,
+    batch: Option<&FlushBatch>,
+    content: Option<&str>,
+) {
+    if ctx.codex_task_binding.is_none() {
+        return;
+    }
+    let (PromptSource::Channel(channel_id), Some(batch), Some(content)) = (
+        source,
+        batch,
+        content.map(str::trim).filter(|text| !text.is_empty()),
+    ) else {
+        return;
+    };
+    let Some(trigger) = batch.events.last().map(|event| &event.event) else {
+        return;
+    };
+
+    let thread_tags = crate::queue::parse_thread_tags(trigger);
+    let root_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|id| nostr::EventId::from_hex(id).ok())
+        .unwrap_or(trigger.id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: root_id,
+    };
+    let builder =
+        match buzz_sdk::build_message(*channel_id, content, Some(&thread_ref), &[], false, &[]) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(channel = %channel_id, "task-bound reply build failed: {error}");
+                return;
+            }
+        };
+    let event = match builder.sign_with_keys(&ctx.rest_client.keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "task-bound reply signing failed: {error}");
+            return;
+        }
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        ctx.rest_client.submit_event(&event),
+    )
+    .await
+    {
+        Ok(Ok(_)) => tracing::info!(
+            channel = %channel_id,
+            event_id = %event.id,
+            "task-bound final answer published"
+        ),
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "task-bound reply failed: {error}")
+        }
+        Err(_) => tracing::warn!(channel = %channel_id, "task-bound reply timed out"),
     }
 }
 

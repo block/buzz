@@ -1392,6 +1392,10 @@ pub struct FormatPromptArgs<'a> {
     /// This must ride in the user turn for every protocol version because
     /// `session/load` cannot retrofit a new system prompt.
     pub task_handoff: Option<&'a str>,
+    /// The harness signs and publishes the final ACP answer for a task-bound
+    /// shared-runtime agent. This compact reminder prevents duplicate CLI
+    /// sends and keeps per-agent credentials out of the shared Codex process.
+    pub task_bound_auto_delivery: bool,
     /// Set once this session's standing context has already been delivered —
     /// see [`StandingContext`]. Only meaningful for legacy agents; modern
     /// agents are gated by `has_system_prompt_support` regardless.
@@ -1522,6 +1526,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // cannot be delivered through session/new even for modern agents.
     if let Some(handoff) = args.task_handoff {
         sections.push(handoff.to_string());
+    }
+
+    if args.task_bound_auto_delivery {
+        sections.push(
+            "[Buzz Delivery]\nReturn the user-visible reply as your final answer. The Buzz harness signs and publishes that final answer to this conversation. Do not call `buzz messages send` for this reply."
+                .to_string(),
+        );
     }
 
     // Context hints (with a human-aware reply anchor).
@@ -4775,6 +4786,38 @@ mod tests {
             .expect("room context section");
         assert_eq!(sections[handoff_index], handoff);
         assert!(handoff_index < context_index);
+    }
+
+    #[test]
+    fn test_task_bound_auto_delivery_precedes_room_context() {
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event: make_event("reply through the bridge"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let sections = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                task_bound_auto_delivery: true,
+                ..Default::default()
+            },
+        );
+
+        let delivery_index = sections
+            .iter()
+            .position(|section| section.starts_with("[Buzz Delivery]"))
+            .expect("Buzz delivery section");
+        let context_index = sections
+            .iter()
+            .position(|section| section.starts_with("[Context]"))
+            .expect("room context section");
+        assert!(sections[delivery_index].contains("Do not call `buzz messages send`"));
+        assert!(delivery_index < context_index);
     }
 
     #[test]

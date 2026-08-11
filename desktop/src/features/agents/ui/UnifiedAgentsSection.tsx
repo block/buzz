@@ -275,6 +275,7 @@ function AgentPersonaCard({
       avatar={
         agent ? (
           <AgentRuntimeAvatarControl
+            actionKind={agent.codexTaskBinding ? "connect" : "start"}
             activeTestId={`agent-runtime-active-${agent.pubkey}`}
             avatarUrl={avatarUrl}
             errorLabel={friendlyError}
@@ -366,6 +367,7 @@ function StandaloneAgentCard({
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl
+          actionKind={agent.codexTaskBinding ? "connect" : "start"}
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
           avatarUrl={profileQuery.data?.avatarUrl}
           errorLabel={friendlyError}

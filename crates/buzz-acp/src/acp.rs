@@ -132,6 +132,19 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+fn codex_final_answer_text(update: &serde_json::Value) -> Option<&str> {
+    (update
+        .pointer("/_meta/codex/phase")
+        .and_then(|v| v.as_str())
+        == Some("final_answer"))
+    .then(|| update.pointer("/content/text").and_then(|v| v.as_str()))
+    .flatten()
+}
+
+fn contains_buzz_standing_context(text: &str) -> bool {
+    text.contains("[Base]") && text.contains("buzz-acp harness routes channel events")
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -215,6 +228,16 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Final-answer text emitted by codex-acp during the current prompt.
+    ///
+    /// Task-bound shared-runtime agents hand this text back to the harness for
+    /// signed Buzz delivery, so the shared Codex process never needs an
+    /// identity-specific private key.
+    turn_final_answer: String,
+    /// True only while `session/load` history notifications are being drained.
+    session_load_in_progress: bool,
+    /// Set when that replay contains Buzz's standing-context marker.
+    session_load_saw_buzz_standing_context: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -556,6 +579,9 @@ impl AcpClient {
             image_prompt_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_final_answer: String::new(),
+            session_load_in_progress: false,
+            session_load_saw_buzz_standing_context: false,
         })
     }
 
@@ -677,6 +703,7 @@ impl AcpClient {
         Ok(SessionNewResponse {
             session_id,
             raw: result,
+            loaded_buzz_standing_context: false,
         })
     }
 
@@ -715,9 +742,14 @@ impl AcpClient {
             "sessionId": session_id,
             "mcpServers": mcp_servers,
         });
+        self.session_load_in_progress = true;
+        self.session_load_saw_buzz_standing_context = false;
         let result = self
             .send_request_with_session_update_observer("session/load", params, false)
-            .await?;
+            .await;
+        self.session_load_in_progress = false;
+        let result = result?;
+        let loaded_buzz_standing_context = self.session_load_saw_buzz_standing_context;
         // Spec-compliant agents may omit sessionId on load (it is implied).
         // Prefer the request id so callers always have a concrete binding.
         let resolved_id = result
@@ -729,6 +761,7 @@ impl AcpClient {
         Ok(SessionNewResponse {
             session_id: resolved_id,
             raw: result,
+            loaded_buzz_standing_context,
         })
     }
 
@@ -757,6 +790,7 @@ impl AcpClient {
         Ok(SessionNewResponse {
             session_id: forked_id,
             raw: result,
+            loaded_buzz_standing_context: false,
         })
     }
 
@@ -790,6 +824,11 @@ impl AcpClient {
 
     pub fn image_prompt_supported(&self) -> bool {
         self.image_prompt_supported
+    }
+
+    pub fn take_turn_final_answer(&mut self) -> Option<String> {
+        let answer = std::mem::take(&mut self.turn_final_answer);
+        (!answer.trim().is_empty()).then_some(answer)
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -892,6 +931,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.turn_final_answer.clear();
         let params = build_prompt_content_params(session_id, content);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1885,6 +1925,19 @@ impl AcpClient {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
+                if let Some(text) = codex_final_answer_text(update) {
+                    self.turn_final_answer.push_str(text);
+                }
+                false
+            }
+            "user_message_chunk" => {
+                if self.session_load_in_progress
+                    && update["content"]["text"]
+                        .as_str()
+                        .is_some_and(contains_buzz_standing_context)
+                {
+                    self.session_load_saw_buzz_standing_context = true;
+                }
                 false
             }
             "tool_call" => {
@@ -2213,6 +2266,9 @@ pub struct SessionNewResponse {
     pub session_id: String,
     /// The full `result` value from the JSON-RPC response.
     pub raw: serde_json::Value,
+    /// A `session/load` replay contained Buzz's standing-context marker.
+    /// False for newly created and forked sessions.
+    pub loaded_buzz_standing_context: bool,
 }
 
 /// How to deliver a system prompt on `session/new`.
@@ -2415,6 +2471,39 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captures_only_codex_final_answer_messages() {
+        let final_update = serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "published answer"},
+            "_meta": {"codex": {"phase": "final_answer"}}
+        });
+        let commentary_update = serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "working on it"},
+            "_meta": {"codex": {"phase": "commentary"}}
+        });
+
+        assert_eq!(
+            codex_final_answer_text(&final_update),
+            Some("published answer")
+        );
+        assert_eq!(codex_final_answer_text(&commentary_update), None);
+    }
+
+    #[test]
+    fn detects_buzz_standing_context_in_loaded_history() {
+        assert!(contains_buzz_standing_context(
+            "[Base]\nYou are operating inside Buzz. The buzz-acp harness routes channel events to your session."
+        ));
+        assert!(!contains_buzz_standing_context(
+            "[Task Handoff]\nContinue this local task."
+        ));
+        assert!(!contains_buzz_standing_context(
+            "The buzz-acp harness routes channel events to your session."
+        ));
+    }
 
     #[test]
     fn fork_capability_requires_advertised_session_fork() {
@@ -3431,7 +3520,7 @@ mod tests {
     async fn session_load_suppresses_replayed_updates_from_observer_only() {
         let script = r#"
             read -t 2 _load
-            echo '{"jsonrpc":"2.0","method":"session/update","params":{"marker":"replayed"}}'
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"marker":"replayed","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"[Base] buzz-acp harness routes channel events to your session"}}}}'
             echo '{"jsonrpc":"2.0","id":0,"result":{}}'
             read -t 2 _next
             echo '{"jsonrpc":"2.0","method":"session/update","params":{"marker":"live"}}'
@@ -3447,6 +3536,7 @@ mod tests {
             .await
             .expect("session/load should succeed");
         assert_eq!(loaded.session_id, "sess-existing");
+        assert!(loaded.loaded_buzz_standing_context);
 
         let next = client
             .send_request("test/echo", serde_json::json!({}))

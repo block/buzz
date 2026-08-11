@@ -493,23 +493,46 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
     }
 }
 
-fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
-    if let Ok(current_dir) = std::env::current_dir() {
-        dirs.extend(profile_target_dirs(&current_dir));
+fn command_search_dirs_for(
+    workspace_root: &Path,
+    current_dir: Option<&Path>,
+    executable_parent: Option<&Path>,
+    prefer_workspace_profiles: bool,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if !prefer_workspace_profiles {
+        dirs.extend(executable_parent.map(Path::to_path_buf));
     }
 
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
+    dirs.extend(profile_target_dirs(workspace_root));
+    if let Some(current_dir) = current_dir {
+        dirs.extend(profile_target_dirs(current_dir));
+    }
+
+    if prefer_workspace_profiles {
+        dirs.extend(executable_parent.map(Path::to_path_buf));
+    }
+
     dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
         if !unique.contains(&dir) {
             unique.push(dir);
         }
         unique
     })
+}
+
+fn command_search_dirs() -> Vec<PathBuf> {
+    let current_dir = std::env::current_dir().ok();
+    let executable_parent = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+
+    command_search_dirs_for(
+        &workspace_root_dir(),
+        current_dir.as_deref(),
+        executable_parent.as_deref(),
+        cfg!(debug_assertions),
+    )
 }
 
 fn is_executable_file(path: &Path) -> bool {

@@ -234,6 +234,11 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             // Side effects — strictly after records leave disk.
             for pk in &cascade {
                 state.clear_agent_session_caches(pk);
+                if let Err(error) = crate::managed_agents::remove_codex_task_binding(&app, pk) {
+                    eprintln!(
+                        "buzz-desktop: delete_persona: failed to remove Codex task binding for {pk}: {error}"
+                    );
+                }
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);

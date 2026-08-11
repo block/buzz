@@ -41,12 +41,7 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   }
 
   if (agent.codexTaskBinding) {
-    if (agent.codexTaskBinding.appServerUrl) {
-      return isManagedAgentActive(agent) ? "Disconnect Buzz" : "Connect Buzz";
-    }
-    return isManagedAgentActive(agent)
-      ? "Return to Codex"
-      : "Take over in Buzz";
+    return isManagedAgentActive(agent) ? "Disconnect Buzz" : "Connect Buzz";
   }
 
   if (isManagedAgentActive(agent)) {
@@ -147,15 +142,11 @@ export async function stopManagedAgentWithRules({
   }
 
   await stopManagedAgent(agent.pubkey);
-  return agent.codexTaskBinding?.appServerUrl
+  return agent.codexTaskBinding
     ? {
-        noticeMessage: `Disconnected Buzz from ${agent.codexTaskBinding.threadName}. The shared app-server remains the task owner, so other connected Codex clients can continue.`,
+        noticeMessage: `Disconnected Buzz from ${agent.codexTaskBinding.threadName}. Other clients connected to the shared Codex runtime can continue.`,
       }
-    : agent.codexTaskBinding
-      ? {
-          noticeMessage: `Returned ${agent.codexTaskBinding.threadName} to Codex Desktop. Its Buzz identity and task binding are preserved.`,
-        }
-      : {};
+    : {};
 }
 
 export async function deleteManagedAgentWithRules({

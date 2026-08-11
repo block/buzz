@@ -1337,7 +1337,13 @@ pub async fn delete_managed_agent(
                 return Err(format!("agent {pubkey} not found"));
             }
             save_managed_agents(&app, &records)?;
-            crate::managed_agents::delete_codex_task_identity_state(&app, &pubkey)?;
+            if let Err(error) =
+                crate::managed_agents::delete_codex_task_identity_state(&app, &pubkey)
+            {
+                eprintln!(
+                    "buzz-desktop: failed to delete Codex task identity state for {pubkey}: {error}"
+                );
+            }
             // Tombstone-after-validation: only reached past the deployed-remote
             // guard above and a confirmed removal — never orphan a live remote
             // deployment's relay record. Inside the lock, before the block closes

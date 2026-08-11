@@ -4033,6 +4033,17 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_keeps_buzz_credentials_in_the_agent_mcp() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("`buzz-dev-mcp` MCP server's `shell` tool"));
+        assert!(prompt.contains("Never run `buzz` through Codex's native `exec_command`"));
+        assert!(prompt.contains("per-session MCP server"));
+        assert!(prompt.contains("Do not search the workspace"));
+        assert!(prompt.contains("unless the current prompt contains `[Buzz Delivery]`"));
+        assert!(prompt.contains("let the harness publish it"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));

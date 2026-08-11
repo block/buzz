@@ -41,8 +41,8 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
-    // Local Codex task ownership is derived from the Desktop-only binding
-    // store. It must never be redirected through persona or agent env input.
+    // Local Codex task identity comes from the Desktop-only binding store. It
+    // must never be redirected through persona or agent environment input.
     "BUZZ_ACP_CODEX_TASK_ID",
     "BUZZ_ACP_CODEX_TASK_WORKSPACE",
     // Control-plane parallelism: the Desktop resolves the effective

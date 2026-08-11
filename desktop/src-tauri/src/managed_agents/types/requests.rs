@@ -136,7 +136,8 @@ pub struct CreateManagedAgentRequest {
     /// cannot supply an arbitrary workspace path.
     #[serde(default)]
     pub codex_task_id: Option<String>,
-    /// Optional shared Codex app-server WebSocket used by a task-bound agent.
+    /// Legacy transport field retained for older clients. Task-bound agents
+    /// always use the computer-level Codex shared runtime.
     #[serde(default)]
     pub codex_app_server_url: Option<String>,
     #[serde(default)]

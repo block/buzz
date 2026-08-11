@@ -376,7 +376,7 @@ export function buildOwnerFields({
     fields.push({
       copyValue: managedAgent.codexTaskBinding.appServerUrl ?? undefined,
       displayValue:
-        managedAgent.codexTaskBinding.appServerUrl ?? "Exclusive ACP process",
+        managedAgent.codexTaskBinding.appServerUrl ?? "Codex shared runtime",
       icon: Server,
       label: "Codex connection",
       testId: "user-profile-codex-connection",

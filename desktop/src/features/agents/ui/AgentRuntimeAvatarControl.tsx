@@ -12,6 +12,7 @@ import { Spinner } from "@/shared/ui/spinner";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
 type AgentRuntimeAvatarControlProps = {
+  actionKind?: "connect" | "start";
   activeTestId: string;
   avatarUrl?: string | null;
   errorLabel?: string | null;
@@ -40,6 +41,7 @@ const AGENT_AVATAR_SIZE = TAILWIND_SPACING["24"];
 const ACTION_BADGE_SIZE = TAILWIND_SPACING["11"];
 const ACTION_BUTTON_HEIGHT = 36;
 const START_ACTION_BADGE_WIDTH = 56;
+const CONNECT_ACTION_BADGE_WIDTH = 92;
 const RESTART_ACTION_BADGE_WIDTH = 72;
 const ACTIVE_BADGE_CUTOUT_SIZE = TAILWIND_SPACING["6"];
 const ACTIVE_DOT_SIZE = 18;
@@ -108,6 +110,11 @@ const START_ACTION_BADGE = getActionBadge(
   ACTION_BUTTON_HEIGHT,
   ACTION_BADGE_OFFSET,
 );
+const CONNECT_ACTION_BADGE = getActionBadge(
+  CONNECT_ACTION_BADGE_WIDTH,
+  ACTION_BUTTON_HEIGHT,
+  ACTION_BADGE_OFFSET,
+);
 const RESTART_ACTION_BADGE = getActionBadge(
   RESTART_ACTION_BADGE_WIDTH,
   ACTION_BUTTON_HEIGHT,
@@ -126,6 +133,7 @@ const MASK_TRANSITION = {
 } as const;
 
 export function AgentRuntimeAvatarControl({
+  actionKind = "start",
   activeTestId,
   avatarUrl,
   errorLabel,
@@ -142,14 +150,23 @@ export function AgentRuntimeAvatarControl({
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
   const isRestartAction = requiresRestart || isRestarting;
+  const isConnectAction = actionKind === "connect";
   const actionLabel = isRestarting
     ? "Restarting Agent"
     : isStarting
-      ? "Starting Agent"
+      ? isConnectAction
+        ? "Connecting Buzz"
+        : "Starting Agent"
       : isRestartAction
         ? "Restart Agent"
-        : "Start Agent";
-  const actionText = isRestartAction ? "Restart" : "Start";
+        : isConnectAction
+          ? "Connect Buzz"
+          : "Start Agent";
+  const actionText = isRestartAction
+    ? "Restart"
+    : isConnectAction
+      ? "Connect Buzz"
+      : "Start";
   const isPending = isStarting || isRestarting;
   const showRunningDot = isActive && !isRestartAction;
   const hasError = !isActive && !isPending && Boolean(errorLabel);
@@ -157,7 +174,9 @@ export function AgentRuntimeAvatarControl({
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
   const actionBadge = isRestartAction
     ? RESTART_ACTION_BADGE
-    : START_ACTION_BADGE;
+    : isConnectAction
+      ? CONNECT_ACTION_BADGE
+      : START_ACTION_BADGE;
   const badge = showRunningDot
     ? ACTIVE_BADGE
     : hasError
