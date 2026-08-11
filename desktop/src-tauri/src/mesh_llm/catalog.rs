@@ -60,10 +60,13 @@ pub enum ModelFit {
     Tight,
     Tradeoff,
     TooLarge,
+    Unknown,
 }
 
 fn fit_code(model_gb: f64, vram_gb: f64) -> ModelFit {
-    if model_gb <= vram_gb * 0.6 {
+    if vram_gb <= 0.0 {
+        ModelFit::Unknown
+    } else if model_gb <= vram_gb * 0.6 {
         ModelFit::Comfortable
     } else if model_gb <= vram_gb * 0.9 {
         ModelFit::Tight
@@ -80,6 +83,7 @@ fn fit_rank(fit: ModelFit) -> u8 {
         ModelFit::Tight => 1,
         ModelFit::Tradeoff => 2,
         ModelFit::TooLarge => 3,
+        ModelFit::Unknown => 4,
     }
 }
 
@@ -148,129 +152,67 @@ fn catalog_hardware() -> CatalogHardware {
     // GPU VRAM. That is useful for runtime placement, but misleading in the
     // picker: a 16 GB card with 32 GB system RAM reads as ~32 GB and receives
     // too-large recommendations. For the catalog, report and rank against
-    // dedicated GPU memory only. These probes also hide child console windows,
-    // avoiding the visible PowerShell/nvidia-smi flashes from the upstream
-    // survey when Settings → Compute opens.
-    if let Some((names, vram_bytes)) = windows_nvidia_smi_gpus() {
-        return CatalogHardware {
-            gpu_name: summarize_gpu_names(&names),
-            vram_bytes,
-        };
-    }
-    let gpus = windows_video_controllers();
-    let names: Vec<String> = gpus.iter().map(|(name, _)| name.clone()).collect();
-    let vram_bytes = gpus.iter().map(|(_, bytes)| *bytes).sum();
-    CatalogHardware {
-        gpu_name: summarize_gpu_names(&names),
-        vram_bytes,
-    }
+    // dedicated GPU memory only.
+    select_catalog_adapter(&dxgi_adapters())
+        .map(|adapter| CatalogHardware {
+            gpu_name: Some(adapter.name.clone()),
+            vram_bytes: adapter.dedicated_vram_bytes,
+        })
+        .unwrap_or(CatalogHardware {
+            gpu_name: None,
+            vram_bytes: 0,
+        })
 }
 
 #[cfg(target_os = "windows")]
-fn windows_command_output(program: &str, args: &[&str]) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new(program)
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DxgiAdapterInfo {
+    name: String,
+    dedicated_vram_bytes: u64,
+    software: bool,
 }
 
 #[cfg(target_os = "windows")]
-fn windows_nvidia_smi_gpus() -> Option<(Vec<String>, u64)> {
-    let output = windows_command_output(
-        "nvidia-smi",
-        &[
-            "--query-gpu=name,memory.total",
-            "--format=csv,noheader,nounits",
-        ],
-    )?;
-    parse_nvidia_smi_catalog_output(&output)
+fn select_catalog_adapter(adapters: &[DxgiAdapterInfo]) -> Option<&DxgiAdapterInfo> {
+    adapters
+        .iter()
+        .filter(|adapter| !adapter.software && adapter.dedicated_vram_bytes > 0)
+        // Rank against a single adapter's memory. Summing multiple GPUs would
+        // recommend models that fit in no one adapter unless the runtime can
+        // explicitly shard layers across devices.
+        .max_by_key(|adapter| adapter.dedicated_vram_bytes)
 }
 
 #[cfg(target_os = "windows")]
-fn parse_nvidia_smi_catalog_output(output: &str) -> Option<(Vec<String>, u64)> {
-    let mut names = Vec::new();
-    let mut total = 0_u64;
-    for line in output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let Some((name, mib)) = line.rsplit_once(',') else {
-            continue;
-        };
-        let Ok(mib) = mib.trim().parse::<u64>() else {
-            continue;
-        };
-        if mib == 0 {
-            continue;
-        }
-        names.push(name.trim().to_string());
-        total = total.saturating_add(mib.saturating_mul(1024 * 1024));
-    }
-    (!names.is_empty() && total > 0).then_some((names, total))
-}
+fn dxgi_adapters() -> Vec<DxgiAdapterInfo> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
+    };
 
-#[cfg(target_os = "windows")]
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct WindowsVideoController {
-    name: Option<String>,
-    #[serde(rename = "AdapterRAM")]
-    adapter_ram: Option<serde_json::Value>,
-}
-
-#[cfg(target_os = "windows")]
-fn windows_video_controllers() -> Vec<(String, u64)> {
-    let Some(output) = windows_command_output(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
-        ],
-    ) else {
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
         return Vec::new();
     };
-    parse_windows_video_controller_catalog_json(&output)
+
+    let mut adapters = Vec::new();
+    let mut index = 0;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
+        index += 1;
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+            continue;
+        };
+        adapters.push(DxgiAdapterInfo {
+            name: utf16_description(&desc.Description),
+            dedicated_vram_bytes: desc.DedicatedVideoMemory as u64,
+            software: (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0,
+        });
+    }
+    adapters
 }
 
 #[cfg(target_os = "windows")]
-fn parse_windows_video_controller_catalog_json(output: &str) -> Vec<(String, u64)> {
-    fn ram(value: &serde_json::Value) -> Option<u64> {
-        value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
-    }
-
-    let parse_one = |controller: WindowsVideoController| {
-        let name = controller.name?.trim().to_string();
-        let bytes = ram(&controller.adapter_ram?)?;
-        (bytes > 0 && !name.is_empty()).then_some((name, bytes))
-    };
-
-    if let Ok(controller) = serde_json::from_str::<WindowsVideoController>(output) {
-        return parse_one(controller).into_iter().collect();
-    }
-    serde_json::from_str::<Vec<WindowsVideoController>>(output)
-        .map(|controllers| controllers.into_iter().filter_map(parse_one).collect())
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "windows")]
-fn summarize_gpu_names(names: &[String]) -> Option<String> {
-    match names {
-        [] => None,
-        [one] => Some(one.clone()),
-        _ => Some(format!("{} GPUs", names.len())),
-    }
+fn utf16_description(value: &[u16]) -> String {
+    let len = value.iter().position(|ch| *ch == 0).unwrap_or(value.len());
+    String::from_utf16_lossy(&value[..len]).trim().to_string()
 }
 
 fn installed_names() -> Vec<(String, String)> {
@@ -337,7 +279,8 @@ fn build_catalog(
         });
     }
 
-    let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
+    let recommended =
+        (vram_bytes > 0).then(|| buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
     for entry in &mut entries {
         entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
         // Both curated tiers are always offered: the recommended one for this
@@ -356,7 +299,11 @@ fn build_catalog(
 
     MeshModelCatalog {
         gpu_name,
-        vram_display: format_rated_capacity(vram_bytes),
+        vram_display: if vram_bytes > 0 {
+            format_rated_capacity(vram_bytes)
+        } else {
+            "Unknown".to_string()
+        },
         vram_gb,
         recommended,
         entries,
@@ -386,6 +333,7 @@ mod tests {
         assert_eq!(fit_code(10.0, 12.0), ModelFit::Tight);
         assert_eq!(fit_code(10.0, 10.0), ModelFit::Tradeoff);
         assert_eq!(fit_code(10.0, 8.0), ModelFit::TooLarge);
+        assert_eq!(fit_code(10.0, 0.0), ModelFit::Unknown);
     }
 
     #[test]
@@ -434,27 +382,62 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_catalog_uses_dedicated_gpu_vram_not_system_offload() {
-        let (names, bytes) = parse_nvidia_smi_catalog_output("NVIDIA GeForce RTX 5060 Ti, 16376\n")
-            .expect("nvidia-smi row parses");
-        assert_eq!(names, vec!["NVIDIA GeForce RTX 5060 Ti"]);
-        assert_eq!(bytes, 16_376 * 1024 * 1024);
-        assert_eq!(format_rated_capacity(bytes), "16 GB");
+    fn windows_catalog_uses_max_dedicated_adapter_vram() {
+        let adapters = vec![
+            DxgiAdapterInfo {
+                name: "AMD Radeon RX 7600 XT".to_string(),
+                dedicated_vram_bytes: 16 * 1024 * 1024 * 1024,
+                software: false,
+            },
+            DxgiAdapterInfo {
+                name: "NVIDIA GeForce RTX 4060".to_string(),
+                dedicated_vram_bytes: 8 * 1024 * 1024 * 1024,
+                software: false,
+            },
+        ];
+        let selected = select_catalog_adapter(&adapters).expect("adapter selected");
+        assert_eq!(selected.name, "AMD Radeon RX 7600 XT");
+        // The catalog ranks what fits on one adapter, not pooled multi-GPU VRAM.
+        assert_eq!(selected.dedicated_vram_bytes, 16 * 1024 * 1024 * 1024);
+        assert_eq!(
+            format_rated_capacity(selected.dedicated_vram_bytes),
+            "16 GB"
+        );
+    }
+
+    #[test]
+    fn unknown_vram_does_not_mark_entries_too_large() {
+        let catalog = build_catalog(None, 0, 0.0, &[]);
+        assert_eq!(catalog.vram_display, "Unknown");
+        assert!(catalog.recommended.is_none());
+        assert!(catalog
+            .entries
+            .iter()
+            .all(|entry| entry.fit == ModelFit::Unknown));
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_catalog_parses_cim_video_controller_json() {
-        let controllers = parse_windows_video_controller_catalog_json(
-            r#"[{"Name":"GPU A","AdapterRAM":8589934592},{"Name":"GPU B","AdapterRAM":"4294967296"}]"#,
-        );
-        assert_eq!(
-            controllers,
-            vec![
-                ("GPU A".to_string(), 8_589_934_592),
-                ("GPU B".to_string(), 4_294_967_296)
-            ]
-        );
+    fn windows_catalog_ignores_software_and_zero_vram_adapters() {
+        let adapters = vec![
+            DxgiAdapterInfo {
+                name: "Microsoft Basic Render Driver".to_string(),
+                dedicated_vram_bytes: 32 * 1024 * 1024 * 1024,
+                software: true,
+            },
+            DxgiAdapterInfo {
+                name: "DisplayLink".to_string(),
+                dedicated_vram_bytes: 0,
+                software: false,
+            },
+            DxgiAdapterInfo {
+                name: "AMD Radeon RX 7600 XT".to_string(),
+                dedicated_vram_bytes: 16 * 1024 * 1024 * 1024,
+                software: false,
+            },
+        ];
+        let selected = select_catalog_adapter(&adapters).expect("hardware adapter selected");
+        assert_eq!(selected.name, "AMD Radeon RX 7600 XT");
     }
 
     #[test]

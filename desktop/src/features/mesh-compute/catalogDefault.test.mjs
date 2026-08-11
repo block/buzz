@@ -49,6 +49,13 @@ test("defaultShareModelFromCatalog never picks too large entries", () => {
   );
 });
 
+test("defaultShareModelFromCatalog can pick unknown-fit entries", () => {
+  assert.equal(
+    defaultShareModelFromCatalog([entry("unknown", { fit: "unknown" })]),
+    "unknown",
+  );
+});
+
 test("defaultShareModelFromCatalog returns null when nothing is usable", () => {
   assert.equal(
     defaultShareModelFromCatalog([entry("too-large", { fit: "too_large" })]),

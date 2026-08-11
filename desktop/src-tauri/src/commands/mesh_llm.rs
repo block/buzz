@@ -334,6 +334,12 @@ fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
                     for name in WINDOWS_MESH_RUNTIME_DEP_DLLS {
                         let src = dependency_dir.join(name);
                         let dst = lib_dir.join(name);
+                        // Runtime archives are authoritative for DLLs they ship;
+                        // Buzz's bundle only fills gaps (for example CUDA
+                        // archives that lack MinGW support DLLs). Do not
+                        // replace archive-provided DLLs with runner-local
+                        // MinGW copies, whose version depends on whether the
+                        // bundler bootstrapped via MSYS2 or Chocolatey.
                         if dst.is_file() {
                             append_mesh_debug_log(
                                 app,

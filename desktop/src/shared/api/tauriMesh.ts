@@ -164,7 +164,12 @@ export async function meshInstalledModels(): Promise<MeshModelOption[]> {
   }
 }
 
-export type MeshModelFit = "comfortable" | "tight" | "tradeoff" | "too_large";
+export type MeshModelFit =
+  | "comfortable"
+  | "tight"
+  | "tradeoff"
+  | "too_large"
+  | "unknown";
 
 export type MeshCatalogEntry = {
   /** Catalog name — valid as-is in the model field. */

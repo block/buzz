@@ -593,6 +593,7 @@ const FIT_LABEL: Record<MeshCatalogEntry["fit"], string> = {
   tight: "Tight fit",
   tradeoff: "Trade-off",
   too_large: "Too large",
+  unknown: "Unknown fit",
 };
 
 const FIT_CLASS: Record<MeshCatalogEntry["fit"], string> = {
@@ -600,6 +601,7 @@ const FIT_CLASS: Record<MeshCatalogEntry["fit"], string> = {
   tight: "text-amber-600 dark:text-amber-400",
   tradeoff: "text-orange-600 dark:text-orange-400",
   too_large: "text-destructive",
+  unknown: "text-muted-foreground",
 };
 
 /**

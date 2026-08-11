@@ -124,8 +124,12 @@ jobs:
             ~/.cargo/git
             target
             desktop/src-tauri/target
-            !desktop/src-tauri/target/**/release/bundle
+            !desktop/src-tauri/target/**/release/bundle/**
           key: ${{ steps.rust_cache_key.outputs.key }}
+
+      - name: Remove restored bundle outputs
+        shell: bash
+        run: rm -rf desktop/src-tauri/target/**/release/bundle
 
       - name: Generate non-updating bundle config
         shell: bash
@@ -157,15 +161,18 @@ jobs:
       - name: Locate NSIS installer
         id: artifact
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           BUNDLE_DIR="desktop/src-tauri/target/${TARGET}/release/bundle"
-          EXE=$(find "$BUNDLE_DIR/nsis" -name '*.exe' -type f | head -1)
-          if [[ -z "$EXE" ]]; then
-            echo "::error::No NSIS installer found in $BUNDLE_DIR/nsis"
+          mapfile -t EXES < <(find "$BUNDLE_DIR/nsis" -name "*${VERSION}*.exe" -type f | sort)
+          if [[ ${#EXES[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one NSIS installer for version $VERSION in $BUNDLE_DIR/nsis; found ${#EXES[@]}"
+            find "$BUNDLE_DIR/nsis" -name '*.exe' -type f -print || true
             exit 1
           fi
-          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+          echo "exe=${EXES[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows canary installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -191,7 +198,7 @@ jobs:
             ~/.cargo/git
             target
             desktop/src-tauri/target
-            !desktop/src-tauri/target/**/release/bundle
+            !desktop/src-tauri/target/**/release/bundle/**
           key: ${{ steps.rust_cache_key.outputs.key }}
 
       - name: Save pnpm store cache
