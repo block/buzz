@@ -444,7 +444,7 @@ export function findInboxItemByEventId(
   );
 }
 
-function formatInboxTimestamp(unixSeconds: number) {
+export function formatInboxTimestamp(unixSeconds: number) {
   const date = new Date(unixSeconds * 1_000);
   const now = new Date();
   const dayDiff = diffInDays(now, date);

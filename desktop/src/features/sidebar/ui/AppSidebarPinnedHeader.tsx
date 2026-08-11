@@ -1,5 +1,6 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Inbox, Target, Zap } from "lucide-react";
 
+import type { AppView } from "@/app/AppShell.helpers";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
 import type { Channel, SearchHit } from "@/shared/api/types";
@@ -11,15 +12,6 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
-
-type SidebarSelectedView =
-  | "home"
-  | "channel"
-  | "messages"
-  | "agents"
-  | "workflows"
-  | "pulse"
-  | "projects";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -39,10 +31,11 @@ type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
   onSelectHome: () => void;
+  onSelectAttention: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
-  selectedView: SidebarSelectedView;
+  selectedView: AppView;
 };
 
 export function AppSidebarPinnedHeader({
@@ -84,6 +77,7 @@ export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
+  onSelectAttention,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -124,6 +118,20 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuBadge>
           ) : null}
         </SidebarMenuItem>
+        <FeatureGate feature="attention">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-attention-view"
+              isActive={selectedView === "attention"}
+              onClick={onSelectAttention}
+              tooltip="Attention"
+              type="button"
+            >
+              <Target className="h-4 w-4" />
+              <SidebarMenuLabel>Attention</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
         <FeatureGate feature="pulse">
           <SidebarMenuItem>
             <SidebarMenuButton
