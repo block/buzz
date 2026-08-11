@@ -1497,6 +1497,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   await page.getByTestId("appearance-mode-light").click();
 
   // Switch to a light theme — verifies dark→light transition
+  await page.getByTestId("theme-style-trigger").click();
   await page.getByTestId("theme-option-github-light").click();
 
   await expect
@@ -1622,6 +1623,92 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
 
   await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-harnesses")).toBeVisible();
-  await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
+  const agentsPage = page.getByTestId("settings-agents");
+  await expect(
+    agentsPage.getByRole("heading", { name: "Agents", exact: true }),
+  ).toBeVisible();
+
+  for (const testId of [
+    "agents-preferences-card",
+    "settings-harnesses",
+    "settings-global-agent-config",
+  ]) {
+    const section = agentsPage.getByTestId(testId);
+    await expect(section).toBeVisible();
+    await expect(section).toHaveCSS("border-radius", "12px");
+    await expect(section).toHaveCSS("border-top-width", "1px");
+  }
+
+  await expect(
+    agentsPage.getByRole("heading", {
+      name: "Agent runtimes",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    agentsPage.getByRole("heading", {
+      name: "Agent defaults",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const runtimeRow = page.getByTestId("doctor-runtime-goose");
+  await expect(runtimeRow).toContainText("Goose");
+  await expect(runtimeRow).toHaveCSS("border-radius", "0px");
+  await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
+
+  const agentsSecondaryColor = await agentsPage
+    .getByText(
+      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
+    )
+    .evaluate((element) => getComputedStyle(element).color);
+  await page.getByTestId("settings-nav-appearance").click();
+  const appearanceSecondaryColor = await page
+    .getByTestId("link-preview-style-trigger")
+    .locator("..")
+    .locator("p")
+    .nth(1)
+    .evaluate((element) => getComputedStyle(element).color);
+  expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
+});
+
+test("settings subtitles share the Appearance secondary color", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+
+  const appearancePanel = page.getByTestId("settings-panel-appearance");
+  const secondaryColor = await appearancePanel
+    .locator("[data-settings-subcopy]")
+    .first()
+    .evaluate((element) => getComputedStyle(element).color);
+
+  for (const section of [
+    "profile",
+    "appearance",
+    "notifications",
+    "voice",
+    "shortcuts",
+    "custom-emoji",
+    "local-archive",
+    "channel-templates",
+    "hosted-communities",
+    "agents",
+    "compute",
+    "experimental",
+    "mobile",
+    "updates",
+  ]) {
+    await page.getByTestId(`settings-nav-${section}`).click();
+    const subtitles = page
+      .getByTestId(`settings-panel-${section}`)
+      .locator("[data-settings-subcopy]");
+    await expect(subtitles.first()).toBeVisible();
+    const colors = await subtitles.evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).color),
+    );
+    expect(new Set(colors), `${section} subtitle colors`).toEqual(
+      new Set([secondaryColor]),
+    );
+  }
 });

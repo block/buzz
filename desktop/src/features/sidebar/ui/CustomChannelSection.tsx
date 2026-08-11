@@ -627,10 +627,11 @@ export function CustomChannelSection({
         <DroppableSectionBody sectionId={section.id}>
           <SidebarGroup
             className={cn(
-              "group/sidebar-section select-none",
+              "group/sidebar-section select-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
               isDragging && "opacity-30",
             )}
             data-section-actions-open={actionsMenuOpen || undefined}
+            data-sidebar-drag-state={isDragging ? "dragging" : undefined}
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
