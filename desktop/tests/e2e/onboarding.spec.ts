@@ -2019,7 +2019,7 @@ test("connected first-community profile keeps Back bottom-left and balances the 
     borderRadius: "16px",
     fontSize: "14px",
   });
-  await expect(page.getByText("Your username", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Community Nostr handle")).toBeVisible();
   await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
     "data-system-color-scheme",
     /^(light|dark)$/,
@@ -2346,7 +2346,7 @@ test("connected first-community profile keeps Back bottom-left and balances the 
     .toBeNull();
 });
 
-test("name-only community profile save preserves an existing avatar", async ({
+test("community profile save preserves existing avatar and untouched handle", async ({
   page,
 }) => {
   await seedCommunityProfileStage(page, "txn-avatar-preserve-existing");
@@ -2359,6 +2359,10 @@ test("name-only community profile save preserves an existing avatar", async ({
   const existingAvatarUrl =
     "https://mock.relay/media/existing-community-avatar.png";
   await seedCurrentAvatar(page, existingAvatarUrl);
+  await invokeMockCommand(page, "update_profile", { name: "existing-handle" });
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
+  });
   await page.getByTestId("community-profile-name-key").fill("Tyler");
   await page.getByTestId("community-profile-next").click();
 
@@ -2375,11 +2379,73 @@ test("name-only community profile save preserves an existing avatar", async ({
       ),
     )
     .toEqual([undefined]);
+  const profile = await invokeMockCommand<{
+    avatar_url: string | null;
+    display_name: string | null;
+    name: string | null;
+  }>(page, "get_profile");
+  expect(profile.avatar_url).toBe(existingAvatarUrl);
+  expect(profile.display_name).toBe("Tyler");
+  expect(profile.name).toBe("existing-handle");
+});
+
+test("delayed profile seed does not undo an explicit avatar clear", async ({
+  page,
+}) => {
+  await seedCommunityProfileStage(page, "txn-avatar-clear-seed-race");
+  await installMockBridge(
+    page,
+    { profileReadDelayMs: 750 },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  const existingAvatarUrl =
+    "https://mock.relay/media/existing-community-avatar.png";
+  await page.route(`${existingAvatarUrl}*`, async (route) => {
+    await route.fulfill({
+      body: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+  });
+  await seedCurrentAvatar(page, existingAvatarUrl);
+  await expect(page.getByTestId("community-avatar-circle-image")).toBeVisible();
+
+  await page.getByTestId("community-profile-name-key").fill("Tyler");
+  await page.getByTestId("community-profile-next").click();
+  await expect(page.getByTestId("community-team-intro-back")).toBeVisible();
+  await page.getByTestId("community-team-intro-back").click();
+
+  await page.getByTestId("community-avatar-open").click();
+  const avatarUrlInput = page.getByTestId("community-avatar-url");
+  await avatarUrlInput.fill("https://example.com/replacement-avatar.png");
+  await avatarUrlInput.fill("");
+  await page.getByTestId("community-avatar-done").click();
+  await expect(page.getByTestId("community-avatar-empty")).toBeVisible();
+
+  // The second profile read started when Back reopened this stage and resolves
+  // after the explicit clear. It must not restore the relay's older avatar.
+  await page.waitForTimeout(1_000);
+  await expect(page.getByTestId("community-avatar-empty")).toBeVisible();
+
+  await page.getByTestId("community-profile-next").click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(({ command }) => command === "update_profile")
+          .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
+      ),
+    )
+    .toContain("");
   const profile = await invokeMockCommand<{ avatar_url: string | null }>(
     page,
     "get_profile",
   );
-  expect(profile.avatar_url).toBe(existingAvatarUrl);
+  expect(profile.avatar_url).toBeNull();
 });
 
 test("pending avatar stays navigable, clears failures, and retries", async ({

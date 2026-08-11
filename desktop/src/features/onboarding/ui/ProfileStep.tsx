@@ -7,6 +7,7 @@ import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
@@ -200,9 +201,11 @@ export function ProfileStep({
     skipForNow,
     submit,
     updateDisplayName,
+    updateName,
   } = actions;
-  const { isSaving, name, saveRecovery } = state;
+  const { handle, isSaving, name, saveRecovery } = state;
   const displayNameDraft = name.draftValue;
+  const handleDraft = handle.draftValue;
   const hasDisplayNameDraft = displayNameDraft.length > 0;
   const canSubmit = displayNameDraft.trim().length > 0 && !isSaving;
   const inputRef = React.useRef<HTMLInputElement | null>(null);
@@ -273,6 +276,39 @@ export function ProfileStep({
             value={displayNameDraft}
           />
         </div>
+      </label>
+
+      <label
+        className="mt-6 block w-full max-w-[576px] text-left"
+        htmlFor="onboarding-name"
+      >
+        <span className="text-sm font-medium text-foreground">
+          Nostr handle{" "}
+          <span className="font-normal text-muted-foreground">(optional)</span>
+        </span>
+        <p className="mt-1 text-sm text-muted-foreground">
+          A short name for your Nostr profile. It does not need to be unique.
+        </p>
+        <Input
+          aria-label="Nostr handle"
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          className="mt-3"
+          data-testid="onboarding-name"
+          disabled={isSaving}
+          id="onboarding-name"
+          onChange={(event) => updateName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && canSubmit) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="e.g. theangrypit"
+          spellCheck={false}
+          value={handleDraft}
+        />
       </label>
 
       {saveRecovery.errorMessage ? (

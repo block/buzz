@@ -148,11 +148,8 @@ type AppSidebarProps = {
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit) => void;
-  /**
-   * Full channel set used for global search. Unlike `channels` (which is
-   * scoped to the viewer's joined sidebar list), this includes open channels
-   * the viewer hasn't joined, so search can surface them.
-   */
+  /** Full channel set for global search, including open channels the viewer
+   * has not joined; `channels` only contains their joined sidebar list. */
   searchChannels: Channel[];
   searchFocusRequest: number;
   onSelectSettings: (section?: SettingsSection) => void;
@@ -485,7 +482,8 @@ export function AppSidebar({
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.displayName,
+      profileDisplayName:
+        profile?.displayName?.trim() || profile?.name?.trim() || null,
     });
   const sortedDirectMessages = React.useMemo(
     () =>
@@ -506,6 +504,7 @@ export function AppSidebar({
   });
   const resolvedDisplayName =
     profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
     fallbackDisplayName?.trim() ||
     "Current identity";
   const isCreatingAny =

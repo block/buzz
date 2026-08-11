@@ -64,7 +64,10 @@ function getResolvedProfile(
 export function mergeCurrentProfileIntoLookup(
   profiles: UserProfileLookup | undefined,
   currentProfile:
-    | Pick<Profile, "pubkey" | "displayName" | "avatarUrl" | "nip05Handle">
+    | Pick<
+        Profile,
+        "pubkey" | "name" | "displayName" | "avatarUrl" | "nip05Handle"
+      >
     | null
     | undefined,
 ) {
@@ -75,10 +78,11 @@ export function mergeCurrentProfileIntoLookup(
   return {
     ...(profiles ?? {}),
     [normalizePubkey(currentProfile.pubkey)]: {
-      displayName: currentProfile.displayName,
-      // `Profile` does not carry the kind-0 `name`; keep whatever the batch
-      // lookup already resolved so mention aliases survive the merge.
-      name: profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ?? null,
+      displayName:
+        currentProfile.displayName?.trim() ||
+        currentProfile.name?.trim() ||
+        null,
+      name: currentProfile.name,
       avatarUrl: currentProfile.avatarUrl,
       nip05Handle: currentProfile.nip05Handle,
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
@@ -118,6 +122,11 @@ export function resolveUserLabel(input: {
     return displayName;
   }
 
+  const name = profile?.name?.trim();
+  if (name) {
+    return name;
+  }
+
   const nip05Handle = profile?.nip05Handle?.trim();
   if (nip05Handle) {
     return nip05Handle;
@@ -154,9 +163,10 @@ export function resolveUserSecondaryLabel(input: {
 }) {
   const profile = getResolvedProfile(input.pubkey, input.profiles);
   const displayName = profile?.displayName?.trim();
+  const name = profile?.name?.trim();
   const nip05Handle = profile?.nip05Handle?.trim();
 
-  if (displayName && nip05Handle) {
+  if ((displayName || name) && nip05Handle) {
     return nip05Handle;
   }
 
@@ -165,7 +175,7 @@ export function resolveUserSecondaryLabel(input: {
 
 /**
  * Label for an agent's owner: "you" when the current user owns it, otherwise
- * the owner's display name, NIP-05 handle, or truncated pubkey.
+ * the owner's NIP-05 handle, display name, Nostr name, or truncated pubkey.
  */
 export function formatOwnerLabel(
   ownerPubkey: string | null | undefined,
@@ -186,8 +196,9 @@ export function formatOwnerLabel(
 
   const owner = ownerProfiles?.[normalizedOwnerPubkey];
   return (
-    owner?.displayName?.trim() ||
     owner?.nip05Handle?.trim() ||
+    owner?.displayName?.trim() ||
+    owner?.name?.trim() ||
     truncatePubkey(ownerPubkey)
   );
 }

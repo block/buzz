@@ -76,6 +76,7 @@ async function persistSelfProfile(
   writeSelfProfileCache(relayUrl, pubkey, {
     version: 1,
     displayName: profile.displayName,
+    name: profile.name,
     avatarUrl: profile.avatarUrl,
     about: profile.about,
     avatarDataUrl,
@@ -110,6 +111,7 @@ export function useProfileQuery(enabled = true) {
         ? ({
             pubkey,
             displayName: cached.displayName,
+            name: cached.name,
             avatarUrl: cached.avatarUrl,
             about: cached.about,
             nip05Handle: null,
@@ -404,6 +406,7 @@ export function useUsersBatchQuery(
             // These cached summaries are never used for the onboarding gate.
             hasProfileEvent: false,
             ...summary,
+            name: summary.name ?? null,
           },
       );
     }
@@ -531,7 +534,7 @@ export function useUpdateProfileMutation() {
         await updateCachedChannelMemberDisplayName(
           queryClient,
           pubkey,
-          profile.displayName,
+          profile.displayName?.trim() || profile.name?.trim() || null,
         );
 
         // Own author labels/avatars render through the users-batch delta

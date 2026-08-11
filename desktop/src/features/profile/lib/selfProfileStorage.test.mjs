@@ -124,6 +124,7 @@ test("parseSelfProfileCache: valid v1 payload round-trips", () => {
   const payload = {
     version: 1,
     displayName: "Alice",
+    name: "alice",
     avatarUrl: "https://relay.example.com/media/abc.jpg",
     about: "Building better communities",
     avatarDataUrl: "data:image/jpeg;base64,/9j/4A==",
@@ -137,6 +138,7 @@ test("parseSelfProfileCache: null fields are preserved", () => {
   const payload = {
     version: 1,
     displayName: null,
+    name: null,
     avatarUrl: null,
     about: null,
     avatarDataUrl: null,
@@ -203,6 +205,7 @@ test("parseSelfProfileCache: non-finite updatedAt is coerced to 0", () => {
   const resultNaN = parseSelfProfileCache({
     version: 1,
     displayName: null,
+    name: null,
     avatarUrl: null,
     avatarDataUrl: null,
     updatedAt: NaN,
@@ -279,6 +282,7 @@ function makeCache(overrides = {}) {
   return {
     version: 1,
     displayName: null,
+    name: null,
     avatarUrl: null,
     avatarDataUrl: null,
     updatedAt: 0,
