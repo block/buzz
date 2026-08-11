@@ -8,6 +8,7 @@ import {
   clearCommunityThemeOutbox,
   communityThemeApplyExpectation,
   communityThemePersistenceAction,
+  communityThemeScopeFallback,
   hasMigratedCommunityTheme,
   markCommunityThemeMigrated,
   readCommunityThemeOutbox,
@@ -21,6 +22,7 @@ import {
   CommunityThemeSyncManager,
   communityThemeHydrationRemote,
   isNewerCommunityThemeCoordinate,
+  shouldSeedCommunityTheme,
   type RemoteCommunityTheme,
 } from "./communityThemeSync";
 import { useTheme } from "./ThemeProvider";
@@ -74,9 +76,10 @@ export function CommunityThemeController() {
     // Preserve the user's existing global appearance the first time this
     // feature sees their current community. Later missing/malformed target
     // records use the stable default so the previous community never leaks.
-    const fallback = hasMigratedCommunityTheme(pubkey)
-      ? DEFAULT_COMMUNITY_THEME
-      : initialPreferenceRef.current;
+    const fallback = communityThemeScopeFallback(
+      hasMigratedCommunityTheme(pubkey),
+      initialPreferenceRef.current,
+    );
     const scopedPreference = dirty ?? local ?? fallback;
     scopedPreferenceRef.current = scopedPreference;
     applyPreference(scopedPreference);
@@ -148,11 +151,19 @@ export function CommunityThemeController() {
         if (remote) {
           applyRemote(remote);
           markCommunityThemeMigrated(pubkey);
+        } else if (shouldSeedCommunityTheme(result)) {
+          const local =
+            readCommunityThemeOutbox(pubkey, relayUrl) ??
+            readCommunityThemePreference(pubkey, relayUrl) ??
+            scopedPreferenceRef.current ??
+            DEFAULT_COMMUNITY_THEME;
+          writeCommunityThemePreference(pubkey, relayUrl, local);
+          writeCommunityThemeOutbox(pubkey, relayUrl, local);
+          markCommunityThemeMigrated(pubkey);
+          manager.publish(local);
         }
-        // Absence is not safe permission to publish during hydration: live
-        // delivery can still be buffered, rejected, or unreadable. Keep the
-        // already-applied local fallback and publish only explicit edits or a
-        // durable outbox recovered above.
+        // Invalid or unavailable hydration keeps the already-applied fallback
+        // without publishing over relay state we could not establish safely.
       });
     const unsubscribeReconnect = relayClient.subscribeToReconnects(() => {
       void manager.fetchRemote().then((result) => {

@@ -5,6 +5,7 @@ import {
   CommunityThemeSyncManager,
   communityThemeHydrationRemote,
   isNewerCommunityThemeCoordinate,
+  shouldSeedCommunityTheme,
 } from "./communityThemeSync.ts";
 
 const preference = {
@@ -117,8 +118,9 @@ test("live replacement delivered during empty onboarding fetch prevents default 
       throw new Error(`unexpected command: ${command}`);
     },
   };
-  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+  mock.method(relayClient, "subscribeLive", (_filter, callback, onReady) => {
     liveCallback = callback;
+    onReady("eose");
     return Promise.resolve(async () => {});
   });
   mock.method(relayClient, "fetchEvents", async () => {
@@ -164,17 +166,18 @@ test("failed live setup cannot authorize hydration publishing", async () => {
     const manager = new CommunityThemeSyncManager("alice");
     const { result } = await manager.subscribeAndFetch(() => {});
 
-    assert.deepEqual(result, { status: "absent" });
+    assert.deepEqual(result, { status: "unavailable" });
     assert.equal(communityThemeHydrationRemote(result), null);
   } finally {
     mock.reset();
   }
 });
 
-test("buffered live delivery cannot authorize hydration publishing", async () => {
+test("EOSE-confirmed absence authorizes hydration seeding after live delivery drains", async () => {
   let liveCallback;
-  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+  mock.method(relayClient, "subscribeLive", (_filter, callback, onReady) => {
     liveCallback = callback;
+    onReady("eose");
     return Promise.resolve(async () => {});
   });
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
@@ -182,11 +185,9 @@ test("buffered live delivery cannot authorize hydration publishing", async () =>
     const manager = new CommunityThemeSyncManager("alice");
     const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
 
-    // RelayClientSession may not invoke this callback until its event batch
-    // flushes after the empty history result has already resolved.
     assert.equal(typeof liveCallback, "function");
-    assert.deepEqual(result, { status: "absent" });
-    assert.equal(communityThemeHydrationRemote(result), null);
+    assert.deepEqual(result, { status: "confirmed-absent" });
+    assert.equal(shouldSeedCommunityTheme(result), true);
     await unsubscribe();
   } finally {
     mock.reset();
@@ -204,8 +205,9 @@ test("unreadable live state cannot authorize hydration publishing", async () => 
       throw new Error(`unexpected command: ${command}`);
     },
   };
-  mock.method(relayClient, "subscribeLive", (_filter, callback) => {
+  mock.method(relayClient, "subscribeLive", (_filter, callback, onReady) => {
     liveCallback = callback;
+    onReady("eose");
     return Promise.resolve(async () => {});
   });
   mock.method(relayClient, "fetchEvents", async () => {
@@ -216,7 +218,7 @@ test("unreadable live state cannot authorize hydration publishing", async () => 
     const manager = new CommunityThemeSyncManager("alice");
     const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
 
-    assert.deepEqual(result, { status: "absent" });
+    assert.deepEqual(result, { status: "invalid" });
     assert.equal(communityThemeHydrationRemote(result), null);
     await unsubscribe();
   } finally {
@@ -226,17 +228,17 @@ test("unreadable live state cannot authorize hydration publishing", async () => 
 });
 
 test("apparently ready live setup cannot authorize hydration publishing", async () => {
-  // RelayClientSession currently also resolves subscribeLive for terminal
-  // CLOSED and its readiness timeout, so resolution is not proof of coverage.
-  mock.method(relayClient, "subscribeLive", () =>
-    Promise.resolve(async () => {}),
-  );
+  // Timeout readiness is not proof that the live REQ reached EOSE.
+  mock.method(relayClient, "subscribeLive", (_filter, _callback, onReady) => {
+    onReady("timeout");
+    return Promise.resolve(async () => {});
+  });
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   try {
     const manager = new CommunityThemeSyncManager("alice");
     const { result, unsubscribe } = await manager.subscribeAndFetch(() => {});
 
-    assert.deepEqual(result, { status: "absent" });
+    assert.deepEqual(result, { status: "unavailable" });
     assert.equal(communityThemeHydrationRemote(result), null);
     await unsubscribe();
   } finally {
@@ -256,19 +258,25 @@ test("fetch reports relay failures as unavailable rather than absent", async () 
   }
 });
 
-test("hydration applies only valid remote state", () => {
+test("hydration applies valid remote state and seeds only confirmed absence", () => {
   const remote = {
     preference,
     createdAt: 123,
     eventId: "remote-theme",
   };
-  assert.equal(communityThemeHydrationRemote({ status: "absent" }), null);
+  assert.equal(
+    communityThemeHydrationRemote({ status: "confirmed-absent" }),
+    null,
+  );
   assert.equal(communityThemeHydrationRemote({ status: "invalid" }), null);
   assert.equal(communityThemeHydrationRemote({ status: "unavailable" }), null);
   assert.equal(
     communityThemeHydrationRemote({ status: "valid", remote }),
     remote,
   );
+  assert.equal(shouldSeedCommunityTheme({ status: "confirmed-absent" }), true);
+  assert.equal(shouldSeedCommunityTheme({ status: "invalid" }), false);
+  assert.equal(shouldSeedCommunityTheme({ status: "unavailable" }), false);
 });
 
 test("acknowledged coordinates use relay same-second ordering", () => {

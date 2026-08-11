@@ -7,6 +7,7 @@ import {
   communityThemeApplyExpectation,
   communityThemeOutboxKey,
   communityThemePersistenceAction,
+  communityThemeScopeFallback,
   communityThemeStorageKey,
   parseCommunityThemePreference,
   readCommunityThemeOutbox,
@@ -173,6 +174,20 @@ test("no-op initialization remains programmatic", () => {
   assert.equal(
     communityThemePersistenceAction(expectation, DEFAULT_COMMUNITY_THEME),
     "acknowledge",
+  );
+});
+
+test("confirmed first-community migration isolates later empty scopes", () => {
+  const inherited = {
+    ...DEFAULT_COMMUNITY_THEME,
+    theme: "dracula",
+    followSystem: false,
+  };
+
+  assert.deepEqual(communityThemeScopeFallback(false, inherited), inherited);
+  assert.deepEqual(
+    communityThemeScopeFallback(true, inherited),
+    DEFAULT_COMMUNITY_THEME,
   );
 });
 

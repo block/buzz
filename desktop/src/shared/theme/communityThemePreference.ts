@@ -165,6 +165,13 @@ export function cacheAndApplyCommunityTheme(
   apply(preference);
 }
 
+export function communityThemeScopeFallback(
+  migrated: boolean,
+  inherited: CommunityThemePreference,
+): CommunityThemePreference {
+  return migrated ? DEFAULT_COMMUNITY_THEME : inherited;
+}
+
 export function sameCommunityThemePreference(
   left: CommunityThemePreference,
   right: CommunityThemePreference,
