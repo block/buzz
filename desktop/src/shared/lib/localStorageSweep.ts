@@ -8,9 +8,21 @@
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
-const SWEEP_DEBOUNCE_MS = 5 * 60 * 1_000;
-const INITIAL_SWEEP_FALLBACK_MS = 250;
-const INITIAL_SWEEP_IDLE_TIMEOUT_MS = 1_500;
+/** Minimum time after app boot before the first sweep begins. */
+export const BOOT_SWEEP_FLOOR_MS = 30_000;
+/**
+ * Generous idle-callback ceiling. Unlike the original 1 500 ms value this is
+ * not a forcing timeout that lands during busy startup — the browser schedules
+ * the callback when the main thread is genuinely idle.
+ */
+export const SWEEP_IDLE_TIMEOUT_MS = 60_000;
+/** Per-slice setTimeout delay in environments without requestIdleCallback. */
+export const SWEEP_FALLBACK_TIMER_MS = 250;
+/**
+ * Maximum number of localStorage entries to parse per chunk when an
+ * IdleDeadline is unavailable (rIC-free fallback path).
+ */
+export const SWEEP_CHUNK_ENTRY_BUDGET = 20;
 
 type LocalStorageSweepRule = {
   keyPrefix: string;
@@ -69,6 +81,9 @@ function updatedAtFromJson(value: string): number | null {
  * Removes whitelisted cache entries older than their configured TTL.
  * Entries without a trustworthy `updatedAt` are left alone rather than guessed
  * stale. Storage and parse failures never escape into app startup.
+ *
+ * This synchronous form is preserved for direct test use. The scheduler calls
+ * sweepChunked instead, which splits the same work across idle-time slices.
  */
 export function sweepStaleLocalStorage(now = Date.now()): number {
   let removed = 0;
@@ -103,53 +118,129 @@ export function sweepStaleLocalStorage(now = Date.now()): number {
   return removed;
 }
 
+type SliceCallback = (deadline?: { timeRemaining(): number }) => void;
+
+function scheduleSlice(fn: SliceCallback): void {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(fn as IdleRequestCallback, {
+      timeout: SWEEP_IDLE_TIMEOUT_MS,
+    });
+  } else {
+    globalThis.setTimeout(fn, SWEEP_FALLBACK_TIMER_MS);
+  }
+}
+
 /**
- * Defers the first sweep until the browser is idle (or a short timer fallback),
- * then sweeps hourly while the app remains open and when a hidden app becomes
- * visible. Visibility sweeps are debounced to avoid repeated work from rapid
- * focus changes. Returns a cleanup function for tests or future teardown.
+ * Snapshots matching key names synchronously (cheap — no parsing), then
+ * processes entries across successive idle-time slices. Keys removed between
+ * the snapshot and their slice are silently skipped via a re-getItem check.
+ *
+ * `isAlive` is checked at the start of each slice; returning false aborts
+ * further processing without removing accumulated stale keys.
  */
-export function startLocalStorageSweep(): () => void {
-  let lastSweepAt = Number.NEGATIVE_INFINITY;
-  let listening = false;
-  let intervalId: ReturnType<typeof window.setInterval> | null = null;
-  let idleCallbackId: number | null = null;
-  let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
-  const runIfDue = () => {
-    const now = Date.now();
-    if (now - lastSweepAt < SWEEP_DEBOUNCE_MS) return;
-    lastSweepAt = now;
-    sweepStaleLocalStorage(now);
-  };
-  const onVisibilityChange = () => {
-    if (document.visibilityState === "visible") runIfDue();
+function sweepChunked(now: number, isAlive: () => boolean): void {
+  // Step 1: cheap key-only snapshot — no getItem, no parsing.
+  let pendingKeys: string[];
+  try {
+    const storage = window.localStorage;
+    pendingKeys = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (!key) continue;
+      if (LOCAL_STORAGE_SWEEP_RULES.some((r) => key.startsWith(r.keyPrefix))) {
+        pendingKeys.push(key);
+      }
+    }
+  } catch (err) {
+    console.warn("[localStorageSweep] key snapshot failed:", err);
+    return;
+  }
+
+  if (!pendingKeys.length) return;
+
+  const staleKeys: string[] = [];
+  let pos = 0;
+
+  // Step 2: parse entries in idle-time slices; reschedule until all done.
+  const processSlice: SliceCallback = (deadline) => {
+    if (!isAlive()) return;
+    try {
+      const storage = window.localStorage;
+      const sliceStart = pos;
+      while (pos < pendingKeys.length) {
+        // Always process at least one entry per slice: a timeout-fired idle
+        // callback reports timeRemaining() === 0, and breaking before any
+        // progress would reschedule forever on a persistently busy thread.
+        const processedInSlice = pos - sliceStart;
+        if (deadline && processedInSlice > 0 && deadline.timeRemaining() <= 0) {
+          break;
+        }
+        if (!deadline && processedInSlice >= SWEEP_CHUNK_ENTRY_BUDGET) break;
+        const key = pendingKeys[pos++];
+        const value = storage.getItem(key);
+        if (value === null) continue; // deleted since snapshot — skip
+        const rule = LOCAL_STORAGE_SWEEP_RULES.find((r) =>
+          key.startsWith(r.keyPrefix),
+        );
+        if (!rule) continue;
+        const updatedAt = updatedAtFromJson(value);
+        if (updatedAt !== null && updatedAt <= now - rule.maxAgeMs) {
+          staleKeys.push(key);
+        }
+      }
+
+      if (pos < pendingKeys.length) {
+        scheduleSlice(processSlice);
+        return;
+      }
+
+      // All entries processed — batch-remove stale keys.
+      for (const key of staleKeys) {
+        try {
+          storage.removeItem(key);
+        } catch {
+          // Non-fatal: key may have been concurrently removed by another tab.
+        }
+      }
+    } catch (err) {
+      console.warn("[localStorageSweep] stale cache cleanup failed:", err);
+    }
   };
 
+  scheduleSlice(processSlice);
+}
+
+/**
+ * Schedules background sweeps:
+ * - First sweep is delayed by BOOT_SWEEP_FLOOR_MS (30 s) so it never lands
+ *   on the startup critical path. After the floor the browser picks the
+ *   actual execution time (no forcing timeout).
+ * - Subsequent sweeps run hourly via setInterval.
+ * - The hidden→visible trigger has been removed. It stacked the sweep onto
+ *   the exact moment focus-refetch storms fire. Hourly + boot-delayed covers
+ *   the TTL contract — all rule TTLs are 14 days.
+ *
+ * Returns a cleanup function for tests or future teardown.
+ */
+export function startLocalStorageSweep(): () => void {
+  let alive = true;
+  let intervalId: ReturnType<typeof window.setInterval> | null = null;
+  let bootTimeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+
+  const runSweep = () => sweepChunked(Date.now(), () => alive);
+
   try {
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    listening = true;
-    intervalId = window.setInterval(runIfDue, SWEEP_INTERVAL_MS);
-    if ("requestIdleCallback" in window) {
-      idleCallbackId = window.requestIdleCallback(runIfDue, {
-        timeout: INITIAL_SWEEP_IDLE_TIMEOUT_MS,
-      });
-    } else {
-      timeoutId = globalThis.setTimeout(runIfDue, INITIAL_SWEEP_FALLBACK_MS);
-    }
+    bootTimeoutId = globalThis.setTimeout(runSweep, BOOT_SWEEP_FLOOR_MS);
+    intervalId = window.setInterval(runSweep, SWEEP_INTERVAL_MS);
   } catch (error) {
     console.warn("[localStorageSweep] scheduler setup failed:", error);
   }
 
   return () => {
+    alive = false;
     try {
-      if (listening) {
-        document.removeEventListener("visibilitychange", onVisibilityChange);
-      }
+      if (bootTimeoutId !== null) globalThis.clearTimeout(bootTimeoutId);
       if (intervalId !== null) window.clearInterval(intervalId);
-      if (idleCallbackId !== null && "cancelIdleCallback" in window) {
-        window.cancelIdleCallback(idleCallbackId);
-      }
-      if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
     } catch (error) {
       console.warn("[localStorageSweep] scheduler cleanup failed:", error);
     }

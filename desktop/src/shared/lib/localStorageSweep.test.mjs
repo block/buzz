@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BOOT_SWEEP_FLOOR_MS,
   LOCAL_STORAGE_SWEEP_RULES,
+  SWEEP_CHUNK_ENTRY_BUDGET,
+  SWEEP_FALLBACK_TIMER_MS,
+  SWEEP_IDLE_TIMEOUT_MS,
   startLocalStorageSweep,
   sweepStaleLocalStorage,
 } from "./localStorageSweep.ts";
@@ -136,17 +140,9 @@ test("storage access failures warn and never escape", () => {
 });
 
 test("scheduler setup failures warn and never escape startup", () => {
-  const originalDocument = globalThis.document;
   const originalWarn = console.warn;
   const warnings = [];
   console.warn = (...args) => warnings.push(args);
-  globalThis.document = {
-    addEventListener() {
-      throw new Error("listener unavailable");
-    },
-    removeEventListener() {},
-    visibilityState: "visible",
-  };
   installWindow(makeLocalStorage(), {
     clearInterval() {},
     setInterval() {
@@ -163,29 +159,23 @@ test("scheduler setup failures warn and never escape startup", () => {
     assert.equal(warnings.length, 1);
   } finally {
     console.warn = originalWarn;
-    globalThis.document = originalDocument;
   }
 });
 
-test("scheduler uses a deferred timer when requestIdleCallback is unavailable", () => {
-  const originalDocument = globalThis.document;
+test("fallback path: boot-floor setTimeout fires first, then per-slice setTimeout processes entries", () => {
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
-  const documentTarget = new EventTarget();
-  Object.defineProperty(documentTarget, "visibilityState", {
-    value: "visible",
-  });
-  globalThis.document = documentTarget;
 
   const timeouts = new Map();
-  let nextTimeoutId = 50;
+  let nextId = 50;
   globalThis.setTimeout = (callback, delay) => {
-    const id = nextTimeoutId++;
+    const id = nextId++;
     timeouts.set(id, { callback, delay });
     return id;
   };
   globalThis.clearTimeout = (id) => timeouts.delete(id);
 
+  // Stale entry with updatedAt=0 (older than any 14-day TTL)
   const localStorage = makeLocalStorage([
     ["buzz-channel-messages.v1:startup", snapshot(0)],
   ]);
@@ -196,47 +186,69 @@ test("scheduler uses a deferred timer when requestIdleCallback is unavailable", 
 
   const stop = startLocalStorageSweep();
   try {
+    // One boot-floor timer scheduled; no sweep yet.
+    assert.equal(timeouts.size, 1);
+    const [bootId, bootEntry] = [...timeouts.entries()][0];
+    assert.equal(bootEntry.delay, BOOT_SWEEP_FLOOR_MS);
     assert.notEqual(
       localStorage.getItem("buzz-channel-messages.v1:startup"),
       null,
+      "sweep must not run before boot floor",
     );
-    const [{ callback, delay }] = timeouts.values();
-    assert.equal(delay, 250);
-    callback();
+
+    // Fire boot timer — sweepChunked snapshots keys and schedules a slice.
+    timeouts.delete(bootId);
+    bootEntry.callback();
+
+    // One per-slice fallback timer now pending; still no removal.
+    assert.equal(timeouts.size, 1);
+    const [, sliceEntry] = [...timeouts.entries()][0];
+    assert.equal(sliceEntry.delay, SWEEP_FALLBACK_TIMER_MS);
+    assert.notEqual(
+      localStorage.getItem("buzz-channel-messages.v1:startup"),
+      null,
+      "sweep must not run before slice fires",
+    );
+
+    // Fire slice — stale entry removed.
+    sliceEntry.callback();
     assert.equal(
       localStorage.getItem("buzz-channel-messages.v1:startup"),
       null,
+      "stale entry removed after slice fires",
     );
   } finally {
     stop();
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
-    globalThis.document = originalDocument;
   }
-  assert.equal(timeouts.size, 0);
 });
 
-test("scheduler sweeps after idle, on debounced visibility, and hourly", () => {
+test("scheduler: boot-floor gate, idle callback with SWEEP_IDLE_TIMEOUT_MS, hourly interval, no visibilitychange listener", () => {
   const originalNow = Date.now;
-  const originalDocument = globalThis.document;
-  let now = 100 * DAY_MS;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const now = 100 * DAY_MS;
   Date.now = () => now;
-
-  const documentTarget = new EventTarget();
-  Object.defineProperty(documentTarget, "visibilityState", {
-    configurable: true,
-    value: "visible",
-    writable: true,
-  });
-  globalThis.document = documentTarget;
 
   const intervals = new Map();
   const idleCallbacks = new Map();
-  const cancelledIdleCallbacks = [];
   let nextIntervalId = 1;
   let nextIdleId = 100;
+
+  // Capture the boot setTimeout.
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 9999;
+  };
+  globalThis.clearTimeout = () => {};
+
+  // Track visibilitychange listeners to assert none are registered.
+  const visibilityListeners = [];
+
   const localStorage = makeLocalStorage([
-    ["buzz-channel-messages.v1:startup", snapshot(now - 14 * DAY_MS)],
+    ["buzz-channel-messages.v1:stale", snapshot(now - 14 * DAY_MS)],
   ]);
   installWindow(localStorage, {
     requestIdleCallback(callback, options) {
@@ -245,7 +257,6 @@ test("scheduler sweeps after idle, on debounced visibility, and hourly", () => {
       return id;
     },
     cancelIdleCallback(id) {
-      cancelledIdleCallbacks.push(id);
       idleCallbacks.delete(id);
     },
     setInterval(callback, delay) {
@@ -255,62 +266,218 @@ test("scheduler sweeps after idle, on debounced visibility, and hourly", () => {
     },
     clearInterval: (id) => intervals.delete(id),
   });
+  globalThis.document = {
+    addEventListener(event, fn) {
+      if (event === "visibilitychange") visibilityListeners.push(fn);
+    },
+    removeEventListener() {},
+    visibilityState: "visible",
+  };
 
-  let idleId;
   const stop = startLocalStorageSweep();
   try {
+    // Boot floor: no idle callbacks before the boot timer fires.
+    assert.equal(idleCallbacks.size, 0, "no idle callback before boot floor");
+    assert.equal(visibilityListeners.length, 0, "no visibilitychange listener");
     assert.notEqual(
-      localStorage.getItem("buzz-channel-messages.v1:startup"),
+      localStorage.getItem("buzz-channel-messages.v1:stale"),
       null,
-      "initial sweep must not run synchronously on the boot path",
+      "sweep not run before boot floor",
     );
-    assert.equal(idleCallbacks.size, 1);
-    const idleEntry = idleCallbacks.entries().next().value;
-    idleId = idleEntry[0];
-    const { callback: idleCallback, options } = idleEntry[1];
-    assert.equal(options.timeout, 1_500);
-    idleCallback();
+
+    // Fire boot timer — sweepChunked schedules first idle callback.
+    assert.ok(bootCallback, "boot timer was registered");
+    bootCallback();
+    assert.equal(idleCallbacks.size, 1, "idle callback scheduled after boot");
+    const [firstId, firstEntry] = [...idleCallbacks.entries()][0];
     assert.equal(
-      localStorage.getItem("buzz-channel-messages.v1:startup"),
-      null,
+      firstEntry.options.timeout,
+      SWEEP_IDLE_TIMEOUT_MS,
+      "idle callback uses SWEEP_IDLE_TIMEOUT_MS, not a forcing 1500ms",
     );
+
+    // Fire idle callback with ample time remaining — sweep completes in one slice.
+    firstEntry.callback({ timeRemaining: () => 50 });
+    idleCallbacks.delete(firstId);
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:stale"),
+      null,
+      "stale entry removed after idle callback fires",
+    );
+
+    // Hourly interval is registered.
     assert.equal(intervals.size, 1);
-    const [{ callback, delay }] = intervals.values();
+    const [{ callback: intervalCallback, delay }] = intervals.values();
     assert.equal(delay, 60 * 60 * 1_000);
 
-    localStorage.setItem(
-      "buzz-channel-messages.v1:visibility",
-      snapshot(now - 14 * DAY_MS),
-    );
-    now += 60 * 1_000;
-    documentTarget.dispatchEvent(new Event("visibilitychange"));
-    assert.notEqual(
-      localStorage.getItem("buzz-channel-messages.v1:visibility"),
-      null,
-    );
-
-    now += 5 * 60 * 1_000;
-    documentTarget.dispatchEvent(new Event("visibilitychange"));
-    assert.equal(
-      localStorage.getItem("buzz-channel-messages.v1:visibility"),
-      null,
-    );
-
+    // Hourly fires — schedules another idle callback sweep.
     localStorage.setItem(
       "buzz-channel-messages.v1:interval",
       snapshot(now - 14 * DAY_MS),
     );
-    now += 60 * 60 * 1_000;
-    callback();
+    intervalCallback();
+    assert.equal(
+      idleCallbacks.size,
+      1,
+      "idle callback scheduled for hourly sweep",
+    );
+    const hourlyEntry = [...idleCallbacks.values()][0];
+    hourlyEntry.callback({ timeRemaining: () => 50 });
     assert.equal(
       localStorage.getItem("buzz-channel-messages.v1:interval"),
       null,
+      "hourly sweep removes stale entry",
+    );
+
+    // Visibility change does NOT trigger sweep — listener was never registered.
+    localStorage.setItem(
+      "buzz-channel-messages.v1:vis",
+      snapshot(now - 14 * DAY_MS),
+    );
+    assert.equal(
+      visibilityListeners.length,
+      0,
+      "visibilitychange listener absent",
+    );
+    assert.notEqual(
+      localStorage.getItem("buzz-channel-messages.v1:vis"),
+      null,
+      "visibility change does not trigger sweep",
     );
   } finally {
     stop();
     Date.now = originalNow;
-    globalThis.document = originalDocument;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    globalThis.document = undefined;
   }
-  assert.equal(intervals.size, 0);
-  assert.deepEqual(cancelledIdleCallbacks, [idleId]);
+});
+
+test("chunked sweep: keys processed across multiple idle slices; stale entries removed only at end", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  const idleCallbacks = [];
+  const now = 100 * DAY_MS;
+
+  // Create more entries than SWEEP_CHUNK_ENTRY_BUDGET so multiple slices fire.
+  const entryCount = SWEEP_CHUNK_ENTRY_BUDGET + 5;
+  const entries = Array.from({ length: entryCount }, (_, i) => [
+    `buzz-channel-messages.v1:key-${i}`,
+    snapshot(now - 14 * DAY_MS), // all stale
+  ]);
+  const localStorage = makeLocalStorage(entries);
+
+  installWindow(localStorage, {
+    requestIdleCallback(callback, _options) {
+      idleCallbacks.push(callback);
+      return idleCallbacks.length;
+    },
+    cancelIdleCallback() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    // Fire boot timer.
+    assert.ok(bootCallback);
+    bootCallback();
+
+    // First idle callback scheduled — fire it with zero time remaining so it
+    // processes exactly SWEEP_CHUNK_ENTRY_BUDGET entries and reschedules.
+    assert.equal(idleCallbacks.length, 1, "first idle callback scheduled");
+    idleCallbacks[0]({ timeRemaining: () => 0 });
+
+    // With zero time remaining the slice stops at SWEEP_CHUNK_ENTRY_BUDGET
+    // entries; stale keys not yet removed (second slice pending).
+    const removedAfterFirst = entries.filter(
+      ([key]) => localStorage.getItem(key) === null,
+    ).length;
+    assert.equal(
+      removedAfterFirst,
+      0,
+      "no keys removed until all slices complete",
+    );
+
+    // A second idle callback was scheduled for the remaining entries.
+    assert.equal(idleCallbacks.length, 2, "second idle callback scheduled");
+    idleCallbacks[1]({ timeRemaining: () => 50 }); // ample time — completes all
+
+    // All stale keys now removed.
+    const remaining = entries.filter(
+      ([key]) => localStorage.getItem(key) !== null,
+    );
+    assert.equal(
+      remaining.length,
+      0,
+      "all stale entries removed after final slice",
+    );
+  } finally {
+    stop();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("chunked sweep: keys deleted between snapshot and slice are silently skipped", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  const idleCallbacks = [];
+  // Use real Date.now() so timestamps are relative to the actual clock.
+  const now = Date.now();
+
+  const localStorage = makeLocalStorage([
+    ["buzz-channel-messages.v1:gone", snapshot(now - 14 * DAY_MS)],
+    ["buzz-channel-messages.v1:fresh", snapshot(now - DAY_MS)],
+  ]);
+
+  installWindow(localStorage, {
+    requestIdleCallback(callback, _options) {
+      idleCallbacks.push(callback);
+      return idleCallbacks.length;
+    },
+    cancelIdleCallback() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    bootCallback();
+    assert.equal(idleCallbacks.length, 1);
+
+    // Delete "gone" externally before the slice fires.
+    localStorage.store.delete("buzz-channel-messages.v1:gone");
+
+    // Slice processes — should not throw on missing key.
+    assert.doesNotThrow(() => {
+      idleCallbacks[0]({ timeRemaining: () => 50 });
+    });
+
+    // "fresh" key untouched.
+    assert.notEqual(
+      localStorage.getItem("buzz-channel-messages.v1:fresh"),
+      null,
+    );
+  } finally {
+    stop();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });

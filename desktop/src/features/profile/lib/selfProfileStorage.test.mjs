@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  parseSelfProfileCache,
   MAX_SELF_PROFILE_CACHES,
   MAX_SELF_PROFILE_CACHES_PER_RELAY,
+  _resetProfileKeyCountForTest,
+  parseSelfProfileCache,
   resolveAvatarDataUrl,
   shouldFetchAvatar,
   storageKey,
@@ -73,6 +74,7 @@ function installStorage(onGetItem = () => {}) {
 }
 
 test("writeSelfProfileCache caps each relay and the global cache by updatedAt", () => {
+  _resetProfileKeyCountForTest();
   const values = installStorage();
   const relayA = "wss://relay-a.example";
   for (let index = 0; index < MAX_SELF_PROFILE_CACHES_PER_RELAY + 1; index++) {
@@ -103,6 +105,7 @@ test("writeSelfProfileCache caps each relay and the global cache by updatedAt", 
 });
 
 test("writeSelfProfileCache does not read existing payloads below both caps", () => {
+  _resetProfileKeyCountForTest();
   const readKeys = [];
   const values = installStorage((key) => readKeys.push(key));
   const relay = "wss://relay.example";
@@ -413,5 +416,111 @@ test("resolveAvatarDataUrl: fetch failed, URL changed → null", () => {
   assert.equal(
     resolveAvatarDataUrl("https://relay.example.com/new.jpg", null, existing),
     null,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Memoized key-count tests
+// ---------------------------------------------------------------------------
+
+function installStorageTracked() {
+  const values = new Map();
+  let keyCallCount = 0;
+  const mock = {
+    values,
+    get keyCallCount() {
+      return keyCallCount;
+    },
+    get length() {
+      return values.size;
+    },
+    key(index) {
+      keyCallCount++;
+      return [...values.keys()][index] ?? null;
+    },
+    getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, String(value)),
+  };
+  globalThis.window = {
+    dispatchEvent: () => true,
+    localStorage: mock,
+  };
+  globalThis.CustomEvent ??= class CustomEvent {};
+  return mock;
+}
+
+test("trim does not call key() when memo is initialized and total is under per-relay cap", () => {
+  _resetProfileKeyCountForTest();
+  const storage = installStorageTracked();
+  const relay = "wss://relay.example";
+
+  // First write: memo uninitialized → ensureProfileKeyCount scans (calls key()).
+  writeSelfProfileCache(relay, "pk-0", makeCache({ updatedAt: 1 }));
+  const keyCallsAfterFirst = storage.keyCallCount;
+  assert.ok(
+    keyCallsAfterFirst > 0,
+    "first write triggers key scan to init memo",
+  );
+
+  // Second write with total still ≤ MAX_SELF_PROFILE_CACHES_PER_RELAY (8).
+  // Memo already initialized → trim returns in O(1), no key() calls.
+  const before = storage.keyCallCount;
+  writeSelfProfileCache(relay, "pk-1", makeCache({ updatedAt: 2 }));
+  const after = storage.keyCallCount;
+  assert.equal(
+    after - before,
+    0,
+    "no key() calls in trim when memo is hot and count is under cap",
+  );
+});
+
+test("memoized count resyncs when a full scan finds external deletions", () => {
+  _resetProfileKeyCountForTest();
+  const storage = installStorageTracked();
+  const relay = "wss://relay.example";
+
+  // Fill to just above per-relay cap so trim does a key-only scan.
+  for (let i = 0; i < MAX_SELF_PROFILE_CACHES_PER_RELAY + 1; i++) {
+    writeSelfProfileCache(relay, `pk-${i}`, makeCache({ updatedAt: i + 1 }));
+  }
+
+  // Externally delete some keys to make the memo stale.
+  const keysToDelete = [...storage.values.keys()]
+    .filter((k) => k.startsWith("buzz-self-profile.v1:"))
+    .slice(0, 3);
+  for (const k of keysToDelete) storage.values.delete(k);
+
+  // Next write: trim does key-only scan, detects mismatch, resyncs memo.
+  // Should not throw and should cap correctly.
+  assert.doesNotThrow(() => {
+    writeSelfProfileCache(relay, "pk-new", makeCache({ updatedAt: 999 }));
+  });
+  // After resync the memo reflects actual storage (no stale inflation).
+  const finalKeys = [...storage.values.keys()].filter((k) =>
+    k.startsWith("buzz-self-profile.v1:"),
+  );
+  assert.ok(
+    finalKeys.length <= MAX_SELF_PROFILE_CACHES_PER_RELAY,
+    `expected ≤${MAX_SELF_PROFILE_CACHES_PER_RELAY} keys after trim, got ${finalKeys.length}`,
+  );
+});
+
+test("over-cap write still trims correctly after memo init", () => {
+  _resetProfileKeyCountForTest();
+  const values = installStorage();
+  const relay = "wss://relay-a.example";
+
+  // Fill to cap + 1 (triggers the full parse+evict path).
+  for (let i = 0; i <= MAX_SELF_PROFILE_CACHES_PER_RELAY; i++) {
+    writeSelfProfileCache(relay, `pk-${i}`, makeCache({ updatedAt: i }));
+  }
+
+  // Oldest (updatedAt=0) should have been evicted; newest preserved.
+  assert.equal(values.has(storageKey(relay, "pk-0")), false, "oldest evicted");
+  assert.equal(
+    values.has(storageKey(relay, `pk-${MAX_SELF_PROFILE_CACHES_PER_RELAY}`)),
+    true,
+    "newest preserved",
   );
 });
