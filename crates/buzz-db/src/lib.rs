@@ -39,7 +39,7 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
-/// Use-limited relay invite persistence (v2 opaque tokens).
+/// Relay invite persistence (generic v2 invites and bound v3 handoffs).
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
@@ -4197,6 +4197,88 @@ impl Db {
             policy_version,
         )
         .await
+    }
+
+    /// Mints a one-hour v3 identity handoff bound to `expected_pubkey` and the
+    /// supplied link incarnation. The bearer code is returned exactly once;
+    /// storage retains only its digest.
+    pub async fn mint_identity_handoff(
+        &self,
+        community: CommunityId,
+        expected_pubkey: &str,
+        link_incarnation_id: &str,
+        created_by: &str,
+    ) -> Result<relay_invite::MintIdentityHandoffOutcome> {
+        relay_invite::mint_identity_handoff(
+            &self.pool,
+            community,
+            expected_pubkey,
+            link_incarnation_id,
+            created_by,
+        )
+        .await
+    }
+
+    /// Reads a v3 handoff state after verifying its public-key and link-
+    /// incarnation binding. The handoff ID is a locator, not authorization.
+    pub async fn identity_handoff_status(
+        &self,
+        community: CommunityId,
+        handoff_id: Uuid,
+        expected_pubkey: &str,
+        link_incarnation_id: &str,
+    ) -> Result<Option<relay_invite::IdentityHandoffState>> {
+        relay_invite::identity_handoff_status(
+            &self.pool,
+            community,
+            handoff_id,
+            expected_pubkey,
+            link_incarnation_id,
+        )
+        .await
+    }
+
+    /// Atomically claims a v3 identity handoff for its exact bound public key.
+    /// Claim state is stamped independently of whether membership already
+    /// exists, and policy evidence shares the same transaction.
+    pub async fn claim_identity_handoff(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+    ) -> Result<relay_invite::IdentityHandoffClaimOutcome> {
+        relay_invite::claim_identity_handoff(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+        )
+        .await
+    }
+
+    /// Permanently fences a link incarnation and invalidates every active v3
+    /// handoff for its community/public-key lock identity in one transaction.
+    pub async fn invalidate_identity_handoffs(
+        &self,
+        community: CommunityId,
+        expected_pubkey: &str,
+        link_incarnation_id: &str,
+    ) -> Result<relay_invite::IdentityHandoffInvalidation> {
+        relay_invite::invalidate_identity_handoffs(
+            &self.pool,
+            community,
+            expected_pubkey,
+            link_incarnation_id,
+        )
+        .await
+    }
+
+    /// Deletes one bounded batch of v3 handoffs beyond the 30-day terminal
+    /// retention window. Revoked-incarnation fences are retained permanently.
+    pub async fn reap_terminal_identity_handoffs(&self) -> Result<u64> {
+        relay_invite::reap_terminal_identity_handoffs(&self.pool).await
     }
 
     /// Sidecar an accepted product-feedback event, idempotent by event id.

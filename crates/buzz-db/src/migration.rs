@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 29);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -946,6 +946,27 @@ mod tests {
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        // Identity handoffs are a downgrade-safe v3 namespace, separate from
+        // generic v2 invites. The partial unique index is the database backstop
+        // for one active handoff per community/public-key pair, while the
+        // incarnation fence intentionally outlives retained handoff rows.
+        assert_eq!(migrations[28].version, 29);
+        let identity_handoffs = migrations[28].sql.as_str();
+        assert!(identity_handoffs.contains("CREATE TABLE identity_handoffs"));
+        assert!(identity_handoffs.contains("CREATE TABLE identity_handoff_revoked_incarnations"));
+        assert!(identity_handoffs.contains("UNIQUE (community_id, token_hash)"));
+        assert!(identity_handoffs.contains("identity_handoffs_one_active_pubkey_idx"));
+        assert!(identity_handoffs.contains("WHERE state = 'active'"));
+        assert!(identity_handoffs.contains("expected_pubkey = lower(expected_pubkey)"));
+        assert!(identity_handoffs.contains("length(expected_pubkey) = 64"));
+        assert!(identity_handoffs.contains("length(incarnation_hash) = 32"));
+        assert!(identity_handoffs.contains("terminal_at IS NULL"));
+        assert!(identity_handoffs.contains("terminal_at IS NOT NULL"));
+        assert!(!identity_handoffs.contains("_operator_global_tables"));
+
+        assert!(desired_schema.contains("CREATE TABLE identity_handoffs"));
+        assert!(desired_schema.contains("CREATE TABLE identity_handoff_revoked_incarnations"));
     }
 
     #[test]

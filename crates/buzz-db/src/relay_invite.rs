@@ -1,4 +1,4 @@
-//! Use-limited relay invite persistence (v2 opaque tokens).
+//! Relay invite persistence for generic v2 invites and bound v3 handoffs.
 //!
 //! Unlike the stateless v1 HMAC invite tokens in `buzz-relay::invite_token`,
 //! v2 invites are backed by durable rows in `relay_invites`. The table stores
@@ -22,7 +22,9 @@ use buzz_core::invite::{
     V2_SECRET_LEN,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sha2::{Digest as _, Sha256};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
+use std::collections::BTreeSet;
 
 use crate::error::Result;
 use crate::CommunityId;
@@ -370,6 +372,561 @@ pub async fn claim_relay_invite(
     })
 }
 
+/// Prefix reserved for public-key-bound identity handoffs.
+pub const IDENTITY_HANDOFF_PREFIX: &str = "v3.";
+
+/// Number of random bytes encoded in a v3 identity-handoff code.
+pub const IDENTITY_HANDOFF_SECRET_LEN: usize = 32;
+
+/// Fixed v3 identity-handoff lifetime: one hour.
+pub const IDENTITY_HANDOFF_TTL_SECS: i32 = 60 * 60;
+
+const IDENTITY_HANDOFF_RETENTION_DAYS: i32 = 30;
+const IDENTITY_HANDOFF_RETENTION_BATCH_SIZE: i64 = 1_000;
+const INCARNATION_DIGEST_DOMAIN: &[u8] = b"buzz.identity-handoff-incarnation.v1\0";
+
+/// The durable state of a public-key-bound identity handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityHandoffState {
+    /// The handoff is live and may be claimed by its bound public key.
+    Active,
+    /// The bound public key completed the handoff.
+    Claimed,
+    /// A newer handoff replaced this one.
+    Superseded,
+    /// Link revocation invalidated this handoff.
+    Invalidated,
+    /// The database-defined deadline was reached.
+    Expired,
+}
+
+impl IdentityHandoffState {
+    fn from_database(value: &str) -> Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "claimed" => Ok(Self::Claimed),
+            "superseded" => Ok(Self::Superseded),
+            "invalidated" => Ok(Self::Invalidated),
+            "expired" => Ok(Self::Expired),
+            _ => Err(crate::DbError::InvalidData(
+                "identity handoff has an unknown state".to_owned(),
+            )),
+        }
+    }
+}
+
+/// A freshly minted v3 identity handoff.
+#[derive(Debug)]
+pub struct MintedIdentityHandoff {
+    /// Full `v3.<hex-secret>` bearer code. Returned only from the mint call.
+    pub code: String,
+    /// Opaque, non-authorizing status reference.
+    pub handoff_id: uuid::Uuid,
+    /// Database-generated one-hour expiry.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Result of attempting to mint a v3 identity handoff.
+#[derive(Debug)]
+pub enum MintIdentityHandoffOutcome {
+    /// The handoff was created and any older live handoff was superseded.
+    Minted(MintedIdentityHandoff),
+    /// The supplied link incarnation has already been revoked.
+    RevokedIncarnation,
+}
+
+/// Whether a successful v3 claim added relay membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityHandoffMembershipOutcome {
+    /// The claim inserted membership for the bound key.
+    Added,
+    /// The bound key was already a relay member.
+    AlreadyMember,
+}
+
+/// Typed result of a v3 identity-handoff claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityHandoffClaimOutcome {
+    /// The live handoff was stamped claimed independently of membership state.
+    Claimed {
+        /// Whether this transaction inserted membership.
+        membership: IdentityHandoffMembershipOutcome,
+    },
+    /// The handoff had already been claimed.
+    AlreadyClaimed,
+    /// The claimant does not match the bound public key.
+    IdentityMismatch,
+    /// The handoff reached its database-defined deadline.
+    Expired,
+    /// A newer mint replaced this handoff.
+    Superseded,
+    /// Link revocation invalidated this handoff.
+    Invalidated,
+    /// No handoff matches the community-scoped token digest.
+    Invalid,
+}
+
+/// Result of installing a revoked-incarnation fence and invalidating handoffs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityHandoffInvalidation {
+    /// True only when this call inserted the permanent fence.
+    pub fence_created: bool,
+    /// Number of active handoffs changed to invalidated.
+    pub invalidated_count: u64,
+}
+
+/// Build the canonical v3 code for a random identity-handoff secret.
+pub fn encode_identity_handoff_code(secret: &[u8; IDENTITY_HANDOFF_SECRET_LEN]) -> String {
+    format!("{IDENTITY_HANDOFF_PREFIX}{}", hex::encode(secret))
+}
+
+/// Validate the canonical fixed-length v3 code shape without reading storage.
+pub fn validate_identity_handoff_code(code: &str) -> bool {
+    let Some(encoded) = code.strip_prefix(IDENTITY_HANDOFF_PREFIX) else {
+        return false;
+    };
+    encoded.len() == IDENTITY_HANDOFF_SECRET_LEN * 2
+        && encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Hash the complete v3 code for database lookup.
+pub fn hash_identity_handoff_code(code: &str) -> [u8; 32] {
+    Sha256::digest(code.as_bytes()).into()
+}
+
+fn identity_handoff_incarnation_digest(link_incarnation_id: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(INCARNATION_DIGEST_DOMAIN);
+    hasher.update(link_incarnation_id.as_bytes());
+    hasher.finalize().into()
+}
+
+fn normalize_identity_handoff_pubkey(pubkey: &str) -> Result<String> {
+    if pubkey.len() != 64 || !pubkey.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(crate::DbError::InvalidData(
+            "identity handoff requires a 64-character hexadecimal public key".to_owned(),
+        ));
+    }
+    Ok(pubkey.to_ascii_lowercase())
+}
+
+fn validate_identity_handoff_incarnation(link_incarnation_id: &str) -> Result<()> {
+    if !(16..=256).contains(&link_incarnation_id.len()) || !link_incarnation_id.is_ascii() {
+        return Err(crate::DbError::InvalidData(
+            "identity handoff link incarnation is malformed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_handoff_creator(created_by: &str) -> Result<()> {
+    if created_by.is_empty() || created_by.len() > 256 {
+        return Err(crate::DbError::InvalidData(
+            "identity handoff creator is malformed".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn lock_identity_handoff_key(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    expected_pubkey: &str,
+) -> Result<()> {
+    let lock_identity = format!("buzz_identity_handoff:{community}:{expected_pubkey}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_identity)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn normalize_expired_identity_handoffs(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    expected_pubkey: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE identity_handoffs \
+         SET state = 'expired', terminal_at = transaction_timestamp() \
+         WHERE community_id = $1 AND expected_pubkey = $2 AND state = 'active' \
+           AND expires_at <= transaction_timestamp()",
+    )
+    .bind(community.as_uuid())
+    .bind(expected_pubkey)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Mint one one-hour identity handoff for a normalized public key.
+///
+/// The transaction takes the community/public-key advisory lock before it
+/// normalizes expiry or supersedes any row. A durable revoked-incarnation fence
+/// is checked under the same transaction before the new active row is inserted.
+pub async fn mint_identity_handoff(
+    pool: &PgPool,
+    community: CommunityId,
+    expected_pubkey: &str,
+    link_incarnation_id: &str,
+    created_by: &str,
+) -> Result<MintIdentityHandoffOutcome> {
+    let expected_pubkey = normalize_identity_handoff_pubkey(expected_pubkey)?;
+    validate_identity_handoff_incarnation(link_incarnation_id)?;
+    validate_identity_handoff_creator(created_by)?;
+    let incarnation_hash = identity_handoff_incarnation_digest(link_incarnation_id);
+    let secret: [u8; IDENTITY_HANDOFF_SECRET_LEN] = rand::random();
+    let code = encode_identity_handoff_code(&secret);
+    let token_hash = hash_identity_handoff_code(&code);
+
+    let mut tx = pool.begin().await?;
+    lock_identity_handoff_key(&mut tx, community, &expected_pubkey).await?;
+    normalize_expired_identity_handoffs(&mut tx, community, &expected_pubkey).await?;
+
+    let fenced = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS( \
+             SELECT 1 FROM identity_handoff_revoked_incarnations \
+             WHERE community_id = $1 AND incarnation_hash = $2 \
+         )",
+    )
+    .bind(community.as_uuid())
+    .bind(incarnation_hash.as_slice())
+    .fetch_one(&mut *tx)
+    .await?;
+    if fenced {
+        tx.rollback().await?;
+        return Ok(MintIdentityHandoffOutcome::RevokedIncarnation);
+    }
+
+    // The advisory lock is always taken before UPDATE obtains row locks.
+    sqlx::query(
+        "UPDATE identity_handoffs \
+         SET state = 'superseded', terminal_at = transaction_timestamp() \
+         WHERE community_id = $1 AND expected_pubkey = $2 AND state = 'active'",
+    )
+    .bind(community.as_uuid())
+    .bind(&expected_pubkey)
+    .execute(&mut *tx)
+    .await?;
+
+    let row = sqlx::query(
+        "INSERT INTO identity_handoffs ( \
+             community_id, token_hash, expected_pubkey, incarnation_hash, \
+             created_by, expires_at \
+         ) VALUES ( \
+             $1, $2, $3, $4, $5, \
+             transaction_timestamp() + make_interval(secs => $6) \
+         ) RETURNING id, expires_at",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash.as_slice())
+    .bind(&expected_pubkey)
+    .bind(incarnation_hash.as_slice())
+    .bind(created_by)
+    .bind(IDENTITY_HANDOFF_TTL_SECS)
+    .fetch_one(&mut *tx)
+    .await?;
+    let handoff_id = row.try_get("id")?;
+    let expires_at = row.try_get("expires_at")?;
+    tx.commit().await?;
+
+    Ok(MintIdentityHandoffOutcome::Minted(MintedIdentityHandoff {
+        code,
+        handoff_id,
+        expires_at,
+    }))
+}
+
+fn terminal_claim_outcome(state: IdentityHandoffState) -> IdentityHandoffClaimOutcome {
+    match state {
+        IdentityHandoffState::Active => IdentityHandoffClaimOutcome::Invalid,
+        IdentityHandoffState::Claimed => IdentityHandoffClaimOutcome::AlreadyClaimed,
+        IdentityHandoffState::Superseded => IdentityHandoffClaimOutcome::Superseded,
+        IdentityHandoffState::Invalidated => IdentityHandoffClaimOutcome::Invalidated,
+        IdentityHandoffState::Expired => IdentityHandoffClaimOutcome::Expired,
+    }
+}
+
+/// Atomically claim a v3 identity handoff with its exact bound public key.
+///
+/// Token lookup is deliberately unlocked. It reveals the lock identity, after
+/// which the transaction takes the advisory lock and rereads the row `FOR
+/// UPDATE`. The handoff is stamped claimed even when membership already exists.
+pub async fn claim_identity_handoff(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+) -> Result<IdentityHandoffClaimOutcome> {
+    let claimer_pubkey = normalize_identity_handoff_pubkey(claimer_pubkey)?;
+    let Some(lock_pubkey) = sqlx::query_scalar::<_, String>(
+        "SELECT expected_pubkey FROM identity_handoffs \
+         WHERE community_id = $1 AND token_hash = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash.as_slice())
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(IdentityHandoffClaimOutcome::Invalid);
+    };
+
+    let mut tx = pool.begin().await?;
+    lock_identity_handoff_key(&mut tx, community, &lock_pubkey).await?;
+    let row = sqlx::query(
+        "SELECT id, expected_pubkey, state, \
+                expires_at <= transaction_timestamp() AS is_expired \
+         FROM identity_handoffs \
+         WHERE community_id = $1 AND token_hash = $2 \
+         FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(IdentityHandoffClaimOutcome::Invalid);
+    };
+
+    let handoff_id: uuid::Uuid = row.try_get("id")?;
+    let expected_pubkey: String = row.try_get("expected_pubkey")?;
+    let state = IdentityHandoffState::from_database(row.try_get("state")?)?;
+    let is_expired: bool = row.try_get("is_expired")?;
+
+    if state != IdentityHandoffState::Active {
+        tx.rollback().await?;
+        return Ok(terminal_claim_outcome(state));
+    }
+    if is_expired {
+        sqlx::query(
+            "UPDATE identity_handoffs \
+             SET state = 'expired', terminal_at = transaction_timestamp() \
+             WHERE community_id = $1 AND id = $2 AND state = 'active'",
+        )
+        .bind(community.as_uuid())
+        .bind(handoff_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(IdentityHandoffClaimOutcome::Expired);
+    }
+    if expected_pubkey != claimer_pubkey {
+        tx.rollback().await?;
+        return Ok(IdentityHandoffClaimOutcome::IdentityMismatch);
+    }
+
+    let membership_added = sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, 'member', 'invite') \
+         ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(&claimer_pubkey)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    if let Some(policy_version) = policy_version {
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(&claimer_pubkey)
+        .bind(policy_version)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        "UPDATE identity_handoffs \
+         SET state = 'claimed', terminal_at = transaction_timestamp() \
+         WHERE community_id = $1 AND id = $2 AND state = 'active'",
+    )
+    .bind(community.as_uuid())
+    .bind(handoff_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let membership = if membership_added {
+        IdentityHandoffMembershipOutcome::Added
+    } else {
+        IdentityHandoffMembershipOutcome::AlreadyMember
+    };
+    Ok(IdentityHandoffClaimOutcome::Claimed { membership })
+}
+
+/// Read and normalize one v3 handoff after authenticating its stored binding.
+///
+/// The handoff ID is only a locator. Both expected public key and link
+/// incarnation must match before expiry is normalized or state is returned.
+pub async fn identity_handoff_status(
+    pool: &PgPool,
+    community: CommunityId,
+    handoff_id: uuid::Uuid,
+    expected_pubkey: &str,
+    link_incarnation_id: &str,
+) -> Result<Option<IdentityHandoffState>> {
+    let expected_pubkey = normalize_identity_handoff_pubkey(expected_pubkey)?;
+    validate_identity_handoff_incarnation(link_incarnation_id)?;
+    let incarnation_hash = identity_handoff_incarnation_digest(link_incarnation_id);
+    let mut tx = pool.begin().await?;
+    lock_identity_handoff_key(&mut tx, community, &expected_pubkey).await?;
+
+    let row = sqlx::query(
+        "SELECT expected_pubkey, incarnation_hash, state, \
+                expires_at <= transaction_timestamp() AS is_expired \
+         FROM identity_handoffs \
+         WHERE community_id = $1 AND id = $2 \
+         FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(handoff_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    let stored_pubkey: String = row.try_get("expected_pubkey")?;
+    let stored_incarnation: Vec<u8> = row.try_get("incarnation_hash")?;
+    if stored_pubkey != expected_pubkey || stored_incarnation.as_slice() != incarnation_hash {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    let mut state = IdentityHandoffState::from_database(row.try_get("state")?)?;
+    let is_expired: bool = row.try_get("is_expired")?;
+    if state == IdentityHandoffState::Active && is_expired {
+        sqlx::query(
+            "UPDATE identity_handoffs \
+             SET state = 'expired', terminal_at = transaction_timestamp() \
+             WHERE community_id = $1 AND id = $2 AND state = 'active'",
+        )
+        .bind(community.as_uuid())
+        .bind(handoff_id)
+        .execute(&mut *tx)
+        .await?;
+        state = IdentityHandoffState::Expired;
+    }
+    tx.commit().await?;
+    Ok(Some(state))
+}
+
+/// Permanently fence one link incarnation and invalidate active handoffs.
+///
+/// Fence insertion and state changes share one transaction. The public key is
+/// used only as the advisory-lock identity and handoff selector; the durable
+/// fence contains only the community and domain-separated incarnation digest.
+pub async fn invalidate_identity_handoffs(
+    pool: &PgPool,
+    community: CommunityId,
+    expected_pubkey: &str,
+    link_incarnation_id: &str,
+) -> Result<IdentityHandoffInvalidation> {
+    let expected_pubkey = normalize_identity_handoff_pubkey(expected_pubkey)?;
+    validate_identity_handoff_incarnation(link_incarnation_id)?;
+    let incarnation_hash = identity_handoff_incarnation_digest(link_incarnation_id);
+    let mut tx = pool.begin().await?;
+    lock_identity_handoff_key(&mut tx, community, &expected_pubkey).await?;
+
+    let fence_created = sqlx::query(
+        "INSERT INTO identity_handoff_revoked_incarnations (community_id, incarnation_hash) \
+         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(incarnation_hash.as_slice())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+
+    // The advisory lock is always acquired before UPDATE takes row locks.
+    let invalidated_count = sqlx::query(
+        "UPDATE identity_handoffs \
+         SET state = 'invalidated', terminal_at = transaction_timestamp() \
+         WHERE community_id = $1 AND expected_pubkey = $2 AND state = 'active'",
+    )
+    .bind(community.as_uuid())
+    .bind(&expected_pubkey)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+
+    Ok(IdentityHandoffInvalidation {
+        fence_created,
+        invalidated_count,
+    })
+}
+
+/// Delete one bounded batch of v3 handoffs past the 30-day terminal window.
+///
+/// Candidate discovery is unlocked. The transaction acquires every candidate
+/// community/public-key advisory lock in sorted order before deleting any row,
+/// preserving the advisory-before-row ordering used by all other transitions.
+/// Revoked-incarnation fences are never removed by this cleanup.
+pub async fn reap_terminal_identity_handoffs(pool: &PgPool) -> Result<u64> {
+    let candidates = sqlx::query(
+        "SELECT community_id, id, expected_pubkey \
+         FROM identity_handoffs \
+         WHERE terminal_at < transaction_timestamp() - make_interval(days => $1) \
+         ORDER BY terminal_at, community_id, id \
+         LIMIT $2",
+    )
+    .bind(IDENTITY_HANDOFF_RETENTION_DAYS)
+    .bind(IDENTITY_HANDOFF_RETENTION_BATCH_SIZE)
+    .fetch_all(pool)
+    .await?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut lock_keys = BTreeSet::new();
+    let mut rows = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let community_id: uuid::Uuid = candidate.try_get("community_id")?;
+        let handoff_id: uuid::Uuid = candidate.try_get("id")?;
+        let expected_pubkey: String = candidate.try_get("expected_pubkey")?;
+        lock_keys.insert((community_id, expected_pubkey.clone()));
+        rows.push((community_id, handoff_id));
+    }
+
+    let mut tx = pool.begin().await?;
+    for (community_id, expected_pubkey) in lock_keys {
+        lock_identity_handoff_key(
+            &mut tx,
+            CommunityId::from_uuid(community_id),
+            &expected_pubkey,
+        )
+        .await?;
+    }
+
+    let mut deleted = 0;
+    for (community_id, handoff_id) in rows {
+        deleted += sqlx::query(
+            "DELETE FROM identity_handoffs \
+             WHERE community_id = $1 AND id = $2 \
+               AND terminal_at < transaction_timestamp() - make_interval(days => $3)",
+        )
+        .bind(community_id)
+        .bind(handoff_id)
+        .bind(IDENTITY_HANDOFF_RETENTION_DAYS)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +958,16 @@ mod tests {
 
     async fn delete_test_community(pool: &PgPool, community: CommunityId) {
         let mut tx = pool.begin().await.expect("begin test cleanup");
+        sqlx::query("DELETE FROM identity_handoffs WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test identity handoffs");
+        sqlx::query("DELETE FROM identity_handoff_revoked_incarnations WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test identity handoff fences");
         sqlx::query("DELETE FROM relay_invites WHERE community_id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -423,6 +990,19 @@ mod tests {
         format!("{:064x}", Uuid::new_v4().as_u128())
     }
 
+    fn test_incarnation() -> String {
+        Uuid::new_v4().to_string()
+    }
+
+    fn minted_identity_handoff(outcome: MintIdentityHandoffOutcome) -> MintedIdentityHandoff {
+        match outcome {
+            MintIdentityHandoffOutcome::Minted(handoff) => handoff,
+            MintIdentityHandoffOutcome::RevokedIncarnation => {
+                panic!("fresh incarnation unexpectedly revoked")
+            }
+        }
+    }
+
     async fn use_count(pool: &PgPool, community: CommunityId, invite_id: Uuid) -> i32 {
         sqlx::query_scalar(
             "SELECT use_count FROM relay_invites WHERE community_id = $1 AND id = $2",
@@ -432,6 +1012,37 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("read invite use_count")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_raw_identity_handoff(
+        pool: &PgPool,
+        community: CommunityId,
+        handoff_id: Uuid,
+        token_hash: [u8; 32],
+        expected_pubkey: &str,
+        incarnation_hash: [u8; 32],
+        state: &str,
+        expires_at: DateTime<Utc>,
+        terminal_at: Option<DateTime<Utc>>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO identity_handoffs ( \
+                 community_id, id, token_hash, expected_pubkey, incarnation_hash, \
+                 state, created_by, expires_at, terminal_at \
+             ) VALUES ($1, $2, $3, $4, $5, $6, 'owner', $7, $8)",
+        )
+        .bind(community.as_uuid())
+        .bind(handoff_id)
+        .bind(token_hash.as_slice())
+        .bind(expected_pubkey)
+        .bind(incarnation_hash.as_slice())
+        .bind(state)
+        .bind(expires_at)
+        .bind(terminal_at)
+        .execute(pool)
+        .await
+        .map(|_| ())
     }
 
     #[test]
@@ -446,6 +1057,432 @@ mod tests {
             let error = validate_mint_inputs(ttl, max_uses).expect_err("invalid mint contract");
             assert!(matches!(error, crate::DbError::InvalidData(_)), "{error:?}");
         }
+    }
+
+    #[test]
+    fn identity_handoff_codes_use_a_distinct_v3_namespace_and_domain_hashes() {
+        let code = encode_identity_handoff_code(&[7_u8; IDENTITY_HANDOFF_SECRET_LEN]);
+        assert!(code.starts_with("v3."));
+        assert!(!code.starts_with(buzz_core::invite::V2_PREFIX));
+        assert_eq!(hash_identity_handoff_code(&code).len(), 32);
+        assert_ne!(
+            identity_handoff_incarnation_digest("same-bytes"),
+            hash_identity_handoff_code("same-bytes")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_mismatch_is_non_mutating_and_existing_member_claim_is_stamped() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let mismatch = test_pubkey();
+        let incarnation = test_incarnation();
+        let minted = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint identity handoff"),
+        );
+        let token_hash = hash_identity_handoff_code(&minted.code);
+
+        assert_eq!(
+            claim_identity_handoff(&pool, community, &token_hash, &mismatch, None)
+                .await
+                .expect("mismatched claim"),
+            IdentityHandoffClaimOutcome::IdentityMismatch
+        );
+        assert!(!is_relay_member(&pool, community, &mismatch)
+            .await
+            .expect("mismatched membership"));
+        assert_eq!(
+            identity_handoff_status(&pool, community, minted.handoff_id, &expected, &incarnation,)
+                .await
+                .expect("active status"),
+            Some(IdentityHandoffState::Active)
+        );
+        assert_eq!(
+            identity_handoff_status(
+                &pool,
+                community,
+                minted.handoff_id,
+                &expected,
+                &test_incarnation(),
+            )
+            .await
+            .expect("wrong-incarnation status"),
+            None
+        );
+
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+             VALUES ($1, $2, 'member', 'admin')",
+        )
+        .bind(community.as_uuid())
+        .bind(&expected)
+        .execute(&pool)
+        .await
+        .expect("insert pre-existing member");
+
+        assert_eq!(
+            claim_identity_handoff(&pool, community, &token_hash, &expected, None)
+                .await
+                .expect("matching claim"),
+            IdentityHandoffClaimOutcome::Claimed {
+                membership: IdentityHandoffMembershipOutcome::AlreadyMember,
+            }
+        );
+        assert_eq!(
+            identity_handoff_status(&pool, community, minted.handoff_id, &expected, &incarnation,)
+                .await
+                .expect("claimed status"),
+            Some(IdentityHandoffState::Claimed)
+        );
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_identity_handoff_mints_leave_one_active_and_supersede_the_other() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let incarnation = test_incarnation();
+
+        let (first, second) = tokio::join!(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner"),
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner"),
+        );
+        let first = minted_identity_handoff(first.expect("first mint"));
+        let second = minted_identity_handoff(second.expect("second mint"));
+
+        let states: Vec<String> = sqlx::query_scalar(
+            "SELECT state FROM identity_handoffs \
+             WHERE community_id = $1 AND expected_pubkey = $2 ORDER BY created_at, id",
+        )
+        .bind(community.as_uuid())
+        .bind(&expected)
+        .fetch_all(&pool)
+        .await
+        .expect("read handoff states");
+        assert_eq!(states.iter().filter(|state| *state == "active").count(), 1);
+        assert_eq!(
+            states.iter().filter(|state| *state == "superseded").count(),
+            1
+        );
+        assert_ne!(first.handoff_id, second.handoff_id);
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_claim_at_database_expiry_boundary_is_expired() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let incarnation = test_incarnation();
+        let minted = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint identity handoff"),
+        );
+        sqlx::query(
+            "UPDATE identity_handoffs SET expires_at = transaction_timestamp() \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(minted.handoff_id)
+        .execute(&pool)
+        .await
+        .expect("set exact expiry boundary");
+
+        assert_eq!(
+            claim_identity_handoff(
+                &pool,
+                community,
+                &hash_identity_handoff_code(&minted.code),
+                &expected,
+                None,
+            )
+            .await
+            .expect("claim at expiry"),
+            IdentityHandoffClaimOutcome::Expired
+        );
+        assert!(!is_relay_member(&pool, community, &expected)
+            .await
+            .expect("membership after expiry"));
+
+        let stale = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint stale handoff"),
+        );
+        sqlx::query(
+            "UPDATE identity_handoffs SET expires_at = transaction_timestamp() \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(stale.handoff_id)
+        .execute(&pool)
+        .await
+        .expect("expire active handoff before replacement");
+        let fresh = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint replacement"),
+        );
+        let stale_state: String = sqlx::query_scalar(
+            "SELECT state FROM identity_handoffs WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(stale.handoff_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read normalized stale state");
+        assert_eq!(stale_state, "expired");
+        assert_eq!(
+            identity_handoff_status(&pool, community, fresh.handoff_id, &expected, &incarnation,)
+                .await
+                .expect("fresh status"),
+            Some(IdentityHandoffState::Active)
+        );
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_claim_and_replacement_race_completes_without_deadlock() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let incarnation = test_incarnation();
+        let old = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint old handoff"),
+        );
+        let token_hash = hash_identity_handoff_code(&old.code);
+
+        let (claim, replacement) = tokio::join!(
+            claim_identity_handoff(&pool, community, &token_hash, &expected, None),
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner"),
+        );
+        assert!(matches!(
+            claim.expect("racing claim"),
+            IdentityHandoffClaimOutcome::Claimed { .. } | IdentityHandoffClaimOutcome::Superseded
+        ));
+        let replacement = minted_identity_handoff(replacement.expect("racing replacement"));
+        assert_eq!(
+            identity_handoff_status(
+                &pool,
+                community,
+                replacement.handoff_id,
+                &expected,
+                &incarnation,
+            )
+            .await
+            .expect("replacement status"),
+            Some(IdentityHandoffState::Active)
+        );
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revoked_incarnation_fence_survives_terminal_handoff_cleanup() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let incarnation = test_incarnation();
+        let minted = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint identity handoff"),
+        );
+
+        assert_eq!(
+            invalidate_identity_handoffs(&pool, community, &expected, &incarnation)
+                .await
+                .expect("invalidate incarnation"),
+            IdentityHandoffInvalidation {
+                fence_created: true,
+                invalidated_count: 1,
+            }
+        );
+        assert!(matches!(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("delayed mint"),
+            MintIdentityHandoffOutcome::RevokedIncarnation
+        ));
+
+        sqlx::query(
+            "UPDATE identity_handoffs \
+             SET terminal_at = transaction_timestamp() - interval '31 days' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(minted.handoff_id)
+        .execute(&pool)
+        .await
+        .expect("age terminal handoff");
+        assert_eq!(
+            reap_terminal_identity_handoffs(&pool)
+                .await
+                .expect("reap terminal handoff"),
+            1
+        );
+        assert!(matches!(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint after cleanup"),
+            MintIdentityHandoffOutcome::RevokedIncarnation
+        ));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_claim_and_invalidation_race_never_leaves_active_state() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let expected = test_pubkey();
+        let incarnation = test_incarnation();
+        let minted = minted_identity_handoff(
+            mint_identity_handoff(&pool, community, &expected, &incarnation, "owner")
+                .await
+                .expect("mint identity handoff"),
+        );
+        let token_hash = hash_identity_handoff_code(&minted.code);
+
+        let (claim, invalidation) = tokio::join!(
+            claim_identity_handoff(&pool, community, &token_hash, &expected, None),
+            invalidate_identity_handoffs(&pool, community, &expected, &incarnation),
+        );
+        let claim = claim.expect("racing claim");
+        let invalidation = invalidation.expect("racing invalidation");
+        assert!(matches!(
+            claim,
+            IdentityHandoffClaimOutcome::Claimed { .. } | IdentityHandoffClaimOutcome::Invalidated
+        ));
+        assert!(invalidation.invalidated_count <= 1);
+        assert!(matches!(
+            identity_handoff_status(&pool, community, minted.handoff_id, &expected, &incarnation,)
+                .await
+                .expect("terminal status"),
+            Some(IdentityHandoffState::Claimed | IdentityHandoffState::Invalidated)
+        ));
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn identity_handoff_catalog_constraints_reject_malformed_and_duplicate_rows() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let handoff_id = Uuid::new_v4();
+        let pubkey = test_pubkey();
+        let future = Utc::now() + chrono::Duration::hours(1);
+        insert_raw_identity_handoff(
+            &pool, community, handoff_id, [1; 32], &pubkey, [2; 32], "active", future, None,
+        )
+        .await
+        .expect("insert valid catalog row");
+
+        macro_rules! assert_catalog_rejected {
+            ($insert:expr) => {{
+                let error = $insert
+                    .await
+                    .expect_err("catalog constraint must reject malformed row");
+                assert!(matches!(error, sqlx::Error::Database(_)), "{error:?}");
+            }};
+        }
+
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [3; 32],
+            &pubkey,
+            [4; 32],
+            "active",
+            future,
+            None,
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [5; 32],
+            "not-a-pubkey",
+            [6; 32],
+            "active",
+            future,
+            None,
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            handoff_id,
+            [7; 32],
+            &test_pubkey(),
+            [8; 32],
+            "active",
+            future,
+            None,
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [1; 32],
+            &test_pubkey(),
+            [9; 32],
+            "active",
+            future,
+            None,
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [10; 32],
+            &test_pubkey(),
+            [11; 32],
+            "claimed",
+            future,
+            None,
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [12; 32],
+            &test_pubkey(),
+            [13; 32],
+            "active",
+            future,
+            Some(Utc::now()),
+        ));
+        assert_catalog_rejected!(insert_raw_identity_handoff(
+            &pool,
+            community,
+            Uuid::new_v4(),
+            [14; 32],
+            &test_pubkey(),
+            [15; 32],
+            "active",
+            Utc::now() - chrono::Duration::seconds(1),
+            None,
+        ));
+
+        delete_test_community(&pool, community).await;
     }
 
     #[tokio::test]
