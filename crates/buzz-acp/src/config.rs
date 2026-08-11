@@ -483,13 +483,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
 
-    /// Opt-in exactly-once fallback publish gate for agents that don't
+    /// Opt-in best-effort fallback publish gate for agents that don't
     /// reliably self-publish (e.g. the `hermes` backend). When a turn ends
     /// with buffered `agent_message_chunk` text and no accepted
     /// `buzz messages send` tool call was observed for that turn, the
     /// harness publishes the buffered text itself. Default OFF — enabling
     /// this for `claude-agent-acp`/`codex-acp`, which already self-publish
-    /// reliably, would double-post. See `crate::lib::spawn_fallback_publish`.
+    /// reliably, would double-post.
+    ///
+    /// Not a hard exactly-once guarantee: publish detection is heuristic
+    /// (see `acp::looks_like_buzz_messages_send`) and the fallback publish
+    /// itself is fire-and-forget with no retry (see
+    /// `crate::lib::spawn_fallback_publish`) — this is "best effort, with
+    /// duplicate suppression on a best-effort detection signal," not a
+    /// protocol-level guarantee against either drop or duplicate.
     #[arg(
         long,
         env = "BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT",
@@ -573,7 +580,7 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
-    /// Opt-in exactly-once fallback publish gate — see `CliArgs::publish_final_if_unsent`.
+    /// Opt-in best-effort fallback publish gate — see `CliArgs::publish_final_if_unsent`.
     pub publish_final_if_unsent: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.

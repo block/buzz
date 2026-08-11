@@ -3685,10 +3685,11 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned"
             );
-            // Opt-in exactly-once fallback publish gate (default OFF; see
+            // Opt-in best-effort fallback publish gate (default OFF; see
             // `Config::publish_final_if_unsent`) — see
             // `fallback_publish_target`'s doc comment for the exact firing
-            // conditions.
+            // conditions. Not a hard exactly-once guarantee: see that
+            // field's doc comment in config.rs.
             if let Some((ch, text, anchor)) = fallback_publish_target(
                 config.publish_final_if_unsent,
                 stop_reason,
