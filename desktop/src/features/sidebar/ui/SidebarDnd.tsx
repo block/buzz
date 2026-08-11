@@ -2,7 +2,6 @@
 import {
   DndContext,
   DragOverlay,
-  PointerSensor,
   pointerWithin,
   useDraggable,
   useDroppable,
@@ -20,6 +19,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { Hash } from "lucide-react";
 import * as React from "react";
 
+import { PressAwarePointerSensor } from "@/features/sidebar/lib/pressAwarePointerSensor";
 import { cn } from "@/shared/lib/cn";
 
 export type DndChannelData = { type: "channel"; channelId: string };
@@ -192,7 +192,9 @@ export function SidebarDndContext({
   const [activeDragItem, setActiveDragItem] =
     React.useState<SidebarDragItem | null>(null);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(PressAwarePointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
   );
 
   const handleDragStart = React.useCallback(
