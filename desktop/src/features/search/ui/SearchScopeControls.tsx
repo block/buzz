@@ -96,22 +96,32 @@ export function SearchDialogInputRow({
 type CurrentChannelSearchActionProps = {
   channelLabel: string;
   channelType: Channel["channelType"];
+  isSelected: boolean;
   onActivate: () => void;
+  onMouseEnter: () => void;
 };
 
 export function CurrentChannelSearchAction({
   channelLabel,
   channelType,
+  isSelected,
   onActivate,
+  onMouseEnter,
 }: CurrentChannelSearchActionProps) {
   const isDirectMessage = channelType === "dm";
 
   return (
     <div className="px-3 py-3.5">
       <button
-        className="flex w-full items-center gap-4 rounded-lg border border-border/75 bg-muted/30 px-3 py-3 text-left transition-colors hover:bg-muted/55 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        aria-selected={isSelected}
+        className={`flex w-full items-center gap-4 rounded-lg border border-border/75 px-3 py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${
+          isSelected ? "bg-muted/55" : "bg-muted/30 hover:bg-muted/55"
+        }`}
+        data-search-result-index="0"
         data-testid="search-current-channel-control"
         onClick={onActivate}
+        onMouseEnter={onMouseEnter}
+        role="option"
         type="button"
       >
         <span className="flex min-w-0 items-center gap-2">

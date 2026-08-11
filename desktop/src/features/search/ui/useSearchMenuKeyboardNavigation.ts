@@ -4,6 +4,8 @@ import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 
 export function useSearchMenuKeyboardNavigation({
   activeResults,
+  hasLeadingAction,
+  onActivateLeadingAction,
   onOpenResult,
   onRemoveScope,
   query,
@@ -12,6 +14,8 @@ export function useSearchMenuKeyboardNavigation({
   setSelectedMenuIndex,
 }: {
   activeResults: SearchResult[];
+  hasLeadingAction: boolean;
+  onActivateLeadingAction: () => void;
   onOpenResult: (result: SearchResult) => void;
   onRemoveScope: () => void;
   query: string;
@@ -19,12 +23,14 @@ export function useSearchMenuKeyboardNavigation({
   selectedMenuIndex: number;
   setSelectedMenuIndex: React.Dispatch<React.SetStateAction<number>>;
 }) {
+  const selectableCount = activeResults.length + (hasLeadingAction ? 1 : 0);
+
   React.useEffect(() => {
     setSelectedMenuIndex((current) => {
-      if (activeResults.length === 0) return 0;
-      return Math.min(current, activeResults.length - 1);
+      if (selectableCount === 0) return 0;
+      return Math.min(current, selectableCount - 1);
     });
-  }, [activeResults.length, setSelectedMenuIndex]);
+  }, [selectableCount, setSelectedMenuIndex]);
 
   React.useEffect(() => {
     const selectedResult = document.querySelector<HTMLElement>(
@@ -41,15 +47,15 @@ export function useSearchMenuKeyboardNavigation({
         return;
       }
 
-      if (event.key === "ArrowDown" && activeResults.length > 0) {
+      if (event.key === "ArrowDown" && selectableCount > 0) {
         event.preventDefault();
         setSelectedMenuIndex((current) =>
-          Math.min(current + 1, activeResults.length - 1),
+          Math.min(current + 1, selectableCount - 1),
         );
         return;
       }
 
-      if (event.key === "ArrowUp" && activeResults.length > 0) {
+      if (event.key === "ArrowUp" && selectableCount > 0) {
         event.preventDefault();
         setSelectedMenuIndex((current) => Math.max(current - 1, 0));
         return;
@@ -57,16 +63,24 @@ export function useSearchMenuKeyboardNavigation({
 
       if (event.key === "Enter" && !event.nativeEvent.isComposing) {
         event.preventDefault();
-        const result = activeResults[selectedMenuIndex];
+        if (hasLeadingAction && selectedMenuIndex === 0) {
+          onActivateLeadingAction();
+          return;
+        }
+        const result =
+          activeResults[selectedMenuIndex - (hasLeadingAction ? 1 : 0)];
         if (result) onOpenResult(result);
       }
     },
     [
       activeResults,
+      hasLeadingAction,
+      onActivateLeadingAction,
       onOpenResult,
       onRemoveScope,
       query.length,
       scopeActive,
+      selectableCount,
       selectedMenuIndex,
       setSelectedMenuIndex,
     ],

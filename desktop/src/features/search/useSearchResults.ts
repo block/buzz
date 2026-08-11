@@ -12,6 +12,7 @@ import {
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import {
+  getMinimumSearchQueryLength,
   MIN_SEARCH_QUERY_LENGTH,
   useSearchMessagesQuery,
 } from "@/features/search/hooks";
@@ -131,9 +132,10 @@ export function useSearchResults({
   );
 
   const ftsQuery = parsedQuery.text;
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
 
   const hasSearchQuery =
-    debouncedQuery.trim().length >= MIN_SEARCH_QUERY_LENGTH ||
+    debouncedQuery.trim().length >= minimumQueryLength ||
     parsedQuery.since !== null ||
     parsedQuery.until !== null ||
     parsedQuery.from !== null ||
@@ -224,7 +226,7 @@ export function useSearchResults({
       enabled &&
       !hasUnresolvedOperator &&
       !waitingOnFromResolution &&
-      ftsQuery.length >= MIN_SEARCH_QUERY_LENGTH,
+      ftsQuery.length >= minimumQueryLength,
     limit,
     channelId:
       channelResolution.status === "resolved"
@@ -237,6 +239,7 @@ export function useSearchResults({
     since: parsedQuery.since,
     until: parsedQuery.until,
     unresolvedOperator: hasUnresolvedOperator,
+    minimumQueryLength,
   });
 
   const messageResults = React.useMemo(() => {
@@ -442,7 +445,7 @@ export function useSearchResults({
 
   React.useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (trimmed.length < minimumQueryLength) {
       setDebouncedQuery("");
       return;
     }
@@ -454,7 +457,7 @@ export function useSearchResults({
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [query]);
+  }, [minimumQueryLength, query]);
 
   React.useEffect(() => {
     if (!enabled) {

@@ -2,7 +2,7 @@ import { Search } from "lucide-react";
 import * as React from "react";
 
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { MIN_SEARCH_QUERY_LENGTH } from "@/features/search/hooks";
+import { getMinimumSearchQueryLength } from "@/features/search/hooks";
 import { useSearchResults } from "@/features/search/useSearchResults";
 import {
   resultIcon,
@@ -446,9 +446,9 @@ export function TopbarSearch({
   const scopeLabel = scopeChannel
     ? getChannelScopeLabel(scopeChannel, channelLabels, currentPubkey)
     : null;
-  const currentPubkeyNormalized = currentPubkey
-    ? normalizePubkey(currentPubkey)
-    : null;
+  const currentPubkeyNormalized =
+    currentPubkey && normalizePubkey(currentPubkey);
+  const hasScopeAction = Boolean(currentChannel && !scopeChannel);
   const suggestedResults = React.useMemo(
     () => getSuggestedSearchResults(suggestionChannels ?? channels),
     [channels, suggestionChannels],
@@ -492,9 +492,9 @@ export function TopbarSearch({
     () => [...suggestedResults, ...suggestionActionResults],
     [suggestedResults, suggestionActionResults],
   );
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
   const isShowingSuggestions =
-    debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH &&
-    trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH;
+    Math.max(debouncedQuery.length, trimmedQuery.length) < minimumQueryLength;
   const searchableResults = React.useMemo(
     () =>
       results.filter(
@@ -651,6 +651,8 @@ export function TopbarSearch({
 
   const handleDialogInputKeyDown = useSearchMenuKeyboardNavigation({
     activeResults,
+    hasLeadingAction: hasScopeAction,
+    onActivateLeadingAction: activateCurrentChannelScope,
     onOpenResult: openResult,
     onRemoveScope: removeChannelScope,
     query,
@@ -660,6 +662,7 @@ export function TopbarSearch({
   });
 
   const renderSearchResultRow = (result: SearchResult, index: number) => {
+    const menuIndex = index + (hasScopeAction ? 1 : 0);
     const channelDisplayName =
       result.kind === "channel"
         ? getChannelDisplayName(result.channel, channelLabels)
@@ -704,22 +707,22 @@ export function TopbarSearch({
 
     return (
       <button
-        aria-selected={index === selectedMenuIndex}
+        aria-selected={menuIndex === selectedMenuIndex}
         className={cn(
           "search-result-row flex w-full gap-3 rounded-lg px-2.5 text-left transition-colors",
           result.kind === "message" ? "items-start" : "items-center",
           result.kind === "message" ? "py-3.5" : "py-2.5",
-          index === selectedMenuIndex
+          menuIndex === selectedMenuIndex
             ? "bg-muted/45 text-foreground"
             : "hover:bg-muted/35",
         )}
         key={resultKey(result)}
         onClick={() => openResult(result)}
-        onMouseEnter={() => setSelectedMenuIndex(index)}
+        onMouseEnter={() => setSelectedMenuIndex(menuIndex)}
         role="option"
         type="button"
         data-testid={resultTestId(result)}
-        data-search-result-index={index}
+        data-search-result-index={menuIndex}
       >
         {result.kind === "message" ? (
           <UserAvatar
@@ -806,7 +809,6 @@ export function TopbarSearch({
       </div>
     ));
   };
-
   const currentChannelSearchAction =
     currentChannel && !scopeChannel ? (
       <CurrentChannelSearchAction
@@ -816,7 +818,9 @@ export function TopbarSearch({
           currentPubkey,
         )}
         channelType={currentChannel.channelType}
+        isSelected={selectedMenuIndex === 0}
         onActivate={activateCurrentChannelScope}
+        onMouseEnter={() => setSelectedMenuIndex(0)}
       />
     ) : null;
   const searchResultContent = isShowingSuggestions ? (

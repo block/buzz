@@ -392,6 +392,7 @@ test("global search offers an optional current-channel scope", async ({
   await focusSidebarSearchWithShortcut(page);
 
   const scopeControl = page.getByTestId("search-current-channel-control");
+  const input = page.getByTestId("search-dialog-input");
   await expect
     .poll(() =>
       scopeControl
@@ -420,10 +421,15 @@ test("global search offers an optional current-channel scope", async ({
   expect(dialogBox).not.toBeNull();
   expect(controlBox?.width ?? 0).toBeGreaterThan((dialogBox?.width ?? 0) * 0.9);
   expect(controlBox?.width ?? 0).toBeLessThan(dialogBox?.width ?? 0);
-  await scopeControl.click();
+  await expect(scopeControl).toHaveAttribute("aria-selected", "true");
+  const firstRecentResult = page.locator(".search-result-row").first();
+  await input.press("ArrowDown");
+  await expect(firstRecentResult).toHaveAttribute("aria-selected", "true");
+  await input.press("ArrowUp");
+  await expect(scopeControl).toHaveAttribute("aria-selected", "true");
+  await input.press("Enter");
 
   const scopeChip = page.getByTestId("search-channel-scope-chip");
-  const input = page.getByTestId("search-dialog-input");
   await expect(scopeChip).toHaveText(/#general/);
   await expect(input).toBeFocused();
   await input.fill("w");
@@ -581,6 +587,27 @@ test("global search omits channel scoping when no channel is active", async ({
   await expect(page.getByTestId("search-channel-scope-chip")).toHaveCount(0);
 });
 
+test("global one-character search does not query the relay", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await focusSidebarSearchWithShortcut(page);
+
+  await page.getByTestId("search-dialog-input").fill("x");
+  await page.waitForTimeout(400);
+
+  const messageSearchCalls = await page.evaluate(() => {
+    const calls =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return calls.filter((entry) => entry.command === "search_messages").length;
+  });
+  expect(messageSearchCalls).toBe(0);
+});
+
 test("global search tolerates small channel and people typos", async ({
   page,
 }) => {
@@ -635,8 +662,8 @@ test("global search exposes a larger scrollable result window", async ({
   for (let index = 0; index < 14; index += 1) {
     await page.keyboard.press("ArrowDown");
   }
-  await expect(resultRows.nth(14)).toHaveAttribute("aria-selected", "true");
-  await expect(resultRows.nth(14)).toBeInViewport();
+  await expect(resultRows.nth(13)).toHaveAttribute("aria-selected", "true");
+  await expect(resultRows.nth(13)).toBeInViewport();
 });
 
 test("closes sidebar search with Escape", async ({ page }) => {
