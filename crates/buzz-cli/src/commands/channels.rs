@@ -829,11 +829,27 @@ fn validate_ttl_seconds(secs: i64) -> Result<i32, CliError> {
         .map_err(|_| CliError::Usage(format!("--ttl is too large (max {} seconds)", i32::MAX)))
 }
 
+fn validate_update_channel_fields(
+    name: Option<&str>,
+    description: Option<&str>,
+    visibility: Option<&str>,
+    ttl_change: Option<Option<i32>>,
+) -> Result<(), CliError> {
+    if name.is_none() && description.is_none() && visibility.is_none() && ttl_change.is_none() {
+        return Err(CliError::Usage(
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_update_channel(
     client: &BuzzClient,
     channel_id: &str,
     name: Option<&str>,
     description: Option<&str>,
+    visibility: Option<&str>,
     ttl: Option<i64>,
     no_ttl: bool,
 ) -> Result<(), CliError> {
@@ -845,15 +861,12 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    if name.is_none() && description.is_none() && ttl_change.is_none() {
-        return Err(CliError::Usage(
-            "at least one field required (--name, --description, --ttl, --no-ttl)".into(),
-        ));
-    }
+    validate_update_channel_fields(name, description, visibility, ttl_change)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, ttl_change)
-        .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    let builder =
+        buzz_sdk::build_update_channel(channel_uuid, name, description, visibility, ttl_change)
+            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1128,14 +1141,17 @@ pub async fn dispatch(
             channel,
             name,
             description,
+            visibility,
             ttl,
             no_ttl,
         } => {
+            let visibility = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
                 client,
                 &channel,
                 name.as_deref(),
                 description.as_deref(),
+                visibility.as_deref(),
                 ttl,
                 no_ttl,
             )
@@ -1178,8 +1194,8 @@ mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
         finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
+        ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1289,6 +1305,21 @@ mod tests {
     #[test]
     fn validate_ttl_rejects_overflow() {
         assert!(validate_ttl_seconds(i32::MAX as i64 + 1).is_err());
+    }
+
+    #[test]
+    fn update_channel_fields_rejects_empty_update() {
+        let result = validate_update_channel_fields(None, None, None, None);
+        assert!(matches!(result, Err(CliError::Usage(_))));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("at least one field required"));
+        assert!(msg.contains("--visibility"));
+    }
+
+    #[test]
+    fn update_channel_fields_accepts_visibility_only_update() {
+        let result = validate_update_channel_fields(None, None, Some("open"), None);
+        assert!(result.is_ok(), "visibility-only update should be accepted");
     }
 
     // --- BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES gate ---

@@ -279,7 +279,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   ];
   if (pending.isEmpty) return _NonMemberAddOutcome.empty;
 
-  // A plain member of a private channel cannot add anyone: skip the doomed
+  // A non-member cannot add anyone to a private channel: skip the doomed
   // kind:9000 rather than trading it for a relay rejection.
   if (!canAddMembers) {
     return _NonMemberAddOutcome(

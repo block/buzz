@@ -2775,6 +2775,109 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("Inbox type labels keep the same height with and without a channel chip", async ({
+  page,
+}) => {
+  const dmId = "inbox-type-label-dm";
+  const mentionId = "inbox-type-label-mention";
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({
+      channelId,
+      currentPubkey,
+      dmChannelId: directChannelId,
+      dmId: directId,
+      mentionId: channelMentionId,
+      senderPubkey,
+    }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      const createdAt = Math.floor(Date.now() / 1_000);
+      const directMessage = emitMessage({
+        channelName: "alice-tyler",
+        content: "A direct message without a channel chip",
+        createdAt,
+        id: directId,
+        pubkey: senderPubkey,
+      });
+      pushFeedItem({
+        category: "activity",
+        channel_id: directChannelId,
+        channel_name: "alice-tyler",
+        channel_type: null,
+        content: directMessage.content,
+        created_at: directMessage.created_at,
+        id: directMessage.id,
+        kind: directMessage.kind,
+        pubkey: directMessage.pubkey,
+        tags: directMessage.tags,
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "A channel mention with a channel chip",
+        created_at: createdAt + 1,
+        id: channelMentionId,
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      dmChannelId,
+      dmId,
+      mentionId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const dmLabel = page
+    .getByTestId(`home-inbox-item-${dmId}`)
+    .locator('[data-inbox-type-label=""]');
+  const mentionLabel = page
+    .getByTestId(`home-inbox-item-${mentionId}`)
+    .locator('[data-inbox-type-label=""]');
+  await expect(dmLabel).toContainText("DM from alice");
+  await expect(dmLabel.locator('[data-channel-link=""]')).toHaveCount(0);
+  await expect(mentionLabel).toContainText("Mentioned in");
+  await expect(mentionLabel.locator('[data-channel-link=""]')).toHaveText(
+    "#general",
+  );
+
+  const [dmBox, mentionBox] = await Promise.all([
+    dmLabel.boundingBox(),
+    mentionLabel.boundingBox(),
+  ]);
+  expect(dmBox).not.toBeNull();
+  expect(mentionBox).not.toBeNull();
+  expect(
+    Math.abs((dmBox?.height ?? 0) - (mentionBox?.height ?? 0)),
+  ).toBeLessThan(0.5);
+});
+
 test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
@@ -3828,7 +3931,7 @@ test("members sidebar retains distinct same-persona managed agents", async ({
   await expect(page.getByText("Pinky", { exact: true })).toHaveCount(2);
 });
 
-test("private-channel members cannot add people without owner/admin", async ({
+test("private-channel members can add people and managed agents without admin", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -3842,26 +3945,22 @@ test("private-channel members cannot add people without owner/admin", async ({
   });
   await page.goto("/");
   // secret-projects is a private (non-DM) channel where the current user is a
-  // plain member. The relay rejects their kind:9000, so the affordance is
-  // withheld and the reason shown instead of failing after the fact.
+  // plain member. Active members may add ordinary members and bots; only
+  // elevated-role grants and role changes require owner/admin authority.
   await openMembersSidebar(page, "secret-projects");
 
-  await expect(page.getByTestId("members-sidebar-add-denied")).toBeVisible();
-  // The field stays, but only as a filter over existing members.
+  await expect(page.getByTestId("members-sidebar-add-denied")).toHaveCount(0);
   await expect(
     page.getByTestId("channel-management-search-users"),
-  ).toHaveAttribute("placeholder", "Search people and agents");
+  ).toHaveAttribute("placeholder", "Add people and agents");
 
   await page.getByTestId("channel-management-search-users").fill("char");
-  await expect(page.getByText("Not in this channel")).toHaveCount(0);
-  await expect(
-    page.getByTestId(
-      `channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`,
-    ),
-  ).toHaveCount(0);
+  await page
+    .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
   await expect(
     page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).toHaveCount(0);
+  ).toContainText("charlie");
 });
 
 test("open-channel members can add people and managed agents without admin", async ({

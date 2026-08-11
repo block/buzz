@@ -33,6 +33,7 @@ import type {
   UpdateChannelInput,
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
@@ -41,6 +42,10 @@ import {
 } from "@/features/channels/channelSnapshot";
 
 export const channelsQueryKey = ["channels"] as const;
+/** Keeps focused polling at the established one-minute cadence. */
+export const CHANNELS_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the expensive focus refetch until the channel list is old. */
+export const CHANNELS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
 const channelMembersQueryKey = (channelId: string) =>
@@ -193,6 +198,9 @@ function setChannelArchivedState(
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
+  const refetchInterval = useFocusedRefetchInterval(
+    CHANNELS_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery({
     enabled: options?.enabled ?? true,
@@ -214,9 +222,9 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         }
       : undefined,
     initialDataUpdatedAt: 0,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
+    staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 

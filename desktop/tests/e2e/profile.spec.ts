@@ -5,6 +5,7 @@ import {
   installMockBridge,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
+import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
 async function expectHomeView(page: import("@playwright/test").Page) {
@@ -583,6 +584,78 @@ test("renders emoji avatars with a static background layer", async ({
     "font-size",
     "96px",
   );
+});
+
+test("offers emoji search and skin-tone controls for profile avatars", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+
+  const picker = page.locator("em-emoji-picker");
+  const searchInput = picker.locator("input[type='search']");
+  await expect(searchInput).toBeVisible();
+  await expectEmojiMartStylesInstalled(picker);
+  await expect(page.getByTestId("profile-avatar-emoji-picker")).toHaveCSS(
+    "height",
+    "384px",
+  );
+
+  const hasSkinToneControl = await picker.evaluate((element) => {
+    const controls = element.shadowRoot?.querySelectorAll("button") ?? [];
+    return Array.from(controls).some((button) =>
+      /skin tone/i.test(button.getAttribute("aria-label") ?? ""),
+    );
+  });
+  expect(hasSkinToneControl).toBe(true);
+
+  const controlColors = await picker.evaluate((element) => {
+    const root = element.shadowRoot?.querySelector<HTMLElement>("#root");
+    const input = element.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    const toneControl =
+      element.shadowRoot?.querySelector<HTMLElement>(".search + .flex");
+    if (!root || !input || !toneControl) {
+      throw new Error("Profile emoji picker controls did not render.");
+    }
+    return {
+      input: getComputedStyle(input).backgroundColor,
+      picker: getComputedStyle(root).backgroundColor,
+      tone: getComputedStyle(toneControl).backgroundColor,
+    };
+  });
+  expect(controlColors.input).not.toBe(controlColors.picker);
+  expect(controlColors.tone).not.toBe(controlColors.picker);
+
+  const controlHeights = await picker.evaluate((element) => {
+    const input = element.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    const toneControl =
+      element.shadowRoot?.querySelector<HTMLElement>(".search + .flex");
+    const toneButton =
+      element.shadowRoot?.querySelector<HTMLElement>(".skin-tone-button");
+    if (!input || !toneControl || !toneButton) {
+      throw new Error("Profile emoji picker controls did not render.");
+    }
+    input.focus();
+    return {
+      inputHeight: input.getBoundingClientRect().height,
+      inputShadow: getComputedStyle(input).boxShadow,
+      toneButtonBorder: getComputedStyle(toneButton).borderTopWidth,
+      toneButtonShadow: getComputedStyle(toneButton).boxShadow,
+      toneHeight: toneControl.getBoundingClientRect().height,
+    };
+  });
+  expect(controlHeights.inputHeight).toBe(48);
+  expect(controlHeights.toneHeight).toBe(48);
+  expect(controlHeights.inputShadow).toMatch(/inset$/);
+  expect(controlHeights.toneButtonBorder).toBe("0px");
+  expect(controlHeights.toneButtonShadow).toBe("none");
 });
 
 test("reveals emoji background colors only after choosing an emoji", async ({
@@ -1424,6 +1497,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   await page.getByTestId("appearance-mode-light").click();
 
   // Switch to a light theme — verifies dark→light transition
+  await page.getByTestId("theme-style-trigger").click();
   await page.getByTestId("theme-option-github-light").click();
 
   await expect
@@ -1549,6 +1623,92 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
 
   await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-harnesses")).toBeVisible();
-  await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
+  const agentsPage = page.getByTestId("settings-agents");
+  await expect(
+    agentsPage.getByRole("heading", { name: "Agents", exact: true }),
+  ).toBeVisible();
+
+  for (const testId of [
+    "agents-preferences-card",
+    "settings-harnesses",
+    "settings-global-agent-config",
+  ]) {
+    const section = agentsPage.getByTestId(testId);
+    await expect(section).toBeVisible();
+    await expect(section).toHaveCSS("border-radius", "12px");
+    await expect(section).toHaveCSS("border-top-width", "1px");
+  }
+
+  await expect(
+    agentsPage.getByRole("heading", {
+      name: "Agent runtimes",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    agentsPage.getByRole("heading", {
+      name: "Agent defaults",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const runtimeRow = page.getByTestId("doctor-runtime-goose");
+  await expect(runtimeRow).toContainText("Goose");
+  await expect(runtimeRow).toHaveCSS("border-radius", "0px");
+  await expect(runtimeRow).toHaveCSS("border-top-width", "0px");
+
+  const agentsSecondaryColor = await agentsPage
+    .getByText(
+      "Keep agents you address selected for future messages in the same channel or thread. Remove them from the composer at any time.",
+    )
+    .evaluate((element) => getComputedStyle(element).color);
+  await page.getByTestId("settings-nav-appearance").click();
+  const appearanceSecondaryColor = await page
+    .getByTestId("link-preview-style-trigger")
+    .locator("..")
+    .locator("p")
+    .nth(1)
+    .evaluate((element) => getComputedStyle(element).color);
+  expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
+});
+
+test("settings subtitles share the Appearance secondary color", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+
+  const appearancePanel = page.getByTestId("settings-panel-appearance");
+  const secondaryColor = await appearancePanel
+    .locator("[data-settings-subcopy]")
+    .first()
+    .evaluate((element) => getComputedStyle(element).color);
+
+  for (const section of [
+    "profile",
+    "appearance",
+    "notifications",
+    "voice",
+    "shortcuts",
+    "custom-emoji",
+    "local-archive",
+    "channel-templates",
+    "hosted-communities",
+    "agents",
+    "compute",
+    "experimental",
+    "mobile",
+    "updates",
+  ]) {
+    await page.getByTestId(`settings-nav-${section}`).click();
+    const subtitles = page
+      .getByTestId(`settings-panel-${section}`)
+      .locator("[data-settings-subcopy]");
+    await expect(subtitles.first()).toBeVisible();
+    const colors = await subtitles.evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).color),
+    );
+    expect(new Set(colors), `${section} subtitle colors`).toEqual(
+      new Set([secondaryColor]),
+    );
+  }
 });

@@ -8,6 +8,7 @@ import type {
   UserStatusLookup,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { KIND_USER_STATUS } from "@/shared/constants/kinds";
 
 function normalizePubkeys(pubkeys: string[]) {
@@ -38,6 +39,7 @@ export function parseUserStatusEvent(event: RelayEvent): {
 }
 
 export function useUserStatusQuery(pubkeys: string[]) {
+  const refetchInterval = useFocusedRefetchInterval(120_000);
   const normalizedPubkeys = normalizePubkeys(pubkeys);
   const enabled = normalizedPubkeys.length > 0;
 
@@ -75,7 +77,8 @@ export function useUserStatusQuery(pubkeys: string[]) {
       return lookup;
     },
     staleTime: 60_000,
-    refetchInterval: 120_000,
+    refetchInterval,
+    refetchOnWindowFocus: true,
   });
 }
 
