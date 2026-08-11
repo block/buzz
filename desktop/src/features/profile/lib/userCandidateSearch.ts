@@ -1,4 +1,5 @@
 import type { UserSearchResult } from "@/shared/api/types";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ScoreUserCandidateInput = {
@@ -54,6 +55,10 @@ export function scoreUserCandidate({
   const pubkey = normalizePubkey(user.pubkey);
   if (pubkey.startsWith(normalizedQuery)) return 3;
   if (pubkey.includes(normalizedQuery)) return 4;
+
+  const npub = safeNpub(pubkey)?.toLowerCase();
+  if (npub?.startsWith(normalizedQuery)) return 3;
+  if (npub?.includes(normalizedQuery)) return 4;
 
   return null;
 }

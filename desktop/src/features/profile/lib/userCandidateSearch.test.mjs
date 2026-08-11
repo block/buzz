@@ -6,6 +6,7 @@ import {
   rankUserCandidatesBySearch,
   scoreUserCandidate,
 } from "./userCandidateSearch.ts";
+import { pubkeyToNpub } from "../../../shared/lib/nostrUtils.ts";
 
 function makeUser(overrides = {}) {
   return {
@@ -45,6 +46,15 @@ test("scoreUserCandidate ranks display labels before pubkeys", () => {
     scoreUserCandidate({ label: "Alice Johnson", query: "3456", user }),
     4,
   );
+});
+
+test("scoreUserCandidate matches the canonical npub", () => {
+  const pubkey =
+    "50d0af578a29c245c08c9e2ad95be422ba6e3a9df938dcf6b8863ebcdec399db";
+  const npub = pubkeyToNpub(pubkey);
+  const user = makeUser({ pubkey });
+
+  assert.equal(scoreUserCandidate({ label: pubkey, query: npub, user }), 3);
 });
 
 test("scoreUserCandidate supports agent labels and empty-query defaults", () => {

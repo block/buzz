@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nostr::Event;
+use nostr::{Event, PublicKey};
 use serde_json::Value;
 
 use crate::models::{SearchUsersResponse, UserSearchResultInfo};
@@ -32,6 +32,53 @@ pub fn search_users_from_events(events: &[Event]) -> SearchUsersResponse {
         users,
         next_cursor: None,
     }
+}
+
+/// Resolve an exact pubkey query from profile and relay-membership events.
+///
+/// A NIP-43 community member may not have published kind:0 metadata yet. In
+/// that case the membership snapshot is still authoritative enough to expose a
+/// bare-key search result. When a snapshot exists, identities outside it fail
+/// closed; when no snapshot exists, the relay is treated as open.
+pub fn exact_user_search_result(
+    events: &[Event],
+    target: &PublicKey,
+) -> Option<UserSearchResultInfo> {
+    let target_hex = target.to_hex();
+    let membership_event = events
+        .iter()
+        .filter(|event| event.kind.as_u16() == 13534)
+        .max_by_key(|event| event.created_at);
+
+    if membership_event.is_some_and(|event| !relay_membership_contains(event, &target_hex)) {
+        return None;
+    }
+
+    events
+        .iter()
+        .filter(|event| event.kind.as_u16() == 0 && event.pubkey == *target)
+        .max_by_key(|event| event.created_at)
+        .map(user_search_result_from_event)
+        .or(Some(UserSearchResultInfo {
+            pubkey: target_hex,
+            display_name: None,
+            avatar_url: None,
+            nip05_handle: None,
+            owner_pubkey: None,
+            is_agent: false,
+        }))
+}
+
+fn relay_membership_contains(event: &Event, target_hex: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        matches!(
+            values.first().map(String::as_str),
+            Some("member") | Some("p")
+        ) && values
+            .get(1)
+            .is_some_and(|pubkey| pubkey.eq_ignore_ascii_case(target_hex))
+    })
 }
 
 /// Convert a default kind:0 page to user-search results for empty-query pickers.
@@ -228,6 +275,24 @@ mod tests {
             .expect("sign")
     }
 
+    fn membership_event(members: &[&str]) -> Event {
+        let tags = members
+            .iter()
+            .map(|pubkey| {
+                Tag::parse(vec![
+                    "member".to_string(),
+                    (*pubkey).to_string(),
+                    "member".to_string(),
+                ])
+                .expect("membership tag")
+            })
+            .collect::<Vec<_>>();
+        EventBuilder::new(Kind::from_u16(13534), "")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign membership")
+    }
+
     #[test]
     fn search_users_maps_each_event() {
         let e1 = ev(0, r#"{"name":"a"}"#, vec![]);
@@ -236,6 +301,54 @@ mod tests {
         assert_eq!(r.users.len(), 2);
         assert_eq!(r.users[0].display_name.as_deref(), Some("a"));
         assert_eq!(r.users[1].display_name.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn exact_search_returns_profileless_relay_member() {
+        let target = nostr::Keys::generate().public_key();
+        let membership = membership_event(&[&target.to_hex()]);
+
+        let result = exact_user_search_result(std::slice::from_ref(&membership), &target).unwrap();
+
+        assert_eq!(result.pubkey, target.to_hex());
+        assert_eq!(result.display_name, None);
+        assert_eq!(result.avatar_url, None);
+        assert_eq!(result.nip05_handle, None);
+        assert!(!result.is_agent);
+    }
+
+    #[test]
+    fn exact_search_preserves_profile_for_relay_member() {
+        let keys = nostr::Keys::generate();
+        let target = keys.public_key();
+        let profile = EventBuilder::metadata(&nostr::Metadata::new().name("Ada"))
+            .sign_with_keys(&keys)
+            .expect("sign profile");
+        let membership = membership_event(&[&target.to_hex()]);
+
+        let result = exact_user_search_result(&[profile, membership], &target).unwrap();
+
+        assert_eq!(result.pubkey, target.to_hex());
+        assert_eq!(result.display_name.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn exact_search_rejects_non_member_when_snapshot_exists() {
+        let member = nostr::Keys::generate().public_key();
+        let outsider = nostr::Keys::generate().public_key();
+        let membership = membership_event(&[&member.to_hex()]);
+
+        assert!(exact_user_search_result(&[membership], &outsider).is_none());
+    }
+
+    #[test]
+    fn exact_search_allows_bare_key_when_relay_has_no_membership_snapshot() {
+        let target = nostr::Keys::generate().public_key();
+
+        let result = exact_user_search_result(&[], &target).unwrap();
+
+        assert_eq!(result.pubkey, target.to_hex());
+        assert_eq!(result.display_name, None);
     }
 
     #[test]
