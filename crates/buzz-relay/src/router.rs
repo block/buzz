@@ -6,9 +6,9 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{HeaderMap, Request, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
     middleware,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post, put},
     Router,
 };
@@ -188,6 +188,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     if path.starts_with("/assets/") {
                         return files.oneshot(req).await.map(IntoResponse::into_response);
                     }
+                    if is_identity_handoff_landing_path(path) {
+                        return Ok(read_identity_handoff_spa_index(&index).await);
+                    }
                     if should_serve_spa(path, serve_git_web_gui) {
                         return Ok(read_spa_index(&index).await);
                     }
@@ -230,8 +233,14 @@ fn is_invite_landing_path(path: &str) -> bool {
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
 }
 
+fn is_identity_handoff_landing_path(path: &str) -> bool {
+    path == "/invite"
+}
+
 fn should_serve_spa(path: &str, serve_git_web_gui: bool) -> bool {
-    is_invite_landing_path(path) || (serve_git_web_gui && is_git_web_gui_path(path))
+    is_identity_handoff_landing_path(path)
+        || is_invite_landing_path(path)
+        || (serve_git_web_gui && is_git_web_gui_path(path))
 }
 
 fn is_git_web_gui_path(path: &str) -> bool {
@@ -241,6 +250,34 @@ fn is_git_web_gui_path(path: &str) -> bool {
 async fn read_spa_index(index: &std::path::Path) -> axum::response::Response {
     match tokio::fs::read(index).await {
         Ok(body) => axum::response::Html(body).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+const IDENTITY_HANDOFF_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; manifest-src 'none'; media-src 'none'; worker-src 'none'";
+
+fn identity_handoff_spa_response(body: Vec<u8>) -> Response {
+    let mut response = axum::response::Html(body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-robots-tag"),
+        HeaderValue::from_static("noindex, nofollow"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(IDENTITY_HANDOFF_CSP),
+    );
+    response
+}
+
+async fn read_identity_handoff_spa_index(index: &std::path::Path) -> Response {
+    match tokio::fs::read(index).await {
+        Ok(body) => identity_handoff_spa_response(body),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -503,6 +540,13 @@ mod tests {
     }
 
     #[test]
+    fn identity_handoff_landing_path_is_fragment_only() {
+        assert!(is_identity_handoff_landing_path("/invite"));
+        assert!(!is_identity_handoff_landing_path("/invite/"));
+        assert!(!is_identity_handoff_landing_path("/invite/v3.secret"));
+    }
+
+    #[test]
     fn git_web_gui_paths_are_explicit() {
         assert!(is_git_web_gui_path("/"));
         assert!(is_git_web_gui_path("/repos"));
@@ -514,6 +558,7 @@ mod tests {
 
     #[test]
     fn invite_is_always_served_but_git_gui_requires_opt_in() {
+        assert!(should_serve_spa("/invite", false));
         assert!(should_serve_spa("/invite/payload.mac", false));
         assert!(should_serve_spa("/invite/payload.mac", true));
         assert!(!should_serve_spa("/", false));
@@ -521,6 +566,49 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[test]
+    fn identity_handoff_landing_response_is_private_and_default_deny() {
+        let response = identity_handoff_spa_response(b"<!doctype html>".to_vec());
+        let headers = response.headers();
+
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        assert_eq!(
+            headers.get("referrer-policy"),
+            Some(&HeaderValue::from_static("no-referrer"))
+        );
+        assert_eq!(
+            headers.get("x-robots-tag"),
+            Some(&HeaderValue::from_static("noindex, nofollow"))
+        );
+        assert_eq!(
+            headers.get("content-security-policy"),
+            Some(&HeaderValue::from_static(IDENTITY_HANDOFF_CSP))
+        );
+
+        let csp = headers
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        for directive in [
+            "default-src 'none'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "connect-src 'none'",
+            "form-action 'none'",
+            "frame-src 'none'",
+            "frame-ancestors 'none'",
+            "base-uri 'none'",
+        ] {
+            assert!(csp.contains(directive), "missing {directive}");
+        }
+        assert!(!csp.contains("unsafe-inline"));
+        assert!(!csp.contains("unsafe-eval"));
+        assert!(!csp.contains("https:"));
     }
 
     #[test]

@@ -24,6 +24,19 @@ type JoinPolicy = {
 
 type PolicyDocument = { title: string; markdown: string };
 
+function identityHandoffDeepLink(relay: string, code: string): string {
+  const query = new URLSearchParams({ relay, code });
+  return `buzz://join?${query.toString()}`;
+}
+
+function InviteAppIcon() {
+  return (
+    <div className="h-12 w-12 overflow-hidden rounded-[22.37%] bg-black">
+      <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
+    </div>
+  );
+}
+
 /** Convert relay invite sentinels into user-facing recovery guidance. */
 function inviteClaimErrorMessage(message: string): string {
   if (message.includes("invite_exhausted")) {
@@ -36,6 +49,121 @@ function inviteClaimErrorMessage(message: string): string {
     return "This invite is invalid. Check the link or ask for a new invite.";
   }
   return message;
+}
+
+/** Fragment-only landing for a public-key-bound identity handoff. */
+export function IdentityHandoffInvitePage({ code }: { code: string | null }) {
+  const relay = relayWsUrl();
+  const host = relay.replace(/^wss?:\/\//, "");
+  const headingRef = React.useRef<HTMLHeadingElement>(null);
+  const [desktopSupported, setDesktopSupported] = React.useState<
+    boolean | undefined
+  >(undefined);
+  const [launchAttempted, setLaunchAttempted] = React.useState(false);
+
+  React.useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
+  React.useEffect(() => {
+    if (!code) return;
+    let active = true;
+    detectBuzzDownloadPlatform(navigator).then((platform) => {
+      if (active) setDesktopSupported(platform.operatingSystem !== "unknown");
+    });
+    return () => {
+      active = false;
+    };
+  }, [code]);
+
+  const launchBuzz = () => {
+    if (!code || desktopSupported !== true) return;
+    setLaunchAttempted(true);
+    window.location.assign(identityHandoffDeepLink(relay, code));
+  };
+
+  const invalid = code === null;
+  const mobile = code !== null && desktopSupported === false;
+  const title = invalid
+    ? "This invite link can’t be opened"
+    : mobile
+      ? "Continue on a desktop"
+      : "Open your linked identity in Buzz";
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center bg-[linear-gradient(180deg,#D7D72E_0%,#D7E7F6_100%)] px-4 py-16 text-center">
+      <div className="w-full max-w-xl space-y-4">
+        <div className="flex w-full flex-col items-center rounded-3xl bg-white px-6 py-10 sm:px-12 sm:py-12">
+          <InviteAppIcon />
+          <h1
+            className="mt-4 text-balance text-2xl font-semibold tracking-tight text-black outline-none"
+            ref={headingRef}
+            tabIndex={-1}
+          >
+            {title}
+          </h1>
+
+          {invalid ? (
+            <p className="mt-4 max-w-md text-pretty text-sm leading-6 text-black/60">
+              Return to the Impel dashboard and request a fresh invite. For your
+              security, incomplete or changed links can’t be retried.
+            </p>
+          ) : mobile ? (
+            <p className="mt-4 max-w-md text-pretty text-sm leading-6 text-black/60">
+              This identity handoff opens Buzz on macOS, Windows, or Linux. Move
+              the original invite link to a desktop to continue.
+            </p>
+          ) : (
+            <>
+              <p className="mt-4 max-w-md text-pretty text-sm leading-6 text-black/60">
+                Continue with the Buzz identity you saved when you linked Impel.
+                This invite stays on this device and isn’t claimed in your
+                browser.
+              </p>
+              <p className="mt-7 font-mono text-sm text-black/60">{host}</p>
+
+              <div className="mt-7 w-full max-w-md">
+                <Button
+                  className="h-10 w-full bg-black text-white hover:bg-black/90 focus-visible:ring-black disabled:cursor-wait disabled:bg-black/30 disabled:text-white/70 motion-reduce:transition-none"
+                  disabled={desktopSupported === undefined}
+                  type="button"
+                  onClick={launchBuzz}
+                >
+                  {launchAttempted ? "Try opening Buzz again" : "Open Buzz"}
+                </Button>
+
+                {launchAttempted ? (
+                  <div
+                    aria-live="polite"
+                    className="mt-5 rounded-2xl bg-black/5 px-4 py-3 text-sm leading-5 text-black/70"
+                  >
+                    <p>
+                      Nothing happened? Get the official Buzz release, then
+                      return here and try again.
+                    </p>
+                    <a
+                      className="mt-2 inline-flex min-h-10 items-center font-medium text-black underline-offset-4 hover:text-black/70 hover:underline focus-visible:underline"
+                      href={BUZZ_RELEASES_URL}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      Install or update Buzz
+                    </a>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
+        </div>
+
+        {!invalid && !mobile ? (
+          <p className="flex min-h-[3.125rem] items-center justify-center rounded-2xl bg-white px-5 py-3 text-sm leading-5 text-black/60">
+            Buzz will verify that this invite belongs to your linked identity.
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 /** Landing page for a community invite link (`/invite/<code>`). */

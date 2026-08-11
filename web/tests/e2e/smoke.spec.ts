@@ -1,6 +1,159 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
+const V3_HANDOFF_CODE = `v3.${"ab".repeat(32)}`;
+
+test("identity handoff keeps the fragment credential out of browser surfaces", async ({
+  page,
+}) => {
+  const requests: Array<{ url: string; referer?: string }> = [];
+  page.on("request", (request) => {
+    requests.push({
+      url: request.url(),
+      referer: request.headers().referer,
+    });
+  });
+
+  await page.goto(`/invite#code=${V3_HANDOFF_CODE}`);
+
+  await expect(
+    page.getByRole("heading", { name: "Open your linked identity in Buzz" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/\/invite$/);
+  await expect(
+    page.getByRole("button", { name: "Join in browser" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Accept invite in Buzz" }),
+  ).toHaveCount(0);
+
+  const browserSurfaces = await page.evaluate(() => ({
+    body: document.body.textContent ?? "",
+    html: document.documentElement.outerHTML,
+    history: JSON.stringify(window.history.state),
+    localStorage: JSON.stringify({ ...window.localStorage }),
+    sessionStorage: JSON.stringify({ ...window.sessionStorage }),
+  }));
+  expect(JSON.stringify(browserSurfaces)).not.toContain(V3_HANDOFF_CODE);
+  expect(requests).not.toHaveLength(0);
+  for (const request of requests) {
+    expect(request.url).not.toContain(V3_HANDOFF_CODE);
+    expect(request.referer ?? "").not.toContain(V3_HANDOFF_CODE);
+    expect(new URL(request.url).origin).toBe("http://127.0.0.1:4173");
+  }
+  expect(
+    requests.some(({ url }) => new URL(url).pathname.startsWith("/api/")),
+  ).toBe(false);
+  await expect(
+    page.locator("form, iframe, frame, object, embed, base"),
+  ).toHaveCount(0);
+});
+
+test("identity handoff launches only on a desktop action and retries from memory", async ({
+  page,
+}) => {
+  const client = await page.context().newCDPSession(page);
+  await client.send("Page.enable");
+  const navigations: string[] = [];
+  client.on("Page.frameRequestedNavigation", (event) => {
+    if (event.url.startsWith("buzz://join?")) navigations.push(event.url);
+  });
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/invite#code=${V3_HANDOFF_CODE}`);
+  await expect(
+    page.getByRole("heading", { name: "Open your linked identity in Buzz" }),
+  ).toBeFocused();
+  const openBuzz = page.getByRole("button", { name: "Open Buzz" });
+  await expect(openBuzz).toBeVisible();
+  expect(navigations).toEqual([]);
+
+  await openBuzz.press("Enter");
+  await expect
+    .poll(() => navigations.length, { timeout: 5_000 })
+    .toBeGreaterThan(0);
+
+  const expectedDeepLink = `buzz://join?relay=${encodeURIComponent(
+    "ws://127.0.0.1:4173",
+  )}&code=${encodeURIComponent(V3_HANDOFF_CODE)}`;
+  expect(navigations[0]).toBe(expectedDeepLink);
+  await expect(
+    page.getByRole("link", { name: "Install or update Buzz" }),
+  ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
+
+  await page.getByRole("button", { name: "Try opening Buzz again" }).click();
+  await expect
+    .poll(() => navigations.length, { timeout: 5_000 })
+    .toBeGreaterThan(1);
+  expect(navigations[1]).toBe(expectedDeepLink);
+  expect(
+    await page
+      .getByRole("main")
+      .evaluate((main) => main.getAnimations({ subtree: true }).length),
+  ).toBe(0);
+});
+
+test("identity handoff withholds direct launch on mobile", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Mobile",
+  });
+  await context.addInitScript(() => {
+    Object.defineProperties(navigator, {
+      platform: { configurable: true, value: "iPhone" },
+      maxTouchPoints: { configurable: true, value: 5 },
+      userAgentData: {
+        configurable: true,
+        value: { platform: "iPhone", mobile: true },
+      },
+    });
+  });
+  const page = await context.newPage();
+
+  await page.goto(`/invite#code=${V3_HANDOFF_CODE}`);
+
+  await expect(
+    page.getByRole("heading", { name: "Continue on a desktop" }),
+  ).toBeFocused();
+  await expect(
+    page.getByText("Move the original invite link to a desktop to continue."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Buzz" })).toHaveCount(0);
+  await expect(page).toHaveURL(/\/invite$/);
+  await context.close();
+});
+
+test("identity handoff rejects missing and non-canonical fragments locally", async ({
+  page,
+}) => {
+  const invalidSuffixes = [
+    "",
+    "?code=v3.query-sentinel",
+    `?unexpected=1#code=${V3_HANDOFF_CODE}`,
+    "#code=v2.not-a-handoff",
+    "#code=v3.short",
+    `#code=${V3_HANDOFF_CODE}&extra=1`,
+    `#code=v3.${"AB".repeat(32)}`,
+    `#code=v3.${"a".repeat(65)}`,
+  ];
+
+  for (const suffix of invalidSuffixes) {
+    await page.goto(`/invite${suffix}`);
+    await expect(
+      page.getByRole("heading", {
+        name: "This invite link can’t be opened",
+      }),
+    ).toBeFocused();
+    await expect(page).toHaveURL(/\/invite$/);
+    await expect(page.getByRole("button", { name: "Open Buzz" })).toHaveCount(
+      0,
+    );
+    await expect(page.getByText(/v3\.|not-a-handoff|ABAB/)).toHaveCount(0);
+  }
+});
+
 test("home page loads with Buzz branding", async ({ page }) => {
   await page.goto("/");
   await expect(
