@@ -325,15 +325,23 @@ def send_error(msg_id: Any, code: int, message: str, data: Any = None):
 
 def send_update(session_id: str, update_type: str, content: str):
     """Send a session/update notification (agent -> harness -> relay)."""
+    session_update_kind = "agent_message_chunk"
+    if update_type == "status":
+        session_update_kind = "agent_thought_chunk"
+
     send({
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": {
             "sessionId": session_id,
             "update": {
+                "sessionUpdate": session_update_kind,
                 "type": update_type,
                 "role": "agent",
-                "content": content,
+                "content": {
+                    "text": content,
+                },
+                "text": content,
             },
         },
     })
