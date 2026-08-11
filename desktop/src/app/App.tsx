@@ -18,8 +18,10 @@ import {
 } from "@/app/communityViewTransition";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
+import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
+import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -40,6 +42,7 @@ import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
+import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -318,6 +321,8 @@ function CommunityApp({
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
+  const isFindingCommunityAfterLeave =
+    activeCommunity === null && loadCommunityDiscoveryAfterLeave();
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
@@ -342,6 +347,7 @@ function CommunityApp({
     activeCommunity,
     communityKey,
     sharedIdentity,
+    isFindingCommunityAfterLeave,
   );
 
   const transitionCommunity = useCallback(
@@ -511,7 +517,9 @@ function CommunityApp({
       appContent = (
         <WelcomeSetup
           initialPage={resumeFirstCommunityPage ?? undefined}
-          onBack={onBackToMachineConfig}
+          onBack={
+            isFindingCommunityAfterLeave ? undefined : onBackToMachineConfig
+          }
         />
       );
     } else if ("error" in community && community.error) {
@@ -546,6 +554,7 @@ function CommunityApp({
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
       <CommunityQueryProvider key={communityKey}>
+        <CommunityThemeController />
         <AppReady
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
@@ -652,12 +661,13 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [activeCommunity, communityOnboarding.start],
   );
 
-  // Deep links are captured here — above the machine-onboarding gate — not in
-  // CommunityApp. The Rust side queues them; draining into the persisted
-  // community-onboarding transaction immediately means an invite opened on a
-  // fresh install is acknowledged on screen while the identity steps are
-  // still pending, and survives a relaunch in between.
+  // Community links are app-global work. A Huddle companion loads the same
+  // React tree, but must never race the main window for the native pending-link
+  // queue or replace its dedicated transcript surface with onboarding.
+  const acceptsCommunityDeepLinks = huddleWindowChannelId() === null;
   useEffect(() => {
+    if (!acceptsCommunityDeepLinks) return;
+
     const unlisten = listenForDeepLinks({
       startCommunityOnboarding: communityOnboarding.start,
       openAddCommunity,
@@ -666,7 +676,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [communityOnboarding.start, openAddCommunity]);
+  }, [acceptsCommunityDeepLinks, communityOnboarding.start, openAddCommunity]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
@@ -696,6 +706,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       <MachineOnboardingFlow
         complete={completeMachineOnboarding}
         continueWithIdentity={machine.continueWithIdentity}
+        continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
         navigateAfterComplete={navigateAfterOnboarding}

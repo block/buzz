@@ -10,6 +10,7 @@ import {
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
+import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -386,6 +387,18 @@ export function ProfileSummaryView({
         />
       ) : null}
 
+      {/* Tab-independent restart badge — visible on every tab so the user
+          sees it on a plain Info-tab open, not only on the Runtime tab.
+          Fixes the side-panel badge inconsistency (info-tab default = badge invisible
+          before this change). */}
+      {managedAgent?.needsRestart ? (
+        <RestartDiffBadge
+          autoRestartEnabled={managedAgent.autoRestartOnConfigChange}
+          className="self-center"
+          restartDiff={managedAgent.restartDiff}
+        />
+      ) : null}
+
       {showTabSection ? (
         <section className="space-y-3">
           {showTabBar ? (
@@ -420,6 +433,7 @@ export function ProfileSummaryView({
                 diagnosticsFields={diagnosticsFields}
                 diagnosticsSummary={diagnosticsTrailing}
                 needsRestart={managedAgent?.needsRestart ?? false}
+                restartDiff={managedAgent?.restartDiff ?? []}
                 onOpenDiagnostics={onOpenDiagnostics}
                 onOpenInstructions={onOpenInstructions}
                 runtimeConfigurationFields={runtimeConfigurationFields}

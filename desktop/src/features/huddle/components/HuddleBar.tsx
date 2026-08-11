@@ -1,34 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Bot,
   Captions,
-  MessageSquareText,
   PhoneOff,
+  PictureInPicture,
+  PictureInPicture2,
   SmilePlus,
 } from "lucide-react";
 import * as React from "react";
 
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import { useProfileQuery } from "@/features/profile/hooks";
+import { useProfileQuery, useSelfProfileCache } from "@/features/profile/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
-import {
-  KIND_HUDDLE_REACTION,
-  KIND_HUDDLE_STARTED,
-} from "@/shared/constants/kinds";
+import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
+import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
 import { truncatePubkey } from "@/shared/lib/pubkey";
@@ -44,8 +45,10 @@ type HuddleState = {
     | "leaving";
   parent_channel_id: string | null;
   ephemeral_channel_id: string | null;
+  huddle_thread_event_id: string | null;
   participants: string[]; // pubkey hex strings
   agent_pubkeys: string[];
+  agent_voice_settings: Record<string, HuddleAgentVoiceSettings>;
   tts_enabled: boolean;
   transcription_enabled: boolean;
   is_creator: boolean;
@@ -54,6 +57,10 @@ type HuddleState = {
 
 type HuddleBarProps = {
   className?: string;
+  /** The companion window owns the full controls; the main app only opens it. */
+  mode?: "main" | "room";
+  /** Called after the companion window has been opened successfully. */
+  onOpenHuddleWindow?: () => void;
   onOpenThread?: (channelId: string, messageId: string) => void;
   onVisibilityChange?: (visible: boolean) => void;
 };
@@ -62,6 +69,11 @@ const HUDDLE_DRAWER_EXIT_MS = 260;
 const HUDDLE_STATE_FALLBACK_INTERVAL_MS = 30_000;
 const HUDDLE_MODEL_STATUS_INTERVAL_MS = 10_000;
 const HUDDLE_REACTION_NAME_MAX = 48;
+const HEADPHONES_HINT_SEEN_STORAGE_KEY = "buzz.huddle.headphones-hint-seen";
+
+function hasSeenHeadphonesHint() {
+  return window.localStorage.getItem(HEADPHONES_HINT_SEEN_STORAGE_KEY) === "1";
+}
 
 function isVisibleHuddleState(state: HuddleState | null) {
   return state?.phase === "active" || state?.phase === "connected";
@@ -69,17 +81,6 @@ function isVisibleHuddleState(state: HuddleState | null) {
 
 function firstTagValue(event: RelayEvent, name: string): string | null {
   return event.tags.find((tag) => tag[0] === name)?.[1] ?? null;
-}
-
-function parseEphemeralChannelId(content: string): string | null {
-  try {
-    const parsed = JSON.parse(content) as { ephemeral_channel_id?: unknown };
-    return typeof parsed.ephemeral_channel_id === "string"
-      ? parsed.ephemeral_channel_id
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 function customEmojiShortcode(emoji: string): string | null {
@@ -146,18 +147,21 @@ function huddleReactionTags(
 
 export function HuddleBar({
   className,
-  onOpenThread,
+  mode = "main",
+  onOpenHuddleWindow,
   onVisibilityChange,
 }: HuddleBarProps) {
+  const documentVisible = useDocumentVisible();
   const {
-    localAudioTrack,
     leaveHuddle,
     micConnected,
+    isMuted,
+    toggleMute,
     micLevel,
-    pttActive,
     voiceInputMode,
     setVoiceInputMode,
     activeSpeakers,
+    speakerLevels,
     huddleError,
     clearHuddleError,
     audioDevices,
@@ -172,6 +176,7 @@ export function HuddleBar({
   const customEmoji = useCustomEmoji();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
+  const selfProfileCache = useSelfProfileCache();
   const { burstHuddleReaction } = useEmojiBurst();
 
   const isPttMode = voiceInputMode === "push_to_talk";
@@ -181,9 +186,9 @@ export function HuddleBar({
   );
   const stateGenerationRef = React.useRef(0);
   const locallyLeavingChannelRef = React.useRef<string | null>(null);
-  const [isMuted, setIsMuted] = React.useState(false);
-  const [headphonesHintDismissed, setHeadphonesHintDismissed] =
-    React.useState(false);
+  const [headphonesHintDismissed, setHeadphonesHintDismissed] = React.useState(
+    hasSeenHeadphonesHint,
+  );
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
@@ -192,9 +197,6 @@ export function HuddleBar({
   const [transcriptError, setTranscriptError] = React.useState<string | null>(
     null,
   );
-  const [huddleThreadEventId, setHuddleThreadEventId] = React.useState<
-    string | null
-  >(null);
   const [modelStatus, setModelStatus] = React.useState<{
     stt: string;
     tts: string;
@@ -238,7 +240,7 @@ export function HuddleBar({
       }
     }
 
-    void fetchState();
+    if (documentVisible) void fetchState();
 
     // Primary: listen for Rust-emitted state change events
     listen<HuddleState>("huddle-state-changed", (event) => {
@@ -253,21 +255,27 @@ export function HuddleBar({
 
     // Fallback in case events are missed; keep it slow so normal huddle use is
     // event-driven and does not keep a sync IPC command warm on the main thread.
-    const id = window.setInterval(
-      () => void fetchState(),
-      HUDDLE_STATE_FALLBACK_INTERVAL_MS,
-    );
+    const id = documentVisible
+      ? window.setInterval(
+          () => void fetchState(),
+          HUDDLE_STATE_FALLBACK_INTERVAL_MS,
+        )
+      : null;
 
     return () => {
       cancelled = true;
       unlisten?.();
-      window.clearInterval(id);
+      if (id !== null) window.clearInterval(id);
     };
-  }, [applyIncomingState]);
+  }, [applyIncomingState, documentVisible]);
 
   const huddlePhase = state?.phase;
   React.useEffect(() => {
-    if (huddlePhase !== "active" && huddlePhase !== "connected") return;
+    if (
+      !documentVisible ||
+      (huddlePhase !== "active" && huddlePhase !== "connected")
+    )
+      return;
 
     let cancelled = false;
 
@@ -310,21 +318,49 @@ export function HuddleBar({
     return () => {
       cancelled = true;
       window.clearInterval(id);
-      setModelStatus(null); // Clear stale status on huddle end/phase change.
     };
-  }, [huddlePhase]);
+  }, [documentVisible, huddlePhase]);
 
   React.useEffect(() => {
-    if (localAudioTrack) {
-      localAudioTrack.enabled = !isMuted;
-    }
-  }, [isMuted, localAudioTrack]);
+    if (huddlePhase === "active" || huddlePhase === "connected") return;
+    setModelStatus(null);
+  }, [huddlePhase]);
 
   const isHuddleVisible = isVisibleHuddleState(state);
+  const companionHadActiveHuddleRef = React.useRef(false);
+  const mainHadActiveHuddleRef = React.useRef(false);
+
+  const dismissHeadphonesHint = React.useCallback(() => {
+    window.localStorage.setItem(HEADPHONES_HINT_SEEN_STORAGE_KEY, "1");
+    setHeadphonesHintDismissed(true);
+  }, []);
 
   React.useEffect(() => {
     onVisibilityChange?.(isHuddleVisible);
   }, [isHuddleVisible, onVisibilityChange]);
+
+  React.useEffect(() => {
+    if (mode !== "room") return;
+    if (isHuddleVisible) {
+      companionHadActiveHuddleRef.current = true;
+      return;
+    }
+    if (companionHadActiveHuddleRef.current) {
+      void getCurrentWindow().close();
+    }
+  }, [isHuddleVisible, mode]);
+
+  React.useEffect(() => {
+    if (mode !== "main") return;
+    if (isHuddleVisible) {
+      mainHadActiveHuddleRef.current = true;
+      return;
+    }
+    if (mainHadActiveHuddleRef.current) {
+      mainHadActiveHuddleRef.current = false;
+      dismissHeadphonesHint();
+    }
+  }, [dismissHeadphonesHint, isHuddleVisible, mode]);
 
   React.useEffect(() => {
     if (isHuddleVisible && state) {
@@ -341,8 +377,15 @@ export function HuddleBar({
 
   const barState = isHuddleVisible && state ? state : renderedState;
   const reactionChannelId = barState?.ephemeral_channel_id ?? null;
-  const parentChannelId = barState?.parent_channel_id ?? null;
   const currentPubkey = identityQuery.data?.pubkey ?? null;
+  const participantSpeakerLevels = React.useMemo(() => {
+    const levels = { ...speakerLevels };
+    if (currentPubkey) {
+      levels[currentPubkey.toLowerCase()] =
+        micConnected && !isMuted ? micLevel : 0;
+    }
+    return levels;
+  }, [currentPubkey, isMuted, micConnected, micLevel, speakerLevels]);
   const reactionSenderName = React.useMemo(
     () =>
       clampReactionName(
@@ -404,40 +447,6 @@ export function HuddleBar({
     };
   }, [burstHuddleReaction, currentPubkey, reactionChannelId]);
 
-  React.useEffect(() => {
-    if (!parentChannelId || !reactionChannelId) {
-      setHuddleThreadEventId(null);
-      return;
-    }
-
-    let disposed = false;
-    let cleanup: (() => void) | null = null;
-    setHuddleThreadEventId(null);
-
-    void relayClient
-      .subscribeToHuddleEvents(parentChannelId, (event) => {
-        if (disposed || event.kind !== KIND_HUDDLE_STARTED) return;
-        if (parseEphemeralChannelId(event.content) !== reactionChannelId)
-          return;
-        setHuddleThreadEventId(event.id);
-      })
-      .then((dispose) => {
-        if (disposed) {
-          void dispose();
-          return;
-        }
-        cleanup = () => void dispose();
-      })
-      .catch((error) => {
-        console.error("[huddle] Failed to find huddle thread:", error);
-      });
-
-    return () => {
-      disposed = true;
-      cleanup?.();
-    };
-  }, [parentChannelId, reactionChannelId]);
-
   const handleHuddleReactionSelect = React.useCallback(
     (emoji: string) => {
       const trimmedEmoji = emoji.trim();
@@ -484,9 +493,9 @@ export function HuddleBar({
   }
 
   const isDrawerClosing = !isHuddleVisible;
+  const hasAvailableMic = micConnected;
   const ttsEnabled = barState.tts_enabled;
   const transcriptionEnabled = barState.transcription_enabled;
-
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
   // far-end reference. The AEC follow-up PR flips this constant in the
@@ -503,6 +512,12 @@ export function HuddleBar({
       const backendClean = await leaveHuddle();
       if (backendClean) {
         setState(null);
+        // A companion is the active huddle room, not a persistent transcript
+        // viewer. Close it immediately after it ends instead of depending on
+        // an asynchronous state event to arrive first.
+        if (mode === "room") {
+          void getCurrentWindow().close();
+        }
       } else {
         locallyLeavingChannelRef.current = null;
         stateGenerationRef.current += 1;
@@ -532,9 +547,22 @@ export function HuddleBar({
     }
   }
 
-  function handleOpenThread() {
-    if (!parentChannelId || !huddleThreadEventId) return;
-    onOpenThread?.(parentChannelId, huddleThreadEventId);
+  async function handleOpenHuddleWindow() {
+    try {
+      await invoke("open_huddle_window");
+      dismissHeadphonesHint();
+      onOpenHuddleWindow?.();
+    } catch (error) {
+      console.error("Failed to open huddle window:", error);
+    }
+  }
+
+  async function handleReturnToDrawer() {
+    try {
+      await invoke("close_huddle_companion");
+    } catch (error) {
+      console.error("Failed to return huddle to drawer:", error);
+    }
   }
 
   return (
@@ -601,39 +629,35 @@ export function HuddleBar({
           </span>
         )}
 
-        {showAddAgent && (
-          <AddAgentDialog
-            currentAgentPubkeys={barState.agent_pubkeys}
-            onClose={() => setShowAddAgent(false)}
-            onAdd={async (pubkey: string): Promise<AgentAddResult> => {
-              setAgentAddError(null);
-              try {
-                const result = await invoke<AgentAddResult>(
-                  "add_agent_to_huddle",
-                  { agentPubkey: pubkey },
-                );
-                // Refresh huddle state so the participant list updates immediately.
-                const s = await invoke<HuddleState>("get_huddle_state");
-                setState(s);
-                return result;
-              } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                setAgentAddError(`Failed to add agent: ${msg}`);
-                throw e; // Re-throw so AddAgentDialog shows its inline error.
-              }
-            }}
-          />
-        )}
-      </div>
+        <AddAgentDialog
+          currentAgentPubkeys={barState.agent_pubkeys}
+          onClose={() => setShowAddAgent(false)}
+          onAdd={async (pubkey: string): Promise<AgentAddResult> => {
+            setAgentAddError(null);
+            try {
+              const result = await invoke<AgentAddResult>(
+                "add_agent_to_huddle",
+                { agentPubkey: pubkey },
+              );
+              // Refresh huddle state so the participant list updates immediately.
+              const s = await invoke<HuddleState>("get_huddle_state");
+              setState(s);
+              return result;
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              setAgentAddError(`Failed to add agent: ${msg}`);
+              throw e; // Re-throw so AddAgentDialog shows its inline error.
+            }
+          }}
+          open={showAddAgent}
+        />
 
-      <div className="flex items-center gap-5 justify-self-center">
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <MicControls
             isMuted={isMuted}
-            onToggleMute={() => setIsMuted((m) => !m)}
+            onToggleMute={toggleMute}
             isPttMode={isPttMode}
-            pttActive={pttActive}
-            micConnected={micConnected}
+            micConnected={hasAvailableMic}
             micLevel={micLevel}
             onSelectVoiceInputMode={setVoiceInputMode}
             audioDevices={audioDevices}
@@ -646,9 +670,12 @@ export function HuddleBar({
           <SpeakerControls
             ttsEnabled={ttsEnabled}
             showHeadphonesHint={
-              aecMissing && !headphonesHintDismissed && !isDrawerClosing
+              mode === "main" &&
+              aecMissing &&
+              !headphonesHintDismissed &&
+              !isDrawerClosing
             }
-            onHeadphonesHintDismiss={() => setHeadphonesHintDismissed(true)}
+            onHeadphonesHintDismiss={dismissHeadphonesHint}
             onToggleTts={async () => {
               try {
                 await invoke("set_tts_enabled", { enabled: !ttsEnabled });
@@ -663,60 +690,56 @@ export function HuddleBar({
             onSelectOutputDevice={setSelectedOutputDevice}
           />
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="View huddle thread"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                disabled={!parentChannelId || !huddleThreadEventId}
-                onClick={handleOpenThread}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
-                <MessageSquareText className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              View thread
-            </TooltipContent>
-          </Tooltip>
+          {mode === "main" ? (
+            <HuddleParticipantsControl
+              participants={barState.participants}
+              activeSpeakers={activeSpeakers}
+              speakerLevels={participantSpeakerLevels}
+              agentPubkeys={barState.agent_pubkeys}
+              agentVoiceSettings={barState.agent_voice_settings}
+              selfProfile={{
+                avatarUrl:
+                  profileQuery.data?.avatarUrl ??
+                  selfProfileCache?.avatarDataUrl ??
+                  null,
+                displayName:
+                  profileQuery.data?.displayName ??
+                  identityQuery.data?.displayName ??
+                  null,
+                pubkey: currentPubkey,
+              }}
+              onRemoveAgent={async (pubkey) => {
+                const confirmed = window.confirm(
+                  "Remove this agent from the huddle?",
+                );
+                if (!confirmed) return;
+                try {
+                  await invoke("remove_agent_from_huddle", {
+                    agentPubkey: pubkey,
+                  });
+                  setState((prev) => {
+                    if (!prev) return prev;
+                    return {
+                      ...prev,
+                      participants: prev.participants.filter(
+                        (p) => p !== pubkey,
+                      ),
+                      agent_pubkeys: prev.agent_pubkeys.filter(
+                        (p) => p !== pubkey,
+                      ),
+                    };
+                  });
+                } catch (e) {
+                  console.error("Failed to remove agent from huddle:", e);
+                }
+              }}
+            />
+          ) : null}
         </div>
+      </div>
 
+      <div className="flex shrink-0 items-center gap-2 justify-self-center">
         <div className="flex items-center gap-2">
-          <HuddleParticipantsControl
-            participants={barState.participants}
-            activeSpeakers={activeSpeakers}
-            agentPubkeys={barState.agent_pubkeys}
-            onRemoveAgent={async (pubkey) => {
-              if (!barState.ephemeral_channel_id) return;
-              const confirmed = window.confirm(
-                "Remove this agent from the huddle?",
-              );
-              if (!confirmed) return;
-              try {
-                await invoke("remove_channel_member", {
-                  channelId: barState.ephemeral_channel_id,
-                  pubkey,
-                });
-                // Optimistically remove from local state — the backend's
-                // 15s membership poll will eventually converge.
-                setState((prev) => {
-                  if (!prev) return prev;
-                  return {
-                    ...prev,
-                    participants: prev.participants.filter((p) => p !== pubkey),
-                    agent_pubkeys: prev.agent_pubkeys.filter(
-                      (p) => p !== pubkey,
-                    ),
-                  };
-                });
-              } catch (e) {
-                console.error("Failed to remove agent from huddle:", e);
-              }
-            }}
-          />
-
           <Popover
             onOpenChange={setIsReactionPickerOpen}
             open={isReactionPickerOpen}
@@ -792,33 +815,64 @@ export function HuddleBar({
             </TooltipContent>
           </Tooltip>
         </div>
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              aria-label="Leave huddle"
-              className="h-12 gap-2 px-4"
-              disabled={isLeaving}
-              aria-busy={isLeaving}
-              onClick={() => void handleLeave()}
-              size="sm"
-              variant="destructive"
-            >
-              <PhoneOff className="h-4 w-4" />
-              Leave
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent className="buzz-huddle-tooltip">
-            Leave huddle
-          </TooltipContent>
-        </Tooltip>
       </div>
 
-      <div aria-hidden="true" className="min-w-0" />
+      <div className="flex shrink-0 items-center gap-2 justify-self-end">
+        {mode === "main" ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="Open huddle in a new window"
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                onClick={() => void handleOpenHuddleWindow()}
+                size="icon"
+                type="button"
+                variant="secondary"
+              >
+                <PictureInPicture2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              Open huddle window
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="Return huddle to drawer"
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                onClick={() => void handleReturnToDrawer()}
+                size="icon"
+                type="button"
+                variant="secondary"
+              >
+                <PictureInPicture className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              Return huddle to drawer
+            </TooltipContent>
+          </Tooltip>
+        )}
+
+        <Button
+          aria-label="Leave huddle"
+          className="h-12 gap-2 px-4"
+          disabled={isLeaving}
+          aria-busy={isLeaving}
+          onClick={() => void handleLeave()}
+          size="sm"
+          variant="destructive"
+        >
+          <PhoneOff className="h-4 w-4" />
+          Leave
+        </Button>
+      </div>
 
       {/* Screen reader announcements for huddle state changes */}
       <output aria-live="polite" className="sr-only">
-        {micConnected
+        {hasAvailableMic
           ? "In huddle, microphone connected"
           : "In huddle, no microphone"}
         {`, voice input: ${isPttMode ? "push to talk, press Ctrl+Space to transmit" : "voice activity detection"}`}

@@ -15,7 +15,9 @@ class AccentPickerPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final selected = ref.watch(accentProvider);
+    final selected =
+        accentIndexForWireValue(ref.watch(communityThemeProvider).accent) ??
+        defaultAccentIndex;
     final colorScheme = context.colors;
 
     return FrostedScaffold(
@@ -31,7 +33,8 @@ class AccentPickerPage extends ConsumerWidget {
               color: accentColorForScheme(colorScheme, i),
               label: accentColors[i].name,
               selected: selected == i,
-              onTap: () => ref.read(accentProvider.notifier).setAccent(i),
+              onTap: () =>
+                  ref.read(communityThemeProvider.notifier).setAccent(i),
             ),
         ],
       ),

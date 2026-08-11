@@ -23,6 +23,8 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
+import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
@@ -290,6 +292,40 @@ class _EmptyPhotoLibrary implements PhotoLibrary {
       const [];
 }
 
+class _FakeVideoUploadService extends MediaUploadService {
+  final XFile video;
+  XFile? uploadedVideo;
+
+  _FakeVideoUploadService(this.video)
+    : super(
+        baseUrl: 'https://relay.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+  @override
+  Future<XFile?> pickGalleryVideo() async => video;
+
+  @override
+  Future<BlobDescriptor> uploadVideo(
+    XFile pickedVideo, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    uploadedVideo = pickedVideo;
+    onProgress?.call(1);
+    return const BlobDescriptor(
+      url: 'https://relay.example/media/test.mp4',
+      sha256:
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      size: 32,
+      type: 'video/mp4',
+      uploaded: 1,
+    );
+  }
+}
+
 class _FakePhotoLibrary implements PhotoLibrary {
   final List<RecentPhoto> photos;
 
@@ -321,14 +357,22 @@ class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
 
-  _RecordingRelaySocket(this.events, this.handleMessage)
-    : super(
-        wsUrl: 'ws://localhost',
-        nsec: null,
-        onMessage: handleMessage,
-        onConnected: () {},
-        onDisconnected: (_) {},
-      );
+  /// Invoked after an event has been recorded and acknowledged, before the
+  /// caller's `await` resumes. Lets a test interleave state changes (such as
+  /// a community switch) between two relay round trips.
+  final void Function(Map<String, dynamic> event)? onEventAcknowledged;
+
+  _RecordingRelaySocket(
+    this.events,
+    this.handleMessage, {
+    this.onEventAcknowledged,
+  }) : super(
+         wsUrl: 'ws://localhost',
+         nsec: null,
+         onMessage: handleMessage,
+         onConnected: () {},
+         onDisconnected: (_) {},
+       );
 
   @override
   SocketState get state => SocketState.connected;
@@ -339,6 +383,7 @@ class _RecordingRelaySocket extends RelaySocket {
       events.add(event);
       final id = event['id'] as String;
       super.debugHandleOkForTest(['OK', id, true, '']);
+      onEventAcknowledged?.call(event);
     }
   }
 
@@ -392,6 +437,152 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('starts compact and grows to the full-width composer', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byTooltip('Add attachment').hitTestable(), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
+      expect(find.byKey(const ValueKey('composer-footer-gradient')), findsOne);
+      final composerBackdrop = find.descendant(
+        of: find.byKey(const ValueKey('composer-footer-gradient')),
+        matching: find.byType(MobileTabFooterBackdrop),
+      );
+      expect(composerBackdrop, findsOneWidget);
+      expect(
+        tester.getSize(composerBackdrop).height,
+        mobileTabFooterBackdropHeight(tester.element(composerBackdrop)),
+      );
+      final compactDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(
+        compactDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog + Grid.quarter),
+      );
+      final compactWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+
+      await _expandComposer(tester);
+
+      final expandedWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+      final expandedDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(compactWidth, closeTo(expandedWidth * 0.85, 0.5));
+      expect(
+        expandedDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog),
+      );
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.byIcon(LucideIcons.atSign), findsOneWidget);
+      expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+      expect(find.byIcon(LucideIcons.smilePlus), findsOneWidget);
+      expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
+    });
+
+    testWidgets('returns to the compact capsule when the keyboard drops', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      final focusNode = tester
+          .widget<TextField>(find.byType(TextField))
+          .focusNode!;
+      expect(focusNode.hasFocus, isTrue);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.reset);
+      await tester.pump();
+
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+      final compactDecoration =
+          tester
+                  .widget<Container>(
+                    find.byKey(const ValueKey('composer-surface')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(
+        compactDecoration.borderRadius,
+        BorderRadius.circular(Radii.dialog + Grid.quarter),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('attachment control responds while the composer is expanding', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('mounted composer does not carry draft text across an in-place '
         'identity switch', (tester) async {
       final keysA = nostr.Keys.generate();
@@ -400,7 +591,13 @@ void main() {
 
       await tester.pumpWidget(
         _buildComposeBar(
-          uploadService: _testUploadService(keysA.nsec),
+          uploadService: MediaUploadService(
+            baseUrl: relayUrl,
+            nsec: keysA.nsec,
+            pickGalleryImage: () async =>
+                XFile.fromData(_pngBytes, name: 'identity-a.png'),
+            pickGalleryVideo: () async => null,
+          ),
           relayConfig: () => _SwitchableRelayConfigNotifier(
             RelayConfig(baseUrl: relayUrl, nsec: keysA.nsec),
           ),
@@ -428,6 +625,9 @@ void main() {
       await tester.enterText(find.byType(TextField), 'identity A secret draft');
       await tester.pump();
       expect(storedText(keysA), 'identity A secret draft');
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
       // Switch identity in place while the composer stays mounted.
       final container = ProviderScope.containerOf(
@@ -439,9 +639,15 @@ void main() {
       await tester.pumpAndSettle();
 
       // The mounted composer must not carry identity A's text forward.
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       expect(textField.controller!.text, isEmpty);
       expect(storedText(keysB), isNull);
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
 
       // Identity B's edits persist only into B's store; A's is untouched.
       await tester.enterText(find.byType(TextField), 'identity B text');
@@ -492,6 +698,94 @@ void main() {
 
       expect(textField.controller!.text, 'hello :meow:world');
       expect(textField.controller!.selection.baseOffset, 12);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets('composer controls use selection haptics', (tester) async {
+      final hapticCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'HapticFeedback.vibrate') {
+              hapticCalls.add(call);
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      hapticCalls.clear();
+
+      await tester.tap(find.byIcon(LucideIcons.atSign));
+      tester.widget<TextField>(find.byType(TextField)).controller!.clear();
+      await tester.pump();
+      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.pump();
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.bold));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close formatting'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Add attachment'));
+      await tester.pumpAndSettle();
+
+      expect(hapticCalls, hasLength(6));
+      expect(
+        hapticCalls.every(
+          (call) => call.arguments == 'HapticFeedbackType.selectionClick',
+        ),
+        isTrue,
+      );
+    });
+
+    testWidgets('composer suggestions use the shared popover treatment', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [_makeChannel(name: 'general', channelType: 'stream')],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.hash));
+      await tester.pumpAndSettle();
+
+      final surface = find.byKey(const ValueKey('channel-suggestions-popover'));
+      final material = tester.widget<Material>(surface);
+      final shape = material.shape! as RoundedRectangleBorder;
+      expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+      expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+      expect(material.elevation, appPopoverElevation);
+      expect(
+        material.shadowColor,
+        appPopoverShadowColor(tester.element(surface)),
+      );
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontFamily,
+        'Inter',
+      );
     });
 
     testWidgets('native All Photos picker failures show an error', (
@@ -587,6 +881,60 @@ void main() {
 
         expect(presentCalls, 1);
         expect(textField.focusNode?.hasFocus, isTrue);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('leaving a focused composer dismisses the native keyboard', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var dismissCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+          case 'present':
+            return true;
+          case 'dismiss':
+            dismissCalls += 1;
+            return null;
+        }
+        return null;
+      });
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+        expect(focusNode.hasFocus, isTrue);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(dismissCalls, 1);
       } finally {
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpWidget(const SizedBox.shrink());
@@ -1102,7 +1450,7 @@ void main() {
       ]);
     });
 
-    testWidgets('bounds concurrent system-selected photo uploads', (
+    testWidgets('defers system-selected photo uploads until send', (
       tester,
     ) async {
       final releaseFirstBatch = Completer<void>();
@@ -1154,19 +1502,8 @@ void main() {
       );
 
       await _openSystemPhotoPicker(tester);
-      for (var frame = 0; frame < 20 && requestsStarted < 3; frame += 1) {
-        await tester.pump(const Duration(milliseconds: 20));
-      }
-
-      expect(requestsStarted, 3);
-      expect(peakActiveRequests, 3);
-
-      releaseFirstBatch.complete();
-      await tester.pumpAndSettle();
-
-      expect(requestsStarted, 5);
-      expect(peakActiveRequests, 3);
-      expect(find.byTooltip('Remove attachment'), findsNWidgets(5));
+      expect(requestsStarted, 0);
+      expect(peakActiveRequests, 0);
     });
 
     testWidgets('numbers recent photo selection and returns to the menu', (
@@ -1191,6 +1528,10 @@ void main() {
         ),
       );
 
+      final compactComposerWidth = tester
+          .getSize(find.byKey(const ValueKey('composer-width-transition')))
+          .width;
+
       await _openAttachmentMenu(tester);
       await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
@@ -1201,6 +1542,12 @@ void main() {
       );
       expect(find.byTooltip('Back to attachment options'), findsWidgets);
       expect(find.text('All photos'), findsOneWidget);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('attachment-surface-popover')))
+            .width,
+        closeTo(compactComposerWidth / 0.85, 0.5),
+      );
 
       await tester.tap(find.byKey(const ValueKey('recent-photo-two')));
       await tester.pumpAndSettle();
@@ -1265,12 +1612,22 @@ void main() {
       await _openAttachmentMenu(tester);
 
       final menu = find.byKey(const ValueKey('attachment-menu'));
+      final surface = find.byKey(const ValueKey('attachment-surface-popover'));
       final rows = [
         for (final label in ['camera', 'photos', 'video', 'files'])
           find.byKey(ValueKey('attachment-menu-item-$label')),
       ];
       final menuRect = tester.getRect(menu);
 
+      final material = tester.widget<Material>(surface);
+      final shape = material.shape! as RoundedRectangleBorder;
+      expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+      expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+      expect(material.elevation, appPopoverElevation);
+      expect(
+        material.shadowColor,
+        appPopoverShadowColor(tester.element(surface)),
+      );
       expect(menuRect.size, const Size(216, 264));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
@@ -1280,6 +1637,7 @@ void main() {
       for (final label in ['Camera', 'Photos', 'Video', 'Files']) {
         final text = tester.widget<Text>(find.text(label));
         expect(text.style?.fontSize, 20);
+        expect(text.style?.fontFamily, 'Inter');
       }
       final icons = [
         for (final label in ['camera', 'photos', 'video', 'files'])
@@ -1316,6 +1674,48 @@ void main() {
               tester.getRect(rows[index - 1]).bottom,
           Grid.xxs,
         );
+      }
+    });
+
+    testWidgets('tapping outside dismisses the Android attachment menu', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+        expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('attachment-dismiss-barrier')),
+          findsOneWidget,
+        );
+
+        await tester.tapAt(const Offset(24, 24));
+        await tester.pumpAndSettle();
+
+        expect(find.byKey(const ValueKey('attachment-menu')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('attachment-dismiss-barrier')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('attachment-trigger-closed')).hitTestable(),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
 
@@ -1376,6 +1776,9 @@ void main() {
                 }) async {},
           ),
         );
+        final compactComposerWidth = tester
+            .getSize(find.byKey(const ValueKey('composer-width-transition')))
+            .width;
 
         await _openAttachmentMenu(tester);
         await tester.tap(find.text('Camera'));
@@ -1396,6 +1799,12 @@ void main() {
         expect(
           find.byKey(const ValueKey('camera-initialization-ready')),
           findsOneWidget,
+        );
+        expect(
+          tester
+              .getSize(find.byKey(const ValueKey('attachment-surface-popover')))
+              .width,
+          closeTo(compactComposerWidth / 0.85, 0.5),
         );
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
@@ -1444,62 +1853,343 @@ void main() {
       );
     });
 
-    testWidgets('keeps upload progress visible after the picker closes', (
-      tester,
-    ) async {
-      final uploadResponse = Completer<http.Response>();
-      final uploadService = MediaUploadService(
-        baseUrl: 'https://relay.example',
-        nsec: nostr.Keys.generate().nsec,
-        httpClient: http_testing.MockClient((request) => uploadResponse.future),
-        pickGalleryVideo: () async => null,
-        pickGalleryImage: () async => null,
-        pickGalleryImages: () async => [
-          XFile.fromData(_pngBytes, name: 'tiny.png'),
-        ],
-      );
+    testWidgets(
+      'shows post-send upload progress above the composer and cancels',
+      (tester) async {
+        final uploadResponse = Completer<http.Response>();
+        var sent = false;
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) => uploadResponse.future,
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          pickGalleryImages: () async => [
+            XFile.fromData(_pngBytes, name: 'tiny.png'),
+          ],
+        );
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  sent = true;
+                },
+          ),
+        );
+
+        await _openSystemPhotoPicker(tester);
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('compose-upload-progress')),
+          findsNothing,
+        );
+
+        await _expandComposer(tester);
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('compose-upload-progress')),
+          findsOneWidget,
+        );
+        expect(find.text('Uploading'), findsOneWidget);
+        expect(find.text('100%'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('compose-upload-cancel')),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<AnimatedFractionallySizedBox>(
+                find.byKey(const ValueKey('compose-upload-progress-fill')),
+              )
+              .widthFactor,
+          1,
+        );
+        final progressFill = tester.widget<ColoredBox>(
+          find.descendant(
+            of: find.byKey(const ValueKey('compose-upload-progress-fill')),
+            matching: find.byType(ColoredBox),
+          ),
+        );
+        expect(progressFill.color.a, closeTo(0.12, 0.001));
+        expect(
+          tester
+              .widget<AnimatedFractionallySizedBox>(
+                find.byKey(const ValueKey('compose-upload-progress-fill')),
+              )
+              .heightFactor,
+          1,
+        );
+        expect(
+          tester
+              .widget<Padding>(
+                find.byKey(const ValueKey('compose-upload-cancel-padding')),
+              )
+              .padding,
+          const EdgeInsets.symmetric(
+            horizontal: Grid.half,
+            vertical: Grid.quarter,
+          ),
+        );
+
+        await tester.pump(const Duration(milliseconds: 220));
+        await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('compose-upload-progress')),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('compose-upload-progress')),
+          findsNothing,
+        );
+
+        uploadResponse.complete(
+          http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('compose-upload-progress')),
+          findsNothing,
+        );
+        expect(sent, isFalse);
+      },
+    );
+
+    testWidgets('surfaces an error and keeps the draft when a community switch '
+        'cancels a text-only send', (tester) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      var sendCount = 0;
 
       await tester.pumpWidget(
         _buildComposeBar(
-          uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [_testAgent(agentPubkey)],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+          ),
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {
+            sendCount += 1;
+          },
         ),
       );
 
-      await _openSystemPhotoPicker(tester);
-      await tester.pump();
-
-      expect(
-        find.byKey(const ValueKey('compose-upload-progress')),
-        findsOneWidget,
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
       );
-      expect(find.bySemanticsLabel('Uploading attachment…'), findsOneWidget);
-
-      uploadResponse.complete(
-        http.Response(
-          jsonEncode({
-            'url': 'https://relay.example/media/test.png',
-            'sha256':
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-            'size': 16,
-            'type': 'image/png',
-            'uploaded': 1,
-          }),
-          200,
+      final session = container.read(relaySessionProvider.notifier);
+      // Switch community the moment the agent's kind:9000 add is
+      // acknowledged. That is the only window in which the guard can fire:
+      // everything before the first relay round trip runs in the same
+      // microtask as the ChannelActions read.
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+          onEventAcknowledged: (event) {
+            if (event['kind'] != 9000) return;
+            container
+                .read(relayConfigProvider.notifier)
+                .update(baseUrl: 'https://other.example', nsec: signer.nsec);
+          },
         ),
       );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
+      // The cancelled send must not reach the relay.
+      expect(sendCount, 0);
+      // The escaped StateError itself is pinned by flutter_test's own
+      // unhandled-exception reporting, which fails this test if the error
+      // is not caught. Deliberately no `takeException()` row: the framework
+      // has already consumed the error by this point, so such a row reads
+      // null whether or not the error escaped, and would never fail.
+      //
+      // What needs pinning is the user-visible half. The composer's own
+      // error line cannot carry it, because the same identity change resets
+      // that state on the very next frame, so the surface must outlive the
+      // switch.
       expect(
-        find.byKey(const ValueKey('compose-upload-progress')),
-        findsNothing,
+        find.widgetWithText(
+          SnackBar,
+          'Message not sent: the community changed',
+        ),
+        findsOneWidget,
+      );
+      // Characterization, not a fix: the unsent text is already retained in
+      // the originating community's own draft store (the send path never
+      // reaches `clearComposer`, and the persist listener wrote it while
+      // typing), so it is waiting when the user switches back. This row
+      // holds without the catch above and exists to keep it that way.
+      final storedDrafts = _testPrefs.getString(
+        'compose_drafts_v1:https://relay.example:${signer.public}',
+      );
+      expect(storedDrafts, isNotNull);
+      expect(
+        (jsonDecode(storedDrafts!) as List)
+            .map((d) => (d as Map<String, dynamic>)['text'])
+            .toList(),
+        contains('hello @Helper Bot'),
       );
     });
+
+    testWidgets(
+      'stale channel actions cannot invite after a community switch',
+      (tester) async {
+        final signer = nostr.Keys.generate();
+        final publishedEvents = <Map<String, dynamic>>[];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            relayConfig: () => _SwitchableRelayConfigNotifier(
+              RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+            ),
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        final session = container.read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+          ),
+        );
+        final staleActions = container.read(channelActionsProvider);
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://other-community.example', nsec: null);
+        await tester.pump();
+
+        await expectLater(
+          staleActions.addMembers(
+            channelId: 'channel-1',
+            pubkeys: ['c' * 64],
+            role: 'bot',
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(publishedEvents, isEmpty);
+      },
+    );
+
+    testWidgets(
+      'does not add a mentioned non-member when media upload is cancelled',
+      (tester) async {
+        final agentPubkey = 'c' * 64;
+        final signer = nostr.Keys.generate();
+        final publishedEvents = <Map<String, dynamic>>[];
+        final uploadResponse = Completer<http.Response>();
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: signer.nsec,
+          httpClient: http_testing.MockClient(
+            (request) => uploadResponse.future,
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          pickGalleryImages: () async => [
+            XFile.fromData(_pngBytes, name: 'tiny.png'),
+          ],
+        );
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            currentPubkey: signer.public,
+            relayAgents: [_testAgent(agentPubkey)],
+            channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          ),
+        );
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        final session = container.read(relaySessionProvider.notifier);
+        final socket = _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+        );
+        session.debugAttachSocketForTest(socket);
+
+        await _openSystemPhotoPicker(tester);
+        await tester.pumpAndSettle();
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pump();
+
+        expect(
+          publishedEvents.where((event) => event['kind'] == 9000),
+          isEmpty,
+        );
+
+        await tester.pump(const Duration(milliseconds: 220));
+        await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
+        uploadResponse.complete(
+          http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          publishedEvents.where((event) => event['kind'] == 9000),
+          isEmpty,
+        );
+      },
+    );
 
     testWidgets('renders markdown formatting without visible delimiters', (
       tester,
@@ -1672,21 +2362,20 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(galleryPickerCalled, isFalse);
-      expect(uploadedBytes, _pngBytes);
-      expect(uploadedMimeType, 'image/png');
+      expect(uploadedBytes, isNull);
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
       expect(
-        find.byKey(
-          const ValueKey(
-            'compose-attachment:https://relay.example/media/pasted.png',
-          ),
+        find.byWidgetPredicate(
+          (widget) => widget is Image && widget.image is MemoryImage,
         ),
         findsOneWidget,
       );
-      expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
       await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
+      expect(uploadedBytes, _pngBytes);
+      expect(uploadedMimeType, 'image/png');
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
       expect(sentMediaTags, hasLength(1));
       expect(
@@ -1755,14 +2444,7 @@ void main() {
         pasteImage.onPressed();
         await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(
-            const ValueKey(
-              'compose-attachment:https://relay.example/media/ios-native-paste.png',
-            ),
-          ),
-          findsOneWidget,
-        );
+        expect(find.byTooltip('Remove attachment'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
@@ -1884,14 +2566,7 @@ void main() {
         pasteImage.onPressed!();
         await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(
-            const ValueKey(
-              'compose-attachment:https://relay.example/media/ios-paste.png',
-            ),
-          ),
-          findsOneWidget,
-        );
+        expect(find.byTooltip('Remove attachment'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
@@ -2060,18 +2735,20 @@ void main() {
       await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
-      final attachmentFinder = find.byKey(
-        const ValueKey(
-          'compose-attachment:https://relay.example/media/test.png',
-        ),
-      );
       final removeButtonFinder = find.byTooltip('Remove attachment');
 
-      expect(attachmentFinder, findsOneWidget);
       expect(removeButtonFinder, findsOneWidget);
 
-      final attachmentTopRight = tester.getTopRight(attachmentFinder);
-      final attachmentTopLeft = tester.getTopLeft(attachmentFinder);
+      final attachmentTopRight = tester.getTopRight(
+        find
+            .ancestor(of: removeButtonFinder, matching: find.byType(Container))
+            .first,
+      );
+      final attachmentTopLeft = tester.getTopLeft(
+        find
+            .ancestor(of: removeButtonFinder, matching: find.byType(Container))
+            .first,
+      );
       final removeButtonCenter = tester.getCenter(removeButtonFinder);
 
       expect(
@@ -2114,8 +2791,14 @@ void main() {
 
       await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'Keep this draft');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
+      expect(find.text('Keep this draft'), findsOneWidget);
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
     for (final statusCode in [
@@ -2153,6 +2836,9 @@ void main() {
         );
 
         await _openSystemPhotoPicker(tester);
+        await tester.pumpAndSettle();
+        await _expandComposer(tester);
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pumpAndSettle();
 
         expect(
@@ -2203,14 +2889,7 @@ void main() {
       await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(
-          const ValueKey(
-            'compose-attachment:https://relay.example/media/animated.gif',
-          ),
-        ),
-        findsOneWidget,
-      );
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
     testWidgets('adds a selected non-member agent as a bot before sending', (
@@ -2459,6 +3138,80 @@ void main() {
       expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
+    testWidgets(
+      'adds the agent in a private channel when the sender is a plain member',
+      (tester) async {
+        final agentPubkey = 'a' * 64;
+        final signer = nostr.Keys.generate();
+        final publishedEvents = <Map<String, dynamic>>[];
+        var didSend = false;
+        List<String> sentMentionPubkeys = const <String>[];
+        List<List<String>> sentMediaTags = const <List<String>>[];
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            // Plain member of a private channel: ordinary member and bot
+            // additions are permitted; elevated-role grants still are not.
+            members: [
+              ChannelMember(
+                pubkey: signer.public,
+                role: 'member',
+                joinedAt: DateTime(2024),
+              ),
+            ],
+            relayAgents: [_testAgent(agentPubkey)],
+            channels: [
+              _makeCurrentChannel(visibility: 'private'),
+              _makeSharedMemberChannel(),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  didSend = true;
+                  sentMentionPubkeys = mentionPubkeys;
+                  sentMediaTags = mediaTags;
+                },
+          ),
+        );
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        final session = container.read(relaySessionProvider.notifier);
+        final socket = _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+        );
+        session.debugAttachSocketForTest(socket);
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(didSend, isTrue);
+        expect(
+          publishedEvents.where((event) => event['kind'] == 9000),
+          hasLength(1),
+        );
+        expect(sentMentionPubkeys, contains(agentPubkey));
+        expect(
+          sentMediaTags,
+          isNot(contains(orderedEquals(['mention', agentPubkey]))),
+        );
+        expect(find.text(privateChannelAddDeniedMessage), findsNothing);
+      },
+    );
+
     testWidgets('adds a sanitized animated PNG attachment', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
@@ -2498,95 +3251,52 @@ void main() {
       await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(
-          const ValueKey(
-            'compose-attachment:https://relay.example/media/animated.png',
-          ),
-        ),
-        findsOneWidget,
-      );
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
-    // Skip: video upload relies on native platform bridging
-    // (transcodeVideoToMp4) that can't be fully mocked in widget tests.
-    testWidgets('taps Video in chooser sheet and uploads video', skip: true, (
+    testWidgets('taps Video in chooser sheet and uploads video', (
       tester,
     ) async {
-      final keychain = nostr.Keys.generate();
-      final nsec = keychain.nsec;
+      final pickedVideo = XFile.fromData(
+        Uint8List.fromList([0, 1, 2, 3]),
+        mimeType: 'video/mp4',
+        name: 'clip.mp4',
+      );
+      final uploadService = _FakeVideoUploadService(pickedVideo);
 
-      // Build a temp file with a valid MP4 ftyp header (isom brand).
-      final mp4Bytes = Uint8List(32);
-      mp4Bytes[3] = 32;
-      mp4Bytes[4] = 0x66; // f
-      mp4Bytes[5] = 0x74; // t
-      mp4Bytes[6] = 0x79; // y
-      mp4Bytes[7] = 0x70; // p
-      mp4Bytes[8] = 0x69; // i
-      mp4Bytes[9] = 0x73; // s
-      mp4Bytes[10] = 0x6F; // o
-      mp4Bytes[11] = 0x6D; // m
-      final tempDir = await Directory.systemTemp.createTemp('compose_video_');
-      final tempFile = File('${tempDir.path}/clip.mp4');
-      await tempFile.writeAsBytes(mp4Bytes);
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
 
-      try {
-        final uploadService = MediaUploadService(
-          baseUrl: 'https://relay.example',
-          nsec: nsec,
-          httpClient: http_testing.MockClient((request) async {
-            return http.Response(
-              jsonEncode({
-                'url': 'https://relay.example/media/test.mp4',
-                'sha256':
-                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                'size': 1024,
-                'type': 'video/mp4',
-                'uploaded': 1,
-              }),
-              200,
-            );
-          }),
-          pickGalleryVideo: () async => XFile(tempFile.path),
-          pickGalleryImage: () async => null,
-        );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Video'));
+      await tester.pumpAndSettle();
 
-        String? sentContent;
-        await tester.pumpWidget(
-          _buildComposeBar(
-            uploadService: uploadService,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {
-                  sentContent = content;
-                },
-          ),
-        );
+      expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await _openAttachmentMenu(tester);
-        await tester.tap(find.text('Video'));
-        // Pump enough frames for the async file read + upload to complete.
-        // Can't use pumpAndSettle here — the upload spinner's animation
-        // prevents settling while the async upload is in-flight.
-        for (var i = 0; i < 10; i++) {
-          await tester.pump(const Duration(milliseconds: 100));
-        }
+      final sendButton = find
+          .ancestor(
+            of: find.byIcon(LucideIcons.arrowUp),
+            matching: find.byType(IconButton),
+          )
+          .hitTestable();
+      expect(sendButton, findsOneWidget);
+      await tester.tap(sendButton);
+      await tester.pumpAndSettle();
 
-        // Video attachment should show a video icon (not a broken image).
-        expect(find.byIcon(LucideIcons.video), findsOneWidget);
-
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
-        await tester.pump();
-        await tester.pumpAndSettle();
-
-        expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
-      } finally {
-        await tempDir.delete(recursive: true);
-      }
+      expect(uploadService.uploadedVideo, same(pickedVideo));
+      expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
     });
   });
 
@@ -2853,12 +3563,15 @@ List<({String text, TextStyle style})> _flattenStyledTextSpans(
   return result;
 }
 
-Channel _makeCurrentChannel({String channelType = 'stream'}) {
+Channel _makeCurrentChannel({
+  String channelType = 'stream',
+  String visibility = 'open',
+}) {
   return Channel(
     id: 'channel-1',
     name: 'current',
     channelType: channelType,
-    visibility: 'open',
+    visibility: visibility,
     description: '',
     createdBy: 'pubkey123',
     createdAt: DateTime(2024),

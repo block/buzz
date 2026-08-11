@@ -355,27 +355,26 @@ pub async fn validate_admin_event(
                 .iter()
                 .find(|m| m.pubkey == actor_bytes)
                 .and_then(|m| m.role.parse().ok());
+            let target_pubkey =
+                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
             // PUT_USER: open channels allow any authenticated user; private channels
-            // require the actor to be an existing member (any role can invite).
+            // require the actor to be an existing active member. Any active member may
+            // add an ordinary member, guest, or bot, but only owners/admins may grant
+            // an elevated role.
             if channel.visibility == "private" {
                 if actor_role.is_none() {
                     return Err(anyhow::anyhow!("actor not authorized"));
                 }
 
-                // Only owners/admins may grant elevated roles.
-                if requested_role.is_some_and(|r| r.is_elevated())
-                    && !actor_role.is_some_and(|r| r.is_elevated())
+                if requested_role.is_some_and(|role| role.is_elevated())
+                    && !actor_role.is_some_and(|role| role.is_elevated())
                 {
                     return Err(anyhow::anyhow!(
                         "only owners/admins may grant elevated roles"
                     ));
                 }
             }
-
-            // Extract target pubkey from p tag
-            let target_pubkey =
-                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
             // Changing an ACTIVE existing member's role is privileged in both
             // directions, on every visibility. `get_members` filters

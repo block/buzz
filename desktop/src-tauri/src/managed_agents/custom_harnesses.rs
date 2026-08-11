@@ -268,7 +268,7 @@ pub(crate) fn registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Thread-safe registry of non-builtin (preset + custom) harness definitions,
 /// populated on every `discover_acp_runtimes_from` call and queried at spawn time.
-fn loaded_harness_registry() -> &'static RwLock<Vec<Arc<HarnessDefinition>>> {
+pub(super) fn loaded_harness_registry() -> &'static RwLock<Vec<Arc<HarnessDefinition>>> {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<RwLock<Vec<Arc<HarnessDefinition>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| RwLock::new(Vec::new()))

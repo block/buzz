@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import type {
   DraftMentionRef,
   DraftState,
@@ -28,6 +29,19 @@ type UseDraftPersistLifecycleParams = {
   livePendingImeta: ImetaMedia[];
   /** Async setter for pendingImeta — called after the synchronous snapshot. */
   setPendingImeta: (imeta: ImetaMedia[]) => void;
+  /** Snapshot the local files owned by the outgoing draft key. */
+  getQueuedAttachments?: () => QueuedMediaAttachment[];
+  /** Retain local files in memory under their draft key. */
+  saveQueuedAttachmentsForDraft?: (
+    draftKey: string,
+    attachments: QueuedMediaAttachment[],
+  ) => void;
+  /** Local files cannot be persisted, so clear them at a draft-key boundary. */
+  clearQueuedAttachments?: () => void;
+  /** Restore local files retained while a deferred upload was off-channel. */
+  restoreQueuedAttachments?: (attachments: QueuedMediaAttachment[]) => void;
+  /** Read and remove local files retained for a recovered draft. */
+  takeQueuedAttachmentsForDraft?: (draftKey: string) => QueuedMediaAttachment[];
   /** Set the rich-text editor content from a draft string. */
   setContent: (content: string) => void;
   /** Clear the rich-text editor content (no-draft path). */
@@ -80,6 +94,11 @@ export function useDraftPersistLifecycle({
   restoreMentionRefs,
   livePendingImeta,
   setPendingImeta,
+  getQueuedAttachments,
+  saveQueuedAttachmentsForDraft,
+  clearQueuedAttachments,
+  restoreQueuedAttachments,
+  takeQueuedAttachmentsForDraft,
   setContent,
   clearContent,
   setSpoileredAttachmentUrls,
@@ -87,6 +106,12 @@ export function useDraftPersistLifecycle({
   syncComposerContentFromEditor,
 }: UseDraftPersistLifecycleParams): void {
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
+  const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
+    [],
+  );
+  const restoredQueuedAttachmentsDraftKeyRef = React.useRef<string | null>(
+    null,
+  );
   // Render-time update: keep the ref in sync with committed state so the
   // cleanup always reads the latest value during normal mounted operation.
   pendingImetaForPersistRef.current = livePendingImeta;
@@ -99,6 +124,16 @@ export function useDraftPersistLifecycle({
     // already reflects the incoming channel, which would corrupt the outgoing
     // draft's channelId metadata.
 
+    // Files cannot be serialized into localStorage. Replace the outgoing
+    // queue (retained by the cleanup below) with the incoming draft's queue.
+    clearQueuedAttachments?.();
+    if (effectiveDraftKey !== restoredQueuedAttachmentsDraftKeyRef.current) {
+      restoredQueuedAttachmentsDraftKeyRef.current = effectiveDraftKey ?? null;
+      restoredQueuedAttachmentsRef.current = effectiveDraftKey
+        ? (takeQueuedAttachmentsForDraft?.(effectiveDraftKey) ?? [])
+        : [];
+    }
+    restoreQueuedAttachments?.(restoredQueuedAttachmentsRef.current);
     const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
     if (saved) {
       setContent(saved.content);
@@ -121,6 +156,10 @@ export function useDraftPersistLifecycle({
 
     return () => {
       if (effectiveDraftKey) {
+        const queuedAttachments = getQueuedAttachments?.() ?? [];
+        if (queuedAttachments.length > 0) {
+          saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
+        }
         const content = syncComposerContentFromEditor();
         persistDraft(
           effectiveDraftKey,

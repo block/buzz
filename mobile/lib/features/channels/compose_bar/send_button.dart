@@ -17,7 +17,9 @@ class _SendButton extends StatelessWidget {
       width: 36,
       height: 36,
       child: IconButton(
-        onPressed: (isSending || isDisabled) ? null : onTap,
+        onPressed: (isSending || isDisabled)
+            ? null
+            : () => _runComposerAction(onTap),
         style: IconButton.styleFrom(
           backgroundColor: context.colors.primary,
           disabledBackgroundColor: context.colors.primary.withValues(

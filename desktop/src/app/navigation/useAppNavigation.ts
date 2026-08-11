@@ -109,6 +109,7 @@ export function useAppNavigation() {
         commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
+        repositoryId?: string;
       },
     ) =>
       commitNavigation(
@@ -125,6 +126,9 @@ export function useAppNavigation() {
               ? { pullRequestId: behavior.pullRequestId }
               : {}),
             ...(behavior?.issueId ? { issueId: behavior.issueId } : {}),
+            ...(behavior?.repositoryId
+              ? { repositoryId: behavior.repositoryId }
+              : {}),
           },
         },
         behavior,
@@ -171,6 +175,8 @@ export function useAppNavigation() {
         autoSend?: string;
         messageId?: string;
         replace?: boolean;
+        /** Open this thread panel directly without waiting for a timeline row. */
+        thread?: string;
         threadRootId?: string | null;
       },
     ) =>
@@ -190,6 +196,7 @@ export function useAppNavigation() {
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
+            ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },

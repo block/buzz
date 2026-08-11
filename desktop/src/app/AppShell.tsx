@@ -1,10 +1,12 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
-import { deriveShellRoute } from "@/app/AppShell.helpers";
+import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
+import { useTerminalContext } from "@/app/useTerminalContext";
 import { AppShellProvider } from "@/app/AppShellContext";
-import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
-import { AppShellOverlays } from "@/app/AppShellOverlays";
+import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
+import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
+import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
@@ -15,9 +17,11 @@ import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
-import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
+import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
+import { useHuddlePresentation } from "@/app/useHuddlePresentation";
+import { shouldShowSidebarChannel } from "@/app/huddleChannelVisibility";
 import {
   channelsQueryKey,
   useChannelsQuery,
@@ -26,7 +30,6 @@ import {
   useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
-import { msgContextKey } from "@/features/channels/readState/readStateFormat";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
@@ -63,10 +66,7 @@ import {
   type SettingsSection,
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
-import { HuddleProvider } from "@/features/huddle";
-import { AppHuddleBar } from "@/app/AppHuddleBar";
 import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
-import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
@@ -87,28 +87,38 @@ import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
-import type { ChannelVisibility, SearchHit } from "@/shared/api/types";
+import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
-import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
-import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
-import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
+import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
-const LazySettingsScreen = React.lazy(async () => {
-  const module = await import("@/features/settings/ui/SettingsScreen");
-  return { default: module.SettingsScreen };
-});
-
+import { LazySettingsScreen } from "@/app/LazySettingsScreen";
+const EMPTY_CHANNELS: Channel[] = [];
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
   const communitiesHook = useCommunities();
+  const {
+    handleHuddleCompanionOpen,
+    handleHuddleEnded,
+    handleHuddleStartPendingChange,
+    handleHuddleStarted,
+    handleHuddleVisibilityChange,
+    handleSidebarChannelSelect,
+    huddleBackingChannelIds,
+    revealedHuddleChannelIds,
+    isHuddleCompanionOpen,
+    isHuddleDrawerOpen,
+    isHuddleRoom,
+    isHuddleRoomStarting,
+    showHuddleInMainApp,
+    viewHuddleChannel,
+  } = useHuddlePresentation();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
@@ -119,7 +129,6 @@ export function AppShell() {
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
-  const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -164,9 +173,11 @@ export function AppShell() {
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   usePersonaSync(
     identityQuery.data?.pubkey,
@@ -184,8 +195,8 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
-  // deferred) and unconditionally repairs the DB subscription on internal
-  // builds — otherwise frames emitted before the listener opens are lost.
+  // deferred): seeds kind 24200 for fresh identities, no-ops for explicit
+  // opt-outs. Frames before the listener opens are permanently lost.
   const observerReconciled = useObserverArchiveReconciliation(
     identityQuery.data?.pubkey,
   );
@@ -239,8 +250,17 @@ export function AppShell() {
     [channels],
   );
   const sidebarChannels = React.useMemo(
-    () => memberChannels.filter((channel) => channel.archivedAt === null),
-    [memberChannels],
+    () =>
+      memberChannels.filter(
+        (channel) =>
+          channel.archivedAt === null &&
+          shouldShowSidebarChannel(
+            channel,
+            huddleBackingChannelIds,
+            revealedHuddleChannelIds,
+          ),
+      ),
+    [huddleBackingChannelIds, memberChannels, revealedHuddleChannelIds],
   );
   const hasRestoredCommunityDestinationRef = React.useRef(false);
   React.useEffect(() => {
@@ -290,13 +310,13 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
-  const activeChannel = React.useMemo(
-    () =>
-      selectedChannelId
-        ? (channels.find((channel) => channel.id === selectedChannelId) ?? null)
-        : null,
-    [channels, selectedChannelId],
-  );
+  const { activeChannel, terminalContext } = useTerminalContext({
+    channelId: selectedChannelId,
+    channels,
+    locationSearch: location.search,
+    pubkey: identityQuery.data?.pubkey,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+  });
   const managedChannel = React.useMemo(() => {
     const targetChannelId = managedChannelId ?? selectedChannelId;
     return targetChannelId
@@ -309,25 +329,27 @@ export function AppShell() {
     handleThreadReplyDesktopNotification,
   } = useAppShellDesktopNotifications({
     channels,
+    enabled: !isHuddleRoom,
     goChannel,
     goHome,
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    silentChannelIds: huddleBackingChannelIds,
   });
-
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
     followThread,
     unfollowThread,
   } = useThreadFollows(identityQuery.data?.pubkey);
-
   const {
-    markAllChannelsRead,
+    markAllChannelsRead: markAllChannelReadMarkers,
     markChannelRead,
     markChannelUnread,
+    clearChannelUnreadSource,
     unreadChannelIds,
+    topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
@@ -338,80 +360,76 @@ export function AppShell() {
     participatedRootIds,
     authoredRootIds,
     mentionedRootIds,
+    recordThreadInteraction,
     threadActivityItems,
     mutedRootIds,
     muteThread,
     unmuteThread,
-  } = useUnreadChannels(sidebarChannels, activeChannel, {
-    pubkey: identityQuery.data?.pubkey,
-    relayClient,
-    relayUrl: communitiesHook.activeCommunity?.relayUrl,
-    currentPubkey: identityQuery.data?.pubkey,
-    mutedChannelIds,
-    notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-    onChannelMessage: handleChannelNotification,
-    onDmMessage: handleDmNotification,
-    onLiveMention: refetchHomeFeedFromLiveSignal,
-    onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
-    followedRootIds,
-  });
-
-  const getThreadReadAt = React.useCallback(
-    (rootId: string, channelId?: string | null) => {
-      const threadReadAt = getOwnReadAt(`thread:${rootId}`);
-      if (!channelId) {
-        return threadReadAt;
-      }
-
-      const channelReadAt = getChannelReadAt(channelId);
-      if (threadReadAt === null) {
-        return channelReadAt;
-      }
-      if (channelReadAt === null) {
-        return threadReadAt;
-      }
-      return Math.max(threadReadAt, channelReadAt);
+  } = useUnreadChannels(
+    isHuddleRoom ? EMPTY_CHANNELS : sidebarChannels,
+    isHuddleRoom ? null : activeChannel,
+    {
+      pubkey: identityQuery.data?.pubkey,
+      relayClient,
+      relayUrl: communitiesHook.activeCommunity?.relayUrl,
+      currentPubkey: identityQuery.data?.pubkey,
+      mutedChannelIds,
+      notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
+      onChannelMessage: handleChannelNotification,
+      onDmMessage: handleDmNotification,
+      onLiveMention: refetchHomeFeedFromLiveSignal,
+      onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
+      followedRootIds,
     },
-    [getChannelReadAt, getOwnReadAt],
   );
 
-  const markThreadRead = React.useCallback(
-    (rootId: string, timestamp: number) => {
-      markChannelRead(
-        `thread:${rootId}`,
-        new Date(timestamp * 1_000).toISOString(),
-      );
-    },
-    [markChannelRead],
-  );
-
-  // Per-message read frontier (LP4 v3): effective(msg:<id>) folds through the
-  // channel, so a channel-read clears messages older than the top-level frontier.
-  const getMessageReadAt = React.useCallback(
-    (messageId: string) => getChannelReadAt(msgContextKey(messageId)),
-    [getChannelReadAt],
-  );
-  const markMessageRead = React.useCallback(
-    (messageId: string, timestamp: number) =>
-      markChannelRead(
-        msgContextKey(messageId),
-        new Date(timestamp * 1_000).toISOString(),
-      ),
-    [markChannelRead],
-  );
-  const threadActivityFeedItems = useThreadActivityFeedItems(
+  const {
+    getThreadReadAt,
+    markThreadRead,
+    getMessageReadAt,
+    getChannelActivityItemReadAt,
+    markMessageRead,
+    threadActivityFeedItems,
+    locallyUnreadFeedItems,
+    unreadThreadFeedItems,
+    unreadThreadChannelIds,
+  } = useChannelActivityProjection({
+    channels,
+    feed: homeFeedQuery.data?.feed,
+    unreadFeedItemIds: feedItemState.unreadSet,
+    getChannelReadAt,
+    getOwnReadAt,
+    markChannelRead,
+    readStateVersion,
     threadActivityItems,
     mutedRootIds,
-    channels,
-  );
+  });
+  const markAllChannelsRead = React.useCallback(() => {
+    markAllReadSources({
+      activeChannelId: activeChannel?.id ?? null,
+      channelActivityItems: unreadThreadFeedItems,
+      markAllChannelReadMarkers,
+      markActiveChannelRead: (channelId, createdAt) =>
+        markChannelRead(channelId, new Date(createdAt * 1_000).toISOString()),
+      undoUnreadFeedItem: feedItemState.undoUnread,
+      unreadFeedItemIds: feedItemState.unreadSet,
+    });
+  }, [
+    activeChannel?.id,
+    feedItemState.undoUnread,
+    feedItemState.unreadSet,
+    markAllChannelReadMarkers,
+    markChannelRead,
+    unreadThreadFeedItems,
+  ]);
 
-  // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
       identityQuery.data?.pubkey,
       notificationSettings.settings,
       notificationSettings.setDesktopEnabled,
+      !isHuddleRoom,
       selectedView === "home" && !settingsOpen,
       getChannelReadAt,
       readStateVersion,
@@ -423,8 +441,8 @@ export function AppShell() {
       getThreadReadAt,
       getMessageReadAt,
       channels,
+      huddleBackingChannelIds,
     );
-
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
@@ -611,18 +629,19 @@ export function AppShell() {
     [openSearchHit],
   );
   useAppShellLifecycleEffects({
+    desktopBadgeEnabled: !isHuddleRoom,
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links into the router.
-  useMessageDeepLinks();
+  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
+  useMessageDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
   React.useLayoutEffect(() => {
-    if (settingsOpen) {
+    if (settingsOpen || isHuddleRoom) {
       return;
     }
 
@@ -682,12 +701,13 @@ export function AppShell() {
     handleOpenSearch,
     goNewMessage,
     goHome,
+    isHuddleRoom,
     settingsOpen,
   ]);
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
-    open: settingsOpen,
+    open: isHuddleRoom ? undefined : settingsOpen,
   });
   useMarkAsReadShortcuts({
     activeChannelId: activeChannel?.id ?? null,
@@ -698,17 +718,20 @@ export function AppShell() {
   });
   return (
     <PreventSleepProvider>
-      <AppShellTrayMenu
-        channels={channels}
-        goChannel={goChannel}
-        openCreateChannel={handleOpenCreateChannel}
-      />
+      {!isHuddleRoom ? (
+        <AppShellTrayMenu
+          channels={channels}
+          goChannel={goChannel}
+          openCreateChannel={handleOpenCreateChannel}
+        />
+      ) : null}
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{
             markAllChannelsRead,
             markChannelRead,
             markChannelUnread,
+            clearChannelUnreadSource,
             openBrowseChannels: handleOpenBrowseChannels,
             openCreateChannel: handleOpenCreateChannel,
             openChannelManagement: (channelId?: string) => {
@@ -721,6 +744,7 @@ export function AppShell() {
             getThreadReadAt,
             markThreadRead,
             getMessageReadAt,
+            getChannelActivityItemReadAt,
             markMessageRead,
             readStateVersion,
             setContextParentResolver,
@@ -728,270 +752,245 @@ export function AppShell() {
             unfollowThread: handleUnfollowThread,
             isFollowingThread,
             isNotifiedForThread,
+            recordThreadInteraction,
             isThreadMuted: (rootId) => mutedRootIds.has(rootId),
             threadActivityItems,
             threadActivityFeedItems,
+            locallyUnreadFeedItems,
+            unreadThreadFeedItems,
+            unreadThreadChannelIds,
+            topLevelUnreadChannelIds,
+            hasSidebarUnreadProjections: true,
             feedItemState,
             onOpenSettings: handleOpenSettings,
           }}
         >
-          <HuddleProvider>
-            <RemindMeLaterProvider pubkey={identityQuery.data?.pubkey}>
-              <div
-                className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
-                data-huddle-open={isHuddleDrawerOpen}
-              >
-                <div
-                  className={cn(
-                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
-                    isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
-                  )}
-                >
-                  <BuzzTheme.GradientLayer />
-                  {hasCommunityRail ? (
-                    <CommunityRail
-                      activeCommunityId={
-                        communitiesHook.activeCommunity?.id ?? null
-                      }
-                      onAddCommunity={addCommunityDialog.openDialog}
-                      onRemoveCommunity={(id) => void handleRemoveCommunity(id)}
-                      onReorderCommunities={communitiesHook.reorderCommunities}
-                      onSwitchCommunity={handleSwitchCommunity}
-                      onUpdateCommunity={communitiesHook.updateCommunity}
-                      communities={communitiesHook.communities}
-                    />
-                  ) : null}
-                  <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
-                    <AppProfilePanelProvider>
-                      {!settingsOpen ? (
-                        <AppTopChrome
-                          canGoBack={canGoBack}
-                          canGoForward={canGoForward}
-                          hasCommunityRail={hasCommunityRail}
-                          onGoBack={goBack}
-                          onGoForward={goForward}
-                        />
-                      ) : null}
-                      {settingsOpen ? (
-                        <div className="flex min-h-0 flex-1 overflow-hidden">
-                          <React.Suspense fallback={null}>
-                            <LazySettingsScreen
-                              currentPubkey={identityQuery.data?.pubkey}
-                              fallbackDisplayName={
-                                identityQuery.data?.displayName
-                              }
-                              isUpdatingDesktopNotifications={
-                                notificationSettings.isUpdatingDesktopEnabled
-                              }
-                              notificationErrorMessage={
-                                notificationSettings.errorMessage
-                              }
-                              notificationPermission={
-                                notificationSettings.permission
-                              }
-                              notificationSettings={
-                                notificationSettings.settings
-                              }
-                              onClose={handleCloseSettings}
-                              onSectionChange={handleSettingsSectionChange}
-                              onSetDesktopNotificationsEnabled={
-                                notificationSettings.setDesktopEnabled
-                              }
-                              onSetHomeBadgeEnabled={
-                                notificationSettings.setHomeBadgeEnabled
-                              }
-                              onSetSlotAlertsEnabled={
-                                notificationSettings.setSlotAlertsEnabled
-                              }
-                              onSetNotifyWhileViewing={
-                                notificationSettings.setNotifyWhileViewing
-                              }
-                              onSetAllSlotAlertsEnabled={
-                                notificationSettings.setAllSlotAlertsEnabled
-                              }
-                              onSetSoundForSlot={
-                                notificationSettings.setSoundForSlot
-                              }
-                              section={settingsSection}
-                            />
-                          </React.Suspense>
-                        </div>
-                      ) : (
-                        <div className="flex min-h-0 flex-1 overflow-hidden">
-                          <AppSidebar
-                            activeCommunity={communitiesHook.activeCommunity}
-                            channels={sidebarChannels}
-                            currentPubkey={identityQuery.data?.pubkey}
-                            errorMessage={channelsErrorMessage}
-                            fallbackDisplayName={
-                              identityQuery.data?.displayName
-                            }
-                            homeBadgeCount={homeBadgeCount + dueReminderBadge}
-                            addCommunityPrefill={addCommunityDialog.prefill}
-                            isAddCommunityOpen={addCommunityDialog.open}
-                            relayConnectionCard={relayConnectionCard}
-                            isCreatingChannel={createChannelMutation.isPending}
-                            isCreatingForum={createForumMutation.isPending}
-                            isLoading={channelsQuery.isLoading}
-                            isCreateChannelOpen={isCreateChannelOpen}
-                            isPresencePending={presenceSession.isPending}
-                            onAddCommunity={(community) => {
-                              const id = communitiesHook.addCommunity({
-                                ...community,
-                                pubkey:
-                                  community.pubkey ??
-                                  identityQuery.data?.pubkey,
-                              });
-                              handleSwitchCommunity(id);
-                            }}
-                            onAddCommunityOpenChange={
-                              addCommunityDialog.onOpenChange
-                            }
-                            onNewMessage={goNewMessage}
-                            onBackgroundClick={requestFocusedThreadClose}
-                            onCreateChannelOpenChange={setIsCreateChannelOpen}
-                            onOpenAddCommunity={addCommunityDialog.openDialog}
-                            onSendFeedback={() => setIsSendFeedbackOpen(true)}
-                            onUpdateCommunity={communitiesHook.updateCommunity}
-                            onRemoveCommunity={(id) =>
-                              void handleRemoveCommunity(id)
-                            }
-                            onSwitchCommunity={handleSwitchCommunity}
-                            onCreateAgent={() => requestOpenCreateAgent()}
-                            selfPresenceStatus={presenceSession.currentStatus}
-                            communities={communitiesHook.communities}
-                            onCreateChannel={handleCreateChannel}
-                            onCreateForum={handleCreateForum}
-                            onHideDm={handleHideDm}
-                            onMarkAllChannelsRead={markAllChannelsRead}
-                            onMarkChannelRead={markChannelRead}
-                            onMarkChannelUnread={markChannelUnread}
-                            onBrowseChannels={handleOpenBrowseChannels}
-                            onOpenDm={async ({ pubkeys }) => {
-                              const directMessage =
-                                await openDmMutation.mutateAsync({
-                                  pubkeys,
-                                });
-                              await goChannel(directMessage.id);
-                            }}
-                            onSelectAgents={() => void goAgents()}
-                            onSelectChannel={(channelId) =>
-                              void goChannel(channelId)
-                            }
-                            onOpenSearchResult={handleOpenSearchResult}
-                            searchChannels={channels}
-                            searchFocusRequest={searchFocusRequest}
-                            onSelectHome={() => void goHome()}
-                            onSelectProjects={() => void goProjects()}
-                            onSelectPulse={() => void goPulse()}
-                            onSelectSettings={handleOpenSettings}
-                            onSelectWorkflows={() => void goWorkflows()}
-                            onSetPresenceStatus={(status) =>
-                              presenceSession.setStatus(status)
-                            }
-                            onSetUserStatus={(text, emoji) =>
-                              setUserStatusMutation.mutate({ text, emoji })
-                            }
-                            onClearUserStatus={() =>
-                              setUserStatusMutation.mutate({
-                                text: "",
-                                emoji: "",
-                              })
-                            }
-                            profile={profileQuery.data}
-                            selfUserStatus={
-                              deferredPubkey
-                                ? (selfStatusQuery.data?.[
-                                    deferredPubkey.toLowerCase()
-                                  ] ?? undefined)
-                                : undefined
-                            }
-                            selectedChannelId={selectedChannelId}
-                            selectedView={selectedView}
-                            unreadChannelIds={unreadChannelIds}
-                            unreadChannelCounts={unreadChannelCounts}
-                            mutedChannelIds={mutedChannelIds}
-                            onMuteChannel={muteChannel}
-                            onUnmuteChannel={unmuteChannel}
-                            starredChannelIds={starredChannelIds}
-                            onStarChannel={starChannel}
-                            onUnstarChannel={unstarChannel}
-                          />
-                          <MainInsetProvider mainInsetRef={mainInsetRef}>
-                            <SidebarInset
-                              ref={mainInsetRef}
-                              className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
-                              data-buzz-glass-inset
-                              data-buzz-shadow-viewport
-                              style={
-                                chromeCssVarDefaults as React.CSSProperties
-                              }
-                            >
-                              <BuzzTheme.ContentSurface>
-                                <Outlet />
-                              </BuzzTheme.ContentSurface>
-                            </SidebarInset>
-                          </MainInsetProvider>
-                          <RelayConnectionOverlay
-                            card={relayConnectionCard}
-                            errorMessage={channelsErrorMessage}
-                            hasCommunityRail={hasCommunityRail}
-                            isHuddleDrawerOpen={isHuddleDrawerOpen}
-                          />
-                        </div>
-                      )}
-                      <RequestedAgentCreateDialogs />
-                      <AgentManagementDialogs />
-                      <AppShellOverlays
-                        activeChannel={managedChannel}
-                        browseDialogType={browseDialogType}
-                        channels={channels}
-                        currentPubkey={identityQuery.data?.pubkey}
-                        isChannelManagementOpen={isChannelManagementOpen}
-                        isCreatingBrowseChannel={
-                          createChannelMutation.isPending ||
-                          createForumMutation.isPending
-                        }
-                        onBrowseChannelJoin={handleBrowseChannelJoin}
-                        onBrowseChannelCreate={handleBrowseChannelCreate}
-                        onBrowseDialogOpenChange={handleBrowseDialogOpenChange}
-                        onChannelManagementOpenChange={(open) => {
-                          setIsChannelManagementOpen(open);
-                          if (!open) {
-                            setManagedChannelId(null);
-                          }
-                        }}
-                        onDeleteActiveChannel={() => {
-                          setIsChannelManagementOpen(false);
-                          setManagedChannelId(null);
-                          void goHome({ replace: true });
-                        }}
-                        onSelectChannel={(channelId) => {
-                          void goChannel(channelId);
-                        }}
-                      />
-                      <SendFeedbackController
-                        onOpenChange={setIsSendFeedbackOpen}
-                        open={isSendFeedbackOpen}
-                      />
-                    </AppProfilePanelProvider>
-                  </SidebarProvider>
-                </div>
-
-                <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
-                  <AppHuddleBar
-                    onOpenThread={(channelId, messageId) => {
-                      void goChannel(channelId, {
-                        messageId,
-                        threadRootId: messageId,
-                      });
-                    }}
-                    onVisibilityChange={setIsHuddleDrawerOpen}
+          <AppHuddleShell
+            currentPubkey={identityQuery.data?.pubkey}
+            isCompanionOpen={isHuddleCompanionOpen}
+            isDrawerOpen={isHuddleDrawerOpen}
+            isRoom={isHuddleRoom}
+            onCompanionOpen={handleHuddleCompanionOpen}
+            onHuddleStartPendingChange={handleHuddleStartPendingChange}
+            onHuddleStarted={handleHuddleStarted}
+            onShowHuddleInMainApp={showHuddleInMainApp}
+            onViewHuddleChannel={viewHuddleChannel}
+            onVisibilityChange={handleHuddleVisibilityChange}
+          >
+            {hasCommunityRail && !isHuddleRoom ? (
+              <CommunityRail
+                activeCommunityId={communitiesHook.activeCommunity?.id ?? null}
+                onAddCommunity={addCommunityDialog.openDialog}
+                onReorderCommunities={communitiesHook.reorderCommunities}
+                onSwitchCommunity={handleSwitchCommunity}
+                onUpdateCommunity={communitiesHook.updateCommunity}
+                communities={communitiesHook.communities}
+              />
+            ) : null}
+            <SidebarProvider
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
+              data-testid="app-sidebar-layer"
+            >
+              <AppProfilePanelProvider>
+                {!settingsOpen && !isHuddleRoom ? (
+                  <AppTopChrome
+                    canGoBack={canGoBack}
+                    canGoForward={canGoForward}
+                    hasCommunityRail={hasCommunityRail}
+                    onGoBack={goBack}
+                    onGoForward={goForward}
                   />
-                </div>
-              </div>
-            </RemindMeLaterProvider>
-          </HuddleProvider>
+                ) : null}
+                {settingsOpen ? (
+                  <div className="flex min-h-0 flex-1 overflow-hidden">
+                    <React.Suspense fallback={null}>
+                      <LazySettingsScreen
+                        currentPubkey={identityQuery.data?.pubkey}
+                        fallbackDisplayName={identityQuery.data?.displayName}
+                        isUpdatingDesktopNotifications={
+                          notificationSettings.isUpdatingDesktopEnabled
+                        }
+                        notificationErrorMessage={
+                          notificationSettings.errorMessage
+                        }
+                        notificationPermission={notificationSettings.permission}
+                        notificationSettings={notificationSettings.settings}
+                        onClose={handleCloseSettings}
+                        onSectionChange={handleSettingsSectionChange}
+                        onSetDesktopNotificationsEnabled={
+                          notificationSettings.setDesktopEnabled
+                        }
+                        onSetHomeBadgeEnabled={
+                          notificationSettings.setHomeBadgeEnabled
+                        }
+                        onSetSlotAlertsEnabled={
+                          notificationSettings.setSlotAlertsEnabled
+                        }
+                        onSetNotifyWhileViewing={
+                          notificationSettings.setNotifyWhileViewing
+                        }
+                        onSetAllSlotAlertsEnabled={
+                          notificationSettings.setAllSlotAlertsEnabled
+                        }
+                        onSetSoundForSlot={notificationSettings.setSoundForSlot}
+                        section={settingsSection}
+                      />
+                    </React.Suspense>
+                  </div>
+                ) : (
+                  <div className="relative flex min-h-0 flex-1 overflow-visible">
+                    {!isHuddleRoom ? (
+                      <AppSidebar
+                        activeCommunity={communitiesHook.activeCommunity}
+                        channels={sidebarChannels}
+                        currentPubkey={identityQuery.data?.pubkey}
+                        errorMessage={channelsErrorMessage}
+                        fallbackDisplayName={identityQuery.data?.displayName}
+                        homeBadgeCount={homeBadgeCount + dueReminderBadge}
+                        addCommunityPrefill={addCommunityDialog.prefill}
+                        isAddCommunityOpen={addCommunityDialog.open}
+                        relayConnectionCard={relayConnectionCard}
+                        isCreatingChannel={createChannelMutation.isPending}
+                        isCreatingForum={createForumMutation.isPending}
+                        isLoading={channelsQuery.isLoading}
+                        isCreateChannelOpen={isCreateChannelOpen}
+                        isHuddleCompanionOpen={isHuddleCompanionOpen}
+                        isPresencePending={presenceSession.isPending}
+                        onAddCommunity={(community) => {
+                          const id = communitiesHook.addCommunity({
+                            ...community,
+                            pubkey:
+                              community.pubkey ?? identityQuery.data?.pubkey,
+                          });
+                          handleSwitchCommunity(id);
+                        }}
+                        onAddCommunityOpenChange={
+                          addCommunityDialog.onOpenChange
+                        }
+                        onNewMessage={goNewMessage}
+                        onBackgroundClick={requestFocusedThreadClose}
+                        onCreateChannelOpenChange={setIsCreateChannelOpen}
+                        onOpenAddCommunity={addCommunityDialog.openDialog}
+                        onSendFeedback={() => setIsSendFeedbackOpen(true)}
+                        onUpdateCommunity={communitiesHook.updateCommunity}
+                        onRemoveCommunity={handleRemoveCommunity}
+                        onSwitchCommunity={handleSwitchCommunity}
+                        onCreateAgent={() => requestOpenCreateAgent()}
+                        selfPresenceStatus={presenceSession.currentStatus}
+                        communities={communitiesHook.communities}
+                        onCreateChannel={handleCreateChannel}
+                        onCreateForum={handleCreateForum}
+                        onHideDm={handleHideDm}
+                        onHuddleEnded={handleHuddleEnded}
+                        onMarkAllChannelsRead={markAllChannelsRead}
+                        onMarkChannelRead={markChannelRead}
+                        onMarkChannelUnread={markChannelUnread}
+                        onBrowseChannels={handleOpenBrowseChannels}
+                        onOpenDm={async ({ pubkeys }) => {
+                          const directMessage =
+                            await openDmMutation.mutateAsync({
+                              pubkeys,
+                            });
+                          await goChannel(directMessage.id);
+                        }}
+                        onSelectAgents={() => void goAgents()}
+                        onSelectChannel={handleSidebarChannelSelect}
+                        onOpenSearchResult={handleOpenSearchResult}
+                        searchChannels={channels}
+                        searchFocusRequest={searchFocusRequest}
+                        onSelectHome={() => void goHome()}
+                        onSelectProjects={() => void goProjects()}
+                        onSelectPulse={() => void goPulse()}
+                        onSelectSettings={handleOpenSettings}
+                        onSelectWorkflows={() => void goWorkflows()}
+                        onSetPresenceStatus={(status) =>
+                          presenceSession.setStatus(status)
+                        }
+                        onSetUserStatus={(text, emoji) =>
+                          setUserStatusMutation.mutate({ text, emoji })
+                        }
+                        onClearUserStatus={() =>
+                          setUserStatusMutation.mutate({
+                            text: "",
+                            emoji: "",
+                          })
+                        }
+                        profile={profileQuery.data}
+                        selfUserStatus={
+                          deferredPubkey
+                            ? (selfStatusQuery.data?.[
+                                deferredPubkey.toLowerCase()
+                              ] ?? undefined)
+                            : undefined
+                        }
+                        selectedChannelId={selectedChannelId}
+                        selectedView={selectedView}
+                        unreadChannelIds={unreadChannelIds}
+                        previewActivityChannelIds={unreadThreadChannelIds}
+                        unreadChannelCounts={unreadChannelCounts}
+                        mutedChannelIds={mutedChannelIds}
+                        onMuteChannel={muteChannel}
+                        onUnmuteChannel={unmuteChannel}
+                        starredChannelIds={starredChannelIds}
+                        onStarChannel={starChannel}
+                        onUnstarChannel={unstarChannel}
+                      />
+                    ) : null}
+                    <AppShellChannelSurface
+                      isHuddleRoom={isHuddleRoom}
+                      isHuddleRoomStarting={isHuddleRoomStarting}
+                      mainInsetRef={mainInsetRef}
+                      terminal={<TerminalBootstrap {...terminalContext} />}
+                    >
+                      <Outlet />
+                    </AppShellChannelSurface>
+                    {!isHuddleRoom ? (
+                      <RelayConnectionOverlay
+                        card={relayConnectionCard}
+                        errorMessage={channelsErrorMessage}
+                        hasCommunityRail={hasCommunityRail}
+                        isHuddleDrawerOpen={isHuddleDrawerOpen}
+                      />
+                    ) : null}
+                  </div>
+                )}
+                <RequestedAgentCreateDialogs />
+                <AgentManagementDialogs />
+                <AppShellOverlays
+                  activeChannel={managedChannel}
+                  browseDialogType={browseDialogType}
+                  channels={channels}
+                  currentPubkey={identityQuery.data?.pubkey}
+                  isChannelManagementOpen={isChannelManagementOpen}
+                  isCreatingBrowseChannel={
+                    createChannelMutation.isPending ||
+                    createForumMutation.isPending
+                  }
+                  onBrowseChannelJoin={handleBrowseChannelJoin}
+                  onBrowseChannelCreate={handleBrowseChannelCreate}
+                  onBrowseDialogOpenChange={handleBrowseDialogOpenChange}
+                  onChannelManagementOpenChange={(open) => {
+                    setIsChannelManagementOpen(open);
+                    if (!open) {
+                      setManagedChannelId(null);
+                    }
+                  }}
+                  onDeleteActiveChannel={() => {
+                    setIsChannelManagementOpen(false);
+                    setManagedChannelId(null);
+                    void goHome({ replace: true });
+                  }}
+                  onSelectChannel={(channelId) => {
+                    void goChannel(channelId);
+                  }}
+                />
+                <SendFeedbackController
+                  onOpenChange={setIsSendFeedbackOpen}
+                  open={isSendFeedbackOpen}
+                />
+              </AppProfilePanelProvider>
+            </SidebarProvider>
+          </AppHuddleShell>
         </AppShellProvider>
       </ChannelNavigationProvider>
     </PreventSleepProvider>

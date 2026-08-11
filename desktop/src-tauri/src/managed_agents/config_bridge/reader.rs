@@ -3,15 +3,17 @@ use crate::managed_agents::types::ManagedAgentRecord;
 
 use super::types::*;
 
-/// Build the full config surface for an agent, merging all four tiers.
+/// Build the full config surface for an agent, merging all tiers.
 ///
-/// Pre-spawn (no session cache): tiers 2a (env vars / record) and 2b (config files).
-/// Post-spawn (session cache present): adds tiers 1a (ACP native) and 1b (ACP configOptions).
+/// Inherited values flow through `tiers` — a sanitized snapshot of the
+/// persona and global tiers assembled at the command boundary. Each field
+/// builder constructs its own candidate list and resolves via
+/// `resolve_with_override`.
 pub(crate) fn read_config_surface(
     record: &ManagedAgentRecord,
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
-    baseline: Option<(&str, ConfigOrigin)>,
+    tiers: &InheritedConfigTiers,
 ) -> RuntimeConfigSurface {
     let is_pre_spawn = session_cache.is_none();
 
@@ -27,14 +29,7 @@ pub(crate) fn read_config_surface(
         })
         .unwrap_or_else(|| (RuntimeFileConfig::default(), false));
 
-    // Tier 2a: record-level values (Buzz-explicit).
-    let record_model = record.model.clone();
-    let record_provider = record
-        .env_vars
-        .get(runtime_meta.and_then(|m| m.provider_env_var).unwrap_or(""))
-        .cloned()
-        .or_else(|| record.provider.clone()); // structured provider field as fallback
-
+    // Runtime-specific env var keys.
     let supports_acp_model = runtime_meta.is_some_and(|m| m.supports_acp_model_switching);
     let model_env_var = runtime_meta.and_then(|m| m.model_env_var);
     let provider_env_var = runtime_meta.and_then(|m| m.provider_env_var);
@@ -48,10 +43,6 @@ pub(crate) fn read_config_surface(
     let context_limit_env_var = runtime_meta.and_then(|m| m.context_limit_env_var);
 
     // Tier 1b: ACP configOptions from session cache.
-    // For unstable/switchable agents, current_model comes from the `models`
-    // field. For stable agents that only report model via configOptions
-    // (category="model", current_value), fall back to find_config_option_value
-    // so their current model is surfaced in the panel.
     let acp_model = session_cache.and_then(|c| {
         c.current_model
             .clone()
@@ -59,61 +50,53 @@ pub(crate) fn read_config_surface(
     });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
     let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
-    let record_effort = thinking_env_var
-        .and_then(|k| record.env_vars.get(k))
-        .cloned();
 
     let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
 
     let normalized = NormalizedConfig {
-        model: Some(apply_runtime_override(
-            build_model_field(
-                &record_model,
-                &file_config.model,
-                &acp_model,
-                model_env_var,
-                supports_acp_model,
-                is_pre_spawn,
-                session_cache,
-                required_fields.contains(&"model"),
-            ),
-            acp_model.as_deref(),
-            baseline,
+        model: Some(build_model_field(
+            record,
+            &file_config.model,
+            &acp_model,
+            model_env_var,
+            supports_acp_model,
+            is_pre_spawn,
+            session_cache,
+            required_fields.contains(&"model"),
             model_overridden,
+            tiers,
         )),
         provider: build_provider_field(
-            &record_provider,
+            record,
             &file_config.provider,
             provider_env_var,
             provider_locked,
             required_fields.contains(&"provider"),
+            tiers,
         ),
         mode: build_mode_field(&file_config.mode, &acp_mode, is_pre_spawn, session_cache),
         thinking_effort: build_thinking_field(
-            &record_effort,
+            record,
             &file_config.thinking_effort,
             &acp_effort,
             thinking_env_var,
             is_pre_spawn,
             session_cache,
+            tiers,
         ),
         max_output_tokens: build_numeric_env_field(
             max_tokens_env_var,
-            &record.env_vars,
+            record,
             &file_config.max_output_tokens,
+            tiers,
         ),
         context_limit: build_numeric_env_field(
             context_limit_env_var,
-            &record.env_vars,
+            record,
             &file_config.context_limit,
+            tiers,
         ),
-        system_prompt: build_system_prompt_field(
-            &record
-                .system_prompt
-                .clone()
-                .or_else(|| record.env_vars.get("BUZZ_ACP_SYSTEM_PROMPT").cloned()),
-            &file_config.system_prompt,
-        ),
+        system_prompt: build_system_prompt_field(record, &file_config.system_prompt, tiers),
     };
 
     // Advanced fields from config file extras.
@@ -130,7 +113,7 @@ pub(crate) fn read_config_surface(
         })
         .collect();
 
-    // Collect the env var keys already covered by normalized fields so we don't double-surface them.
+    // Collect the env var keys already covered by normalized fields.
     let normalized_env_keys: Vec<&str> = [
         model_env_var,
         provider_env_var,
@@ -144,15 +127,13 @@ pub(crate) fn read_config_surface(
     .collect();
 
     // Tier 2a: remaining env vars not covered by normalized fields.
-    // Env var wins over config file for the same key (tier 2a > 2b), so skip
-    // keys already present in file_config.extra.
     let mut advanced = advanced;
     for (k, v) in &record.env_vars {
         if normalized_env_keys.contains(&k.as_str()) {
             continue;
         }
         if file_config.extra.contains_key(k) {
-            continue; // config file already surfaced this key
+            continue;
         }
         advanced.push(ConfigField {
             key: k.clone(),
@@ -178,8 +159,6 @@ pub(crate) fn read_config_surface(
             {
                 ConfigTierStatus::Available
             } else {
-                // Post-spawn without native config data is also Pending — it arrives
-                // asynchronously after the session/new response.
                 ConfigTierStatus::Pending
             }
         } else {
@@ -226,9 +205,27 @@ fn mcp_config_file_path_for_runtime(runtime: &KnownAcpRuntime) -> Option<String>
     }
 }
 
+/// Extract an env-backed candidate value for `env_key` from each tier in
+/// spawn precedence: record env > persona env > global env > definition env.
+/// Returns `[record, persona, global, definition]` — `None` when key is absent.
+fn env_candidates<'a>(
+    env_key: &str,
+    record_env: &'a std::collections::BTreeMap<String, String>,
+    persona_env: &'a std::collections::BTreeMap<String, String>,
+    global_env: &'a std::collections::BTreeMap<String, String>,
+    definition_env: &'a std::collections::BTreeMap<String, String>,
+) -> [Option<&'a str>; 4] {
+    [
+        record_env.get(env_key).map(String::as_str),
+        persona_env.get(env_key).map(String::as_str),
+        global_env.get(env_key).map(String::as_str),
+        definition_env.get(env_key).map(String::as_str),
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_model_field(
-    record_model: &Option<String>,
+    record: &ManagedAgentRecord,
     file_model: &Option<String>,
     acp_model: &Option<String>,
     model_env_var: Option<&str>,
@@ -236,30 +233,109 @@ fn build_model_field(
     is_pre_spawn: bool,
     session_cache: Option<&SessionConfigCache>,
     is_required: bool,
+    model_overridden: bool,
+    tiers: &InheritedConfigTiers,
 ) -> NormalizedField {
-    // Precedence: Buzz-explicit > ACP current > config file
-    let (value, origin) = if let Some(ref m) = record_model {
-        (Some(m.clone()), ConfigOrigin::BuzzExplicit)
-    } else if let Some(ref m) = acp_model {
-        (Some(m.clone()), ConfigOrigin::AcpConfigOption)
-    } else if let Some(ref m) = file_model {
-        (Some(m.clone()), ConfigOrigin::ConfigFile)
-    } else {
-        // No value from any tier. EnvVar is the sentinel origin for "no value
-        // resolved" — there is no dedicated None-origin variant. The panel
-        // renders this as an empty/absent field.
-        (None, ConfigOrigin::EnvVar)
-    };
+    let [rec_env, pers_env, glob_env, def_env] = model_env_var
+        .map(|k| {
+            env_candidates(
+                k,
+                &record.env_vars,
+                &tiers.persona_env,
+                &tiers.global_env,
+                &tiers.definition_env,
+            )
+        })
+        .unwrap_or([None, None, None, None]);
 
-    // The secondary expresses ONLY the static record-vs-file precedence: a
-    // Buzz-explicit model shadowing a config-file model. The live-session
-    // override (acp vs record/persona) is exclusively `apply_runtime_override`'s
-    // job, gated on `model_overridden`. Surfacing `acp_model` here would leak an
-    // override row even when no live switch has been applied.
-    let (overridden_value, overridden_origin) = if record_model.is_some() && file_model.is_some() {
-        (file_model.clone(), Some(ConfigOrigin::ConfigFile))
+    // Structured record model (definition-less only; linked cleared upstream).
+    let struct_record = record.model.as_deref();
+    let struct_persona = tiers.persona_model.as_deref();
+    let struct_global = tiers.global_model.as_deref();
+
+    // Configured candidates in spawn order: record env > persona env > global env >
+    // definition env > struct record > struct persona > struct global > file.
+    // The file entry is always last; everything before it is a "configured" candidate
+    // that gates whether ACP participates as a fallback (see any_configured below).
+    let configured: &[(Option<&str>, ConfigOrigin)] = &[
+        (rec_env, ConfigOrigin::BuzzExplicit),
+        (pers_env, ConfigOrigin::PersonaDefault),
+        (glob_env, ConfigOrigin::GlobalDefault),
+        (def_env, ConfigOrigin::HarnessDefault),
+        (struct_record, ConfigOrigin::BuzzExplicit),
+        (struct_persona, ConfigOrigin::PersonaDefault),
+        (struct_global, ConfigOrigin::GlobalDefault),
+        (file_model.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+    // "Configured" = any non-file candidate. The file entry is always last, so
+    // slicing to len()-1 is equivalent to the old magic `[..6]` and stays correct
+    // if the array ever grows again.
+    let any_configured = configured[..configured.len() - 1]
+        .iter()
+        .any(|(v, _)| v.is_some());
+
+    // When model_overridden is true and ACP is present, ACP is the live winner.
+    // The top configured candidate becomes the secondary (the overridden baseline).
+    // Equal-value case: ACP == baseline → fall through to normal resolution so
+    // the field carries the correct baseline origin rather than RuntimeOverride.
+    if model_overridden {
+        if let Some(acp) = acp_model.as_deref() {
+            let baseline = configured.iter().find(|(v, _)| v.is_some());
+            match baseline {
+                Some((Some(baseline_value), _)) if acp == *baseline_value => {
+                    // Equal-value switch: no real divergence.
+                    // Fall through to the normal resolve path below — it will
+                    // return the same value with its true baseline origin, with
+                    // no secondary row.
+                }
+                Some((Some(baseline_value), baseline_origin)) => {
+                    return NormalizedField {
+                        value: Some(acp.to_string()),
+                        origin: ConfigOrigin::RuntimeOverride,
+                        write_via: model_write_mechanism(
+                            is_pre_spawn,
+                            supports_acp_model,
+                            session_cache,
+                            model_env_var,
+                        ),
+                        overridden_value: Some(baseline_value.to_string()),
+                        overridden_origin: Some(baseline_origin.clone()),
+                        is_required,
+                    };
+                }
+                _ => {
+                    // No configured baseline — ACP is the only source.
+                    return NormalizedField {
+                        value: Some(acp.to_string()),
+                        origin: ConfigOrigin::RuntimeOverride,
+                        write_via: model_write_mechanism(
+                            is_pre_spawn,
+                            supports_acp_model,
+                            session_cache,
+                            model_env_var,
+                        ),
+                        overridden_value: None,
+                        overridden_origin: None,
+                        is_required,
+                    };
+                }
+            }
+        }
+    }
+
+    let (value, origin, overridden_value, overridden_origin) = if !any_configured {
+        // No configured candidate: ACP participates as AcpConfigOption fallback.
+        let full: &[(Option<&str>, ConfigOrigin)] = &[
+            (acp_model.as_deref(), ConfigOrigin::AcpConfigOption),
+            (file_model.as_deref(), ConfigOrigin::ConfigFile),
+        ];
+        resolve_with_override(full).unwrap_or((None, ConfigOrigin::EnvVar, None, None))
     } else {
-        (None, None)
+        // ACP excluded: a configured value is pending and wins over live ACP.
+        match resolve_with_override(configured) {
+            Some(r) => r,
+            None => (None, ConfigOrigin::EnvVar, None, None),
+        }
     };
 
     let write_via = model_write_mechanism(
@@ -280,7 +356,6 @@ fn build_model_field(
 }
 
 /// Resolve how the model field is written back to the runtime.
-/// Prefer ACP `set_config_option`/`set_model` post-spawn, else env-var respawn.
 fn model_write_mechanism(
     is_pre_spawn: bool,
     supports_acp_model: bool,
@@ -301,67 +376,13 @@ fn model_write_mechanism(
     }
 }
 
-/// Re-key the model field as a live runtime override when the harness signals
-/// that a `SwitchModel` control signal set the model (Phase 3c).
-///
-/// The override-active signal is `model_overridden` from the
-/// `session_config_captured` payload — NOT `acp_model != persona_model`, which
-/// would false-positive when a persona model is edited mid-life while the
-/// session is stale on the old model.
-///
-/// `baseline` is the value the live model overrides, paired with its true
-/// origin — `(persona_model, PersonaDefault)` for a persona-linked agent, or
-/// `(record_model, BuzzExplicit)` for a genuine-explicit agent that live-
-/// switched. It is `Some` only when there is such a baseline to override
-/// against; otherwise the field passes through unchanged. Carrying the origin
-/// in the pair (rather than hardcoding it) lets the secondary be tagged by its
-/// real source instead of always reading `PersonaDefault`.
-///
-/// The `acp == baseline_value` short-circuit keeps a live pick of the baseline
-/// model itself from rendering a no-op "override of X with X". It yields a
-/// CLEAN single-value field — `overridden_value`/`overridden_origin` cleared —
-/// rather than passing `base` through, because `build_model_field` already
-/// populates `base`'s secondary with an `AcpConfigOption` row for the
-/// record-model-plus-live-session case; returning `base` would leak that
-/// spurious row. The override preserves the base field's write mechanism — only
-/// the displayed value, origin, and secondary change.
-fn apply_runtime_override(
-    base: NormalizedField,
-    acp_model: Option<&str>,
-    baseline: Option<(&str, ConfigOrigin)>,
-    model_overridden: bool,
-) -> NormalizedField {
-    if !model_overridden {
-        return base;
-    }
-    let (Some(acp), Some((baseline_value, baseline_origin))) = (acp_model, baseline) else {
-        return base;
-    };
-    if acp == baseline_value {
-        // Live pick equals the baseline — no real divergence. Strip any
-        // secondary `build_model_field` may have produced so the panel shows a
-        // single clean value rather than "X overridden by X".
-        return NormalizedField {
-            overridden_value: None,
-            overridden_origin: None,
-            ..base
-        };
-    }
-    NormalizedField {
-        value: Some(acp.to_string()),
-        origin: ConfigOrigin::RuntimeOverride,
-        overridden_value: Some(baseline_value.to_string()),
-        overridden_origin: Some(baseline_origin),
-        ..base
-    }
-}
-
 fn build_provider_field(
-    record_provider: &Option<String>,
+    record: &ManagedAgentRecord,
     file_provider: &Option<String>,
     provider_env_var: Option<&str>,
     provider_locked: bool,
     is_required: bool,
+    tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
     if provider_locked {
         return Some(NormalizedField {
@@ -374,15 +395,43 @@ fn build_provider_field(
         });
     }
 
-    let tiers: &[(Option<&str>, ConfigOrigin)] = &[
-        (record_provider.as_deref(), ConfigOrigin::BuzzExplicit),
+    let [rec_env, pers_env, glob_env, def_env] = provider_env_var
+        .map(|k| {
+            env_candidates(
+                k,
+                &record.env_vars,
+                &tiers.persona_env,
+                &tiers.global_env,
+                &tiers.definition_env,
+            )
+        })
+        .unwrap_or([None, None, None, None]);
+
+    let struct_record = record.provider.as_deref();
+
+    let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
+        (rec_env, ConfigOrigin::BuzzExplicit),
+        (pers_env, ConfigOrigin::PersonaDefault),
+        (glob_env, ConfigOrigin::GlobalDefault),
+        (def_env, ConfigOrigin::HarnessDefault),
+        (struct_record, ConfigOrigin::BuzzExplicit),
+        (
+            tiers.persona_provider.as_deref(),
+            ConfigOrigin::PersonaDefault,
+        ),
+        (
+            tiers.global_provider.as_deref(),
+            ConfigOrigin::GlobalDefault,
+        ),
         (file_provider.as_deref(), ConfigOrigin::ConfigFile),
     ];
-    let (value, origin, overridden_value, overridden_origin) = match resolve_with_override(tiers) {
-        Some(resolved) => resolved,
-        None if is_required => (None, ConfigOrigin::EnvVar, None, None),
-        None => return None,
-    };
+
+    let (value, origin, overridden_value, overridden_origin) =
+        match resolve_with_override(tiers_list) {
+            Some(resolved) => resolved,
+            None if is_required => (None, ConfigOrigin::EnvVar, None, None),
+            None => return None,
+        };
 
     let write_via = if let Some(env_key) = provider_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
@@ -432,20 +481,38 @@ fn build_mode_field(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_thinking_field(
-    record_effort: &Option<String>,
+    record: &ManagedAgentRecord,
     file_effort: &Option<String>,
     acp_effort: &Option<String>,
     thinking_env_var: Option<&str>,
     is_pre_spawn: bool,
     session_cache: Option<&SessionConfigCache>,
+    tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
-    let tiers: &[(Option<&str>, ConfigOrigin)] = &[
-        (record_effort.as_deref(), ConfigOrigin::BuzzExplicit),
+    // Tier ordering: record env > ACP > persona env > global env > definition env > config file.
+    let [rec_env, pers_env, glob_env, def_env] = thinking_env_var
+        .map(|k| {
+            env_candidates(
+                k,
+                &record.env_vars,
+                &tiers.persona_env,
+                &tiers.global_env,
+                &tiers.definition_env,
+            )
+        })
+        .unwrap_or([None, None, None, None]);
+
+    let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
+        (rec_env, ConfigOrigin::BuzzExplicit),
         (acp_effort.as_deref(), ConfigOrigin::AcpConfigOption),
+        (pers_env, ConfigOrigin::PersonaDefault),
+        (glob_env, ConfigOrigin::GlobalDefault),
+        (def_env, ConfigOrigin::HarnessDefault),
         (file_effort.as_deref(), ConfigOrigin::ConfigFile),
     ];
-    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
 
     let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
         ConfigWriteMechanism::AcpSetConfigOption {
@@ -469,67 +536,105 @@ fn build_thinking_field(
     })
 }
 
-/// Numeric fields (max_output_tokens, context_limit) — env-var tier wins over
-/// config-file tier. When an env var key is given and present in the record's
-/// env_vars map the field is BuzzExplicit + RespawnWithEnvVar; otherwise if the
-/// config file supplied a value it is ConfigFile + ReadOnly; otherwise None.
+/// Numeric fields (max_output_tokens, context_limit).
+/// Tier ordering: record env > persona env > global env > config file.
 fn build_numeric_env_field(
     env_var: Option<&'static str>,
-    record_env: &std::collections::BTreeMap<String, String>,
+    record: &ManagedAgentRecord,
     file_value: &Option<String>,
+    tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
-    if let Some(key) = env_var {
-        if let Some(v) = record_env.get(key) {
-            return Some(NormalizedField {
-                value: Some(v.clone()),
-                origin: ConfigOrigin::BuzzExplicit,
-                write_via: ConfigWriteMechanism::RespawnWithEnvVar {
-                    env_key: key.to_string(),
-                },
-                overridden_value: file_value.clone(),
-                overridden_origin: file_value.as_ref().map(|_| ConfigOrigin::ConfigFile),
-                is_required: false,
-            });
+    let [rec_env, pers_env, glob_env, def_env] = env_var
+        .map(|k| {
+            env_candidates(
+                k,
+                &record.env_vars,
+                &tiers.persona_env,
+                &tiers.global_env,
+                &tiers.definition_env,
+            )
+        })
+        .unwrap_or([None, None, None, None]);
+
+    let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
+        (rec_env, ConfigOrigin::BuzzExplicit),
+        (pers_env, ConfigOrigin::PersonaDefault),
+        (glob_env, ConfigOrigin::GlobalDefault),
+        (def_env, ConfigOrigin::HarnessDefault),
+        (file_value.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
+
+    let write_via = if let Some(key) = env_var {
+        ConfigWriteMechanism::RespawnWithEnvVar {
+            env_key: key.to_string(),
         }
-    }
-    file_value.as_ref().map(|v| NormalizedField {
-        value: Some(v.clone()),
-        origin: ConfigOrigin::ConfigFile,
-        write_via: ConfigWriteMechanism::ReadOnly,
-        overridden_value: None,
-        overridden_origin: None,
+    } else {
+        ConfigWriteMechanism::ReadOnly
+    };
+
+    Some(NormalizedField {
+        value,
+        origin,
+        write_via,
+        overridden_value,
+        overridden_origin,
         is_required: false,
     })
 }
 
-/// Record/env prompt wins (BuzzExplicit, respawnable); a config-file prompt it
-/// shadows is reported as the overridden secondary. A config-file-only prompt
-/// — no record/env value to shadow it — is surfaced directly (read-only)
-/// instead of being dropped: a prompt that drives the agent should always be
-/// visible somewhere in the panel.
+/// System prompt field.
+///
+/// Tier ordering per v3 plan: record env > persona env > global env >
+/// struct record > struct persona > config file.
+///
+/// Env tiers sit above structured per spawn contract: `descriptor.env` is
+/// written last (after the structured prompt), so env wins on collision.
+/// `GlobalAgentConfig` has no structured system_prompt, so the global tier
+/// is env-only. `BUZZ_ACP_SYSTEM_PROMPT` is not reserved and is therefore
+/// a real global env tier.
 fn build_system_prompt_field(
-    record_prompt: &Option<String>,
+    record: &ManagedAgentRecord,
     file_prompt: &Option<String>,
+    tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
-    if let Some(v) = record_prompt {
-        return Some(NormalizedField {
-            value: Some(v.clone()),
-            origin: ConfigOrigin::BuzzExplicit,
-            write_via: ConfigWriteMechanism::RespawnWithEnvVar {
-                env_key: "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
-            },
-            overridden_value: file_prompt.clone(),
-            overridden_origin: file_prompt.as_ref().map(|_| ConfigOrigin::ConfigFile),
-            is_required: false,
-        });
-    }
+    const PROMPT_ENV_KEY: &str = "BUZZ_ACP_SYSTEM_PROMPT";
 
-    file_prompt.as_ref().map(|v| NormalizedField {
-        value: Some(v.clone()),
-        origin: ConfigOrigin::ConfigFile,
-        write_via: ConfigWriteMechanism::ReadOnly,
-        overridden_value: None,
-        overridden_origin: None,
+    let [rec_env, pers_env, glob_env, def_env] = env_candidates(
+        PROMPT_ENV_KEY,
+        &record.env_vars,
+        &tiers.persona_env,
+        &tiers.global_env,
+        &tiers.definition_env,
+    );
+
+    // Structured record prompt (definition-less only; linked cleared upstream).
+    let struct_record = record.system_prompt.as_deref();
+
+    let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
+        (rec_env, ConfigOrigin::BuzzExplicit),       // record env
+        (pers_env, ConfigOrigin::PersonaDefault),    // persona env
+        (glob_env, ConfigOrigin::GlobalDefault),     // global env
+        (def_env, ConfigOrigin::HarnessDefault),     // definition env
+        (struct_record, ConfigOrigin::BuzzExplicit), // struct record
+        (
+            tiers.persona_prompt.as_deref(),
+            ConfigOrigin::PersonaDefault,
+        ), // struct persona
+        (file_prompt.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
+
+    Some(NormalizedField {
+        value,
+        origin,
+        write_via: ConfigWriteMechanism::RespawnWithEnvVar {
+            env_key: PROMPT_ENV_KEY.to_string(),
+        },
+        overridden_value,
+        overridden_origin,
         is_required: false,
     })
 }

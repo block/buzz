@@ -4,7 +4,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// A focused field inside a `Scaffold` body, which is the only arrangement
 /// either message list ever runs in.
-Widget _testable({required FocusNode focusNode}) {
+Widget _testable({
+  required FocusNode focusNode,
+  VoidCallback? onUserScrollStart,
+}) {
   return MaterialApp(
     home: Scaffold(
       body: Column(
@@ -12,6 +15,7 @@ Widget _testable({required FocusNode focusNode}) {
           TextField(focusNode: focusNode),
           Expanded(
             child: KeyboardDismissOnDrag(
+              onUserScrollStart: onUserScrollStart,
               child: ListView(
                 children: [
                   for (var i = 0; i < 40; i++)
@@ -102,6 +106,23 @@ void main() {
       await _dragDown(tester, keyboardDismissDragThreshold / 2);
 
       expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('reports a user-started scroll', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      var userScrollStarts = 0;
+      await tester.pumpWidget(
+        _testable(
+          focusNode: focusNode,
+          onUserScrollStart: () => userScrollStarts += 1,
+        ),
+      );
+
+      await tester.drag(find.text('row 3'), const Offset(0, -100));
+      await tester.pumpAndSettle();
+
+      expect(userScrollStarts, 1);
     });
 
     testWidgets('an upward drag never dismisses, however far it goes', (
