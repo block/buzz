@@ -27,6 +27,7 @@ mod migration;
 mod model_tests;
 mod models;
 mod native_websocket;
+mod native_websocket_connector;
 mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;

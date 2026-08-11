@@ -67,8 +67,8 @@ import {
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { AuthOkTracker } from "@/shared/api/relayAuthPolicy";
+import { RelayAuthChallengeBuffer } from "@/shared/api/relayAuthChallengeBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
-
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
@@ -95,7 +95,7 @@ export class RelayClient {
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
-
+  private earlyAuthChallenge = new RelayAuthChallengeBuffer();
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
@@ -132,6 +132,7 @@ export class RelayClient {
     this.terminal = false;
     this.visibleChannelId = null;
     this.authOkTracker.reset();
+    this.earlyAuthChallenge.clear();
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -559,7 +560,7 @@ export class RelayClient {
       }
       this.wsId = wsId;
 
-      await new Promise<void>((resolve, reject) => {
+      const authPromise = new Promise<void>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
           const error = new Error("Relay authentication timed out.");
           this.authRequest = null;
@@ -574,7 +575,10 @@ export class RelayClient {
           timeout,
         };
       });
-
+      const earlyChallenge = this.earlyAuthChallenge.take(generation);
+      if (earlyChallenge !== null)
+        await this.handleAuthChallenge(earlyChallenge, generation);
+      await authPromise;
       this.stabilityTimer = window.setTimeout(() => {
         this.stabilityTimer = null;
         this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -836,19 +840,15 @@ export class RelayClient {
   }
 
   private async handleAuthChallenge(challenge: string, generation: number) {
-    if (!this.relayUrl) {
-      this.relayUrl = await getRelayWsUrl();
-    }
-
-    const event = await createAuthEvent({
+    const relayUrl = this.relayUrl ?? (await getRelayWsUrl());
+    const event = await this.earlyAuthChallenge.prepare(
       challenge,
-      relayUrl: this.relayUrl,
-    });
-
-    if (generation !== this.connectionGeneration || !this.authRequest) {
-      return;
-    }
-
+      generation,
+      () => this.connectionGeneration,
+      () => this.wsId !== null && this.authRequest !== null,
+      () => createAuthEvent({ challenge, relayUrl }),
+    );
+    if (event === null || !this.authRequest) return;
     this.authRequest.pendingEventId = event.id;
     await this.sendRaw(["AUTH", event]);
   }

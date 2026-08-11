@@ -4,11 +4,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, plugin::TauriPlugin, Manager, Runtime};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message},
-};
+use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message};
 use tokio_util::sync::CancellationToken;
+
+use crate::native_websocket_connector::connect_websocket;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -127,12 +126,19 @@ async fn open_connection(
     on_message: Channel<serde_json::Value>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
-    let (socket, _) = tokio::select! {
+    let connection = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
-            .map_err(|_| "WebSocket connection timed out".to_string())?
-            .map_err(|error| error.to_string())?,
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_websocket(url)) => result
+            .map_err(|_| format!(
+                "relay connection failed during connect-timeout: exceeded {} seconds",
+                CONNECT_TIMEOUT.as_secs()
+            ))
+            .and_then(|result| result.map_err(|error| error.to_string())),
     };
+    let (socket, _) = connection.map_err(|error| {
+        eprintln!("buzz-desktop: {error}");
+        error
+    })?;
 
     // Serialize registration with disconnect_all so a reload cannot miss a
     // connection that finished its handshake concurrently with teardown.
@@ -358,11 +364,9 @@ mod tests {
             let (_stream, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
-        let result = std::panic::AssertUnwindSafe(tokio_tungstenite::connect_async(format!(
-            "wss://{address}"
-        )))
-        .catch_unwind()
-        .await;
+        let result = std::panic::AssertUnwindSafe(connect_websocket(&format!("wss://{address}")))
+            .catch_unwind()
+            .await;
 
         assert!(result.is_ok(), "TLS setup must not panic");
         server.await.unwrap();

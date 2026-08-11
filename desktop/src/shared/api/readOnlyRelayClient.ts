@@ -8,6 +8,7 @@ import {
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
+import { RelayAuthChallengeBuffer } from "@/shared/api/relayAuthChallengeBuffer";
 import {
   AUTH_TIMEOUT_MS,
   HISTORY_TIMEOUT_MS,
@@ -46,6 +47,7 @@ export class ReadOnlyRelayClient {
   private histories = new Map<string, PendingHistory>();
   private publishes = new Map<string, PendingPublish>();
   private generation = 0;
+  private earlyAuthChallenge = new RelayAuthChallengeBuffer();
 
   private readonly relayUrl: string;
 
@@ -71,6 +73,7 @@ export class ReadOnlyRelayClient {
   disconnect(): void {
     const error = new Error("Read-only relay observer disconnected.");
     this.generation++;
+    this.earlyAuthChallenge.clear();
 
     if (this.wsId !== null) {
       void closeWebSocket(this.wsId, "observer disconnected");
@@ -142,7 +145,7 @@ export class ReadOnlyRelayClient {
       config: {},
     });
 
-    await new Promise<void>((resolve, reject) => {
+    const authPromise = new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.authRequest = null;
         this.disconnect();
@@ -156,6 +159,10 @@ export class ReadOnlyRelayClient {
         timeout,
       };
     });
+    const earlyChallenge = this.earlyAuthChallenge.take(generation);
+    if (earlyChallenge !== null)
+      await this.handleAuthChallenge(earlyChallenge, generation);
+    await authPromise;
   }
 
   private requestHistory(
@@ -260,12 +267,14 @@ export class ReadOnlyRelayClient {
     challenge: string,
     generation: number,
   ): Promise<void> {
-    const event = await createAuthEvent({
+    const event = await this.earlyAuthChallenge.prepare(
       challenge,
-      relayUrl: this.relayUrl,
-    });
-
-    if (generation !== this.generation || !this.authRequest) return;
+      generation,
+      () => this.generation,
+      () => this.wsId !== null && this.authRequest !== null,
+      () => createAuthEvent({ challenge, relayUrl: this.relayUrl }),
+    );
+    if (event === null || !this.authRequest) return;
     this.authRequest.pendingEventId = event.id;
     await this.sendRaw(["AUTH", event]);
   }
