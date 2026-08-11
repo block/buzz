@@ -1,5 +1,5 @@
 import { getSentMessageLink } from "./AgentSessionToolItem/messageLinks";
-import type { TranscriptItem, ToolStatus } from "./agentSessionTypes";
+import type { ToolStatus, TranscriptItem } from "./agentSessionTypes";
 
 export const MODEL_WORK_PHASES = [
   "context",
@@ -10,6 +10,7 @@ export const MODEL_WORK_PHASES = [
 ] as const;
 
 export type ModelWorkPhase = (typeof MODEL_WORK_PHASES)[number];
+export type ModelWorkMode = "radar" | "explore" | "steer";
 export type ModelWorkStepStatus = "active" | "complete" | "failed";
 
 export type ModelWorkStep = {
@@ -18,6 +19,8 @@ export type ModelWorkStep = {
   id: string;
   item: TranscriptItem;
   label: string;
+  mode: ModelWorkMode;
+  modeReason: string;
   phase: ModelWorkPhase;
   signalLabel: "Chose" | "Found" | null;
   status: ModelWorkStepStatus;
@@ -39,6 +42,36 @@ export type ModelWorkStream = {
     actions: number;
     findings: number;
     inputs: number;
+  };
+};
+
+export type ModelWorkWorkspaceStatus =
+  | "active"
+  | "attention"
+  | "complete"
+  | "ready"
+  | "waiting";
+
+export type ModelWorkViews = {
+  radar: {
+    attentionCount: number;
+    evidence: ModelWorkStep[];
+    evidenceCount: number;
+    findingCount: number;
+    signals: ModelWorkStep[];
+    status: ModelWorkWorkspaceStatus;
+  };
+  explore: {
+    evidence: ModelWorkStep[];
+    humanInputCount: number;
+    paths: ModelWorkStep[];
+    status: ModelWorkWorkspaceStatus;
+  };
+  steer: {
+    actions: ModelWorkStep[];
+    completedCount: number;
+    humanInput: ModelWorkStep[];
+    status: ModelWorkWorkspaceStatus;
   };
 };
 
@@ -88,11 +121,106 @@ export function buildModelWorkStream(
   };
 }
 
+export function buildModelWorkViews(
+  stream: ModelWorkStream,
+  options: { isWorking: boolean },
+): ModelWorkViews {
+  const failures = stream.steps.filter((step) => step.status === "failed");
+  const humanInput = stream.steps.filter(isHumanInputStep);
+  const unresolvedHumanInput = humanInput.filter(
+    (step) =>
+      step.item.type === "lifecycle" &&
+      step.item.renderClass === "permission" &&
+      !step.item.outcome,
+  );
+  const evidence = stream.steps.filter(
+    (step) => step.phase === "context" || step.phase === "explore",
+  );
+  const signals = stream.steps.filter(
+    (step) =>
+      Boolean(step.finding) ||
+      step.status === "failed" ||
+      step.status === "active",
+  );
+  const signalIds = new Set(signals.map((step) => step.id));
+  const radarEvidence = evidence.filter((step) => !signalIds.has(step.id));
+  const paths = stream.steps.filter((step) => step.phase === "decide");
+  const actions = stream.steps.filter(
+    (step) =>
+      (step.phase === "act" || step.phase === "deliver") &&
+      !isHumanInputStep(step),
+  );
+  const hasCompletedDelivery = actions.some(
+    (step) => step.phase === "deliver" && step.status === "complete",
+  );
+  const attentionCount = failures.length + unresolvedHumanInput.length;
+
+  return {
+    radar: {
+      attentionCount,
+      evidence: radarEvidence,
+      evidenceCount: evidence.length,
+      findingCount: stream.totals.findings,
+      signals: signals.length > 0 ? signals : evidence.slice(-3),
+      status:
+        attentionCount > 0
+          ? "attention"
+          : options.isWorking
+            ? "active"
+            : stream.totals.findings > 0
+              ? "ready"
+              : "waiting",
+    },
+    explore: {
+      evidence,
+      humanInputCount: humanInput.length,
+      paths,
+      status:
+        failures.some(
+          (step) => step.phase === "explore" || step.phase === "decide",
+        ) || unresolvedHumanInput.length > 0
+          ? "attention"
+          : options.isWorking &&
+              (stream.activePhase === "explore" ||
+                stream.activePhase === "decide")
+            ? "active"
+            : paths.length > 0
+              ? "ready"
+              : "waiting",
+    },
+    steer: {
+      actions,
+      completedCount: actions.filter((step) => step.status === "complete")
+        .length,
+      humanInput,
+      status:
+        failures.some(
+          (step) => step.phase === "act" || step.phase === "deliver",
+        ) || unresolvedHumanInput.length > 0
+          ? "attention"
+          : options.isWorking &&
+              (stream.activePhase === "act" || stream.activePhase === "deliver")
+            ? "active"
+            : hasCompletedDelivery
+              ? "complete"
+              : "waiting",
+    },
+  };
+}
+
+function isHumanInputStep(step: ModelWorkStep) {
+  return (
+    step.item.type === "lifecycle" && step.item.renderClass === "permission"
+  );
+}
+
 function buildModelWorkStep(
   item: TranscriptItem,
   isWorking: boolean,
 ): ModelWorkStep {
   const phase = phaseForItem(item);
+  const mode = modeForItem(item, phase);
+  const modeReason = modeReasonForItem(item, mode);
   const isLatestActive = isWorking && isItemActive(item);
 
   if (item.type === "metadata") {
@@ -108,6 +236,8 @@ function buildModelWorkStep(
       id: item.id,
       item,
       label: "Context received",
+      mode,
+      modeReason,
       phase,
       signalLabel: null,
       status: "complete",
@@ -126,6 +256,8 @@ function buildModelWorkStep(
       id: item.id,
       item,
       label: item.role === "user" ? "Request received" : "Response prepared",
+      mode,
+      modeReason,
       phase,
       signalLabel: null,
       status: "complete",
@@ -149,6 +281,8 @@ function buildModelWorkStep(
       id: item.id,
       item,
       label: "Analyzing available signals",
+      mode,
+      modeReason,
       phase,
       signalLabel: null,
       status: isLatestActive ? "active" : "complete",
@@ -167,6 +301,8 @@ function buildModelWorkStep(
       id: item.id,
       item,
       label: item.isUpdate ? "Plan adjusted" : "Plan formed",
+      mode,
+      modeReason,
       phase,
       signalLabel: null,
       status: isLatestActive ? "active" : "complete",
@@ -186,6 +322,8 @@ function buildModelWorkStep(
       id: item.id,
       item,
       label: item.title,
+      mode,
+      modeReason,
       phase,
       signalLabel: null,
       status: failed ? "failed" : isLatestActive ? "active" : "complete",
@@ -222,6 +360,8 @@ function buildModelWorkStep(
     id: item.id,
     item,
     label,
+    mode,
+    modeReason,
     phase,
     signalLabel:
       finding && phase === "explore"
@@ -239,6 +379,41 @@ function buildModelWorkStep(
           : summarizeToolResult(item.result),
     },
   };
+}
+
+function modeForItem(
+  item: TranscriptItem,
+  phase: ModelWorkPhase,
+): ModelWorkMode {
+  if (item.type === "tool") {
+    const explicitMode = item.args.runtimeMode ?? item.args.mode;
+    if (
+      explicitMode === "radar" ||
+      explicitMode === "explore" ||
+      explicitMode === "steer"
+    ) {
+      return explicitMode;
+    }
+  }
+
+  if (phase === "context") return "radar";
+  if (phase === "explore" || phase === "decide") return "explore";
+  return "steer";
+}
+
+function modeReasonForItem(item: TranscriptItem, mode: ModelWorkMode): string {
+  if (item.type === "tool" && typeof item.args.modeReason === "string") {
+    const explicitReason = compactText(item.args.modeReason, 180);
+    if (explicitReason) return explicitReason;
+  }
+
+  if (mode === "radar") {
+    return "This event changes observed state and should be merged before the next operation.";
+  }
+  if (mode === "explore") {
+    return "This event adds or compares evidence needed to resolve the current uncertainty.";
+  }
+  return "This event prepares, performs, or verifies an external effect.";
 }
 
 function phaseForItem(item: TranscriptItem): ModelWorkPhase {
@@ -327,7 +502,9 @@ function summarizeToolResult(result: string): string | null {
 }
 
 function summarizeToolArguments(args: Record<string, unknown>): string | null {
-  const entries = Object.entries(args);
+  const entries = Object.entries(args).filter(
+    ([key]) => key !== "runtimeMode" && key !== "modeReason",
+  );
   if (entries.length === 0) return null;
 
   const summary = entries

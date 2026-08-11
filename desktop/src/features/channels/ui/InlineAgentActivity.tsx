@@ -1,5 +1,11 @@
+import {
+  Activity,
+  ChevronRight,
+  ListTree,
+  type LucideIcon,
+  Workflow,
+} from "lucide-react";
 import * as React from "react";
-import { Activity, ChevronRight, ListTree, Waypoints } from "lucide-react";
 
 import { AgentSessionTranscriptList } from "@/features/agents/ui/AgentSessionTranscriptList";
 import { ModelWorkStream } from "@/features/agents/ui/ModelWorkStreamView";
@@ -16,6 +22,23 @@ export type InlineAgentActivity = InlineAgentActivityPlacement & {
   content: React.ReactNode;
 };
 
+type AgentActivityView = "adaptive" | "trace";
+
+const ACTIVITY_VIEWS: {
+  icon: LucideIcon;
+  id: AgentActivityView;
+  label: string;
+  title: string;
+}[] = [
+  {
+    icon: Workflow,
+    id: "adaptive",
+    label: "Adaptive",
+    title: "Model-selected operating modes",
+  },
+  { icon: ListTree, id: "trace", label: "Trace", title: "Full trace" },
+];
+
 export function useInlineAgentActivity({
   agents,
   channelId,
@@ -31,7 +54,7 @@ export function useInlineAgentActivity({
   renderedMessageIds: ReadonlySet<string>;
   workingBotPubkeys: string[];
 }): InlineAgentActivity | null {
-  const [view, setView] = React.useState<"flow" | "trace">("flow");
+  const [view, setView] = React.useState<AgentActivityView>("adaptive");
   const workingSet = React.useMemo(
     () => new Set(workingBotPubkeys.map((pubkey) => pubkey.toLowerCase())),
     [workingBotPubkeys],
@@ -109,7 +132,7 @@ export function useInlineAgentActivity({
           size="sm"
         />
         <div className="min-w-0 flex-1 border-l-2 border-primary/25 pl-3">
-          <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+          <div className="mb-2 flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <button
               className="group inline-flex min-w-0 items-center gap-1 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() =>
@@ -126,34 +149,30 @@ export function useInlineAgentActivity({
             </button>
             <div
               aria-label="Agent activity view"
-              className="flex h-7 shrink-0 items-center rounded-md border border-border/80 bg-muted/30 p-0.5"
+              className="grid h-7 w-full shrink-0 grid-cols-2 items-center rounded-md border border-border/80 bg-muted/30 p-0.5 sm:w-auto"
               role="tablist"
             >
-              <button
-                aria-selected={view === "flow"}
-                className={viewButtonClassName(view === "flow")}
-                onClick={() => setView("flow")}
-                role="tab"
-                title="Work stream"
-                type="button"
-              >
-                <Waypoints aria-hidden="true" className="h-3 w-3" />
-                Flow
-              </button>
-              <button
-                aria-selected={view === "trace"}
-                className={viewButtonClassName(view === "trace")}
-                onClick={() => setView("trace")}
-                role="tab"
-                title="Full trace"
-                type="button"
-              >
-                <ListTree aria-hidden="true" className="h-3 w-3" />
-                Trace
-              </button>
+              {ACTIVITY_VIEWS.map((activityView) => {
+                const Icon = activityView.icon;
+                const selected = view === activityView.id;
+                return (
+                  <button
+                    aria-selected={selected}
+                    className={viewButtonClassName(selected)}
+                    key={activityView.id}
+                    onClick={() => setView(activityView.id)}
+                    role="tab"
+                    title={activityView.title}
+                    type="button"
+                  >
+                    <Icon aria-hidden="true" className="h-3 w-3" />
+                    {activityView.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
-          {view === "flow" ? (
+          {view === "adaptive" ? (
             <ModelWorkStream
               agentAvatarUrl={avatarUrl}
               agentName={selectedAgent.name}
@@ -185,6 +204,6 @@ export function useInlineAgentActivity({
 
 function viewButtonClassName(selected: boolean) {
   return selected
-    ? "inline-flex h-6 items-center gap-1 rounded-[4px] bg-background px-1.5 text-3xs font-semibold text-foreground shadow-xs"
-    : "inline-flex h-6 items-center gap-1 rounded-[4px] px-1.5 text-3xs font-medium text-muted-foreground transition-colors hover:text-foreground";
+    ? "inline-flex h-6 min-w-0 items-center justify-center gap-1 rounded-[4px] bg-background px-1.5 text-3xs font-semibold text-foreground shadow-xs"
+    : "inline-flex h-6 min-w-0 items-center justify-center gap-1 rounded-[4px] px-1.5 text-3xs font-medium text-muted-foreground transition-colors hover:text-foreground";
 }

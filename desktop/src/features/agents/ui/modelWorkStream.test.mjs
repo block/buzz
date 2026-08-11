@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildModelWorkStream } from "./modelWorkStream.ts";
+import {
+  buildModelWorkStream,
+  buildModelWorkViews,
+} from "./modelWorkStream.ts";
 
 const baseIdentity = {
   channelId: "channel-1",
@@ -170,4 +173,123 @@ test("keeps the actual tool arguments alongside the summarized flow", () => {
     stream.steps[0]?.trace.input,
     "channel=agents · contextMessages=24 · endpoint=ampersand/glm51 · unreadOnly=true",
   );
+});
+
+test("uses harness mode decisions without leaking routing metadata into inputs", () => {
+  const item = tool({
+    id: "resolve-definition",
+    label: "Resolved",
+    result: "Ticket issued to called",
+    toolName: "select_definition",
+  });
+  item.args = {
+    candidates: 3,
+    modeReason: "Competing definitions require attributed evidence.",
+    runtimeMode: "explore",
+  };
+
+  const stream = buildModelWorkStream([item], { isWorking: false });
+
+  assert.equal(stream.steps[0]?.mode, "explore");
+  assert.equal(
+    stream.steps[0]?.modeReason,
+    "Competing definitions require attributed evidence.",
+  );
+  assert.equal(stream.steps[0]?.trace.input, "candidates=3");
+});
+
+test("falls back to event semantics when the harness omits a mode", () => {
+  const stream = buildModelWorkStream(
+    [
+      tool({ id: "read", label: "Checked", tone: "read" }),
+      tool({ id: "write", label: "Updated", tone: "write" }),
+    ],
+    { isWorking: false },
+  );
+
+  assert.equal(stream.steps[0]?.mode, "explore");
+  assert.equal(stream.steps[1]?.mode, "steer");
+});
+
+test("organizes real observer steps into Radar, Explore, and Steer", () => {
+  const stream = buildModelWorkStream(
+    [
+      {
+        ...baseIdentity,
+        id: "context",
+        type: "metadata",
+        renderClass: "raw-rail",
+        title: "Prompt context",
+        sections: [{ title: "Channel history", body: "private context" }],
+        timestamp: "2026-08-05T00:00:00.000Z",
+      },
+      tool({
+        id: "read",
+        label: "Checked",
+        result: "Sales and Engineering are working from different dates.",
+      }),
+      tool({
+        id: "sample",
+        label: "Compared",
+        result: "Selected path: limited rollout.",
+        toolName: "sample_model",
+      }),
+      tool({ id: "edit", label: "Updated", tone: "write" }),
+      tool({ id: "send", label: "Sent", renderClass: "message" }),
+    ],
+    { isWorking: false },
+  );
+  const views = buildModelWorkViews(stream, { isWorking: false });
+
+  assert.deepEqual(
+    views.radar.signals.map((step) => step.id),
+    ["read", "sample"],
+  );
+  assert.deepEqual(
+    views.radar.evidence.map((step) => step.id),
+    ["context"],
+  );
+  assert.deepEqual(
+    views.explore.evidence.map((step) => step.id),
+    ["context", "read"],
+  );
+  assert.deepEqual(
+    views.explore.paths.map((step) => step.id),
+    ["sample"],
+  );
+  assert.deepEqual(
+    views.steer.actions.map((step) => step.id),
+    ["edit", "send"],
+  );
+  assert.equal(views.radar.status, "ready");
+  assert.equal(views.explore.status, "ready");
+  assert.equal(views.steer.status, "complete");
+});
+
+test("keeps unresolved human permission visible across Radar and Steer", () => {
+  const stream = buildModelWorkStream(
+    [
+      {
+        ...baseIdentity,
+        id: "permission",
+        type: "lifecycle",
+        renderClass: "permission",
+        title: "Approval requested",
+        text: "Publish the rollout change",
+        timestamp: "2026-08-05T00:00:01.000Z",
+      },
+    ],
+    { isWorking: true },
+  );
+  const views = buildModelWorkViews(stream, { isWorking: true });
+
+  assert.equal(views.radar.attentionCount, 1);
+  assert.equal(views.radar.status, "attention");
+  assert.deepEqual(
+    views.steer.humanInput.map((step) => step.id),
+    ["permission"],
+  );
+  assert.equal(views.explore.humanInputCount, 1);
+  assert.deepEqual(views.steer.actions, []);
+  assert.equal(views.steer.status, "attention");
 });
