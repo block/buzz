@@ -11,8 +11,12 @@ import {
   beginRelayOriginFetch,
   getCachedRelayOrigin,
 } from "@/shared/lib/mediaUrl";
-import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
-import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
+import {
+  isBuzzEntityPreview,
+  type ResolvedLinkPreview,
+  useResolvedLinkPreviews,
+  withEntityFallbacks,
+} from "@/shared/lib/useResolvedLinkPreviews";
 import {
   Attachment,
   AttachmentContent,
@@ -43,6 +47,10 @@ function ComposerLinkPreviewCard({
   );
   const showImage = Boolean(imageSrc && failedImageSrc !== imageSrc);
   const hostname = previewHostname(preview.href);
+  // `buzz://` entity links never produce snapshot tags (recipients render
+  // them from message content against the relay), so they are "done" as soon
+  // as they exist — there is no snapshot to wait for.
+  const done = preview.snapshotReady || isBuzzEntityPreview(preview);
   let path = "";
   try {
     const url = new URL(preview.href);
@@ -55,7 +63,7 @@ function ComposerLinkPreviewCard({
       data-image-state={preview.imageState}
       data-link-preview={preview.kind}
       data-link-preview-composer-card=""
-      state={preview.snapshotReady ? "done" : "processing"}
+      state={done ? "done" : "processing"}
     >
       <AttachmentMedia
         className="h-[55px] w-[55px] rounded-none rounded-l-2xl bg-muted"
@@ -86,10 +94,10 @@ function ComposerLinkPreviewCard({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle className="line-clamp-1" data-link-preview-hostname="">
-          {preview.snapshotReady ? preview.title : hostname}
+          {done ? preview.title : hostname}
         </AttachmentTitle>
         <AttachmentDescription>
-          {preview.snapshotReady
+          {done
             ? preview.provider || hostname
             : path && path !== "/"
               ? path
@@ -136,13 +144,22 @@ export function useComposerLinkPreviews(content: string) {
   const candidates = React.useMemo(
     () =>
       extractSupportedLinkPreviews(content).filter((preview) =>
-        preview.href.startsWith("buzz://")
+        isBuzzEntityPreview(preview)
           ? true
           : isValidLinkPreviewSnapshotCanonicalUrl(preview.href),
       ),
     [content],
   );
-  const previews = useResolvedLinkPreviews(suppressed ? [] : candidates);
+  const resolvedPreviews = useResolvedLinkPreviews(
+    suppressed ? [] : candidates,
+  );
+  // Entity links resolve to null metadata when the relay lookup has nothing
+  // for them (repo links always do — only PR/issue titles are fetched); keep
+  // their cards on the fallback title rather than dropping them.
+  const previews = React.useMemo(
+    () => withEntityFallbacks(suppressed ? [] : candidates, resolvedPreviews),
+    [suppressed, candidates, resolvedPreviews],
+  );
   React.useEffect(() => {
     if (candidates.length === 0) setSuppressed(false);
   }, [candidates.length]);
