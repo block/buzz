@@ -6,6 +6,7 @@ import {
   markCommunityOnboardingComplete,
   useCommunityOnboarding,
 } from "@/features/onboarding/communityOnboarding";
+import { shouldProvisionLocalStarterTeam } from "@/features/onboarding/starterTeamPolicy";
 import { initializeStarterChannels } from "@/features/onboarding/hooks";
 import { useClaimInvite } from "@/features/onboarding/useClaimInvite";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
@@ -409,6 +410,10 @@ export function CommunityOnboardingFlow({
       } catch (error) {
         deferredAvatar?.cancel();
         throw error;
+      }
+      if (!shouldProvisionLocalStarterTeam(transaction.inviteCode)) {
+        await finish();
+        return;
       }
       update({ stage: "team-intro", error: undefined });
     } catch (error) {

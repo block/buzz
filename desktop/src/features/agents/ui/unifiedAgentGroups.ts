@@ -3,10 +3,44 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 
 type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
 
+const LOCAL_STARTER_PERSONA_IDS = new Set([
+  "builtin:fizz",
+  "builtin:honey",
+  "builtin:bumble",
+]);
+const LOCAL_STARTER_NAMES = new Set(["Fizz", "Honey", "Bumble"]);
+
+export function filterLocalStartersWhenCommunityHasAgents(
+  personas: AgentPersona[],
+  agents: ManagedAgent[],
+) {
+  const communityHasAgents = agents.some(
+    (agent) => agent.pubkey.trim() && agent.relayUrl?.trim(),
+  );
+  if (!communityHasAgents) return { personas, agents };
+
+  return {
+    personas: personas.filter(
+      (persona) => !LOCAL_STARTER_PERSONA_IDS.has(persona.id),
+    ),
+    agents: agents.filter(
+      (agent) =>
+        agent.pubkey.trim() ||
+        (agent.personaId
+          ? !LOCAL_STARTER_PERSONA_IDS.has(agent.personaId)
+          : !LOCAL_STARTER_NAMES.has(agent.name)),
+    ),
+  };
+}
+
 export function buildUnifiedGroups(
   personas: AgentPersona[],
   agents: ManagedAgent[],
 ) {
+  ({ personas, agents } = filterLocalStartersWhenCommunityHasAgents(
+    personas,
+    agents,
+  ));
   const byPersonaId = new Map<string, ManagedAgent[]>();
   const ungrouped: ManagedAgent[] = [];
 
