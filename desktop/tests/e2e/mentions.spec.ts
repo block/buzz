@@ -848,9 +848,12 @@ test("other-owned agents without a shared channel are hidden from mentions", asy
   await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
-test("stale channel-member agents absent from managed and relay directories stay hidden", async ({
+test("channel-member agents absent from managed and relay directories stay mentionable", async ({
   page,
 }) => {
+  // Unknown invocability: a member agent with no kind:10100 directory record
+  // is shown rather than hidden, so agents whose harness has not (yet)
+  // published a directory record remain addressable in their channels.
   await installMockBridge(page, { userSearchDelayMs: 1_000 });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -859,7 +862,15 @@ test("stale channel-member agents absent from managed and relay directories stay
   const input = page.getByTestId("message-input");
   await input.fill("@mira");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("mira")).toBeVisible();
+  await input.press("Enter");
+
+  const agentMentionChip = input.locator(".agent-mention-highlight", {
+    hasText: "mira",
+  });
+  await expect(agentMentionChip).toBeVisible();
+  await expect(agentMentionChip).toHaveText("mira");
 });
 
 test("managed relay agents are visible in channel mentions regardless of relay policy", async ({
