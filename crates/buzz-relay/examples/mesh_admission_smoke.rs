@@ -54,16 +54,11 @@ fn env(name: &str) -> anyhow::Result<String> {
     std::env::var(name).map_err(|_| anyhow::anyhow!("{name} is required for this role"))
 }
 
+/// Installs the signed release runtime when none is cached — the same path the
+/// desktop takes. Deliberately no "is it installed?" precondition: this runs in
+/// three separate processes, and a guard here would refuse before reaching the
+/// call that does the installing.
 async fn init_native_runtime() -> anyhow::Result<()> {
-    let cache = mesh_llm_sdk::native_runtime::native_runtime_cache(None)?;
-    let current = mesh_llm_sdk::native_runtime::CURRENT_MESH_VERSION;
-    if !cache
-        .installed()?
-        .iter()
-        .any(|runtime| runtime.mesh_version == current)
-    {
-        anyhow::bail!("MeshLLM native runtime for MeshLLM {current} is not installed; run `just mesh-e2e-hardware` once to prepare it");
-    }
     mesh_llm_host_runtime::initialize_host_runtime()
         .await
         .map_err(|error| anyhow::anyhow!("MeshLLM host runtime init failed: {error}"))

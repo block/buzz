@@ -38,6 +38,9 @@ import {
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
 import { SpoilerMark } from "./spoilerMark";
+import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
+import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
+import { useComposerMessageLinks } from "./useComposerMessageLinks";
 
 function hardBreakLineBounds($from: ResolvedPos) {
   const parentStart = $from.start();
@@ -83,6 +86,7 @@ export type RichTextEditorOptions = {
   mentionNames?: string[];
   agentMentionNames?: string[];
   channelNames?: string[];
+  messageLinkChannels?: readonly ComposerMessageLinkChannel[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
   /** Called on plain Enter (submit). Handled inside Tiptap's extension system
@@ -135,11 +139,6 @@ function shouldAppendSpaceAfterPaste(text: string): boolean {
   const trimmedEnd = text.trimEnd();
   if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
   return PASTED_LINK_AT_END_RE.test(trimmedEnd);
-}
-
-function unwrapExactHttpLink(text: string): string | null {
-  const match = /^(?:<(https?:\/\/[^\s<>]+)>|(https?:\/\/\S+))$/i.exec(text);
-  return match?.[1] ?? match?.[2] ?? null;
 }
 
 const LinkPasteTrailingSpace = Extension.create({
@@ -206,6 +205,7 @@ export function useRichTextEditor({
   mentionNames,
   agentMentionNames,
   channelNames,
+  messageLinkChannels,
   customEmoji,
   onSubmit,
   onEditLastOwnMessage,
@@ -238,6 +238,7 @@ export function useRichTextEditor({
   // Custom-emoji atom node wiring (config + src re-resolve). Kept in a sibling
   // hook so this file stays focused on generic editor setup.
   const customEmojiWiring = useComposerCustomEmoji(customEmoji);
+  const messageLinkWiring = useComposerMessageLinks(messageLinkChannels);
 
   const editor = useEditor(
     {
@@ -462,6 +463,7 @@ export function useRichTextEditor({
         SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
+        messageLinkWiring.extension,
         Placeholder.configure({
           placeholder: () => placeholderRef.current ?? "Write a message…",
         }),
@@ -495,34 +497,15 @@ export function useRichTextEditor({
       ],
       editorProps: {
         handleDOMEvents: {
-          paste: (view, event) => {
-            const clipboard = (event as ClipboardEvent).clipboardData;
-            if (
-              parseSnapshotClipboardHtml(clipboard?.getData("text/html") ?? "")
+          paste: (view, event) =>
+            parseSnapshotClipboardHtml(
+              (event as ClipboardEvent).clipboardData?.getData("text/html") ??
+                "",
             )
-              return false;
-            const url = unwrapExactHttpLink(
-              clipboard?.getData("text/plain") ?? "",
-            );
-            if (!url) return false;
-            const link = view.state.schema.marks.link;
-            if (!link) return false;
-            const { from, to } = view.state.selection;
-            let transaction = view.state.tr.replaceRangeWith(
-              from,
-              to,
-              view.state.schema.text(url, [link.create({ href: url })]),
-            );
-            const end = transaction.mapping.map(to);
-            transaction = transaction.insertText(" ", end);
-            transaction = transaction.removeMark(end, end + 1, link);
-            transaction = transaction.setSelection(
-              TextSelection.create(transaction.doc, end + 1),
-            );
-            view.dispatch(transaction.setStoredMarks([]).scrollIntoView());
-            event.preventDefault();
-            return true;
-          },
+              ? false
+              : createComposerLinkPasteHandler(
+                  messageLinkWiring.resolveChannelName,
+                )(view, event as ClipboardEvent),
         },
         attributes: {
           autocapitalize: "none",
@@ -731,6 +714,11 @@ export function useRichTextEditor({
     if (!editor) return;
     customEmojiWiring.syncEmojiSrc(editor);
   }, [editor, customEmojiWiring.syncEmojiSrc]);
+
+  React.useEffect(() => {
+    if (!editor) return;
+    messageLinkWiring.syncChannelNames(editor);
+  }, [editor, messageLinkWiring.syncChannelNames]);
 
   const getMarkdown = React.useCallback((): string => {
     if (!editor) return "";

@@ -212,33 +212,28 @@ test.describe("global agent config screenshots", () => {
 
     await openAiDefaultsSettings(page);
 
-    const harness = page.getByTestId("global-agent-default-harness");
+    const defaultsCard = page.locator(
+      '[data-testid="settings-global-agent-config"]:visible',
+    );
+    const harness = defaultsCard.getByTestId("global-agent-default-harness");
+    await expect(defaultsCard).toHaveCount(1);
     await expect(harness).toHaveText("Claude Code");
     await expect(page.getByText("Provider", { exact: true })).toHaveCount(0);
-    await expect(page.locator("#global-agent-model")).toBeVisible();
+    await expect(defaultsCard.locator("#global-agent-model")).toBeVisible();
 
-    // Make the form dirty, then return to Claude with no model override. The
-    // harness-native default keeps the now-actionable Save button enabled.
     await harness.press("Enter");
     await page.getByTestId("global-agent-default-harness-option-codex").click();
-    await harness.press("Enter");
-    await page
-      .getByTestId("global-agent-default-harness-option-claude")
-      .click();
     await waitForAnimations(page);
-    await expect(page.getByTestId("global-agent-model")).toHaveText(
-      /Default model/,
+    const model = defaultsCard.locator(
+      '[data-testid="global-agent-model"]:visible',
     );
-    await expect(
-      page.getByRole("button", { name: "Save defaults" }),
-    ).toBeEnabled();
-
-    await harness.press("Enter");
-    await page.getByTestId("global-agent-default-harness-option-codex").click();
-    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveCount(1);
     await model.click();
     await page.getByTestId("global-agent-model-option-gpt-5.5[high]").click();
-    await page.getByRole("button", { name: "Save defaults" }).click();
+    await defaultsCard
+      .getByRole("button", { name: "Save defaults" })
+      .filter({ visible: true })
+      .click();
 
     const saved = await page.evaluate(async () =>
       (

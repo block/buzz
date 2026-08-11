@@ -486,6 +486,7 @@ pub async fn send_channel_message(
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
     link_preview_tags: Option<Vec<Vec<String>>>,
+    sent_from_thread_tag: Option<Vec<String>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -500,6 +501,9 @@ pub async fn send_channel_message(
     let link_previews = link_preview_tags.unwrap_or_default();
     let relay_base = crate::relay::relay_api_base_url_with_override(&state);
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
+    if sent_from_thread_tag.is_some() && kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE {
+        return Err("sent-from-thread provenance requires a stream message".into());
+    }
 
     let mut resolved_root: Option<String> = None;
 
@@ -544,6 +548,7 @@ pub async fn send_channel_message(
                 &emoji,
                 &mention_refs_only,
                 &link_previews,
+                sent_from_thread_tag.as_deref(),
                 &relay_base,
             )?
         }
@@ -712,6 +717,7 @@ fn build_managed_agent_channel_message(
         &[],
         &[],
         &[],
+        None,
         &crate::relay::relay_api_base_url(),
         client_tags,
     )
@@ -890,6 +896,10 @@ pub struct EditMessageInput {
     // tag, so a typo-fix edit never re-wakes existing mentions.
     #[serde(default)]
     mention_pubkeys: Vec<String>,
+    // Full stable mention identity set selected in the edited composer. `None`
+    // means a partial edit that must preserve the existing snapshot; `Some`,
+    // including an empty set, authoritatively replaces it.
+    mention_tags: Option<Vec<Vec<String>>>,
     #[serde(default)]
     suppress_link_previews: bool,
 }
@@ -914,9 +924,12 @@ pub async fn edit_message(
         channel_uuid,
         target_eid,
         trimmed,
-        &input.media_tags,
-        &input.emoji_tags,
-        &mention_refs,
+        events::MessageEditTags {
+            media: &input.media_tags,
+            custom_emoji: &input.emoji_tags,
+            mentions: &mention_refs,
+            mention_refs: input.mention_tags.as_deref(),
+        },
         input.suppress_link_previews,
     )?;
     submit_event(builder, &state).await?;

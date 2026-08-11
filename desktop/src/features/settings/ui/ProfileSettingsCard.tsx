@@ -771,7 +771,10 @@ export function ProfileSettingsCard({
                                 <h2 className="text-lg font-semibold tracking-tight">
                                   Identity
                                 </h2>
-                                <p className="mt-1 text-sm font-normal text-muted-foreground">
+                                <p
+                                  className="mt-1 text-sm font-normal text-muted-foreground/70"
+                                  data-settings-subcopy
+                                >
                                   Your keypair and NIP-05 handle are fixed for
                                   this device.
                                 </p>

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
+import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { seedActiveIdentity } from "../helpers/onboarding";
 
 const BLANK_TYLER_IDENTITY = {
@@ -36,6 +37,42 @@ test("avatar step always shows Skip for now button without an error", async ({
   await page.screenshot({
     path: `${SHOTS}/01-avatar-skip-button.png`,
   });
+});
+
+test("avatar step shares the profile emoji picker controls", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+  await expectEmojiMartStylesInstalled(picker);
+  await expect(page.getByTestId("onboarding-avatar-emoji-picker")).toHaveCSS(
+    "height",
+    "384px",
+  );
+
+  const controlHeights = await picker.evaluate((element) => {
+    const input = element.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    const toneControl =
+      element.shadowRoot?.querySelector<HTMLElement>(".search + .flex");
+    if (!input || !toneControl) {
+      throw new Error("Onboarding emoji picker controls did not render.");
+    }
+    return {
+      input: input.getBoundingClientRect().height,
+      tone: toneControl.getBoundingClientRect().height,
+    };
+  });
+  expect(controlHeights).toEqual({ input: 48, tone: 48 });
 });
 
 test("avatar step skip button completes community profile setup", async ({
