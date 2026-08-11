@@ -3614,9 +3614,13 @@ impl Db {
         workflow::list_enabled_channel_workflows(&self.pool, community_id, channel_id).await
     }
 
-    /// List all active, enabled schedule-triggered workflows.
-    pub async fn list_all_enabled_workflows(&self) -> Result<Vec<workflow::WorkflowRecord>> {
-        workflow::list_all_enabled_workflows(&self.pool).await
+    /// List one keyset-paginated page of active, enabled schedule-triggered workflows.
+    pub async fn list_enabled_schedule_workflows_page(
+        &self,
+        after: Option<(chrono::DateTime<chrono::Utc>, CommunityId, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<workflow::WorkflowRecord>> {
+        workflow::list_enabled_schedule_workflows_page(&self.pool, after, limit).await
     }
 
     /// Claim a scheduled workflow fire for an authoritative schedule instant.

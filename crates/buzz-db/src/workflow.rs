@@ -449,14 +449,24 @@ pub async fn list_enabled_channel_workflows(
     rows.into_iter().map(row_to_workflow_record).collect()
 }
 
-/// List all active, enabled workflows with a `schedule` trigger across all channels.
+/// List one keyset-paginated page of active, enabled workflows with a
+/// `schedule` trigger across all channels.
 ///
 /// Used by the cron scheduler. Filters by trigger type in SQL to avoid loading
 /// event-triggered workflows that the cron loop would immediately discard.
-/// Results are bounded to [`LIST_MAX_LIMIT`] rows.
-pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
-    let rows = sqlx::query(
-        r#"
+/// `after` is the `(created_at, community_id, id)` key of the previous page's
+/// final row. All three fields are required because workflow UUIDs are only
+/// unique within a community.
+pub async fn list_enabled_schedule_workflows_page(
+    pool: &PgPool,
+    after: Option<(DateTime<Utc>, CommunityId, Uuid)>,
+    limit: i64,
+) -> Result<Vec<WorkflowRecord>> {
+    let limit = limit.clamp(1, LIST_MAX_LIMIT);
+    let rows = match after {
+        Some((created_at, community_id, id)) => {
+            sqlx::query(
+                r#"
         SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
                w.status::text AS status, w.enabled, w.created_at, w.updated_at
         FROM workflows w
@@ -465,13 +475,38 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
           AND w.enabled = TRUE
           AND w.definition->'trigger'->>'on' = 'schedule'
           AND c.archived_at IS NULL
-        ORDER BY w.created_at ASC
+          AND (w.created_at, w.community_id, w.id) > ($1, $2, $3)
+        ORDER BY w.created_at ASC, w.community_id ASC, w.id ASC
+        LIMIT $4
+        "#,
+            )
+            .bind(created_at)
+            .bind(community_id.as_uuid())
+            .bind(id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                r#"
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+               w.status::text AS status, w.enabled, w.created_at, w.updated_at
+        FROM workflows w
+        JOIN communities c ON c.id = w.community_id
+        WHERE w.status = 'active'
+          AND w.enabled = TRUE
+          AND w.definition->'trigger'->>'on' = 'schedule'
+          AND c.archived_at IS NULL
+        ORDER BY w.created_at ASC, w.community_id ASC, w.id ASC
         LIMIT $1
         "#,
-    )
-    .bind(LIST_MAX_LIMIT)
-    .fetch_all(pool)
-    .await?;
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+    };
 
     rows.into_iter().map(row_to_workflow_record).collect()
 }
@@ -486,7 +521,8 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
 /// can compute different claim keys.
 ///
 /// `community_id` is server provenance — for the global scheduler scan it is
-/// the `workflow.community_id` returned by [`list_all_enabled_workflows`], not
+/// the `workflow.community_id` returned by
+/// [`list_enabled_schedule_workflows_page`], not
 /// any client-supplied value. It is required because `workflows` is keyed
 /// `(community_id, id)`: duplicate workflow UUIDs across communities are
 /// allowed, so resolving the owning community from `id` alone is ambiguous and
@@ -1707,7 +1743,7 @@ mod tests {
     // The invariant that survives is NOT "the claim never receives community";
     // it is "the community used for the claim is server provenance, never
     // client-controlled." For the global scheduler scan that provenance is the
-    // `workflow.community_id` returned by `list_all_enabled_workflows()`. The
+    // `workflow.community_id` returned by the paginated scheduler scan. The
     // claim therefore takes `community_id` and binds
     // `WHERE w.community_id = $1 AND w.id = $2`, confining the claim row to the
     // intended tenant.
@@ -1791,6 +1827,106 @@ mod tests {
         .await
         .expect("create workflow");
         (workflow_id, community)
+    }
+
+    /// The scheduler must discover schedules beyond the global list cap without
+    /// skipping a duplicate UUID at a cross-community page boundary. Before
+    /// keyset pagination, its single oldest-first query returned only the first
+    /// [`LIST_MAX_LIMIT`] rows forever. A two-column `(created_at, id)` cursor
+    /// also skipped the second row when two communities shared both values.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn schedule_scan_pages_past_global_limit_without_loss() {
+        let pool = setup_pool().await;
+        let community_a = make_community(&pool).await;
+        let community_b = make_community(&pool).await;
+        let owner = vec![0xc3; 32];
+        ensure_user(&pool, community_a, &owner)
+            .await
+            .expect("ensure owner in community A");
+        ensure_user(&pool, community_b, &owner)
+            .await
+            .expect("ensure owner in community B");
+        let channel_a = make_channel(&pool, community_a, &owner).await;
+        let channel_b = make_channel(&pool, community_b, &owner).await;
+        let total = LIST_MAX_LIMIT + 1;
+        let filler_count = LIST_MAX_LIMIT - 1;
+        let duplicate_id = Uuid::new_v4();
+
+        sqlx::query(
+            r#"
+            INSERT INTO workflows
+                (id, community_id, name, owner_pubkey, channel_id, definition,
+                 definition_hash, status, enabled, created_at, updated_at)
+            SELECT md5(series::text)::uuid,
+                   $1,
+                   'schedule-' || series,
+                   $2,
+                   $3,
+                   '{"trigger":{"on":"schedule","cron":"* * * * *"},"steps":[]}'::jsonb,
+                   decode(md5(series::text), 'hex'),
+                   'active',
+                   TRUE,
+                   TIMESTAMPTZ '2026-08-05 00:00:00+00',
+                   TIMESTAMPTZ '2026-08-05 00:00:00+00'
+            FROM generate_series(1, $4::bigint) AS series
+            "#,
+        )
+        .bind(community_a.as_uuid())
+        .bind(&owner)
+        .bind(channel_a)
+        .bind(filler_count)
+        .execute(&pool)
+        .await
+        .expect("insert filler schedules");
+
+        for (community, channel) in [(community_a, channel_a), (community_b, channel_b)] {
+            sqlx::query(
+                r#"
+                INSERT INTO workflows
+                    (id, community_id, name, owner_pubkey, channel_id, definition,
+                     definition_hash, status, enabled, created_at, updated_at)
+                VALUES
+                    ($1, $2, 'boundary-schedule', $3, $4,
+                     '{"trigger":{"on":"schedule","cron":"* * * * *"},"steps":[]}'::jsonb,
+                     decode(md5($2::text), 'hex'), 'active', TRUE,
+                     TIMESTAMPTZ '2026-08-06 00:00:00+00',
+                     TIMESTAMPTZ '2026-08-06 00:00:00+00')
+                "#,
+            )
+            .bind(duplicate_id)
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .bind(channel)
+            .execute(&pool)
+            .await
+            .expect("insert duplicate boundary schedule");
+        }
+
+        let first = list_enabled_schedule_workflows_page(&pool, None, LIST_MAX_LIMIT)
+            .await
+            .expect("first page");
+        assert_eq!(first.len(), LIST_MAX_LIMIT as usize);
+
+        let cursor = first
+            .last()
+            .map(|workflow| (workflow.created_at, workflow.community_id, workflow.id));
+        let second = list_enabled_schedule_workflows_page(&pool, cursor, LIST_MAX_LIMIT)
+            .await
+            .expect("second page");
+        assert_eq!(second.len(), 1, "the boundary twin must not starve");
+
+        let mut identities: std::collections::HashSet<(CommunityId, Uuid)> = first
+            .into_iter()
+            .map(|workflow| (workflow.community_id, workflow.id))
+            .collect();
+        assert!(
+            identities.insert((second[0].community_id, second[0].id)),
+            "pages must not overlap"
+        );
+        assert_eq!(identities.len(), total as usize);
+        assert!(identities.contains(&(community_a, duplicate_id)));
+        assert!(identities.contains(&(community_b, duplicate_id)));
     }
 
     /// Confinement: a duplicate workflow UUID existing in both community A and

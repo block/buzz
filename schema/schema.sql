@@ -378,6 +378,13 @@ CREATE INDEX idx_workflows_channel_active ON workflows (community_id, channel_id
 -- Scheduler scans enabled schedule workflows; community_id returned per row so
 -- side effects run under the owning tenant's context (Lane0 contract §4a.5).
 CREATE INDEX idx_workflows_enabled ON workflows (enabled, status) WHERE enabled;
+-- Global scheduler keyset scan. This intentionally does not lead with
+-- community_id: the cron loop discovers schedules across every live community,
+-- ordered by this exact globally unique cursor.
+CREATE INDEX idx_workflows_schedule_scan ON workflows (created_at, community_id, id)
+    WHERE status = 'active'
+      AND enabled = TRUE
+      AND definition->'trigger'->>'on' = 'schedule';
 
 -- ── Workflow runs ─────────────────────────────────────────────────────────────
 
@@ -436,7 +443,7 @@ CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, 
 -- Plan §5: the at-most-once cron fire claim. UNIQUE (community_id, workflow_id,
 -- scheduled_for) — only the pod that wins the claim insert creates the run.
 -- Restart-safe (DB-durable). community is server provenance: the scheduler passes
--- workflow.community_id from list_all_enabled_workflows(), never a client input.
+-- workflow.community_id from the paginated scheduler scan, never a client input.
 -- workflow_id is NOT globally unique under the (community_id, id) workflow key, so
 -- the claim binds both community and id explicitly rather than resolving from id.
 -- workflow_run_id links the won claim to the run it created (audit; NULL until the
