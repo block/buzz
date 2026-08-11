@@ -155,6 +155,13 @@ class _MessageList extends HookConsumerWidget {
           : displayEntries.length - 1 - chronologicalIndex;
     }
 
+    double latestAlignment() {
+      final viewportHeight = context.size?.height ?? 0;
+      return viewportHeight > 0
+          ? (composerBottomInset / viewportHeight).clamp(0.0, 1.0).toDouble()
+          : 0.0;
+    }
+
     Future<void> scrollToLatest() async {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
       followsLatest.value = true;
@@ -163,6 +170,7 @@ class _MessageList extends HookConsumerWidget {
       try {
         await itemScrollController.scrollTo(
           index: 0,
+          alignment: latestAlignment(),
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
         );
@@ -199,12 +207,15 @@ class _MessageList extends HookConsumerWidget {
     }
 
     bool latestIsAtBoundary() {
-      // In this reversed list, item 0's leading edge is the bottom boundary.
-      // Being merely visible is not enough: a user who has pulled a tall
-      // newest row away from the boundary must not snap back on live updates.
+      // In this reversed list, item 0's leading edge is the visible bottom
+      // boundary above the composer. Being merely visible is not enough: a
+      // user who has pulled a tall newest row away from that boundary must not
+      // snap back on live updates.
+      final boundary = latestAlignment();
       return itemPositionsListener.itemPositions.value.any(
         (position) =>
-            position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+            position.index == 0 &&
+            (position.itemLeadingEdge - boundary).abs() < 0.01,
       );
     }
 

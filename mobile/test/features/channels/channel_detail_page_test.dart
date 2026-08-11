@@ -166,6 +166,7 @@ Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
+  _FakeUserCacheNotifier? userCacheNotifier,
   List<ChannelMember> members = const [],
   Channel? channel,
   List<Channel>? channels,
@@ -197,7 +198,9 @@ Widget _buildTestable({
       channelTypingProvider(
         _channelId,
       ).overrideWith(() => _FakeTypingNotifier(typing)),
-      userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+      userCacheProvider.overrideWith(
+        () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
+      ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelDetailsProvider(_channelId).overrideWith(
@@ -1023,6 +1026,245 @@ void main() {
       );
     });
 
+    testWidgets('long press opens the anchored reaction popover', (
+      tester,
+    ) async {
+      final hapticCalls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'reaction-target',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-reaction-target')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.text('Copy text'), findsNothing);
+      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(hapticCalls, hasLength(1));
+      expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
+    });
+
+    testWidgets('reaction popover leaves existing reactions in the blur', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'reacted-system-message',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+            _reaction(
+              id: 'existing-reaction',
+              targetId: 'reacted-system-message',
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final messageCenter = tester.getCenter(
+        findRichText('joined the channel'),
+      );
+      final reactionRect = tester.getRect(find.byType(ReactionRow));
+      final reactionCenter = reactionRect.center;
+      final reactionPillTop = Offset(
+        reactionRect.center.dx,
+        reactionRect.top + Grid.half + Grid.quarter,
+      );
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-reacted-system-message')),
+      );
+      await tester.pumpAndSettle();
+
+      final backgroundFinder = find.byKey(
+        const ValueKey('reaction-popover-background'),
+      );
+      final background = tester.widget<ClipPath>(backgroundFinder);
+      final backgroundOrigin = tester.getTopLeft(backgroundFinder);
+      final blurPath = background.clipper!.getClip(
+        tester.getSize(backgroundFinder),
+      );
+
+      expect(blurPath.contains(messageCenter - backgroundOrigin), isFalse);
+      expect(blurPath.contains(reactionPillTop - backgroundOrigin), isTrue);
+      expect(blurPath.contains(reactionCenter - backgroundOrigin), isTrue);
+    });
+
+    testWidgets('reaction popover grows right from a fixed left edge', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'left-growth-target',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-left-growth-target')),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      final earlyRect = tester.getRect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+      );
+      await tester.pump(const Duration(milliseconds: 80));
+      final laterRect = tester.getRect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+      );
+
+      expect(laterRect.left, moreOrLessEquals(earlyRect.left));
+      expect(laterRect.width, greaterThan(earlyRect.width));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('long press survives a message rebuild during the hold', (
+      tester,
+    ) async {
+      final userCache = _FakeUserCacheNotifier({
+        'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+      });
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'rebuild-target',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+          ],
+          userCacheNotifier: userCache,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final target = find.byKey(
+        const ValueKey('system-message-row-rebuild-target'),
+      );
+      final gesture = await tester.startGesture(tester.getCenter(target));
+      await tester.pump(const Duration(milliseconds: 250));
+      userCache.replace(
+        const UserProfile(pubkey: 'alice', displayName: 'Alice Updated'),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('long press works over nested rich message content', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const firstImage = 'https://example.com/media/first.png';
+      const secondImage = 'https://example.com/media/second.png';
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'rich-reaction-target',
+              pubkey: 'alice',
+              content:
+                  'Gallery\n'
+                  '![First]($firstImage)\n'
+                  '![Second]($secondImage)',
+              extraTags: const [
+                ['imeta', 'url $firstImage', 'm image/png'],
+                ['imeta', 'url $secondImage', 'm image/png'],
+              ],
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(
+        find.byKey(const ValueKey('message-media-carousel')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('reaction-popover-tray')), findsNothing);
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.text('Copy text'), findsOneWidget);
+    });
+
     testWidgets(
       'keeps image galleries body-aligned and flush with the trailing edge',
       (tester) async {
@@ -1811,7 +2053,7 @@ void main() {
         expect(latestMessage, findsOneWidget);
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
 
         await tester.tap(find.text('Message #general'));
@@ -1823,7 +2065,7 @@ void main() {
         );
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -1836,7 +2078,7 @@ void main() {
         expect(latestMessage, findsOneWidget);
         expect(
           tester.getBottomLeft(latestMessage).dy,
-          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+          closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -1844,6 +2086,53 @@ void main() {
         );
       },
     );
+
+    testWidgets('keeps a short followed tail flush through composer resize', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.reset);
+
+      final messages = [
+        for (var i = 0; i < 3; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final latestMessage = find.byKey(
+        const ValueKey('channel-message-group-msg2'),
+      );
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getBottomLeft(latestMessage).dy,
+        closeTo(tester.getTopLeft(composerDock).dy, 1),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+    });
 
     testWidgets(
       'does not realign a user-detached timeline on keyboard resize',
@@ -1990,6 +2279,18 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
+      final latestMessage = find.byKey(
+        const ValueKey('channel-message-group-newest'),
+      );
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+      expect(
+        tester.getBottomLeft(latestMessage).dy,
+        closeTo(tester.getTopLeft(composerDock).dy, 1),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
     });
 
     testWidgets(
@@ -4269,6 +4570,10 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   UserProfile? get(String pubkey) => _users[pubkey.toLowerCase()];
+
+  void replace(UserProfile profile) {
+    state = {...state, profile.pubkey.toLowerCase(): profile};
+  }
 }
 
 class _FakeChannelsNotifier extends ChannelsNotifier {

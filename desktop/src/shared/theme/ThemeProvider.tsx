@@ -11,6 +11,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
+import { getStorageItem } from "@/shared/lib/safeStorage";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
 import {
   SYNTAX_THEMES,
@@ -80,7 +81,10 @@ function isValidThemeName(name: string): name is SyntaxThemeName {
 
 /** Read stored theme, migrating legacy "light"/"dark"/"system" values. */
 function readStoredTheme(fallback: SyntaxThemeName): SyntaxThemeName {
-  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  // block/buzz#5078 — WebKit throws SecurityError from getItem under a
+  // denied-storage origin; the throw-safe helper lets the provider degrade to
+  // the fallback instead of unmounting the root during first render.
+  const stored = getStorageItem(THEME_STORAGE_KEY);
   if (!stored) return fallback;
 
   // Migrate legacy values
@@ -416,8 +420,7 @@ function applyCachedVars(): string | null {
     root.classList.add(isDark ? "dark" : "light");
     applyBuzzSidebar(themeName);
 
-    const accent =
-      window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
+    const accent = getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
     // Pin Buzz themes to the neutral accent here too, matching applyTheme.
     // Otherwise a cached Buzz theme + non-neutral stored accent flashes the
     // old accent on reload until the async applyTheme effect runs.
@@ -471,7 +474,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
   applyAccentColor(
     resolveEffectiveAccent(
       name,
-      window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
+      getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
     ),
   );
 
@@ -506,15 +509,17 @@ export function ThemeProvider({
   >(null);
   const loadingRef = useRef<string | null>(null);
   const [accentColor, setAccentColorState] = useState<string>(() => {
-    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
+    // block/buzz#5078 — use the throw-safe accessor for init-time reads; a
+    // denied-storage origin would otherwise kill the root on first mount.
+    return getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
-    const stored = window.localStorage.getItem(FOLLOW_SYSTEM_KEY);
+    const stored = getStorageItem(FOLLOW_SYSTEM_KEY);
     if (stored !== null) return stored === "true";
     // Fresh profiles (no saved theme) default to System mode so the Buzz
     // default tracks the OS light/dark scheme. Profiles that picked a theme
     // before this toggle existed keep their fixed theme until they opt in.
-    return window.localStorage.getItem(THEME_STORAGE_KEY) === null;
+    return getStorageItem(THEME_STORAGE_KEY) === null;
   });
   const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;

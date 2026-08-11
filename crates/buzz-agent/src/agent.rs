@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
@@ -22,6 +23,17 @@ const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
 const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Model-visible feedback after the provider truncates an assistant response at
+/// its output-token limit. This is a user message rather than a synthetic tool
+/// result because truncation can happen without a tool call (and an unpaired
+/// tool result is invalid on every provider wire format).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response exceeded the model's output token limit and was truncated. Any incomplete tool call was not run. Continue the task, breaking the work or tool call into smaller steps and keeping the response concise.";
+
+/// A provider can repeatedly spend its entire output allowance without making
+/// progress, while `max_rounds` is unbounded by default. Keep the in-turn rescue
+/// finite so a persistently truncating model eventually surfaces `max_tokens`.
+const MAX_TOKENS_RECOVERIES_PER_RUN: u32 = 2;
 
 /// Remove image blocks that the provider has explicitly rejected while keeping
 /// their surrounding tool result (and therefore the tool-call/result pairing)
@@ -144,6 +156,12 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
+    /// ACP v2 session identifier for this prompt turn. Used to derive
+    /// per-message `messageId` values that are unique within the ACP session.
+    /// Distinct from `session_id` (which is the ACP session); this is a
+    /// per-`session/prompt` random token so that IDs from one prompt invocation
+    /// never collide with those from another even within the same session.
+    pub run_id: String,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -255,6 +273,10 @@ impl RunCtx<'_> {
         // per-session: a fresh prompt deserves a fresh chance to recover, and
         // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
         let mut context_recoveries = 0u32;
+        // Per-run output-truncation recovery budget. Unlike context recovery,
+        // these successful provider requests consume a real round and are not
+        // refunded; this counter only bounds the default-unlimited case.
+        let mut max_tokens_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -292,7 +314,8 @@ impl RunCtx<'_> {
             let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
+                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -460,6 +483,23 @@ impl RunCtx<'_> {
                 self.emit_usage_update().await;
             }
 
+            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
+            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
+            // that belong to the same logical message must share the same ID, and
+            // IDs must be unique per message within the ACP session.
+            //
+            // A provider round produces at most one thought and one assistant
+            // message (the parsers collapse all provider output into one
+            // LlmResponse.reasoning string and one LlmResponse.text string).
+            // These are two *distinct* logical messages, so they get distinct IDs.
+            //
+            // `run_id` is a fresh random token per `session/prompt` invocation,
+            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
+            // unique within the ACP session even across multiple prompts.
+            //
+            // ACP v1 allows the field, so this is a backwards-safe addition.
+            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
+            let message_msg_id = format!("{}-message-{round}", self.run_id);
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -467,6 +507,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
+                            "messageId": &thought_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -481,11 +522,43 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
+                            "messageId": &message_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),
                 )
                 .await;
+            }
+
+            // `max_tokens` describes a truncated assistant response, not turn
+            // completion. Never execute tool calls from it: although one may
+            // parse as valid, a later call (or surrounding instructions) may
+            // have been cut off. Replay only the text, with no tool calls, so
+            // the history remains valid without fabricated tool results; then
+            // add actionable user-role feedback and ask the model to continue.
+            if response.stop == ProviderStop::MaxTokens {
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                if max_tokens_recoveries >= MAX_TOKENS_RECOVERIES_PER_RUN {
+                    tracing::warn!(
+                        recoveries = max_tokens_recoveries,
+                        "provider repeatedly hit output token limit; recovery budget exhausted"
+                    );
+                    return Ok(StopReason::MaxTokens);
+                }
+                max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
+                tracing::warn!(
+                    recovery = max_tokens_recoveries,
+                    max_recoveries = MAX_TOKENS_RECOVERIES_PER_RUN,
+                    discarded_tool_calls = response.tool_calls.len(),
+                    "provider hit output token limit; asking model to continue in smaller steps"
+                );
+                self.history
+                    .push(HistoryItem::User(MAX_TOKENS_RECOVERY_MESSAGE.to_string()));
+                continue;
             }
 
             if response.tool_calls.is_empty() {
