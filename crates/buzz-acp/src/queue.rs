@@ -1228,6 +1228,46 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Resolve the `--reply-to` anchor for a turn's triggering event — shared by
+/// [`format_prompt`] (its `[Context]` reply instruction) and
+/// [`reply_anchor_for_batch`] (the same anchor threaded to `AcpClient` for
+/// the `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback gate, so a fallback
+/// publish threads identically to what the agent was told to do).
+///
+/// Extracted so the two call sites share one implementation instead of two
+/// hand-synced copies — previously `reply_anchor_for_batch`'s doc comment
+/// explicitly flagged itself as a hand-maintained duplicate of this exact
+/// logic.
+///
+/// - DM: anchor is `Some(triggering_event_id)` only when replying inside an
+///   existing thread (`thread_tags.root_event_id` present); a fresh
+///   top-level DM message gets no forced anchor.
+/// - Non-DM: delegates to [`resolve_reply_anchor`], which anchors
+///   human-facing turns (in a thread → the thread root, keeping the reply
+///   flat; top-level → the triggering event, which becomes the new thread
+///   root) and leaves agent↔agent turns unanchored so they can nest freely.
+fn resolve_turn_reply_anchor(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    triggering_event_id: &str,
+    is_dm: bool,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| triggering_event_id.to_string())
+    } else {
+        resolve_reply_anchor(
+            sender_pubkey,
+            thread_tags,
+            triggering_event_id,
+            profile_lookup,
+        )
+    }
+}
+
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
@@ -1391,11 +1431,9 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Resolve the `--reply-to` anchor for a batch's triggering turn, independent
 /// of building the rest of the prompt.
 ///
-/// Mirrors exactly the anchor computation `format_prompt` performs internally
-/// for the `[Context]` reply instruction (same `last_event`/`thread_tags`/
-/// `is_dm`/[`resolve_reply_anchor`] logic — kept in sync by hand rather than
-/// refactored into a shared helper `format_prompt` also calls, to avoid
-/// touching that function's well-tested internals for this).
+/// Delegates to [`resolve_turn_reply_anchor`] — the same helper
+/// `format_prompt` calls internally for its `[Context]` reply instruction —
+/// so this can no longer drift out of sync with that computation.
 ///
 /// Used by `pool::run_prompt_task` to give `AcpClient::set_pending_reply_anchor`
 /// the same anchor the agent's own prompt was told to use, so that a
@@ -1409,19 +1447,13 @@ pub(crate) fn reply_anchor_for_batch(
     let last_event = batch.events.last()?;
     let thread_tags = parse_thread_tags(&last_event.event);
     let sender_pubkey = last_event.event.pubkey.to_hex();
-    if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            profile_lookup,
-        )
-    }
+    resolve_turn_reply_anchor(
+        &sender_pubkey,
+        &thread_tags,
+        &last_event.event.id.to_hex(),
+        is_dm,
+        profile_lookup,
+    )
 }
 
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
@@ -1506,19 +1538,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    let reply_anchor = resolve_turn_reply_anchor(
+        &sender_pubkey,
+        &thread_tags,
+        &last_event.event.id.to_hex(),
+        is_dm,
+        args.profile_lookup,
+    );
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
