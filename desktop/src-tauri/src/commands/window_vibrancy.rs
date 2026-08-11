@@ -35,13 +35,15 @@ pub fn set_window_vibrancy(
             .ok_or_else(|| "main window not found".to_string())?;
 
         if !enabled {
-            clear_vibrancy(&window).map_err(|e| e.to_string())?;
-            // Restore the default opaque background so WindowServer can use its
-            // opaque-window fast path. `None` resets both the NSWindow backing
-            // and the WKWebView canvas to their platform defaults.
+            // Restore opaque backing first: a failure of clear_vibrancy leaves
+            // the window with an opaque canvas and a blur layer hidden behind
+            // it, not a see-through webview. Either mixed state self-corrects
+            // on the next toggle. `None` resets both the NSWindow backing and
+            // the WKWebView canvas to their platform defaults.
             window
                 .set_background_color(None)
                 .map_err(|e| e.to_string())?;
+            clear_vibrancy(&window).map_err(|e| e.to_string())?;
             return Ok(());
         }
 
@@ -64,6 +66,9 @@ pub fn set_window_vibrancy(
         // clear is a no-op (returns `false`) when none is present.
         let _ = clear_vibrancy(&window);
 
+        // Install the blur layer first: a failure of set_background_color leaves
+        // the window opaque with vibrancy behind it, not a see-through webview.
+        // Either mixed state self-corrects on the next toggle.
         apply_vibrancy(&window, material, None, None).map_err(|e| e.to_string())?;
 
         // Make the WKWebView canvas and NSWindow backing transparent so native

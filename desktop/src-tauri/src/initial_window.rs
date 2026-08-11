@@ -15,8 +15,9 @@ pub(crate) fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>
 
 #[cfg(target_os = "macos")]
 pub(crate) fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    // The window remains transparent at runtime for vibrancy. Use an opaque
-    // native backing only across the first visible frames so the previous app
+    // Runtime transparency exists only while glass is enabled via
+    // `set_window_vibrancy`; with glass off the webview stays opaque. Use an
+    // opaque native backing across the first visible frames so the previous app
     // cannot show through before WebKit has submitted its first surface.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");

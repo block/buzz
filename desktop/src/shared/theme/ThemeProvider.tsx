@@ -560,6 +560,11 @@ export function ThemeProvider({
   }, [effectiveTheme]);
 
   useEffect(() => {
+    // `initial-render-ready` fires from a layout effect, so it is already
+    // enqueued before this passive effect's IPC call is dispatched. The native
+    // reveal can in theory precede the transparency call; the Rust-side
+    // stable-geometry wait provides the gap in practice, and a brief opaque
+    // first frame is the accepted worst case for glass users.
     void applyWindowGlass(glassBackground);
   }, [glassBackground]);
 
