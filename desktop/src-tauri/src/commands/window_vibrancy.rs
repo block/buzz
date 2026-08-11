@@ -36,6 +36,12 @@ pub fn set_window_vibrancy(
 
         if !enabled {
             clear_vibrancy(&window).map_err(|e| e.to_string())?;
+            // Restore the default opaque background so WindowServer can use its
+            // opaque-window fast path. `None` resets both the NSWindow backing
+            // and the WKWebView canvas to their platform defaults.
+            window
+                .set_background_color(None)
+                .map_err(|e| e.to_string())?;
             return Ok(());
         }
 
@@ -59,6 +65,14 @@ pub fn set_window_vibrancy(
         let _ = clear_vibrancy(&window);
 
         apply_vibrancy(&window, material, None, None).map_err(|e| e.to_string())?;
+
+        // Make the WKWebView canvas and NSWindow backing transparent so native
+        // vibrancy shows through. Must follow apply_vibrancy so the blur layer
+        // is present before the canvas becomes see-through.
+        window
+            .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))
+            .map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
