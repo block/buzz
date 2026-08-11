@@ -67,10 +67,9 @@ function formatSearchUserName(user: UserSearchResult) {
 function formatSearchUserSecondary(user: UserSearchResult) {
   const displayName = user.displayName?.trim();
   const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return truncatePubkey(user.pubkey);
+  const detail =
+    displayName && nip05Handle ? nip05Handle : truncatePubkey(user.pubkey);
+  return user.isAgent ? `Agent · ${detail}` : detail;
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
@@ -135,7 +134,6 @@ export function CreateAgentRespondToField({
   const searchResults = React.useMemo(() => {
     const candidates = (userSearchQuery.data ?? []).filter(
       (user) =>
-        !user.isAgent &&
         !allowlistSet.has(user.pubkey.toLowerCase()) &&
         !isArchivedDiscovery(user.pubkey),
     );

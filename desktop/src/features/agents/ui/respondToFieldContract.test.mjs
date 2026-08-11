@@ -84,7 +84,28 @@ test("allowlist search fetches a larger page so exact human matches are not crow
   );
 });
 
-test("allowlist search hides agents and re-ranks humans like persona share recipients", () => {
-  assert.match(respondToFieldSource, /!user\.isAgent/);
+test("allowlist search includes agents and re-ranks like persona share recipients", () => {
+  assert.doesNotMatch(respondToFieldSource, /!user\.isAgent/);
   assert.match(respondToFieldSource, /rankUserCandidatesBySearch\(/);
+});
+
+test("allowlist search labels agents so they are distinguishable from humans", () => {
+  assert.match(
+    respondToFieldSource,
+    /user\.isAgent \? `Agent · \$\{detail\}` : detail/,
+  );
+});
+
+test("allowlist search ranks exact human matches ahead of similarly named agents", () => {
+  const searchResultsBlock = respondToFieldSource.slice(
+    respondToFieldSource.indexOf("const searchResults = React.useMemo"),
+    respondToFieldSource.indexOf("const pasteParsed = React.useMemo"),
+  );
+
+  assert.doesNotMatch(searchResultsBlock, /!user\.isAgent/);
+  assert.match(searchResultsBlock, /rankUserCandidatesBySearch\(/);
+  assert.match(
+    searchResultsBlock,
+    /getLabel: formatSearchUserName,\s*\n\s*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
 });
