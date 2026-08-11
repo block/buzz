@@ -490,7 +490,11 @@ pub struct CliArgs {
     /// harness publishes the buffered text itself. Default OFF — enabling
     /// this for `claude-agent-acp`/`codex-acp`, which already self-publish
     /// reliably, would double-post. See `crate::lib::spawn_fallback_publish`.
-    #[arg(long, env = "BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT", default_value_t = false)]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT",
+        default_value_t = false
+    )]
     pub publish_final_if_unsent: bool,
 }
 

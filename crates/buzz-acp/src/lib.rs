@@ -3407,8 +3407,13 @@ fn spawn_fallback_publish(
     };
     let rest = rest.clone();
     tokio::spawn(async move {
-        match pool::publish_fallback_final_text(&rest, channel_id, &content, reply_anchor.as_deref())
-            .await
+        match pool::publish_fallback_final_text(
+            &rest,
+            channel_id,
+            &content,
+            reply_anchor.as_deref(),
+        )
+        .await
         {
             Ok(()) => {
                 tracing::warn!(

@@ -1924,8 +1924,7 @@ pub async fn run_prompt_task(
             .as_ref()
             .map(|ci| ci.channel_type == "dm")
             .unwrap_or(false);
-        let reply_anchor =
-            crate::queue::reply_anchor_for_batch(b, is_dm, profile_lookup.as_ref());
+        let reply_anchor = crate::queue::reply_anchor_for_batch(b, is_dm, profile_lookup.as_ref());
         agent.acp.set_pending_reply_anchor(reply_anchor);
 
         crate::queue::format_prompt(
@@ -3963,8 +3962,9 @@ pub(crate) async fn publish_fallback_final_text(
             root_event_id: id,
             parent_event_id: id,
         });
-    let builder = buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
-        .map_err(|e| format!("build failed: {e}"))?;
+    let builder =
+        buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
+            .map_err(|e| format!("build failed: {e}"))?;
     let event = builder
         .sign_with_keys(&rest.keys)
         .map_err(|e| format!("sign failed: {e}"))?;
