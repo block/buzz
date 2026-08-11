@@ -11,7 +11,10 @@ mod mcp;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog::{
+    discover_databricks_models, minimax_known_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS,
+    MINIMAX_KNOWN_MODELS,
+};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -416,6 +419,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     let available_models: Vec<Value> = {
         use crate::config::Provider;
         match app.cfg.provider {
+            Provider::MiniMax => minimax_known_models()
+                .iter()
+                .map(|model| json!({ "modelId": model.id, "name": model.name }))
+                .collect(),
             Provider::Databricks | Provider::DatabricksV2 => {
                 let models = match resolve_models_catalog(
                     &app.models_cache,

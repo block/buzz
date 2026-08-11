@@ -748,6 +748,43 @@ pub const HANDOFF_MIN_PROMPT_BUDGET_BYTES: usize = 4 * 1024;
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
+/// Default MiniMax text model when neither `BUZZ_AGENT_MODEL` nor
+/// `MINIMAX_MODEL` is set — the current flagship (1M-token context window).
+const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M3";
+const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
+const MINIMAX_M3_CONTEXT_TOKENS: u64 = 1_000_000;
+const MINIMAX_M2_7_CONTEXT_TOKENS: u64 = 204_800;
+/// MiniMax OpenAI-compatible base URLs. The global service and the
+/// mainland-China service share the same Chat Completions wire format and
+/// differ only by host, so the region is expressed purely as the base URL.
+const MINIMAX_GLOBAL_BASE_URL: &str = "https://api.minimax.io/v1";
+const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
+
+/// Pick the default MiniMax OpenAI-compatible base URL for the requested
+/// provider spelling. `minimax-cn` (aliases `minimaxi`, `minimax_cn`) selects
+/// the mainland-China host; everything else — including the bare `minimax` —
+/// selects the global host. Always overridable with `MINIMAX_BASE_URL`.
+fn minimax_default_base_url(requested: Option<&str>) -> &'static str {
+    match requested
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("minimax-cn") | Some("minimaxi") | Some("minimax_cn") => MINIMAX_CN_BASE_URL,
+        _ => MINIMAX_GLOBAL_BASE_URL,
+    }
+}
+
+fn default_context_tokens(provider: Provider, model: &str) -> u64 {
+    match provider {
+        Provider::MiniMax if model.eq_ignore_ascii_case("MiniMax-M2.7") => {
+            MINIMAX_M2_7_CONTEXT_TOKENS
+        }
+        Provider::MiniMax => MINIMAX_M3_CONTEXT_TOKENS,
+        _ => DEFAULT_CONTEXT_TOKENS,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
     Anthropic,
@@ -759,6 +796,13 @@ pub enum Provider {
     /// Databricks AI Gateway v2. Routes by model family through the gateway's
     /// OpenAI Responses, Anthropic Messages, or MLflow Chat Completions paths.
     DatabricksV2,
+    /// MiniMax hosted models over the OpenAI-compatible Chat Completions wire.
+    /// `minimax` targets the global endpoint (`https://api.minimax.io/v1`) and
+    /// `minimax-cn` the mainland-China endpoint (`https://api.minimaxi.com/v1`);
+    /// both authenticate with a static `MINIMAX_API_KEY` bearer. The region is
+    /// carried entirely by the base URL, so the request path reuses the OpenAI
+    /// Chat Completions body builder and parser unchanged — no new wire format.
+    MiniMax,
     /// OpenRouter multi-provider gateway. Routes to `{base_url}/chat/completions` with bearer auth. Wire format is OpenAI-chat-compatible.
     OpenRouter,
 }
@@ -863,8 +907,9 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let databricks_host = env("DATABRICKS_HOST");
         let databricks_model = env("DATABRICKS_MODEL");
+        let provider_raw = env("BUZZ_AGENT_PROVIDER");
         let provider = resolve_provider(
-            env("BUZZ_AGENT_PROVIDER").as_deref(),
+            provider_raw.as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
             env("OPENROUTER_API_KEY").as_deref(),
@@ -910,6 +955,22 @@ impl Config {
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
+            Provider::MiniMax => (
+                req("MINIMAX_API_KEY")?,
+                // MiniMax ships a documented default model (MiniMax-M3), so —
+                // unlike the OpenAI-compatible provider — a bare `minimax`
+                // selection resolves without an explicit model. An explicit
+                // BUZZ_AGENT_MODEL / MINIMAX_MODEL still wins.
+                resolve_model(buzz_agent_model.as_deref(), env("MINIMAX_MODEL").as_deref())
+                    .unwrap_or_else(|| DEFAULT_MINIMAX_MODEL.to_string()),
+                env_or(
+                    "MINIMAX_BASE_URL",
+                    minimax_default_base_url(provider_raw.as_deref()),
+                ),
+                // MiniMax exposes Chat Completions, not the Responses API — pin
+                // it so the `auto` host heuristic never routes to `/responses`.
+                OpenAiApi::Chat,
+            ),
             Provider::OpenRouter => (
                 req("OPENROUTER_API_KEY")?,
                 resolve_model(
@@ -928,6 +989,7 @@ impl Config {
             (_, Some(p)) => std::fs::read_to_string(&p).map_err(|e| format!("config: read {p}: {e}"))?,
             _ => DEFAULT_SYSTEM_PROMPT.to_owned(),
         };
+        let default_max_context_tokens = default_context_tokens(provider, &model);
         let cfg = Config {
             provider,
             system_prompt,
@@ -955,7 +1017,10 @@ impl Config {
                 "BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES",
                 DEFAULT_TOOL_RESULT_TEXT_BYTES,
             )?,
-            max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
+            max_context_tokens: parse_env(
+                "BUZZ_AGENT_MAX_CONTEXT_TOKENS",
+                default_max_context_tokens,
+            )?,
             max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
@@ -1147,6 +1212,10 @@ fn resolve_provider(
                 ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
+                // MiniMax accepts a region-selecting spelling. The API key is
+                // validated later in `from_env` (like Databricks), so the
+                // requested value alone determines the provider here.
+                "minimax" | "minimax-cn" | "minimaxi" | "minimax_cn" => Ok(Provider::MiniMax),
                 "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
                 "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
                 _ => Err(format!(
@@ -1488,6 +1557,71 @@ mod tests {
     fn resolve_provider_unsupported_error_preserves_user_casing() {
         let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
+    }
+
+    #[test]
+    fn resolve_provider_accepts_minimax_region_spellings() {
+        // Every accepted MiniMax spelling resolves to the one provider variant;
+        // the API key is validated later in from_env (like Databricks), so no
+        // key is needed here. Matching is case-insensitive.
+        for raw in [
+            "minimax",
+            "minimax-cn",
+            "minimaxi",
+            "minimax_cn",
+            "MiniMax",
+            "MINIMAX-CN",
+        ] {
+            assert_eq!(
+                resolve_provider(Some(raw), None, None, None).unwrap(),
+                Provider::MiniMax,
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_default_base_url_selects_region_by_spelling() {
+        // The bare id and any unknown/global-ish spelling map to the global
+        // host; only the explicit -cn spellings select the mainland-China host.
+        assert_eq!(
+            minimax_default_base_url(Some("minimax")),
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(
+            minimax_default_base_url(Some("  MiniMax  ")),
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(
+            minimax_default_base_url(Some("minimax-cn")),
+            "https://api.minimaxi.com/v1"
+        );
+        assert_eq!(
+            minimax_default_base_url(Some("MINIMAXI")),
+            "https://api.minimaxi.com/v1"
+        );
+        assert_eq!(
+            minimax_default_base_url(Some("minimax_cn")),
+            "https://api.minimaxi.com/v1"
+        );
+        // Absent value defaults to the global host.
+        assert_eq!(minimax_default_base_url(None), "https://api.minimax.io/v1");
+    }
+
+    #[test]
+    fn minimax_context_defaults_follow_model_windows() {
+        assert_eq!(
+            default_context_tokens(Provider::MiniMax, "MiniMax-M3"),
+            1_000_000
+        );
+        assert_eq!(
+            default_context_tokens(Provider::MiniMax, "MiniMax-M2.7"),
+            204_800
+        );
+        assert_eq!(
+            default_context_tokens(Provider::OpenAi, "MiniMax-M3"),
+            200_000
+        );
     }
 
     #[test]

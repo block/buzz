@@ -49,6 +49,8 @@ const KNOWN_LLM_PROVIDER_IDS = [
   "openai",
   "openai-compat",
   "openrouter",
+  "minimax",
+  "minimax-cn",
 ] as const;
 
 type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
@@ -135,6 +137,16 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
     secretEnvVar: "OPENROUTER_API_KEY",
     apiKeyLabel: "OpenRouter API Key",
   },
+  minimax: {
+    requiredEnvKeys: ["MINIMAX_API_KEY"],
+    secretEnvVar: "MINIMAX_API_KEY",
+    apiKeyLabel: "MiniMax API Key",
+  },
+  "minimax-cn": {
+    requiredEnvKeys: ["MINIMAX_API_KEY"],
+    secretEnvVar: "MINIMAX_API_KEY",
+    apiKeyLabel: "MiniMax API Key",
+  },
 };
 
 const DEFAULT_MODEL_OPTION: PersonaModelOption = {
@@ -147,6 +159,8 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
   { id: "openrouter", label: "OpenRouter" },
+  { id: "minimax", label: "MiniMax" },
+  { id: "minimax-cn", label: "MiniMax (China)" },
   { id: "relay-mesh", label: "Buzz shared compute" },
   { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
@@ -313,9 +327,10 @@ export function providerRequiresExplicitModel(
 
 export function providerDisplayLabel(providerId: string) {
   const trimmedProvider = providerId.trim();
-  return trimmedProvider === "relay-mesh"
-    ? "Buzz shared compute"
-    : trimmedProvider;
+  if (trimmedProvider === "relay-mesh") return "Buzz shared compute";
+  if (trimmedProvider === "minimax") return "MiniMax";
+  if (trimmedProvider === "minimax-cn") return "MiniMax (China)";
+  return trimmedProvider;
 }
 
 export function getDefaultLlmProviderLabel(

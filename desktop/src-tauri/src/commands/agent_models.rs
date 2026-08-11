@@ -99,6 +99,9 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    if let Some(models) = discover_minimax_models(&effective_provider, persisted_model.clone()) {
+        return Ok(models);
+    }
     if let Some(models) = discover_openrouter_models(
         &state.http_client,
         &effective_provider,
@@ -283,6 +286,10 @@ pub async fn discover_agent_models(
         return Err("Buzz shared compute is not available in this build".to_string());
     }
 
+    if let Some(models) = discover_minimax_models(&effective_provider, None) {
+        return Ok(models);
+    }
+
     if let Some(models) =
         discover_openrouter_models(&state.http_client, &effective_provider, &merged_env, None)
             .await?
@@ -333,6 +340,44 @@ struct OpenAiModelListItem {
     id: String,
     #[serde(default)]
     created: Option<i64>,
+}
+
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3";
+const MINIMAX_KNOWN_MODELS: &[&str] = &[MINIMAX_DEFAULT_MODEL, "MiniMax-M2.7"];
+
+fn is_minimax_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("minimax" | "minimax-cn" | "minimaxi" | "minimax_cn")
+    )
+}
+
+fn discover_minimax_models(
+    provider: &DiscoveryProvider,
+    selected_model: Option<String>,
+) -> Option<AgentModelsResponse> {
+    if !is_minimax_provider(provider.as_deref()) {
+        return None;
+    }
+
+    Some(AgentModelsResponse {
+        agent_name: provider.as_deref().unwrap_or("minimax").trim().to_string(),
+        agent_version: "built-in-catalog".to_string(),
+        models: MINIMAX_KNOWN_MODELS
+            .iter()
+            .map(|id| AgentModelInfo {
+                id: (*id).to_string(),
+                name: Some((*id).to_string()),
+                description: None,
+            })
+            .collect(),
+        agent_default_model: Some(MINIMAX_DEFAULT_MODEL.to_string()),
+        selected_model,
+        supports_switching: true,
+    })
 }
 
 #[path = "agent_models_openrouter.rs"]

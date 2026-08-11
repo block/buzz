@@ -388,6 +388,7 @@ impl AgentReadiness {
 ///   provider-specific credentials are required:
 ///   - `anthropic` → `ANTHROPIC_API_KEY`
 ///   - `openai` → `OPENAI_COMPAT_API_KEY`
+///   - `minimax` / `minimax-cn` → `MINIMAX_API_KEY`
 ///   - `databricks` / `databricks_v2` → `DATABRICKS_HOST` (token optional —
 ///     OAuth PKCE is the fallback)
 /// * **claude**: a successful `claude auth status` probe.
@@ -482,8 +483,15 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
+        Some("minimax") | Some("minimax-cn") | Some("minimaxi") | Some("minimax_cn") => {
+            Some("MINIMAX_MODEL")
+        }
         _ => None,
     };
+    let provider_has_default_model = matches!(
+        provider,
+        Some("minimax" | "minimax-cn" | "minimaxi" | "minimax_cn")
+    );
     let model_present = effective
         .env
         .get("BUZZ_AGENT_MODEL")
@@ -493,7 +501,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             .and_then(|k| effective.env.get(k))
             .filter(|v| !v.is_empty())
             .is_some();
-    if !model_present {
+    if !model_present && !provider_has_default_model {
         missing.push(Requirement::NormalizedField {
             field: "model".to_string(),
         });
@@ -528,6 +536,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             if env_key_missing("OPENROUTER_API_KEY") => {
                 missing.push(Requirement::EnvKey {
                     key: "OPENROUTER_API_KEY".to_string(),
+                });
+            }
+        Some("minimax") | Some("minimax-cn") | Some("minimaxi") | Some("minimax_cn")
+            if env_key_missing("MINIMAX_API_KEY") => {
+                missing.push(Requirement::EnvKey {
+                    key: "MINIMAX_API_KEY".to_string(),
                 });
             }
         _ => {
@@ -1731,6 +1745,33 @@ mod tests {
             result.is_ready(),
             "OPENROUTER_MODEL fallback should satisfy model requirement"
         );
+    }
+
+    #[test]
+    fn buzz_agent_minimax_uses_default_model_but_requires_api_key() {
+        let missing_key = make_env(
+            "buzz-agent",
+            env_with(&[("BUZZ_AGENT_PROVIDER", "minimax-cn")]),
+        );
+        let result = agent_readiness(&missing_key);
+        assert!(!result.is_ready());
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "MINIMAX_API_KEY".to_string()
+        }));
+        assert!(!result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }));
+
+        let configured = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "minimax"),
+                ("MINIMAX_API_KEY", "minimax-test-key"),
+            ]),
+        );
+        assert!(agent_readiness(&configured).is_ready());
     }
 }
 

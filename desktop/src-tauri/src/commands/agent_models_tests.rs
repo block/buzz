@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn minimax_provider_detection_covers_global_and_cn_ids() {
+    for provider in ["minimax", "minimax-cn", "minimaxi", "minimax_cn"] {
+        assert!(is_minimax_provider(Some(provider)), "provider={provider}");
+    }
+    assert!(!is_minimax_provider(Some("openai")));
+    assert!(!is_minimax_provider(None));
+}
+
+#[test]
+fn minimax_model_discovery_returns_target_catalog_and_default() {
+    let provider = effective_discovery_provider(
+        Some("minimax-cn"),
+        Some("BUZZ_AGENT_PROVIDER"),
+        &BTreeMap::new(),
+    );
+    let response = discover_minimax_models(&provider, Some("MiniMax-M2.7".to_string()))
+        .expect("MiniMax provider should use its built-in catalog");
+    let ids = response
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["MiniMax-M3", "MiniMax-M2.7"]);
+    assert_eq!(response.agent_default_model.as_deref(), Some("MiniMax-M3"));
+    assert_eq!(response.selected_model.as_deref(), Some("MiniMax-M2.7"));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

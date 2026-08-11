@@ -1,4 +1,4 @@
-//! Databricks model catalog discovery.
+//! Provider model catalogs and Databricks discovery.
 //!
 //! Exposes [`discover_databricks_models`] — an async helper that lists
 //! available models for the `databricks` and `databricks_v2` providers
@@ -29,6 +29,18 @@ use crate::{
 pub struct ModelEntry {
     pub id: String,
     pub name: String,
+}
+
+pub const MINIMAX_KNOWN_MODELS: &[&str] = &["MiniMax-M3", "MiniMax-M2.7"];
+
+pub fn minimax_known_models() -> Vec<ModelEntry> {
+    MINIMAX_KNOWN_MODELS
+        .iter()
+        .map(|id| ModelEntry {
+            id: (*id).to_string(),
+            name: (*id).to_string(),
+        })
+        .collect()
 }
 
 /// Known Databricks AI Gateway v2 models — used only when an authenticated
@@ -664,5 +676,15 @@ mod tests {
         assert!(!is_chat_capable_endpoint("databricks-bge-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-gte-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-qwen3-embedding-0-6b"));
+    }
+
+    #[test]
+    fn minimax_catalog_lists_supported_text_models() {
+        let models = minimax_known_models();
+        let ids = models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["MiniMax-M3", "MiniMax-M2.7"]);
     }
 }
