@@ -136,22 +136,33 @@ export function readSelfProfileCache(
  * This is NOT community-scoped: localStorage is shared across all communities
  * in the same origin, so the count persists across community switches. It must
  * not be added to resetCommunityState().
+ *
+ * Multi-tab caveat: writes from other tabs bypass this tab's memo, so the count
+ * can under-count. The resync-on-divergence check in trimSelfProfileCaches
+ * corrects this on the next over-cap scan, bounded by MAX_SELF_PROFILE_CACHES.
  */
 let _memoizedProfileKeyCount: number | null = null;
 
 /**
  * Returns the memoized key count, scanning once on first call.
- * Subsequent calls are O(1).
+ * Subsequent calls are O(1). Returns null if the scan throws (storage
+ * locked/unavailable); callers treat null as "skip trimming."
  */
-function ensureProfileKeyCount(): number {
+function ensureProfileKeyCount(): number | null {
   if (_memoizedProfileKeyCount !== null) return _memoizedProfileKeyCount;
-  let count = 0;
-  for (let i = 0; i < window.localStorage.length; i++) {
-    const key = window.localStorage.key(i);
-    if (key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) count++;
+  try {
+    let count = 0;
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key?.startsWith(`${STORAGE_KEY_PREFIX}:`)) count++;
+    }
+    _memoizedProfileKeyCount = count;
+    return count;
+  } catch {
+    // Leave memo null — a partial count must never be memoized. The next
+    // call will rescan when storage recovers.
+    return null;
   }
-  _memoizedProfileKeyCount = count;
-  return count;
 }
 
 /** Reset module state between tests. Not for production use. */
@@ -175,8 +186,10 @@ function trimSelfProfileCaches(relayUrl: string, preservedKey: string): void {
   const relayPrefix = `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}:`;
 
   // O(1) fast path: ≤ per-relay cap total → definitely under both caps.
+  // null = scan failed (storage locked); skip trimming so the write still lands.
   const memoTotal = ensureProfileKeyCount();
-  if (memoTotal <= MAX_SELF_PROFILE_CACHES_PER_RELAY) return;
+  if (memoTotal === null || memoTotal <= MAX_SELF_PROFILE_CACHES_PER_RELAY)
+    return;
 
   // Key-only scan to get accurate totals (no getItem, no parsing).
   let totalEntryCount = 0;

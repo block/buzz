@@ -524,3 +524,74 @@ test("over-cap write still trims correctly after memo init", () => {
     "newest preserved",
   );
 });
+
+test("scan failure in ensureProfileKeyCount: write succeeds, memo stays null, next write rescans and enforces cap", () => {
+  _resetProfileKeyCountForTest();
+
+  const values = new Map();
+  let throwOnScan = false;
+  globalThis.window = {
+    dispatchEvent: () => true,
+    localStorage: {
+      get length() {
+        if (throwOnScan) throw new Error("Storage unavailable");
+        return values.size;
+      },
+      getItem: (k) => values.get(k) ?? null,
+      key: (i) => [...values.keys()][i] ?? null,
+      removeItem: (k) => values.delete(k),
+      setItem: (k, v) => values.set(k, String(v)),
+    },
+  };
+  globalThis.CustomEvent ??= class CustomEvent {};
+
+  const relay = "wss://relay.example";
+
+  // Write with scan disabled — ensureProfileKeyCount should catch the throw,
+  // leave memo null, and let the write succeed.
+  throwOnScan = true;
+  const result = writeSelfProfileCache(
+    relay,
+    "pk-0",
+    makeCache({ updatedAt: 1 }),
+  );
+  throwOnScan = false;
+
+  assert.equal(result, true, "write returns true despite scan failure");
+  assert.equal(
+    values.has(storageKey(relay, "pk-0")),
+    true,
+    "entry was written",
+  );
+
+  // Pre-seed enough entries (directly into the map) to push total above cap.
+  for (let i = 1; i <= MAX_SELF_PROFILE_CACHES_PER_RELAY; i++) {
+    values.set(
+      storageKey(relay, `pk-${i}`),
+      JSON.stringify(makeCache({ updatedAt: i + 1 })),
+    );
+  }
+
+  // Replace key() with a tracking version to confirm memo was null (i.e. a
+  // fresh scan is triggered on the next write).
+  let keyCalls = 0;
+  globalThis.window.localStorage.key = (i) => {
+    keyCalls++;
+    return [...values.keys()][i] ?? null;
+  };
+
+  writeSelfProfileCache(relay, "pk-new", makeCache({ updatedAt: 999 }));
+
+  assert.ok(
+    keyCalls > 0,
+    "key() was called, confirming memo was null after scan failure",
+  );
+
+  const finalKeys = [...values.keys()].filter((k) =>
+    k.startsWith("buzz-self-profile.v1:"),
+  );
+  assert.ok(
+    finalKeys.length <= MAX_SELF_PROFILE_CACHES_PER_RELAY,
+    `cap enforced after rescan: got ${finalKeys.length}, expected ≤${MAX_SELF_PROFILE_CACHES_PER_RELAY}`,
+  );
+});

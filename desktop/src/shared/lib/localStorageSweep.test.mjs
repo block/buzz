@@ -7,6 +7,7 @@ import {
   SWEEP_CHUNK_ENTRY_BUDGET,
   SWEEP_FALLBACK_TIMER_MS,
   SWEEP_IDLE_TIMEOUT_MS,
+  SWEEP_LARGE_VALUE_DEFER_BYTES,
   startLocalStorageSweep,
   sweepStaleLocalStorage,
 } from "./localStorageSweep.ts";
@@ -392,12 +393,12 @@ test("chunked sweep: keys processed across multiple idle slices; stale entries r
     bootCallback();
 
     // First idle callback scheduled — fire it with zero time remaining so it
-    // processes exactly SWEEP_CHUNK_ENTRY_BUDGET entries and reschedules.
+    // processes exactly one entry (min-progress guarantee) and reschedules.
     assert.equal(idleCallbacks.length, 1, "first idle callback scheduled");
     idleCallbacks[0]({ timeRemaining: () => 0 });
 
-    // With zero time remaining the slice stops at SWEEP_CHUNK_ENTRY_BUDGET
-    // entries; stale keys not yet removed (second slice pending).
+    // With zero time remaining the slice stops after one entry;
+    // stale keys not yet removed (second slice pending).
     const removedAfterFirst = entries.filter(
       ([key]) => localStorage.getItem(key) === null,
     ).length;
@@ -474,6 +475,323 @@ test("chunked sweep: keys deleted between snapshot and slice are silently skippe
     assert.notEqual(
       localStorage.getItem("buzz-channel-messages.v1:fresh"),
       null,
+    );
+  } finally {
+    stop();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+// --- New hardening tests ---
+
+test("chunked sweep: key rewritten fresh before batch removal is not removed", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  const idleCallbacks = [];
+  const now = Date.now();
+
+  const staleValue = JSON.stringify({
+    updatedAt: now - 14 * DAY_MS,
+    payload: "old",
+  });
+  const freshValue = JSON.stringify({
+    updatedAt: now - DAY_MS,
+    payload: "new",
+  });
+
+  // "target" will be rewritten fresh between slices; "other" stays stale.
+  // Two entries force two slices when timeRemaining() === 0 (1 entry per slice).
+  const localStorage = makeLocalStorage([
+    ["buzz-channel-messages.v1:target", staleValue],
+    ["buzz-channel-messages.v1:other", staleValue],
+  ]);
+
+  installWindow(localStorage, {
+    requestIdleCallback(callback, _options) {
+      idleCallbacks.push(callback);
+      return idleCallbacks.length;
+    },
+    cancelIdleCallback() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    bootCallback();
+    assert.equal(idleCallbacks.length, 1);
+
+    // Slice 1: zero budget → processes exactly one entry ("target", judged stale).
+    idleCallbacks[0]({ timeRemaining: () => 0 });
+
+    // App rewrites "target" to a fresh value before slice 2 fires.
+    localStorage.setItem("buzz-channel-messages.v1:target", freshValue);
+
+    assert.equal(idleCallbacks.length, 2, "second slice scheduled");
+
+    // Slice 2: processes "other", then batch-removes. Re-check on "target"
+    // finds it fresh — must not be removed.
+    idleCallbacks[1]({ timeRemaining: () => 50 });
+
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:target"),
+      freshValue,
+      "key rewritten fresh before batch removal must not be removed",
+    );
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:other"),
+      null,
+      "still-stale key must be removed",
+    );
+  } finally {
+    stop();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("chunked sweep: getItem error on one key does not abort sweep; stale siblings still removed", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  const idleCallbacks = [];
+  const now = Date.now();
+
+  const localStorage = makeLocalStorage([
+    ["buzz-channel-messages.v1:error-key", "value"],
+    ["buzz-channel-messages.v1:stale-key", snapshot(now - 14 * DAY_MS)],
+    ["buzz-channel-messages.v1:fresh-key", snapshot(now - DAY_MS)],
+  ]);
+
+  // Override getItem so that reading "error-key" throws.
+  const realGetItem = localStorage.getItem.bind(localStorage);
+  localStorage.getItem = (key) => {
+    if (key === "buzz-channel-messages.v1:error-key") {
+      throw new Error("storage error");
+    }
+    return realGetItem(key);
+  };
+
+  installWindow(localStorage, {
+    requestIdleCallback(callback, _options) {
+      idleCallbacks.push(callback);
+      return idleCallbacks.length;
+    },
+    cancelIdleCallback() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    bootCallback();
+    assert.equal(idleCallbacks.length, 1);
+
+    // Fire with ample time — all entries processed in one slice.
+    idleCallbacks[0]({ timeRemaining: () => 50 });
+
+    // Stale key removed despite the per-key error on its sibling.
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:stale-key"),
+      null,
+      "stale-key must be removed despite error on error-key",
+    );
+    // Fresh key untouched.
+    assert.notEqual(
+      localStorage.getItem("buzz-channel-messages.v1:fresh-key"),
+      null,
+      "fresh-key must not be removed",
+    );
+    // Exactly one warning emitted for the failing key.
+    const sweepWarnings = warnings.filter((w) =>
+      String(w[0]).includes("[localStorageSweep]"),
+    );
+    assert.equal(
+      sweepWarnings.length,
+      1,
+      "exactly one warning per sweep for key errors",
+    );
+  } finally {
+    stop();
+    console.warn = originalWarn;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("fallback path: multiple slices when entries exceed SWEEP_CHUNK_ENTRY_BUDGET; sweep converges", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  const timeouts = [];
+  let nextId = 200;
+  globalThis.setTimeout = (callback, delay) => {
+    const id = nextId++;
+    timeouts.push({ id, callback, delay });
+    return id;
+  };
+  globalThis.clearTimeout = (id) => {
+    const idx = timeouts.findIndex((t) => t.id === id);
+    if (idx !== -1) timeouts.splice(idx, 1);
+  };
+
+  const now = Date.now();
+  const entryCount = SWEEP_CHUNK_ENTRY_BUDGET + 5;
+  const entries = Array.from({ length: entryCount }, (_, i) => [
+    `buzz-channel-messages.v1:key-${i}`,
+    snapshot(now - 14 * DAY_MS), // all stale
+  ]);
+  const localStorage = makeLocalStorage(entries);
+
+  // No requestIdleCallback on window → forces fallback path.
+  installWindow(localStorage, {
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    // Boot timer registered.
+    const bootTimer = timeouts.find((t) => t.delay === BOOT_SWEEP_FLOOR_MS);
+    assert.ok(bootTimer, "boot timer registered");
+    timeouts.splice(timeouts.indexOf(bootTimer), 1);
+    bootTimer.callback();
+
+    // Process all per-slice timers until no more are scheduled.
+    let slicesProcessed = 0;
+    const MAX_SLICES = 20;
+    while (slicesProcessed < MAX_SLICES) {
+      const sliceTimer = timeouts.find(
+        (t) => t.delay === SWEEP_FALLBACK_TIMER_MS,
+      );
+      if (!sliceTimer) break;
+      timeouts.splice(timeouts.indexOf(sliceTimer), 1);
+      sliceTimer.callback();
+      slicesProcessed++;
+    }
+
+    // entryCount > SWEEP_CHUNK_ENTRY_BUDGET → at least 2 slices required.
+    assert.ok(
+      slicesProcessed >= 2,
+      `expected ≥2 slices, got ${slicesProcessed}`,
+    );
+
+    // All stale entries removed.
+    const remaining = entries.filter(
+      ([key]) => localStorage.getItem(key) !== null,
+    );
+    assert.equal(
+      remaining.length,
+      0,
+      "all stale entries must be removed via fallback path",
+    );
+  } finally {
+    stop();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("chunked sweep: large values deferred once on zero-budget slices then parsed; converges when all values are large", () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  let bootCallback = null;
+  globalThis.setTimeout = (callback, _delay) => {
+    bootCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  const idleCallbacks = [];
+  const now = Date.now();
+
+  // Build values exceeding SWEEP_LARGE_VALUE_DEFER_BYTES with a valid updatedAt.
+  const largePayload = "x".repeat(SWEEP_LARGE_VALUE_DEFER_BYTES + 1);
+  const largeStaleValue = JSON.stringify({
+    updatedAt: now - 14 * DAY_MS,
+    payload: largePayload,
+  });
+  assert.ok(
+    largeStaleValue.length > SWEEP_LARGE_VALUE_DEFER_BYTES,
+    "test value must exceed the defer threshold",
+  );
+
+  const localStorage = makeLocalStorage([
+    ["buzz-channel-messages.v1:large-a", largeStaleValue],
+    ["buzz-channel-messages.v1:large-b", largeStaleValue],
+  ]);
+
+  installWindow(localStorage, {
+    requestIdleCallback(callback, _options) {
+      idleCallbacks.push(callback);
+      return idleCallbacks.length;
+    },
+    cancelIdleCallback() {},
+    setInterval: () => 1,
+    clearInterval() {},
+  });
+
+  const stop = startLocalStorageSweep();
+  try {
+    bootCallback();
+    assert.equal(idleCallbacks.length, 1, "first slice scheduled after boot");
+
+    // Slice 0 (zero budget): large-a is deferred (not yet parsed).
+    idleCallbacks[0]({ timeRemaining: () => 0 });
+    assert.notEqual(
+      localStorage.getItem("buzz-channel-messages.v1:large-a"),
+      null,
+      "large-a must not be removed after first slice (deferred)",
+    );
+    assert.ok(
+      idleCallbacks.length >= 2,
+      "second slice scheduled after deferral",
+    );
+
+    // Fire remaining slices with zero budget until sweep converges.
+    // Worst-case: 2 defer slices (one per key) + 2 parse slices = 4 total.
+    const MAX_SLICES = 20;
+    let sliceCount = 1; // slice 0 already fired
+    while (sliceCount < MAX_SLICES && idleCallbacks.length > sliceCount) {
+      idleCallbacks[sliceCount]({ timeRemaining: () => 0 });
+      sliceCount++;
+    }
+
+    // Both large stale entries must be removed after convergence.
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:large-a"),
+      null,
+      "large-a must be removed after convergence",
+    );
+    assert.equal(
+      localStorage.getItem("buzz-channel-messages.v1:large-b"),
+      null,
+      "large-b must be removed after convergence",
+    );
+    // Sweep converged in a bounded number of slices (≤ 2 * number of keys).
+    assert.ok(
+      sliceCount <= MAX_SLICES,
+      `sweep did not converge within ${MAX_SLICES} slices`,
     );
   } finally {
     stop();

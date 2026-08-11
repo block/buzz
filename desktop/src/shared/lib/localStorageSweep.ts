@@ -23,6 +23,15 @@ export const SWEEP_FALLBACK_TIMER_MS = 250;
  * IdleDeadline is unavailable (rIC-free fallback path).
  */
 export const SWEEP_CHUNK_ENTRY_BUDGET = 20;
+/**
+ * Values larger than this threshold are deferred to the next slice when the
+ * idle deadline has already expired (timeRemaining() <= 0) and the key has
+ * not been previously deferred. Each key is deferred at most once, guaranteeing
+ * convergence: every slice either parses ≥1 entry or grows deferredKeys by
+ * exactly one (a set bounded by the snapshot size). Both quantities are finite,
+ * so the sweep always terminates.
+ */
+export const SWEEP_LARGE_VALUE_DEFER_BYTES = 128 * 1024;
 
 type LocalStorageSweepRule = {
   keyPrefix: string;
@@ -77,6 +86,15 @@ function updatedAtFromJson(value: string): number | null {
   }
 }
 
+/** Returns true when the entry is older than its rule TTL at `now`. */
+function isStale(
+  updatedAt: number | null,
+  rule: LocalStorageSweepRule,
+  now: number,
+): boolean {
+  return updatedAt !== null && updatedAt <= now - rule.maxAgeMs;
+}
+
 /**
  * Removes whitelisted cache entries older than their configured TTL.
  * Entries without a trustworthy `updatedAt` are left alone rather than guessed
@@ -102,7 +120,7 @@ export function sweepStaleLocalStorage(now = Date.now()): number {
       const value = storage.getItem(key);
       if (value === null) continue;
       const updatedAt = updatedAtFromJson(value);
-      if (updatedAt !== null && updatedAt <= now - rule.maxAgeMs) {
+      if (isStale(updatedAt, rule, now)) {
         staleKeys.push(key);
       }
     }
@@ -120,16 +138,6 @@ export function sweepStaleLocalStorage(now = Date.now()): number {
 
 type SliceCallback = (deadline?: { timeRemaining(): number }) => void;
 
-function scheduleSlice(fn: SliceCallback): void {
-  if ("requestIdleCallback" in window) {
-    window.requestIdleCallback(fn as IdleRequestCallback, {
-      timeout: SWEEP_IDLE_TIMEOUT_MS,
-    });
-  } else {
-    globalThis.setTimeout(fn, SWEEP_FALLBACK_TIMER_MS);
-  }
-}
-
 /**
  * Snapshots matching key names synchronously (cheap — no parsing), then
  * processes entries across successive idle-time slices. Keys removed between
@@ -137,8 +145,43 @@ function scheduleSlice(fn: SliceCallback): void {
  *
  * `isAlive` is checked at the start of each slice; returning false aborts
  * further processing without removing accumulated stale keys.
+ *
+ * Returns a cancel function that cancels any pending scheduled-slice handle.
+ * The `isAlive` flag remains the correctness backstop even after cancellation.
  */
-function sweepChunked(now: number, isAlive: () => boolean): void {
+function sweepChunked(now: number, isAlive: () => boolean): () => void {
+  type SliceHandle =
+    | { kind: "idle"; id: number }
+    | { kind: "timeout"; id: ReturnType<typeof globalThis.setTimeout> };
+
+  let currentHandle: SliceHandle | null = null;
+
+  function scheduleSlice(fn: SliceCallback): void {
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(fn as IdleRequestCallback, {
+        timeout: SWEEP_IDLE_TIMEOUT_MS,
+      });
+      currentHandle = { kind: "idle", id };
+    } else {
+      const id = globalThis.setTimeout(fn, SWEEP_FALLBACK_TIMER_MS);
+      currentHandle = { kind: "timeout", id };
+    }
+  }
+
+  function cancelHandle(): void {
+    if (currentHandle === null) return;
+    try {
+      if (currentHandle.kind === "idle") {
+        window.cancelIdleCallback(currentHandle.id);
+      } else {
+        globalThis.clearTimeout(currentHandle.id);
+      }
+    } catch {
+      // Non-fatal: handle may already be consumed.
+    }
+    currentHandle = null;
+  }
+
   // Step 1: cheap key-only snapshot — no getItem, no parsing.
   let pendingKeys: string[];
   try {
@@ -153,20 +196,32 @@ function sweepChunked(now: number, isAlive: () => boolean): void {
     }
   } catch (err) {
     console.warn("[localStorageSweep] key snapshot failed:", err);
-    return;
+    return cancelHandle;
   }
 
-  if (!pendingKeys.length) return;
+  if (!pendingKeys.length) return cancelHandle;
 
+  // Keys judged stale during slices, accumulated for batch removal at the end.
+  // If the sweep is stopped mid-flight (alive=false), these are intentionally
+  // dropped — the next hourly sweep will re-detect them.
   const staleKeys: string[] = [];
+  // Keys that have been deferred once due to large value + zero budget;
+  // a key in this set is always parsed on its second encounter regardless of budget.
+  const deferredKeys = new Set<string>();
   let pos = 0;
+  let warnedThisSweep = false;
 
   // Step 2: parse entries in idle-time slices; reschedule until all done.
   const processSlice: SliceCallback = (deadline) => {
+    // Consume the handle — we are now inside the callback, so it has fired.
+    currentHandle = null;
+
     if (!isAlive()) return;
+
     try {
       const storage = window.localStorage;
       const sliceStart = pos;
+
       while (pos < pendingKeys.length) {
         // Always process at least one entry per slice: a timeout-fired idle
         // callback reports timeRemaining() === 0, and breaking before any
@@ -176,16 +231,48 @@ function sweepChunked(now: number, isAlive: () => boolean): void {
           break;
         }
         if (!deadline && processedInSlice >= SWEEP_CHUNK_ENTRY_BUDGET) break;
+
         const key = pendingKeys[pos++];
-        const value = storage.getItem(key);
-        if (value === null) continue; // deleted since snapshot — skip
-        const rule = LOCAL_STORAGE_SWEEP_RULES.find((r) =>
-          key.startsWith(r.keyPrefix),
-        );
-        if (!rule) continue;
-        const updatedAt = updatedAtFromJson(value);
-        if (updatedAt !== null && updatedAt <= now - rule.maxAgeMs) {
-          staleKeys.push(key);
+
+        try {
+          const value = storage.getItem(key);
+          if (value === null) continue; // deleted since snapshot — skip
+
+          // Defer-once: on a zero-budget slice, avoid parsing large values
+          // that would cause a jank frame. Move the key to the back of the
+          // queue and mark it deferred; on second encounter parse regardless.
+          // Invariant: each slice either parses ≥1 entry or grows deferredKeys
+          // by exactly one — both are bounded by pendingKeys.length, so the
+          // sweep always converges.
+          if (
+            deadline &&
+            deadline.timeRemaining() <= 0 &&
+            value.length > SWEEP_LARGE_VALUE_DEFER_BYTES &&
+            !deferredKeys.has(key)
+          ) {
+            pendingKeys.push(key); // move to back of queue
+            deferredKeys.add(key); // will not be deferred a second time
+            break; // reschedule; deferredKeys grew, so progress was made
+          }
+
+          const rule = LOCAL_STORAGE_SWEEP_RULES.find((r) =>
+            key.startsWith(r.keyPrefix),
+          );
+          if (!rule) continue;
+          const updatedAt = updatedAtFromJson(value);
+          if (isStale(updatedAt, rule, now)) {
+            staleKeys.push(key);
+          }
+        } catch (err) {
+          // Per-key errors skip the entry; remaining keys are still processed.
+          // Log at most once per sweep to avoid flooding on a corrupt store.
+          if (!warnedThisSweep) {
+            console.warn(
+              "[localStorageSweep] key read failed, continuing sweep:",
+              err,
+            );
+            warnedThisSweep = true;
+          }
         }
       }
 
@@ -195,19 +282,34 @@ function sweepChunked(now: number, isAlive: () => boolean): void {
       }
 
       // All entries processed — batch-remove stale keys.
+      // Re-check each key before removing: app code may have rewritten it
+      // fresh between its slice judgment and this final step.
       for (const key of staleKeys) {
         try {
+          const currentValue = storage.getItem(key);
+          if (currentValue === null) continue; // already gone
+          const rule = LOCAL_STORAGE_SWEEP_RULES.find((r) =>
+            key.startsWith(r.keyPrefix),
+          );
+          if (!rule) continue;
+          const currentUpdatedAt = updatedAtFromJson(currentValue);
+          if (!isStale(currentUpdatedAt, rule, now)) continue; // rewritten fresh
           storage.removeItem(key);
         } catch {
           // Non-fatal: key may have been concurrently removed by another tab.
         }
       }
     } catch (err) {
-      console.warn("[localStorageSweep] stale cache cleanup failed:", err);
+      // Last-resort catch: reached only if localStorage itself becomes
+      // unavailable mid-slice (e.g. SecurityError). Stale keys accumulated so
+      // far are dropped; the next hourly sweep re-detects them.
+      console.warn("[localStorageSweep] slice aborted unexpectedly:", err);
     }
   };
 
   scheduleSlice(processSlice);
+
+  return cancelHandle;
 }
 
 /**
@@ -226,8 +328,12 @@ export function startLocalStorageSweep(): () => void {
   let alive = true;
   let intervalId: ReturnType<typeof window.setInterval> | null = null;
   let bootTimeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+  let cancelCurrentSweep: (() => void) | null = null;
 
-  const runSweep = () => sweepChunked(Date.now(), () => alive);
+  const runSweep = () => {
+    cancelCurrentSweep?.();
+    cancelCurrentSweep = sweepChunked(Date.now(), () => alive);
+  };
 
   try {
     bootTimeoutId = globalThis.setTimeout(runSweep, BOOT_SWEEP_FLOOR_MS);
@@ -241,6 +347,8 @@ export function startLocalStorageSweep(): () => void {
     try {
       if (bootTimeoutId !== null) globalThis.clearTimeout(bootTimeoutId);
       if (intervalId !== null) window.clearInterval(intervalId);
+      cancelCurrentSweep?.();
+      cancelCurrentSweep = null;
     } catch (error) {
       console.warn("[localStorageSweep] scheduler cleanup failed:", error);
     }
