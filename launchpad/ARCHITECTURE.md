@@ -160,6 +160,19 @@ titles as filed.
 | adr: AppArmor and service confinement for the Buzz runtime | `OPEN` — [#45](https://github.com/launchpad-26/buzz/issues/45) |
 | adr: which security checks gate deployment in CI/CD | `OPEN` — [#46](https://github.com/launchpad-26/buzz/issues/46) |
 | adr: minimum external security smoke test before a deployment is declared healthy | `OPEN` — [#47](https://github.com/launchpad-26/buzz/issues/47) |
+| adr: observability strategy for the cohort Buzz environment | `OPEN` — [#83](https://github.com/launchpad-26/buzz/issues/83) |
+
+The last row is here and not in
+[SECURITY-POSTURE.md § Open security decisions](SECURITY-POSTURE.md#open-security-decisions):
+it decides what the cohort runs to watch itself — host logs, infrastructure metrics and
+agent traces are three signals with three possible destinations — which is a shape
+question for this architecture. It has a security consequence, stated in
+[#83](https://github.com/launchpad-26/buzz/issues/83), but the posture's own dependency on
+security-event visibility is already carried by
+[#34](https://github.com/launchpad-26/buzz/issues/34) in
+[SECURITY-POSTURE.md § What is true today](SECURITY-POSTURE.md#what-is-true-today), and
+[#83](https://github.com/launchpad-26/buzz/issues/83) defines no control that the posture
+asserts.
 
 Those markers cover only the rows present when this section was written, all confirmed
 `OPEN` against the live issues on 2026-08-11. A decision added later carries its own
