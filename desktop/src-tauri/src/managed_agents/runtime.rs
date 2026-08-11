@@ -63,6 +63,8 @@ pub(crate) use instance_reaper::reap_dead_instance_agents;
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 
+mod isolation_spawn;
+
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
@@ -505,27 +507,8 @@ pub fn spawn_agent_child(
         nvm_bin,
     );
 
-    // The boundary wraps the outer buzz-acp process, not the inner runtime.
-    // That is the only shared spawn seam inherited by the harness, ACP
-    // runtime, MCP/tool servers, shells, and background descendants.
-    let (mut command, isolation_run) = match &record.filesystem_isolation {
-        Some(profile) => {
-            let (command, run) = super::consume_prepared_isolated_agent_command(
-                profile,
-                &record.pubkey,
-                &current_instance_id(app),
-                &resolved_acp_command,
-            )?;
-            (command, Some(run))
-        }
-        None => {
-            let mut command = std::process::Command::new(&resolved_acp_command);
-            if let Some(home) = super::default_agent_workdir() {
-                command.current_dir(home);
-            }
-            (command, None)
-        }
-    };
+    let (mut command, isolation_run) =
+        isolation_spawn::prepared_command(app, record, &resolved_acp_command)?;
     // Consume the prepared root before the first spawn-side mutation. A start
     // without an exact lease must not even append a log marker.
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;

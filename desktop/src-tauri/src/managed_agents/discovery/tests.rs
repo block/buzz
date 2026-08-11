@@ -12,6 +12,9 @@ use super::{
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
+mod record_fixture;
+use record_fixture::record_with;
+
 #[test]
 fn resolves_known_avatar_for_bare_command() {
     let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
@@ -220,71 +223,6 @@ fn effective_agent_command_explicit_override_wins() {
         effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
         "codex-acp"
     );
-}
-
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
-fn record_with(
-    runtime: Option<&str>,
-    persona_id: Option<&str>,
-    override_cmd: Option<&str>,
-) -> crate::managed_agents::types::ManagedAgentRecord {
-    crate::managed_agents::types::ManagedAgentRecord {
-        pubkey: String::new(),
-        name: "r".to_string(),
-        persona_id: persona_id.map(str::to_string),
-        private_key_nsec: String::new(),
-        auth_tag: None,
-        relay_url: String::new(),
-        avatar_url: None,
-        acp_command: String::new(),
-        agent_command: String::new(),
-        agent_command_override: override_cmd.map(str::to_string),
-        agent_args: vec![],
-        mcp_command: String::new(),
-        turn_timeout_seconds: 0,
-        idle_timeout_seconds: None,
-        max_turn_duration_seconds: None,
-        parallelism: 1,
-        system_prompt: None,
-        model: None,
-        provider: None,
-        persona_source_version: None,
-        filesystem_isolation: None,
-        start_on_app_launch: false,
-        auto_restart_on_config_change: true,
-        runtime_pid: None,
-        backend: Default::default(),
-        backend_agent_id: None,
-        provider_binary_path: None,
-        team_id: None,
-        persona_team_dir: None,
-        persona_name_in_team: None,
-        env_vars: std::collections::BTreeMap::new(),
-        created_at: String::new(),
-        updated_at: String::new(),
-        last_started_at: None,
-        last_stopped_at: None,
-        last_exit_code: None,
-        last_error: None,
-        last_error_code: None,
-        respond_to: Default::default(),
-        respond_to_allowlist: vec![],
-        display_name: None,
-        slug: None,
-        runtime: runtime.map(str::to_string),
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        definition_respond_to: None,
-        definition_respond_to_allowlist: Vec::new(),
-        definition_parallelism: None,
-        relay_mesh: None,
-    }
 }
 
 #[test]

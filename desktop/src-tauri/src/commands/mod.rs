@@ -2,6 +2,7 @@ mod agent_access;
 mod agent_auth;
 mod agent_config;
 mod agent_discovery;
+mod agent_fs;
 mod agent_logs;
 mod agent_metric_archive;
 mod agent_model_process;
