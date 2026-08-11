@@ -366,7 +366,7 @@ type E2eConfig = {
     /** Simulates native cold-cache startup work before the async response. */
     linkPreviewMetadataStartBlockMs?: number;
     /** Delays link-preview snapshot media uploads so specs can exercise the
-     *  Send-time wait for in-flight snapshot uploads. */
+     *  composer's settle-gated disabled state before the snapshot tag is ready. */
     linkPreviewUploadDelayMs?: number;
     /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
      *  call should reject, so specs can drive a per-media snapshot upload failure
