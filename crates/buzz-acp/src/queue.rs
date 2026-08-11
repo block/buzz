@@ -3397,6 +3397,136 @@ mod tests {
         assert_eq!(anchor, None);
     }
 
+    // ── resolve_turn_reply_anchor (shared by format_prompt and
+    //    reply_anchor_for_batch — item 6 extraction) ─────────────────────────
+
+    #[test]
+    fn test_turn_anchor_dm_reply_anchors_to_triggering_event() {
+        // DM reply (thread tags present): anchor is the triggering event,
+        // regardless of agent/human — DMs never delegate to
+        // resolve_reply_anchor's human-facing gate.
+        let tags = thread_tags(Some(ROOT_ID), &[]);
+        let anchor = resolve_turn_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, true, None);
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+    }
+
+    #[test]
+    fn test_turn_anchor_dm_non_reply_has_no_anchor() {
+        // Fresh top-level DM message (no thread tags): no forced anchor.
+        let tags = thread_tags(None, &[]);
+        let anchor = resolve_turn_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, true, None);
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_turn_anchor_non_dm_top_level_human_matches_resolve_reply_anchor() {
+        // Non-DM path delegates to resolve_reply_anchor — top-level human
+        // mention anchors to the triggering event, same as calling
+        // resolve_reply_anchor directly (test_anchor_human_top_level_uses_triggering_event).
+        let tags = thread_tags(None, &[AGENT_A_PK]);
+        let anchor =
+            resolve_turn_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+    }
+
+    #[test]
+    fn test_turn_anchor_non_dm_threaded_human_matches_resolve_reply_anchor() {
+        // Non-DM path, threaded human message: anchors to the thread ROOT,
+        // same as test_anchor_human_in_thread_uses_root.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
+        let anchor =
+            resolve_turn_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_turn_anchor_non_dm_agent_to_agent_has_no_anchor() {
+        // Non-DM path, agent-to-agent message: no forced anchor (free nesting),
+        // same as test_anchor_agent_to_agent_in_thread_is_none.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
+        let anchor =
+            resolve_turn_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, false, Some(&id_lookup()));
+        assert_eq!(anchor, None);
+    }
+
+    // ── reply_anchor_for_batch (wrapper used by pool::run_prompt_task to
+    //    thread the fallback-publish gate's anchor) ──────────────────────────
+
+    #[test]
+    fn test_reply_anchor_for_batch_dm_reply() {
+        let ch = Uuid::new_v4();
+        let root_id = "c".repeat(64);
+        let event = make_event_with_tags(
+            "hey",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "root".into()]],
+        );
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let anchor = reply_anchor_for_batch(&batch, true, None);
+        assert_eq!(anchor.as_deref(), Some(event_id.as_str()));
+    }
+
+    #[test]
+    fn test_reply_anchor_for_batch_top_level_human() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let anchor = reply_anchor_for_batch(&batch, false, None);
+        assert_eq!(anchor.as_deref(), Some(event_id.as_str()));
+    }
+
+    #[test]
+    fn test_reply_anchor_for_batch_agrees_with_format_prompt() {
+        // The whole point of the item-6 extraction: reply_anchor_for_batch's
+        // result must equal the anchor format_prompt embeds in its own
+        // [Context] reply instruction for the identical batch.
+        let ch = Uuid::new_v4();
+        let root_id = "d".repeat(64);
+        let event = make_event_with_tags(
+            "@bot deep question",
+            vec![vec!["e".into(), root_id.clone(), "".into(), "root".into()]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let anchor = reply_anchor_for_batch(&batch, false, None);
+        assert_eq!(anchor.as_deref(), Some(root_id.as_str()));
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "format_prompt's own reply instruction must use the same anchor \
+             reply_anchor_for_batch computed"
+        );
+    }
+
     #[test]
     fn test_sanitize_prompt_label_strips_newlines_and_control_chars() {
         assert_eq!(

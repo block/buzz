@@ -2571,6 +2571,166 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 mod tests {
     use super::*;
 
+    // ── tool_call_update_succeeded (item 2: success signal, not just
+    //    lifecycle status) ────────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_succeeded_completed_with_no_raw_output_is_success() {
+        // Pre-existing behavior for backends that never send rawOutput: an
+        // absent rawOutput must not be treated as failure.
+        let update = serde_json::json!({"status": "completed"});
+        assert!(tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_completed_with_is_error_false_is_success() {
+        let update = serde_json::json!({
+            "status": "completed",
+            "rawOutput": {"isError": false},
+        });
+        assert!(tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_completed_with_is_error_true_is_failure() {
+        // The core item-2 fix: "completed" lifecycle status with
+        // rawOutput.isError:true must NOT count as success.
+        let update = serde_json::json!({
+            "status": "completed",
+            "rawOutput": {"isError": true},
+        });
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_status_failed_is_failure() {
+        let update = serde_json::json!({
+            "status": "failed",
+            "rawOutput": {"error": "boom"},
+        });
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_in_progress_is_not_success() {
+        let update = serde_json::json!({"status": "in_progress"});
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    #[test]
+    fn tool_call_succeeded_missing_status_is_not_success() {
+        let update = serde_json::json!({});
+        assert!(!tool_call_update_succeeded(&update));
+    }
+
+    // ── extract_channel_flag ────────────────────────────────────────────
+
+    #[test]
+    fn extract_channel_flag_space_form() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --channel abc-123 --content hi"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_channel_flag_equals_form() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --channel=abc-123"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_channel_flag_absent_returns_none() {
+        assert_eq!(
+            extract_channel_flag("buzz messages send --content hi"),
+            None
+        );
+    }
+
+    // ── looks_like_buzz_messages_send (item 4: hardened heuristic) ───────
+
+    #[test]
+    fn looks_like_send_matches_documented_shapes() {
+        // Real send shapes this MUST still recognize (mirrors buzz-agent's
+        // own reply_shape_matches_documented_send_forms fixture).
+        for cmd in [
+            "buzz messages send --channel X --content Y",
+            "buzz --relay wss://r messages send --channel X --content Y",
+            "/abs/path/buzz messages send",
+            "printf 'hi' | buzz messages send --content -",
+        ] {
+            let update = serde_json::json!({"rawInput": {"command": cmd}});
+            assert!(
+                looks_like_buzz_messages_send(&update, None),
+                "expected {cmd:?} to be recognized as a publish attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_send_matches_via_title_fallback() {
+        // Connectors with no rawInput.command still match via title, as
+        // before this fix — just no longer via the loose any-order check.
+        let update = serde_json::json!({"title": "buzz messages send"});
+        assert!(looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_decoy_with_all_three_words_out_of_order() {
+        // The item-4 regression case: an unrelated tool call whose
+        // title/args happen to mention all three words, but not as an
+        // adjacent "messages send" preceded by "buzz".
+        let update = serde_json::json!({
+            "title": "Send a summary of buzz activity to #messages"
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_decoy_command_mentioning_all_three_words() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "grep -r buzz . | tee messages-and-send.log"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_messages_send_without_buzz_prefix() {
+        // "messages send" adjacent but nothing resembling "buzz" before it.
+        let update = serde_json::json!({
+            "rawInput": {"command": "some-other-tool messages send --x"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_accepts_when_no_expected_channel_given() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel other-channel"}
+        });
+        assert!(looks_like_buzz_messages_send(&update, None));
+    }
+
+    #[test]
+    fn looks_like_send_accepts_matching_channel() {
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel chan-1 --content hi"}
+        });
+        assert!(looks_like_buzz_messages_send(&update, Some("chan-1")));
+    }
+
+    #[test]
+    fn looks_like_send_rejects_mismatched_channel() {
+        // Core item-4 cross-check: a send to a DIFFERENT channel must not
+        // credit this turn's publish detection.
+        let update = serde_json::json!({
+            "rawInput": {"command": "buzz messages send --channel chan-OTHER --content hi"}
+        });
+        assert!(!looks_like_buzz_messages_send(&update, Some("chan-1")));
+    }
+
     #[test]
     fn stop_reason_parses_all_known_values() {
         assert_eq!(StopReason::from_str("end_turn"), Some(StopReason::EndTurn));
@@ -3867,6 +4027,218 @@ mod tests {
         AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
+    }
+
+    // ── publish-final-if-unsent fallback gate: buffering + detection
+    //    integration (item 5) ─────────────────────────────────────────────
+
+    fn agent_message_chunk_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text},
+                },
+            }
+        })
+    }
+
+    fn tool_call_msg(tool_id: &str, command: &str, status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_id,
+                    "title": "shell",
+                    "kind": "other",
+                    "status": status,
+                    "rawInput": {"command": command},
+                },
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn buffer_disarmed_client_stays_empty() {
+        // Item 3: the gate must be a no-op for a client the caller never
+        // armed via `set_publish_final_if_unsent` — the default state.
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("hello world"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "disarmed client must never buffer agent_message_chunk text"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_armed_client_accumulates_text() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("hello "));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("world"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            Some(("hello world", None))
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_blank_text_does_not_fire() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("   \n\t  "));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "whitespace-only buffered text must not count as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffer_is_capped_at_fallback_publish_max_bytes() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        // First chunk fills to just under the cap, second chunk pushes well
+        // past it — the buffer must stop growing at the cap rather than
+        // accumulating without bound.
+        let first = "a".repeat(FALLBACK_PUBLISH_MAX_BYTES - 10);
+        let second = "b".repeat(1000);
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&first));
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&second));
+        let (text, _) = client
+            .pending_unpublished_final_text()
+            .expect("non-blank buffered text");
+        assert_eq!(
+            text.len(),
+            FALLBACK_PUBLISH_MAX_BYTES,
+            "buffer must stop exactly at the cap, not grow past it"
+        );
+        assert!(
+            text.starts_with(&"a".repeat(FALLBACK_PUBLISH_MAX_BYTES - 10)),
+            "content up to the cap must be preserved, not dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn detected_publish_suppresses_pending_text() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-1",
+            "buzz messages send --channel c1 --content hi",
+            "completed",
+        ));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "a detected buzz messages send must suppress the fallback, even \
+             though buffered text is non-blank"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_update_completes_publish_detection_started_by_tool_call() {
+        // The two-message tool_call → tool_call_update lifecycle: pending
+        // status on tool_call, confirmed via a later tool_call_update.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-2",
+            "buzz messages send --channel c1 --content hi",
+            "pending",
+        ));
+        // Still pending — the send hasn't been confirmed completed yet.
+        assert!(client.pending_unpublished_final_text().is_some());
+
+        let update_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-2",
+                    "status": "completed",
+                },
+            }
+        });
+        let _ = client.handle_session_update(&update_msg);
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            None,
+            "tool_call_update confirming completion must suppress the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_reporting_failed_send_does_not_suppress_fallback() {
+        // Item 2: a "completed" lifecycle status with rawOutput.isError:true
+        // must not be credited as a successful publish.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-3",
+                    "title": "shell",
+                    "kind": "other",
+                    "status": "completed",
+                    "rawInput": {"command": "buzz messages send --channel c1"},
+                    "rawOutput": {"isError": true},
+                },
+            }
+        });
+        let _ = client.handle_session_update(&tool_call);
+        assert!(
+            client.pending_unpublished_final_text().is_some(),
+            "a tool call that completed its lifecycle but reported \
+             rawOutput.isError:true must NOT suppress the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_to_different_channel_does_not_suppress_fallback() {
+        // Item 4's --channel cross-check, exercised end-to-end through
+        // handle_session_update + set_pending_channel_id.
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        client.set_pending_channel_id(Some("this-channel".to_string()));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        let _ = client.handle_session_update(&tool_call_msg(
+            "tc-4",
+            "buzz messages send --channel other-channel --content hi",
+            "completed",
+        ));
+        assert!(
+            client.pending_unpublished_final_text().is_some(),
+            "a send to a DIFFERENT channel must not suppress this turn's fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_text_carries_the_reply_anchor() {
+        let mut client = spawn_inert_client().await;
+        client.set_publish_final_if_unsent(true);
+        client.set_pending_reply_anchor(Some("root-event-abc".to_string()));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("final reply text"));
+        assert_eq!(
+            client.pending_unpublished_final_text(),
+            Some(("final reply text", Some("root-event-abc")))
+        );
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a

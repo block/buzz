@@ -3393,6 +3393,44 @@ fn spawn_failure_notice(
     }
 }
 
+/// Decide whether `handle_prompt_result` should fire the
+/// `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback publish for this turn, and if
+/// so, with what content.
+///
+/// Pure and side-effect-free (unlike [`spawn_fallback_publish`], which this
+/// feeds) specifically so the gate's firing conditions are unit-testable
+/// without a live relay/rest client — see the `fallback_publish_target_*`
+/// tests below.
+///
+/// Fires only when ALL of:
+///   - the gate is armed for this config (`armed`, i.e.
+///     `Config::publish_final_if_unsent`)
+///   - the turn is a channel turn (`PromptSource::Channel`) — never a
+///     heartbeat, which has no channel to reply into
+///   - the turn ended with a clean `StopReason::EndTurn` — never
+///     `Refusal`/`MaxTokens`/`MaxTurnRequests`/`Cancelled`, which are
+///     distinct terminal outcomes this gate must not paper over with an
+///     auto-publish
+///   - `pending_final_text` is `Some` — i.e.
+///     `AcpClient::pending_unpublished_final_text` found non-blank buffered
+///     text AND no accepted `buzz messages send` tool call was observed this
+///     turn
+fn fallback_publish_target(
+    armed: bool,
+    stop_reason: acp::StopReason,
+    source: &PromptSource,
+    pending_final_text: Option<(&str, Option<&str>)>,
+) -> Option<(Uuid, String, Option<String>)> {
+    if !armed || stop_reason != acp::StopReason::EndTurn {
+        return None;
+    }
+    let PromptSource::Channel(channel_id) = source else {
+        return None;
+    };
+    let (text, anchor) = pending_final_text?;
+    Some((*channel_id, text.to_string(), anchor.map(str::to_string)))
+}
+
 /// Spawn a task publishing a `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback post
 /// for a channel turn that ended with buffered final text the agent never
 /// published itself. See [`pool::publish_fallback_final_text`] for the
@@ -3648,27 +3686,16 @@ fn handle_prompt_result(
                 "agent_returned"
             );
             // Opt-in exactly-once fallback publish gate (default OFF; see
-            // `Config::publish_final_if_unsent`). Fires only for:
-            //   - a channel turn (never heartbeats — nothing to reply into)
-            //   - a clean `end_turn` stop (never Refusal/MaxTokens/
-            //     MaxTurnRequests/Cancelled — those are distinct terminal
-            //     outcomes this gate must not paper over with an
-            //     auto-publish, per the design doc)
-            //   - buffered final text that's non-blank AND no accepted
-            //     `buzz messages send` tool call was observed this turn
-            //     (`pending_unpublished_final_text` enforces both)
-            if config.publish_final_if_unsent && stop_reason == acp::StopReason::EndTurn {
-                if let PromptSource::Channel(ch) = &result.source {
-                    if let Some((text, anchor)) = result.agent.acp.pending_unpublished_final_text()
-                    {
-                        spawn_fallback_publish(
-                            rest_client,
-                            *ch,
-                            text.to_string(),
-                            anchor.map(str::to_string),
-                        );
-                    }
-                }
+            // `Config::publish_final_if_unsent`) — see
+            // `fallback_publish_target`'s doc comment for the exact firing
+            // conditions.
+            if let Some((ch, text, anchor)) = fallback_publish_target(
+                config.publish_final_if_unsent,
+                stop_reason,
+                &result.source,
+                result.agent.acp.pending_unpublished_final_text(),
+            ) {
+                spawn_fallback_publish(rest_client, ch, text, anchor);
             }
             pool.return_agent(result.agent);
         }
@@ -6469,6 +6496,128 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+}
+
+#[cfg(test)]
+mod fallback_publish_target_tests {
+    //! Unit tests for `fallback_publish_target`, the pure predicate behind
+    //! the `BUZZ_ACP_PUBLISH_FINAL_IF_UNSENT` fallback gate in
+    //! `handle_prompt_result`. Covers the enumerated cases from the
+    //! item-5 team-review requirement: armed/disarmed, every `StopReason`
+    //! variant, channel vs. heartbeat source, and presence/absence of
+    //! pending final text (which itself encodes "no publish detected" and
+    //! "non-blank buffered text" — see `AcpClient::pending_unpublished_final_text`).
+
+    use super::*;
+
+    fn ch() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    #[test]
+    fn fires_on_armed_end_turn_channel_with_pending_text() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("hello there", Some("anchor-1"))),
+        );
+        assert_eq!(
+            result,
+            Some((
+                channel_id,
+                "hello there".to_string(),
+                Some("anchor-1".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn does_not_fire_when_disarmed() {
+        let result = fallback_publish_target(
+            false,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(ch()),
+            Some(("hello", None)),
+        );
+        assert_eq!(result, None, "disarmed config must never fire the gate");
+    }
+
+    #[test]
+    fn does_not_fire_on_non_end_turn_stop_reasons() {
+        for stop_reason in [
+            acp::StopReason::Refusal,
+            acp::StopReason::MaxTokens,
+            acp::StopReason::MaxTurnRequests,
+            acp::StopReason::Cancelled,
+        ] {
+            let result = fallback_publish_target(
+                true,
+                stop_reason.clone(),
+                &PromptSource::Channel(ch()),
+                Some(("hello", None)),
+            );
+            assert_eq!(
+                result, None,
+                "{stop_reason:?} must never fire the fallback gate, regardless of buffered text"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_fire_for_heartbeat_source() {
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Heartbeat,
+            Some(("hello", None)),
+        );
+        assert_eq!(
+            result, None,
+            "heartbeat turns have no channel to publish a fallback into"
+        );
+    }
+
+    #[test]
+    fn does_not_fire_when_no_pending_final_text() {
+        // None covers both "publish already detected" and "blank/no buffered
+        // text" — both collapse to None from `pending_unpublished_final_text`.
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(ch()),
+            None,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn threads_the_reply_anchor_through_unchanged() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("final text", Some("root-event-id"))),
+        );
+        assert_eq!(
+            result.and_then(|(_, _, anchor)| anchor),
+            Some("root-event-id".to_string())
+        );
+    }
+
+    #[test]
+    fn no_anchor_still_fires_with_none_anchor() {
+        let channel_id = ch();
+        let result = fallback_publish_target(
+            true,
+            acp::StopReason::EndTurn,
+            &PromptSource::Channel(channel_id),
+            Some(("final text", None)),
+        );
+        assert_eq!(result, Some((channel_id, "final text".to_string(), None)));
     }
 }
 
