@@ -8,8 +8,9 @@ import {
 } from "@tanstack/react-query";
 
 import {
-  WORKFLOWS_FOCUS_STALE_TIME_MS,
+  WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
   WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
+  RUN_APPROVALS_FOCUS_STALE_TIME_MS,
 } from "./hooks.ts";
 
 afterEach(() => {
@@ -48,21 +49,21 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   return fetchCount;
 }
 
-test("workflows: skips fresh focus refetch", async () => {
+test("workflow-list: skips focus refetch when data is fresh (< 10s)", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: WORKFLOWS_FOCUS_STALE_TIME_MS - 1_000,
-      staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+      ageMs: WORKFLOW_LIST_FOCUS_STALE_TIME_MS - 1_000,
+      staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
     }),
     0,
   );
 });
 
-test("workflows: refetches genuinely stale data on focus", async () => {
+test("workflow-list: refetches on focus when data is stale (> 10s)", async () => {
   assert.equal(
     await focusRefetchCount({
-      ageMs: WORKFLOWS_FOCUS_STALE_TIME_MS + 1,
-      staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+      ageMs: WORKFLOW_LIST_FOCUS_STALE_TIME_MS + 1,
+      staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
     }),
     1,
   );
@@ -83,6 +84,26 @@ test("workflow-runs: refetches on focus when data is stale (> 10s)", async () =>
     await focusRefetchCount({
       ageMs: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS + 1,
       staleTime: WORKFLOW_RUNS_FOCUS_STALE_TIME_MS,
+    }),
+    1,
+  );
+});
+
+test("run-approvals: skips focus refetch when data is fresh (< 5 min)", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: RUN_APPROVALS_FOCUS_STALE_TIME_MS - 1_000,
+      staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
+    }),
+    0,
+  );
+});
+
+test("run-approvals: refetches on focus when data is stale (> 5 min)", async () => {
+  assert.equal(
+    await focusRefetchCount({
+      ageMs: RUN_APPROVALS_FOCUS_STALE_TIME_MS + 1,
+      staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
     }),
     1,
   );

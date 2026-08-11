@@ -18,10 +18,12 @@ import {
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 
-/** Suppresses focus refetches until workflow data is genuinely stale.
- * Channel workflows and run approvals have push-invalidation from mutations;
- * workflow runs poll when active (making the focus refetch redundant). */
-export const WORKFLOWS_FOCUS_STALE_TIME_MS = 5 * 60_000;
+/** Stale gate for workflow list queries (useChannelWorkflowsQuery, allWorkflowsQuery).
+ * These queries have no poll and no relay push subscription; invalidateWorkflowListQueries
+ * only fires for mutations performed by this renderer, so remote workflow creates/edits/deletes
+ * surface only via refetch on focus return.  10 s suppresses rapid focus-flip burst refetches
+ * while keeping remote changes visible on the next focus return. */
+export const WORKFLOW_LIST_FOCUS_STALE_TIME_MS = 10_000;
 /** Keeps focused polling for run approvals at the established 10-second cadence. */
 export const RUN_APPROVALS_REFETCH_INTERVAL_MS = 10_000;
 /** Tighter stale gate for the workflow-runs detail query.
@@ -34,6 +36,10 @@ export const RUN_APPROVALS_REFETCH_INTERVAL_MS = 10_000;
  * 1 s poll alive until the run finishes, so the fix only matters for the
  * "no active runs" → "new remote run" transition.) */
 export const WORKFLOW_RUNS_FOCUS_STALE_TIME_MS = 10_000;
+/** Suppresses redundant focus refetches for the run-approvals query.
+ * The focused 10-second poll (RUN_APPROVALS_REFETCH_INTERVAL_MS) already keeps
+ * this data fresh; a focus return within 5 minutes adds no new information. */
+export const RUN_APPROVALS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 
 export const allWorkflowsQueryKey = (channelIdKey: string) =>
   ["workflows-all", channelIdKey] as const;
@@ -70,7 +76,7 @@ export function useChannelWorkflowsQuery(channelId: string | null) {
     queryFn: ({ queryKey: [, resolvedChannelId] }) =>
       getChannelWorkflows(resolvedChannelId),
     enabled: channelId !== null,
-    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+    staleTime: WORKFLOW_LIST_FOCUS_STALE_TIME_MS,
     refetchOnWindowFocus: true,
   });
 }
@@ -117,7 +123,7 @@ export function useRunApprovalsQuery(
     queryFn: ({ queryKey: [, resolvedWorkflowId, resolvedRunId] }) =>
       getRunApprovals(resolvedWorkflowId, resolvedRunId),
     enabled: workflowId !== null && runId !== null,
-    staleTime: WORKFLOWS_FOCUS_STALE_TIME_MS,
+    staleTime: RUN_APPROVALS_FOCUS_STALE_TIME_MS,
     refetchInterval,
     refetchOnWindowFocus: true,
   });
