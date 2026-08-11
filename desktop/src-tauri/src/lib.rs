@@ -147,13 +147,6 @@ pub fn run() {
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
 
-                    #[cfg(target_os = "macos")]
-                    if let Err(error) = webview
-                        .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)))
-                    {
-                        eprintln!("buzz-desktop: failed to make the macOS webview transparent: {error}");
-                    }
-
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.

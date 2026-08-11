@@ -14,6 +14,20 @@ import { withoutProjectComments } from "@/features/pulse/lib/projectComments";
 import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 
+/** Keeps focused polling at the established 30-second cadence for note feeds. */
+export const PULSE_NOTES_REFETCH_INTERVAL_MS = 30_000;
+/** Keeps focused polling at the established 60-second cadence for reactions. */
+export const PULSE_REACTIONS_REFETCH_INTERVAL_MS = 60_000;
+/** Suppresses the focus refetch until pulse data is genuinely stale.
+ * Polls every 30s while focused — the focus refetch would duplicate that work. */
+export const PULSE_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy shared by all pulse queries; consumed by focusRefetchPolicy.test.mjs. */
+export const pulseFocusRefetchPolicy = {
+  staleTime: PULSE_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: true,
+} as const;
+
 // ── Query keys ──────────────────────────────────────────────────────────────
 
 export const pulseQueryKeys = {
@@ -32,7 +46,9 @@ export const pulseQueryKeys = {
 // ── Own notes ───────────────────────────────────────────────────────────────
 
 export function useLikedNotesQuery(pubkey?: string, enabled = true) {
-  const refetchInterval = useFocusedRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PULSE_NOTES_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
@@ -40,15 +56,16 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
       // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getLikedNotes(pubkey!, 50)),
     enabled: enabled && !!pubkey,
-    staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
 export function useMyNotesQuery(pubkey?: string) {
-  const refetchInterval = useFocusedRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PULSE_NOTES_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.myNotes(pubkey ?? ""),
@@ -56,27 +73,27 @@ export function useMyNotesQuery(pubkey?: string) {
       // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getUserNotes(pubkey!, { limit: 50 })),
     enabled: !!pubkey,
-    staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
 // ── Timeline (notes from contacts) ─────────────────────────────────────────
 
 export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
-  const refetchInterval = useFocusedRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PULSE_NOTES_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.timeline(contactPubkeys),
     queryFn: async () =>
       withoutProjectComments(await getNotesTimeline(contactPubkeys, 10)),
     enabled: enabled && contactPubkeys.length > 0,
-    staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -89,7 +106,9 @@ export function usePulseReactionsQuery(
   noteIds: string[],
   currentPubkey?: string,
 ) {
-  const refetchInterval = useFocusedRefetchInterval(60_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PULSE_REACTIONS_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<Map<string, PulseReactionState>>({
     queryKey: pulseQueryKeys.reactions(noteIds),
@@ -110,10 +129,9 @@ export function usePulseReactionsQuery(
       return result;
     },
     enabled: noteIds.length > 0,
-    staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
@@ -128,17 +146,18 @@ export function useNoteByIdQuery(noteId: string | null) {
 }
 
 export function useGlobalNotesQuery(enabled: boolean) {
-  const refetchInterval = useFocusedRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PULSE_NOTES_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.globalNotes,
     queryFn: async () =>
       withoutProjectComments(await getGlobalNotes({ limit: 50 })),
     enabled,
-    staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...pulseFocusRefetchPolicy,
   });
 }
 
