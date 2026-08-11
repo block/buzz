@@ -21,7 +21,7 @@
         "height": 600,
         "maximized": true,
         "visible": false,
-        "transparent": true,
+        "transparent": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false,

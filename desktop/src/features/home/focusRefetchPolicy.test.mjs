@@ -8,11 +8,11 @@ import {
 } from "@tanstack/react-query";
 
 import {
-  CHANNELS_FOCUS_STALE_TIME_MS,
+  channelsFocusRefetchPolicy,
   CHANNELS_REFETCH_INTERVAL_MS,
 } from "@/features/channels/hooks.ts";
 import {
-  HOME_FEED_FOCUS_STALE_TIME_MS,
+  homeFeedFocusRefetchPolicy,
   HOME_FEED_REFETCH_INTERVAL_MS,
 } from "./hooks.ts";
 
@@ -20,14 +20,14 @@ afterEach(() => {
   focusManager.setFocused(undefined);
 });
 
-async function focusRefetchCount({ ageMs, staleTime }) {
+async function focusRefetchCount({ ageMs, policy }) {
   focusManager.setFocused(false);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClient.mount();
 
-  const queryKey = ["focus-refetch-policy", staleTime, ageMs];
+  const queryKey = ["focus-refetch-policy", policy.staleTime, ageMs];
   queryClient.setQueryData(queryKey, "cached", {
     updatedAt: Date.now() - ageMs,
   });
@@ -40,8 +40,7 @@ async function focusRefetchCount({ ageMs, staleTime }) {
     },
     // Keep setup from fetching stale cache before the simulated focus return.
     refetchOnMount: false,
-    refetchOnWindowFocus: true,
-    staleTime,
+    ...policy,
   });
   const unsubscribe = observer.subscribe(() => {});
 
@@ -53,36 +52,36 @@ async function focusRefetchCount({ ageMs, staleTime }) {
   return fetchCount;
 }
 
-for (const policy of [
+for (const entry of [
   {
     name: "channels",
-    staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
+    focusPolicy: channelsFocusRefetchPolicy,
     refetchInterval: CHANNELS_REFETCH_INTERVAL_MS,
     expectedRefetchInterval: 60_000,
   },
   {
     name: "home feed",
-    staleTime: HOME_FEED_FOCUS_STALE_TIME_MS,
+    focusPolicy: homeFeedFocusRefetchPolicy,
     refetchInterval: HOME_FEED_REFETCH_INTERVAL_MS,
     expectedRefetchInterval: 30_000,
   },
 ]) {
-  test(`${policy.name} skips fresh focus refetch and preserves polling`, async () => {
-    assert.equal(policy.refetchInterval, policy.expectedRefetchInterval);
+  test(`${entry.name} skips fresh focus refetch and preserves polling`, async () => {
+    assert.equal(entry.refetchInterval, entry.expectedRefetchInterval);
     assert.equal(
       await focusRefetchCount({
-        ageMs: policy.staleTime - 1_000,
-        staleTime: policy.staleTime,
+        ageMs: entry.focusPolicy.staleTime - 1_000,
+        policy: entry.focusPolicy,
       }),
       0,
     );
   });
 
-  test(`${policy.name} refetches genuinely stale data on focus`, async () => {
+  test(`${entry.name} refetches genuinely stale data on focus`, async () => {
     assert.equal(
       await focusRefetchCount({
-        ageMs: policy.staleTime + 1,
-        staleTime: policy.staleTime,
+        ageMs: entry.focusPolicy.staleTime + 1,
+        policy: entry.focusPolicy,
       }),
       1,
     );
