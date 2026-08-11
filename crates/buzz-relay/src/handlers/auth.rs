@@ -2,9 +2,11 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
-//! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! NIP-OA owner-delegation fallback on closed relays. The owner recorded for
+//! agent→owner backfill (observer frame auth, agent rate class) is then resolved
+//! with [`crate::api::relay_members::resolve_nip_oa_owner`], which keeps the
+//! delegated owner when membership came through one and otherwise verifies the
+//! presented tag — a direct member's attestation is just as self-proving.
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -237,20 +239,17 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                    )
-                } else {
-                    None
-                }
-            });
+            // NIP-OA backfill: resolve the owner for the agent→owner DB mapping
+            // (needed for observer frame auth and for the agent rate class).
+            // `enforce_relay_membership` reports an owner only when membership was
+            // granted *through* it, so a direct member's tag is resolved here —
+            // on closed relays too, matching the ban cascade above, which already
+            // trusts the same tag unconditionally.
+            let nip_oa_owner = crate::api::relay_members::resolve_nip_oa_owner(
+                nip_oa_owner,
+                pubkey.as_bytes(),
+                auth_tag_json.as_deref(),
+            );
 
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.

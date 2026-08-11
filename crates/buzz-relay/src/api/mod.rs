@@ -117,11 +117,13 @@ pub mod relay_members {
     /// its NIP-OA owner *is* — access is granted via delegation.
     ///
     /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
+    /// immediately — no membership check is performed.
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    /// no NIP-OA tag is present/applicable (open relay without auth tag). `Ok(None)`
+    /// therefore means "admitted on its own", **not** "has no owner": callers that
+    /// record ownership must pass the result through [`resolve_nip_oa_owner`], which
+    /// recovers the owner from the presented tag in exactly those cases.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
@@ -165,6 +167,32 @@ pub mod relay_members {
                 None
             }
         }
+    }
+
+    /// Resolve the NIP-OA owner to materialize for a caller that has already
+    /// passed the membership gate.
+    ///
+    /// `gate_owner` is what [`enforce_relay_membership`] returned: `Some` only
+    /// when membership was granted *through* the owner. Every other admitted
+    /// caller — a direct relay member on a closed relay, or anyone on an open
+    /// relay — arrives here with `None`, and the `auth` tag they presented is
+    /// still cryptographically self-proving. Extract it rather than dropping it:
+    /// which branch granted *access* says nothing about whether the attestation
+    /// of *ownership* is valid.
+    ///
+    /// Gating this on `require_relay_membership` inverted the deployment
+    /// posture — the stricter relay was the only one that never recorded
+    /// ownership, so `owner_only` policies, observer-frame authorization and the
+    /// agent rate class all silently degraded for agents enrolled as members
+    /// (#4223, #4937). No feature flag applies: `allow_nip_oa_auth` governs
+    /// whether NIP-OA can *grant membership*, not whether a verified tag is
+    /// believed (see the flag's own doc comment in `config`).
+    pub fn resolve_nip_oa_owner(
+        gate_owner: Option<nostr::PublicKey>,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+    ) -> Option<nostr::PublicKey> {
+        gate_owner.or_else(|| extract_nip_oa_owner(pubkey_bytes, auth_tag_header))
     }
 
     /// Persist a cryptographically verified NIP-OA agent→owner relationship.
@@ -271,6 +299,76 @@ pub mod relay_members {
             let agent_pubkey = agent_keys.public_key();
 
             let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
+
+            assert_eq!(result, None);
+        }
+
+        /// Membership granted via the owner → that owner is kept as-is, without
+        /// re-verifying the tag.
+        #[test]
+        fn resolve_prefers_the_gate_owner() {
+            let gate_owner_keys = Keys::generate();
+            let other_owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let agent_pubkey = agent_keys.public_key();
+
+            let tag_json = compute_auth_tag(&other_owner_keys, &agent_pubkey, "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = resolve_nip_oa_owner(
+                Some(gate_owner_keys.public_key()),
+                &agent_pubkey.to_bytes(),
+                Some(&tag_json),
+            );
+
+            assert_eq!(result, Some(gate_owner_keys.public_key()));
+        }
+
+        /// The regression this guards: a caller the gate admitted on its own —
+        /// a direct relay member on a closed relay — still has its verified
+        /// owner resolved, instead of the attestation being dropped.
+        #[test]
+        fn resolve_recovers_owner_for_a_direct_member() {
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let agent_pubkey = agent_keys.public_key();
+
+            let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = resolve_nip_oa_owner(None, &agent_pubkey.to_bytes(), Some(&tag_json));
+
+            assert_eq!(result, Some(owner_keys.public_key()));
+        }
+
+        /// A direct member that presents no tag stays ownerless — membership
+        /// alone never invents an owner.
+        #[test]
+        fn resolve_without_a_tag_returns_none() {
+            let agent_keys = Keys::generate();
+
+            let result = resolve_nip_oa_owner(None, &agent_keys.public_key().to_bytes(), None);
+
+            assert_eq!(result, None);
+        }
+
+        /// A tag that attests a *different* agent is not evidence about this
+        /// one: `verify_auth_tag` binds the attestation to the signing pubkey,
+        /// so an intercepted tag can't be replayed onto another agent.
+        #[test]
+        fn resolve_rejects_a_tag_minted_for_another_agent() {
+            let owner_keys = Keys::generate();
+            let attested_agent_keys = Keys::generate();
+            let impostor_keys = Keys::generate();
+
+            let tag_json = compute_auth_tag(&owner_keys, &attested_agent_keys.public_key(), "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = resolve_nip_oa_owner(
+                None,
+                &impostor_keys.public_key().to_bytes(),
+                Some(&tag_json),
+            );
 
             assert_eq!(result, None);
         }
