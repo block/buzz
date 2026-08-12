@@ -35,10 +35,11 @@ use crate::acp::{
     ModelSwitchMethod, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::delivery::{self, DeliveryState, NativeDelivery};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup, ThreadTags,
+    PromptProfile, PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -603,6 +604,8 @@ pub struct PromptContext {
     /// on `session/new`. Never part of the prompt.
     pub session_title: Option<String>,
     pub team_instructions: Option<String>,
+    /// Durable final-response outbox, present only after explicit opt-in.
+    pub native_delivery: Option<Arc<NativeDelivery>>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
@@ -1729,6 +1732,81 @@ fn send_prompt_result(
     });
 }
 
+/// Persist, publish, and reconcile the ordinary ACP text for a completed
+/// channel turn. Delivery state never changes the model outcome: pending
+/// records are retried from the outbox without rerunning the model.
+async fn deliver_completed_turn(
+    agent: &mut OwnedAgent,
+    batch: Option<&FlushBatch>,
+    profile_lookup: Option<&PromptProfileLookup>,
+    ctx: &PromptContext,
+) {
+    let Some(delivery) = ctx.native_delivery.as_ref() else {
+        return;
+    };
+    let Some(batch) = batch else {
+        // Heartbeats have no immutable inbound route and are never auto-published.
+        let _ = agent.acp.take_turn_output();
+        return;
+    };
+    let casualty_id = batch
+        .events
+        .last()
+        .map(|event| event.event.id.to_hex())
+        .unwrap_or_else(|| "<empty-batch>".to_string());
+    let Some(output) = agent.acp.take_turn_output() else {
+        tracing::error!(
+            channel_id = %batch.channel_id,
+            event_id = casualty_id,
+            "native delivery has no ACP text for completed turn"
+        );
+        if let Some(casualty) = batch.events.last() {
+            post_failure_notice(
+                &ctx.rest_client,
+                batch.channel_id,
+                &casualty.event,
+                "⚠️ I completed the request but produced no deliverable response. Please re-send if it is still needed.",
+            )
+            .await;
+        }
+        return;
+    };
+
+    let key = delivery::delivery_key(&ctx.agent_keys.public_key(), batch);
+    let keys = ctx.agent_keys.clone();
+    match delivery
+        .deliver(
+            &key,
+            || delivery::build_reply_event(&keys, batch, &output, profile_lookup),
+            &ctx.rest_client,
+        )
+        .await
+    {
+        Ok(DeliveryState::Confirmed { event_id }) => {
+            tracing::info!(delivery_key = key, %event_id, request_event_id = casualty_id, "native delivery confirmed by relay read-back");
+        }
+        Ok(DeliveryState::Pending { event_id }) => {
+            tracing::warn!(delivery_key = key, %event_id, request_event_id = casualty_id, "native delivery remains pending for recovery");
+        }
+        Err(error) => {
+            tracing::error!(
+                delivery_key = key,
+                event_id = casualty_id,
+                "native delivery could not stage the completed response: {error}"
+            );
+            if let Some(casualty) = batch.events.last() {
+                post_failure_notice(
+                    &ctx.rest_client,
+                    batch.channel_id,
+                    &casualty.event,
+                    "⚠️ I completed the request but could not stage its response for delivery. The request will not be rerun automatically; please re-send if it is still needed.",
+                )
+                .await;
+            }
+        }
+    }
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -2284,6 +2362,7 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    let mut delivery_profile_lookup: Option<PromptProfileLookup> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -2345,6 +2424,7 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        delivery_profile_lookup = profile_lookup.clone();
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -2609,6 +2689,13 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        deliver_completed_turn(
+                            &mut agent,
+                            batch.as_ref(),
+                            delivery_profile_lookup.as_ref(),
+                            &ctx,
+                        )
+                        .await;
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2649,6 +2736,14 @@ pub async fn run_prompt_task(
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
+
+            deliver_completed_turn(
+                &mut agent,
+                batch.as_ref(),
+                delivery_profile_lookup.as_ref(),
+                &ctx,
+            )
+            .await;
 
             let should_rotate = matches!(
                 stop_reason,
@@ -4540,47 +4635,62 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
-/// Best-effort: post a visible failure notice (kind:9) to a channel after a
-/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
-/// triggering event was threaded. Errors are logged and swallowed — the
-/// notice must never take down the main loop.
+/// Best-effort: build a visible failure notice (kind:9) after dead-lettering.
+/// It retains the thread root and replies to the exact discarded event.
+/// Errors are logged and swallowed; a notice failure never stops the loop.
+/// The author is mentioned so the notice is attributable and actionable.
+fn build_failure_notice_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    casualty: &nostr::Event,
+    content: &str,
+) -> Result<nostr::Event, String> {
+    let thread_tags = crate::queue::parse_thread_tags(casualty);
+    let root_id = thread_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|root| nostr::EventId::from_hex(root).ok())
+        .unwrap_or(casualty.id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: casualty.id,
+    };
+    let sender = casualty.pubkey.to_hex();
+    buzz_sdk::build_message(
+        channel_id,
+        content,
+        Some(&thread_ref),
+        &[sender.as_str()],
+        false,
+        &[],
+    )
+    .map_err(|error| error.to_string())?
+    .sign_with_keys(keys)
+    .map_err(|error| error.to_string())
+}
+
 pub(crate) async fn post_failure_notice(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
-    thread_tags: &ThreadTags,
+    casualty: &nostr::Event,
     content: &str,
 ) {
-    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
-        let root_id = nostr::EventId::from_hex(root).ok()?;
-        let parent_id = thread_tags
-            .parent_event_id
-            .as_deref()
-            .and_then(|p| nostr::EventId::from_hex(p).ok())
-            .unwrap_or(root_id);
-        Some(buzz_sdk::ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: parent_id,
-        })
-    });
-    let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
+    let casualty_id = casualty.id.to_hex();
+    let event = match build_failure_notice_event(&rest.keys, channel_id, casualty, content) {
+        Ok(event) => event,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, event_id = casualty_id, "failure notice: build/sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Err(e)) => {
+            tracing::warn!(channel = %channel_id, event_id = casualty_id, "failure notice failed: {e}")
+        }
+        Err(_) => {
+            tracing::warn!(channel = %channel_id, event_id = casualty_id, "failure notice timed out")
+        }
     }
 }
 
@@ -4757,6 +4867,43 @@ mod tests {
             &session_new,
             PermissionMode::Auto.as_wire_str()
         ));
+    }
+
+    #[test]
+    fn failure_notice_replies_to_and_mentions_the_exact_casualty() {
+        let agent_keys = Keys::generate();
+        let sender_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .tags([])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign root");
+        let casualty = EventBuilder::new(Kind::Custom(9), "request")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["e", &root.id.to_hex(), "", "root"]).expect("root tag"),
+            ])
+            .sign_with_keys(&sender_keys)
+            .expect("sign casualty");
+
+        let notice =
+            build_failure_notice_event(&agent_keys, channel_id, &casualty, "could not deliver")
+                .expect("build failure notice");
+        let tags: Vec<Vec<String>> = notice
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+
+        assert!(tags.iter().any(|tag| {
+            tag.len() >= 4 && tag[0] == "e" && tag[1] == root.id.to_hex() && tag[3] == "root"
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.len() >= 4 && tag[0] == "e" && tag[1] == casualty.id.to_hex() && tag[3] == "reply"
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.len() >= 2 && tag[0] == "p" && tag[1] == sender_keys.public_key().to_hex()
+        }));
     }
 
     #[test]
@@ -7927,6 +8074,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             system_prompt: None,
             session_title: None,
             team_instructions: None,
+            native_delivery: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),

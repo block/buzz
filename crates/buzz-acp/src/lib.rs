@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod delivery;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -1943,7 +1944,6 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
-
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
     // When the desktop determines an agent is not ready (missing credentials,
@@ -1955,6 +1955,13 @@ async fn tokio_main() -> Result<()> {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
+
+    let native_delivery = config
+        .delivery_outbox_dir
+        .as_ref()
+        .map(|path| delivery::NativeDelivery::open(path).map(Arc::new))
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("native delivery outbox error: {error}"))?;
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
@@ -2016,6 +2023,16 @@ async fn tokio_main() -> Result<()> {
     }
 
     tracing::info!("connected to relay at {}", config.relay_url);
+
+    if let Some(delivery) = native_delivery.as_ref() {
+        let report = delivery.recover(&relay.rest_client()).await;
+        tracing::info!(
+            confirmed = report.confirmed,
+            pending = report.pending,
+            quarantined = report.quarantined,
+            "native delivery startup recovery complete"
+        );
+    }
 
     relay
         .subscribe_membership_notifications()
@@ -2200,6 +2217,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
+        native_delivery: native_delivery.clone(),
         base_prompt: if config.no_base_prompt {
             None
         } else if let Some(content) = base_prompt_content {
@@ -2221,6 +2239,27 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+    });
+
+    let native_delivery_recovery_task = native_delivery.as_ref().map(|delivery| {
+        let delivery = Arc::clone(delivery);
+        let rest = relay.rest_client();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let report = delivery.recover(&rest).await;
+                if report.confirmed > 0 || report.pending > 0 || report.quarantined > 0 {
+                    tracing::info!(
+                        confirmed = report.confirmed,
+                        pending = report.pending,
+                        quarantined = report.quarantined,
+                        "native delivery periodic recovery complete"
+                    );
+                }
+            }
+        })
     });
 
     if !config.memory_enabled {
@@ -3526,6 +3565,10 @@ async fn tokio_main() -> Result<()> {
         handle.abort();
     }
 
+    if let Some(handle) = native_delivery_recovery_task {
+        handle.abort();
+    }
+
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
@@ -3852,15 +3895,16 @@ fn spawn_failure_notice(
     content: String,
 ) {
     if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
+        let Some(casualty) = batch.events.last().map(|be| be.event.clone()) else {
+            tracing::warn!(channel_id = %batch.channel_id, "cannot post failure notice for empty batch");
+            return;
+        };
         let rest = rest.clone();
         let channel_id = batch.channel_id;
+        let casualty_id = casualty.id.to_hex();
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            tracing::warn!(channel_id = %channel_id, event_id = casualty_id, "posting attributed failure notice");
+            pool::post_failure_notice(&rest, channel_id, &casualty, &content).await;
         });
     }
 }
@@ -3921,6 +3965,11 @@ fn handle_prompt_result(
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
     if let Some(batch) = result.batch.take() {
+        let request_event_id = batch
+            .events
+            .last()
+            .map(|event| event.event.id.to_hex())
+            .unwrap_or_else(|| "<empty-batch>".to_string());
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
@@ -3952,6 +4001,7 @@ fn handle_prompt_result(
             ) {
                 tracing::error!(
                     channel_id = %batch.channel_id,
+                    event_id = request_event_id,
                     events = batch.events.len(),
                     "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
                     batch.events.len(),
@@ -3970,6 +4020,7 @@ fn handle_prompt_result(
             ) {
                 tracing::warn!(
                     channel_id = %batch.channel_id,
+                    event_id = request_event_id,
                     events = batch.events.len(),
                     "hard-cap timeout with recent activity — requeueing for retry"
                 );
@@ -3990,6 +4041,7 @@ fn handle_prompt_result(
                 // the user to re-authenticate the CLI.
                 tracing::warn!(
                     channel_id = %batch.channel_id,
+                    event_id = request_event_id,
                     events = batch.events.len(),
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
@@ -4016,6 +4068,7 @@ fn handle_prompt_result(
         } else {
             tracing::debug!(
                 channel_id = %batch.channel_id,
+                event_id = request_event_id,
                 events = batch.events.len(),
                 "dropping failed batch for removed channel"
             );
@@ -6768,6 +6821,8 @@ mod build_mcp_servers_tests {
             heartbeat_prompt: None,
             system_prompt: None,
             team_instructions: None,
+            native_delivery: false,
+            delivery_outbox_dir: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
             dedup_mode: config::DedupMode::Queue,
@@ -6992,6 +7047,8 @@ mod error_outcome_emission_tests {
             heartbeat_prompt: None,
             system_prompt: None,
             team_instructions: None,
+            native_delivery: false,
+            delivery_outbox_dir: None,
             initial_message: None,
             subscribe_mode: config::SubscribeMode::All,
             dedup_mode: config::DedupMode::Queue,

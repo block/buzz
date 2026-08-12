@@ -428,6 +428,11 @@ impl EventQueue {
     /// `mark_complete` separately.
     pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
+        let event_id = batch
+            .events
+            .last()
+            .map(|event| event.event.id.to_hex())
+            .unwrap_or_else(|| "<empty-batch>".to_string());
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
             *count += 1;
@@ -437,6 +442,7 @@ impl EventQueue {
         if attempt > MAX_RETRIES {
             tracing::error!(
                 channel_id = %channel_id,
+                event_id,
                 attempt,
                 events = batch.events.len(),
                 "dead-lettering batch after {} retries — discarding {} events",
@@ -465,6 +471,7 @@ impl EventQueue {
 
         tracing::warn!(
             channel_id = %channel_id,
+            event_id,
             attempt,
             max = MAX_RETRIES,
             delay_secs = delay.as_secs_f64(),
@@ -1232,7 +1239,7 @@ fn turn_is_human_facing(
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
 /// (intentional for agent coordination).
-fn resolve_reply_anchor(
+pub(crate) fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     triggering_event_id: &str,

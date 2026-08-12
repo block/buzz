@@ -214,6 +214,8 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Concatenated `agent_message_chunk` text for the current ACP turn.
+    turn_output: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +565,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_output: String::new(),
         })
     }
 
@@ -781,6 +784,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.begin_turn_output_capture();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -899,6 +903,18 @@ impl AcpClient {
     pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
         self.goose_usage.seed_zero_baseline(session_id);
         self.standard_usage.seed_zero_baseline(session_id);
+    }
+
+    fn begin_turn_output_capture(&mut self) {
+        self.turn_output.clear();
+    }
+
+    /// Consume the ordinary ACP text emitted by the most recent turn.
+    /// Whitespace-only output is treated as absent.
+    pub fn take_turn_output(&mut self) -> Option<String> {
+        let output = std::mem::take(&mut self.turn_output);
+        let output = output.trim();
+        (!output.is_empty()).then(|| output.to_string())
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1755,6 +1771,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.turn_output.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3717,9 +3734,52 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        #[cfg(unix)]
+        let (command, args): (&str, Vec<String>) = ("cat", Vec::new());
+        #[cfg(windows)]
+        let (command, args): (&str, Vec<String>) = (
+            "cmd.exe",
+            vec!["/Q".into(), "/D".into(), "/C".into(), "more".into()],
+        );
+        AcpClient::spawn(command, &args, &[], false)
             .await
-            .expect("spawn cat as inert client")
+            .expect("spawn inert stdio client")
+    }
+
+    fn agent_message_chunk(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "text": text },
+                },
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn turn_output_capture_joins_agent_message_chunks_and_is_take_once() {
+        let mut client = spawn_inert_client().await;
+        client.begin_turn_output_capture();
+        let _ = client.handle_session_update(&agent_message_chunk("first "));
+        let _ = client.handle_session_update(&agent_message_chunk("second"));
+
+        assert_eq!(client.take_turn_output().as_deref(), Some("first second"));
+        assert_eq!(client.take_turn_output(), None);
+    }
+
+    #[tokio::test]
+    async fn beginning_a_new_turn_discards_stale_or_whitespace_only_output() {
+        let mut client = spawn_inert_client().await;
+        client.begin_turn_output_capture();
+        let _ = client.handle_session_update(&agent_message_chunk("stale"));
+        client.begin_turn_output_capture();
+        let _ = client.handle_session_update(&agent_message_chunk("  \n"));
+
+        assert_eq!(client.take_turn_output(), None);
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
