@@ -875,20 +875,26 @@ class ComposeBar extends HookConsumerWidget {
           focusNode.requestFocus();
         }
       });
-      if (defaultTargetPlatform == TargetPlatform.android &&
-          appView.viewInsets.bottom == 0) {
-        androidImeTransitionStarted.value = false;
+      if (defaultTargetPlatform == TargetPlatform.android) {
         androidImeFallbackTimer.value?.cancel();
-        // Hardware keyboards do not produce bottom-inset metrics. Keep that
-        // path usable without making the onscreen composer outrun the IME.
-        androidImeFallbackTimer.value = Timer(
-          const Duration(milliseconds: 250),
-          () {
-            if (context.mounted && isComposerExpanded.value) {
-              androidImeTransitionStarted.value = true;
-            }
-          },
-        );
+        if (appView.viewInsets.bottom > 0) {
+          // The observer starts with the current inset state, so it will not
+          // emit a hidden-to-shown transition when this composer is mounted
+          // while another field already has the IME open.
+          androidImeTransitionStarted.value = true;
+        } else {
+          androidImeTransitionStarted.value = false;
+          // Hardware keyboards do not produce bottom-inset metrics. Keep that
+          // path usable without making the onscreen composer outrun the IME.
+          androidImeFallbackTimer.value = Timer(
+            const Duration(milliseconds: 250),
+            () {
+              if (context.mounted && isComposerExpanded.value) {
+                androidImeTransitionStarted.value = true;
+              }
+            },
+          );
+        }
       }
     }
 

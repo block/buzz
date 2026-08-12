@@ -599,6 +599,42 @@ void main() {
       }
     });
 
+    testWidgets('expands Android composer when the IME is already visible', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(() {
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      });
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pumpAndSettle();
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('returns to the compact capsule when the keyboard drops', (
       tester,
     ) async {
