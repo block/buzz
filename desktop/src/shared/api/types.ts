@@ -340,16 +340,14 @@ export type ManagedAgent = {
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
   /**
-   * `true` when the linked persona has been edited since this agent was
-   * created — the running agent uses the older pinned snapshot. Surface a
-   * "out of date" marker and prompt the user to delete + respawn to update.
-   * Always `false` for non-persona agents and for orphaned agents.
+   * `true` when the linked persona was edited after this agent was created; the
+   * running agent uses the older pinned snapshot. Surface an "out of date"
+   * marker and prompt delete + respawn. `false` for non-persona/orphaned agents.
    */
   personaOutOfDate: boolean;
   /**
-   * `true` when the agent's linked persona no longer exists. Distinct from
-   * out-of-date: there is no current persona to respawn into, so do not prompt
-   * a respawn — the pinned snapshot is all the config that remains.
+   * `true` when the agent's linked persona no longer exists. Unlike out-of-date
+   * there is no persona to respawn into; the pinned snapshot is all that remains.
    */
   personaOrphaned: boolean;
   /**
@@ -675,6 +673,8 @@ export type RuntimeConfigSurface = {
   advanced: ConfigField[];
   extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
+  /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
+  claudeConfigDirCustom?: boolean;
 };
 
 export type UpdateManagedAgentInput = {

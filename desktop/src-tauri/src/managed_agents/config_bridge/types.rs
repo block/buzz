@@ -175,6 +175,13 @@ pub struct RuntimeConfigSurface {
     pub advanced: Vec<ConfigField>,
     pub extensions: Vec<ExtensionEntry>,
     pub sources: ConfigSourceReport,
+    /// #3493: `true` when the panel is reading from a user-set `CLAUDE_CONFIG_DIR`
+    /// rather than the default `~/.claude/`. Used to show the Keychain caveat
+    /// note in the panel: a custom config dir means a fresh Keychain namespace
+    /// (hash-suffixed), so the agent will be logged out unless the user also
+    /// manages `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
+    #[serde(default)]
+    pub claude_config_dir_custom: bool,
 }
 
 /// Raw config values extracted from a runtime's config file.

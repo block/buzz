@@ -182,6 +182,7 @@ fn linked_stale_record_model_never_outranks_persona_model() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -206,7 +207,14 @@ fn linked_blank_definition_model_falls_through_to_global_default() {
         ..Default::default()
     };
 
-    let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+    let surface = resolve_config_surface(
+        record,
+        &personas,
+        Some(goose_runtime()),
+        None,
+        &global,
+        None,
+    );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("global-model"));
@@ -229,6 +237,7 @@ fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -256,6 +265,7 @@ fn pending_pick_keeps_explicit_x_and_does_not_surface_live_y() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -284,6 +294,7 @@ fn genuine_explicit_live_switch_renders_y_over_x_buzz_explicit_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -319,6 +330,7 @@ fn genuine_explicit_live_switch_to_same_model_yields_clean_field() {
             Some(goose_runtime()),
             Some(&cache),
             &Default::default(),
+            None,
         )
     });
     let model = surface.normalized.model.expect("model resolved");
@@ -347,6 +359,7 @@ fn persona_linked_live_switch_keeps_persona_default_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -382,6 +395,7 @@ fn global_default_live_switch_renders_global_model_as_secondary_global_default()
         Some(goose_runtime()),
         Some(&cache),
         &global,
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
