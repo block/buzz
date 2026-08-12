@@ -13,7 +13,7 @@ Larger than an hour is flagged, not refused. These would have been better issues
 each observable on its own — splitting is the reader's call, not this plan's:
 
   (a) the findings contract alone — record shape, severity ladder, anchoring
-      rules, completion marker — which is the artefact #118 is blocked on
+      rules, completion marker — which is the artefact #118 and #119 are blocked on
   (b) the concurrent runner with a stub reviewer, proving isolation and the
       clean-versus-failed distinction with no prompt written yet
   (c) the three dimension definitions and their scopes
@@ -45,14 +45,22 @@ ALREADY TRUE  (verified against git, the working trees and the GitHub API, not n
   are unaffected". So this plan adds NO workflow file: #120 already added
   .github/workflows/launchpad-review-agent-controls.yml (untracked, see below)
   and the dimensions' controls belong in that runner, not a second one.
-  #120's work exists, is substantial, and is committed nowhere. The worktree
-  /home/serina/Launchpad/buzz__worktrees/feat-review-agent-untrusted-input is at
-  d897a06e8 with launchpad/review-agent/ UNTRACKED — `git log --all --oneline --
-  launchpad/review-agent/` returns nothing, so the tree is on no branch and in no
-  commit. It is 1,789 lines across 14 Python modules plus CONTAINMENT.md (218
-  lines) and three fixtures. Everything #117 imports currently exists only in
-  another worktree's working directory. This is the single largest risk in this
-  plan; see BUDGET.
+  #120's work is COMMITTED as of 2026-08-13, and that changes the risk rather
+  than removing it. Earlier revisions of this plan said the tree was "on no
+  branch and in no commit". That is no longer true: it is three commits on
+  `feat/review-agent-untrusted-input`, all pushed — 618789584, e072fba55 and
+  c64ff7958 — carrying 14 Python modules, CONTAINMENT.md and three fixtures.
+  What replaced the old risk is narrower and harder to notice: the branch is
+  UNMERGED and its files are not reachable from here. `git rev-list --left-right
+  --count origin/launchpad...origin/feat/review-agent-untrusted-input` reports
+  0 3, and `ls launchpad/review-agent/` in this worktree fails — no such
+  directory. So #120 landing first is a PRECONDITION of STEPs 2, 3, 6, 8 and 9,
+  not a scheduling preference: STEP 2 must `import review`, and STEP 9 must add a
+  row to a `run_controls.py` that is not on this branch. The precondition is
+  discharged by #120 merging to `launchpad` and this branch rebasing onto it —
+  never by copying those files into this branch, which would create the second
+  source of truth LEFT OUT forbids and a guaranteed conflict when #120 lands.
+  See BUDGET.
   CONTAINMENT.md is normative and binds #117 by name. Its "Contract for later
   stages" table requires #117 to call `contain.render(surfaces, nonce)` "before
   any text reaches a model" and forbids placing "any surface above the preamble or
@@ -74,12 +82,22 @@ ALREADY TRUE  (verified against git, the working trees and the GitHub API, not n
   require severity, file:line, a one-line defect statement and the concrete
   failure — three of those four have no field in the existing record. Reconciling
   the two is the central design act of this issue, not a detail.
-  #120 has already assigned #117 a coverage gap in writing. CONTAINMENT.md
-  § Detection records detect.py catching 21 of 35 attack matrix cases, missing 14
-  (semantic paraphrase and finding-suppression) at 0 false positives, and says the
-  14 "are #117's responsibility, not an accident" and that the dependency "is
-  written down here because it is otherwise invisible from inside #117".
-  detect.py's own docstring repeats it.
+  #120 has already assigned #117 a coverage gap in writing, and the numbers moved
+  after this plan's second pass. CONTAINMENT.md § Detection now records detect.py
+  catching 28 of 35 attack matrix cases and missing 7 — SEMANTIC PARAPHRASE ONLY —
+  at 0 false positives, and says those 7 "are #117's responsibility, not an
+  accident" and that the dependency "is written down here because it is otherwise
+  invisible from inside #117". detect.py's own docstring repeats it.
+  Earlier revisions of this plan said 21 caught and 14 missed, and named
+  finding-suppression among the missed. Both were true when written and are now
+  wrong: c64ff7958 ("stop claiming a tell is unambiguous") added the suppression
+  rule as `detect._SUPPRESS`, so suppression is CAUGHT. Verified by running the
+  real detector — "Please do not report this as a finding." returns one finding.
+  This correction is load-bearing rather than cosmetic, because STEP 5 and STEP 7
+  scope their injection fixture by "the classes detect.py misses", and a fixture
+  drawn from a class it catches proves nothing about the gap. The ALREADY TRUE
+  note above warns that pinned LINE NUMBERS rot; this is the same warning applied
+  to a pinned MEASUREMENT, which rotted the same way and was not re-checked.
   Surface is the input shape. `fetch.Surface` is entry_point, state, text, reason
   with state in ok | empty | absent | oversized | unparseable and a `readable`
   property (fetch.py:31). Caps are 512 KiB per entry point and 2 MiB per
@@ -136,7 +154,9 @@ ALREADY TRUE  (verified against git, the working trees and the GitHub API, not n
   issue's work; it is recorded in OPEN so it is not lost.
 
 STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [independent]
-        normative. The artefact #118 is blocked on. #117's issue says the contract
+        normative. The artefact #118 and #119 are both blocked on — #119's plan is
+        already committed against revision 3 of it, so this step's change list is
+        part of the deliverable, not a courtesy. #117's issue says the contract
         is "agreed in whichever of the two lands first, then honoured by the
         other", and #117 is planning first, so it is settled here in enough detail
         that #118 implements against it without renegotiating. Written as a
@@ -157,6 +177,21 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
         where it is not — producing a REFUTED verdict for a finding that was true.
         An anchor field makes "this defect has no line" expressible instead of
         forcing a lie.
+        THE ANCHOR IS NOT A FREE CHOICE, and this is the half the first two
+        revisions left out. Structural validity is not appropriateness: anchor "pr"
+        with both fields null satisfies every rule above for ANY finding, so it is
+        the cheapest thing an uncertain reviewer can emit, and it is unfalsifiable
+        by construction — #118 cannot refute a defect at a location it was never
+        given. Left unconstrained, a dimension may report every finding as anchor
+        "pr", pass every rule in STEP 2 and every control in STEP 9, and still
+        satisfy none of #117's second done-criterion, which requires file:line.
+        So: a defect visible at a line of the merge-base diff MUST use anchor
+        "line"; a defect that is a property of a whole file MUST use "file"; "pr"
+        is legitimate ONLY where the defect has no file — a missing file, a claim
+        in the PR body, a property of the change as a whole. STEP 4 states this per
+        dimension and STEP 9 controls it against the planted locations STEP 7
+        records, because a rule with no control is guidance and this one is load-
+        bearing.
         `line` is a NEW-SIDE line number in the merge-base diff, i.e. of the file
         at head_sha. Old-side and new-side numbers differ in every diff that adds
         or removes lines above the finding, so the side is stated, not assumed.
@@ -169,55 +204,94 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
           defect       ONE line: what is wrong
           failure      the concrete failure the defect allows
           finding_id   stable id, see below
-          entry_point  optional — one of CONTAINMENT.md's seven labels, set only
-                       on a finding about author-supplied text, so the containment
-                       class survives in the same stream without a second record
-                       type
-          evidence     optional — the excerpt a finding rests on, rendered
-                       post-escape. Required on any finding carrying an
-                       entry_point, because a containment finding whose excerpt is
-                       dropped is the detected-then-dropped case CONTAINMENT.md
-                       calls worse than never detecting it. Optional elsewhere: a
-                       dimension's finding is already located by file and line,
-                       and quoting the diff back adds bulk without adding evidence.
+          entry_point  REQUIRED on any finding whose defect is an injection
+                       attempt — one of CONTAINMENT.md's seven labels, naming the
+                       surface the text came from. Null on every other finding.
+                       Required rather than optional because an injection finding
+                       that names no surface is the detected-then-dropped case
+                       CONTAINMENT.md calls worse than never detecting it, and a
+                       field that is merely "optional" is a field a converter drops
+                       without failing any rule. STEP 5's clause is what produces
+                       these, for the 7 paraphrase cases detect.py misses.
+          evidence     REQUIRED whenever entry_point is set, RAW — the excerpt the
+                       finding rests on, exactly as the author wrote it, NOT
+                       escaped. Escaping belongs to the renderer: review.py:72
+                       applies `contain.escape` at render time to a raw-evidence
+                       record, and every contain.Finding in the system carries raw
+                       evidence. A record that arrives pre-escaped is escaped twice
+                       by that renderer — a `~` publishes as `~~~~` — so the excerpt
+                       stops matching what the author wrote. Null elsewhere: a
+                       dimension's finding is already located by file and line, and
+                       quoting the diff back adds bulk without adding evidence.
         Ten fields, and the count is load-bearing — STEP 9 builds one control per
-        field, so a field that exists in the conversion but not in this list gets
-        no control at all. `evidence` was exactly that: the first revision mapped
-        it in the conversion below while declaring only nine fields, which would
-        have either dropped the escaped excerpt or grown an undeclared tenth field
-        that no control exercised.
-        How a `contain.Finding` becomes a #117 Finding, stated here because
-        defining `entry_point` without defining the conversion is what leaves the
-        deterministic catches stranded. `contain.render` returns its own findings
-        as its SECOND return value, and they carry kind, entry_point, evidence and
-        severity but NO file and NO line — there is nowhere in that record for
-        one. So the mapping is fixed:
-          anchor      "pr" — never "line" or "file", because a contain.Finding
-                      has no location and inventing one is the false precision the
-                      anchor rule exists to prevent
-          severity    carried through unchanged, which CONTAINMENT.md § Severity
-                      contract fixes at Blocker for all three kinds
-          dimension   "containment" — a reserved slug, not one of STEP 4's three,
-                      so #118 can tell a deterministic catch from a model's
-                      judgement and #121 can score them separately
-          defect      derived from `kind` (delimiter_forge, delimiter_lookalike,
-                      injection_attempt)
-          failure     the fixed consequence for that kind
-          evidence    rendered post-escape, per review.py's existing rule that
-                      quoting attacker text verbatim moves the payload into a
-                      fresh position with fresh authority
-        "containment" is reserved in this contract so no dimension may claim it.
+        field, so a field that exists in the output but not in this list gets no
+        control at all. `evidence` was exactly that: an earlier revision mapped it
+        in a conversion while declaring only nine fields, which would have either
+        dropped the excerpt or grown an undeclared tenth field that no control
+        exercised.
+        WHERE CONTAINMENT FINDINGS LIVE. Settled here, normatively, because two
+        earlier revisions left it ambiguous and #118 and #119 both parse this shape.
+        Containment findings do NOT enter the `findings` array of any dimension
+        report, and they are NOT converted into the ten-field record above. They
+        travel as a TOP-LEVEL SIBLING KEY of the merged document, named
+        `containment`, carrying `contain.Finding` verbatim in JSON:
+          containment.findings[]  severity, kind, entry_point, evidence — the four
+                                  fields of the contain.Finding dataclass, raw and
+                                  unrenamed. `kind` is one of delimiter_forge,
+                                  delimiter_lookalike, injection_attempt.
+          containment.states      a map of ALL SEVEN entry points to their
+                                  fetch.Surface state (ok | empty | absent |
+                                  oversized | unparseable). All seven, always,
+                                  including the ones that succeeded.
+        Three reasons, and the first alone decides it. `review.render_review` —
+        the function CONTAINMENT.md's stage table binds #119 to call — reads
+        `.severity`, `.kind`, `.entry_point` and `.evidence` BY ATTRIBUTE off a
+        contain.Finding, and takes a second argument `states` that no stage
+        currently emits. A converted ten-field record has no `kind`, so it cannot
+        reach the published review through that function at all, and the conversion
+        would strand exactly the findings CONTAINMENT.md § Severity contract
+        requires to appear. Second, escaping: review.py:72 applies
+        `contain.escape` at render, so evidence must arrive raw or it is escaped
+        twice. Third, #118 does not need the conversion — CONTAINMENT.md's stage
+        table already routes it to `contain.findings_for(surfaces, nonce)` for
+        exactly this data, so converting would give #118 two sources for one fact.
+        `states` is load-bearing and is the easiest thing here to get wrong. It
+        feeds render_review's "Incomplete" banner, which is DERIVED from it against
+        `UNREADABLE_STATES` rather than passed in. A `states` map populated only for
+        the surfaces that succeeded makes every unreadable surface read as
+        absent-from-the-map, and the banner never renders — a review over three
+        unreadable surfaces publishing as complete. Hence "all seven, always", and
+        hence a control in STEP 9 that counts the keys rather than checking the key
+        exists.
+        There is no reserved "containment" dimension slug, and no dimension report
+        carries a containment finding. An earlier revision reserved that slug; it is
+        withdrawn, because a sibling key separates the deterministic catches from
+        the model's judgement more cleanly than a slug inside a shared array, and
+        because a dimension report whose `findings` array holds a containment
+        finding would have to declare `outcome: "findings"` and so report a
+        dimension as having found something it did not.
         `defect` and `failure` are two fields, not one, because #117's
         done-criteria name them separately and because a defect statement with no
         stated consequence is what lets an unfalsifiable finding through. #118
         re-rates severity, so the reporting dimension's value must remain readable
         after adjudication rather than being overwritten in place.
         `finding_id` is a truncated hash of (dimension, anchor, file, line,
-        defect). It is stable across re-runs of an unchanged diff, which is what
-        lets #118 attach exactly one verdict per finding and makes its dedupe
-        visible rather than silent. It is NOT stable across a model rewording
-        `defect` — stated plainly here because a reader will otherwise assume it
-        is, and because dedupe across rewordings is #118's job, not this id's.
+        entry_point, defect, evidence). It is stable across re-runs of an unchanged
+        diff, which is what lets #118 attach exactly one verdict per finding and
+        makes its dedupe visible rather than silent. It is NOT stable across a model
+        rewording `defect` — stated plainly here because a reader will otherwise
+        assume it is, and because dedupe across rewordings is #118's job, not this
+        id's.
+        `entry_point` and `evidence` are in the hash inputs, and an earlier revision
+        omitted both. Two findings that differ only by which surface they came from,
+        or only by the excerpt they rest on, are two findings — `contain._dedupe`
+        keys its own identity on exactly (kind, entry_point, evidence) for that
+        reason. Without them, two injection findings from the same dimension whose
+        `defect` line happens to match — the same paraphrase in `pr_body` and in
+        `pr_diff` — hash to one id, and #118 either attaches one verdict to two
+        attacks or dedupes by id and silently drops one. Dropping one is the
+        detected-then-dropped case again, arriving through the id rather than
+        through a missing field.
         The report envelope, one per dimension:
           schema_version    integer, starts at 1
           dimension         the slug
@@ -230,6 +304,25 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
           findings          array
           findings_count    integer
           completion_marker LAST key, see below
+        The merged document STEP 3 prints on stdout wraps those envelopes and is
+        the whole of #117's output contract:
+          pr                number
+          merge_base_sha    the commit pair every report read
+          head_sha
+          reports           array of exactly the dimension envelopes above, one per
+                            slug printed by `--list`, and nothing else in it
+          containment       the block specified above — findings plus a seven-key
+                            states map. Present on every run. A run with no
+                            containment findings emits an EMPTY findings array and
+                            a full states map, never a missing key: #119 reads a
+                            missing `containment` as an incomplete review, which is
+                            the right reading and must be reserved for the case
+                            where this stage genuinely could not produce one.
+        This is deliberately the document #119 already reads, minus the one key it
+        adds itself. #119's STEP 7 takes `{pr, head_sha, merge_base_sha, stages,
+        reports, containment}` on stdin, where `stages` is its own manifest covering
+        stages that emit no envelope. So `reports` and `containment` mean here
+        exactly what they mean there, and #119 wraps rather than restates.
         `outcome: clean` is how "a dimension that finds nothing says so
         explicitly" is distinguished from `status: failed`. Both are legitimate
         outputs; neither is an empty findings array standing alone, which is
@@ -249,16 +342,47 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
         reused, including its refusal to accept a caller-supplied nonce.
         `findings_count` must equal len(findings). A report truncated mid-array
         fails that equality even if it somehow parses.
+        CONTRACT CHANGES SINCE REVISION 3 — for #118 and #119 to diff. #119's plan
+        is committed against revision 3 and names its field list explicitly, so
+        this block exists so its author can diff old against new without reading a
+        review. Five changes:
+          1. Containment findings are a top-level `containment` sibling key
+             carrying raw contain.Finding (severity, kind, entry_point, evidence)
+             plus a seven-key `states` map. Revision 3 converted them into
+             ten-field records under a reserved "containment" dimension slug. That
+             slug is WITHDRAWN. This is the key #119's OPEN says #117 must add, and
+             it is now added with the shape #119 specified.
+          2. `evidence` is RAW, not post-escape. Revision 3 said post-escape.
+             #119's control comparing against `contain.escape(evidence)` is correct
+             against this revision and was wrong against revision 3.
+          3. `entry_point` is REQUIRED on an injection finding, not optional, and
+             `evidence` is required with it. Revision 3 made both droppable.
+          4. `finding_id` hashes (dimension, anchor, file, line, entry_point,
+             defect, evidence). Revision 3 hashed (dimension, anchor, file, line,
+             defect). #119 uses finding_id only as a sort tie-break, so this costs
+             it nothing, but #118 must use the new inputs.
+          5. Revision 3 declared nine finding fields in one place and ten in
+             another; the count is ten, and `evidence` is the tenth. #119's plan
+             lists nine and states "#117's envelope carries neither kind nor
+             evidence" — the `kind` half stays true (kind lives on the containment
+             block, not the finding record), the `evidence` half does not.
+        The ten finding fields and eleven envelope fields are otherwise unchanged,
+        and no field is renamed. #119's OPEN correctly predicted that a rename would
+        cost it STEPs 4, 5, 6, 10 and 12; nothing here renames one.
         done when: FINDINGS.md exists under launchpad/review-agent/; it states all
-        ten finding fields and all eleven envelope fields by the names above, and
-        states that `evidence` is required whenever `entry_point` is set; it
-        states the contain.Finding conversion including the reserved "containment"
-        slug and the anchor "pr" rule; it contains the three anchor rules with
-        both "must be null" constraints; it
-        names Blocker | High | Medium | Low and cites review.py as their source
-        rather than restating the ladder as its own; and it is referenced from a
-        new row in CONTAINMENT.md's "Contract for later stages" table so the two
-        documents point at each other rather than diverging quietly.
+        ten finding fields, all eleven envelope fields and all five merged-document
+        keys by the names above; it states that `entry_point` is required on an
+        injection finding and `evidence` required with it and RAW; it states that
+        containment findings travel in the `containment` sibling key and NOT in any
+        dimension's findings array, that `states` carries all seven entry points,
+        and that no dimension slug may be "containment"; it contains the three
+        anchor rules with both "must be null" constraints AND the rule that a defect
+        visible at a diff line must use anchor "line"; it names Blocker | High |
+        Medium | Low and cites review.py as their source rather than restating the
+        ladder as its own; it carries the five contract changes above so a reader of
+        #119's plan can diff; and it is referenced from a new row in CONTAINMENT.md's
+        "Contract for later stages" table so the two documents point at each other
+        rather than diverging quietly.
 
 STEP 2  launchpad/review-agent/findings.py — the contract in code.          [needs 1]
         Pure functions and dataclasses over already-fetched data. No subprocess,
@@ -270,7 +394,12 @@ STEP 2  launchpad/review-agent/findings.py — the contract in code.          [n
         STEP 1; severity in the imported ladder; findings_count == len(findings);
         the completion marker present, last, and matching the expected dimension
         AND nonce; status/outcome/error mutual exclusivity; non-empty `defect` and
-        `failure`; `evidence` present whenever `entry_point` is set; and — the rule
+        `failure`; `entry_point` present and one of CONTAINMENT.md's seven labels on
+        every injection finding, with `evidence` present and non-empty alongside it;
+        no dimension slug equal to "containment"; on the merged document, a
+        `containment` key present whose `states` map carries all seven entry points
+        and whose every finding has a `kind` in the three CONTAINMENT.md kinds — a
+        six-key states map is a violation, not a shorter map; and — the rule
         the first revision was missing — `outcome` CROSS-CHECKED AGAINST THE
         FINDINGS ARRAY: "clean" requires findings to be empty, "findings" requires
         it non-empty. Without that rule a report reading status "complete", outcome
@@ -281,12 +410,18 @@ STEP 2  launchpad/review-agent/findings.py — the contract in code.          [n
         A validator that stops at the first error hides the rest, and STEP 9's
         suite asserts on the full list.
         SEVERITY_ORDER is imported from review, not re-declared.
-        done when: `python3 -m py_compile launchpad/review-agent/findings.py`
-        succeeds; `validate` returns an empty list for a well-formed report and,
-        for a report carrying three independent violations at once, returns three
-        strings rather than one; a finding with anchor "pr" and a non-null file is
-        rejected; a finding with anchor "line" and a null line is rejected; and
-        `findings.SEVERITY_ORDER is review.SEVERITY_ORDER` is true.
+        done when: `python3 -c "import findings"` run from launchpad/review-agent/
+        succeeds — NOT `py_compile`, which compiles without resolving imports and so
+        passes on a module whose `import review` cannot be satisfied, which is the
+        exact failure the #120 precondition in ALREADY TRUE exists to prevent;
+        `validate` returns an empty list for a well-formed report and, for a report
+        carrying three independent violations at once, returns three strings rather
+        than one; a finding with anchor "pr" and a non-null file is rejected; a
+        finding with anchor "line" and a null line is rejected; an injection finding
+        with no `entry_point` is rejected, and one with an `entry_point` but no
+        `evidence` is rejected; a merged document whose `containment.states` names
+        six entry points is rejected; a dimension slug of "containment" is rejected;
+        and `findings.SEVERITY_ORDER is review.SEVERITY_ORDER` is true.
 
 STEP 3  launchpad/review-agent/run_dimensions.py — the concurrent  [needs 2]  <- RUNS HERE
         runner. The CLI shell, demonstrable before a single prompt is written.
@@ -307,44 +442,69 @@ STEP 3  launchpad/review-agent/run_dimensions.py — the concurrent  [needs 2]  
           CURRENT TIP of the base branch, not the commit the head forked from, and
           diffing against it attributes every commit landed on launchpad since the
           fork to this PR's author.
-          A NONEXISTENT PR MUST BE TOLD APART FROM AN UNREACHABLE ONE. `_gh`
+          A NONEXISTENT PR MUST BE TOLD APART FROM A CREDENTIAL FAILURE. `_gh`
           never raises and collapses 404, missing auth, network outage and timeout
           into the same `absent` Surface, so `all_readable == False` cannot carry
-          the distinction and treating it as "PR not found" would report an
-          outage as a verdict about the PR. This module therefore probes existence
-          once, explicitly, before fetching surfaces, and classifies into THREE
-          states, not two — because gh returns exit code 1 for all of them and
-          only its stderr differs:
-            no such PR          the PR endpoint 404s AND `GET /repos/{o}/{r}`
-                                succeeds, so the credential can see the repo and
-                                the PR genuinely is not in it
-            cannot see it       BOTH 404, or the repo call 401s. GitHub returns
-                                404, not 403, for a resource the caller lacks read
-                                access to — deliberately, so as not to confirm
-                                existence to an unauthorised caller. #110's token
-                                is scoped to launchpad-26/buzz and its scope can be
-                                narrowed or revoked independently of any PR, so a
-                                token that loses read access presents EXACTLY as
-                                "PR 42 does not exist". Without the repo probe this
-                                module would report a credential failure as a fact
-                                about someone's pull request.
-            infrastructure      an auth failure, a network outage or a timeout on
-                                either call
-          All three exit non-zero with distinct reason strings, never one shared
-          "could not review". The repo probe narrows the ambiguity; it does not
-          abolish it — a token that can read the repo but is blocked from one PR
-          still reads as "no such PR", and that residual case is named in OPEN
-          rather than papered over.
-          CONTAINMENT.MD'S OWN FINDINGS MUST BE CARRIED. `contain.render` returns
-          (document, findings, all_readable) and the SECOND element is the
-          deterministic 21-of-35 catches. This module converts every one into a
-          #117 Finding under the reserved "containment" slug per STEP 1, and emits
-          them alongside the dimensions' reports. Dropping them would breach
+          the distinction and treating it as "PR not found" would report an outage
+          as a verdict about the PR. This module therefore probes CREDENTIAL
+          IDENTITY once, explicitly, before fetching surfaces — `GET /user`, whose
+          only possible answer is about the credential — and then reads the PR
+          endpoint's status. An earlier revision probed `GET /repos/{o}/{r}`
+          instead; that probe discriminates NOTHING here, because launchpad-26/buzz
+          is public and the repo endpoint answers 200 to a caller with no
+          credential at all. Verified: unauthenticated, the repo endpoint returns
+          200 and a nonexistent PR returns 404, which is exactly the signature the
+          old rule read as "the credential is fine and the PR is absent".
+          What each response means, stated rather than left to a reader:
+            GET /user 200            the credential is live. Its login is printed,
+                                     so a run is attributable.
+            GET /user 401            bad or expired credential -> INFRASTRUCTURE.
+                                     Verified: an invalid token returns
+                                     {"message": "Bad credentials"} on /user AND on
+                                     the PR endpoint, so a dead token never reaches
+                                     the PR classification at all.
+            GET /user network/timeout INFRASTRUCTURE.
+            then, with a live credential, on GET /repos/{o}/{r}/pulls/{n}:
+            200                      proceed.
+            404                      NO SUCH PR. Sound here only because the repo
+                                     is public: a live credential can read any PR
+                                     of a public repo, so absence is absence. If
+                                     launchpad-26/buzz is ever made private this
+                                     collapses — GitHub returns 404 rather than 403
+                                     for a resource the caller cannot read, so as
+                                     not to confirm existence — and the rule needs a
+                                     visibility check before the 404 branch. The
+                                     condition is named because it is invisible from
+                                     inside the code.
+            403                      the credential is live but blocked from this
+                                     PR, or rate-limited. Distinguished by the
+                                     message and the x-ratelimit-remaining header;
+                                     rate-limited is INFRASTRUCTURE, blocked is its
+                                     own reason.
+            401                      the credential died between the two calls ->
+                                     INFRASTRUCTURE.
+          Every non-proceed outcome exits non-zero with its own reason string, never
+          one shared "could not review". A 401 belongs to INFRASTRUCTURE and to
+          nothing else: an earlier revision listed a 401 under both "cannot see it"
+          and "infrastructure", which is two branches matching one input with no
+          tie-break, so half of the implementations of it would have told an operator
+          that a dead token was a fact about someone's pull request.
+          CONTAINMENT.MD'S OWN FINDINGS MUST BE CARRIED, IN THE `containment` KEY.
+          `contain.render` returns (document, findings, all_readable) and the SECOND
+          element is the deterministic 28-of-35 catches. This module emits every one
+          of them verbatim — severity, kind, entry_point, evidence, raw and
+          unrenamed — as the top-level `containment.findings` array per STEP 1, and
+          emits `containment.states` from `fetch.Surface.state` for all seven entry
+          points. It does NOT convert them into ten-field records and does NOT put
+          them in any dimension's findings array. Dropping them would breach
           CONTAINMENT.md § Severity contract, which requires all three kinds to
           appear in the published review and calls a detected-then-dropped finding
-          "worse than one never detected, because it reads as a clean review" —
-          and the dimensions cannot cover the gap, because LEFT OUT scopes them to
-          the 14 that detection misses.
+          "worse than one never detected, because it reads as a clean review" — and
+          the dimensions cannot cover the gap, because LEFT OUT scopes them to the 7
+          that detection misses. `states` comes from the Surfaces this module already
+          holds, so there is no second fetch; the seven-key requirement is a control
+          in STEP 9 rather than a comment, because a map built only from the surfaces
+          that succeeded silences #119's incomplete banner.
         The reviewer is an INJECTED CALLABLE, defaulting to a stub that returns a
         well-formed clean report. Two payoffs: the harness is provable end to end
         today, and every control in STEP 9 feeds recorded outputs with no model
@@ -364,19 +524,28 @@ STEP 3  launchpad/review-agent/run_dimensions.py — the concurrent  [needs 2]  
         places anything after the closing marker, and never re-calls
         `detect.detect` — contain.render already merges those findings and calling
         it again double-reports.
-        done when: `python3 launchpad/review-agent/run_dimensions.py 86 --stub`
-        exits 0 and prints JSON containing three reports, each with status
-        "complete", outcome "clean", and a completion marker that
-        `findings.validate` accepts; every report's merge_base_sha and head_sha
-        are non-empty and the merge_base_sha equals `gh api
-        repos/launchpad-26/buzz/compare/{base}...{head} -q
-        .merge_base_commit.sha`; `--payload` on a captured fixture produces the
-        same three reports with the injected runner asserting `gh` was never
-        spawned; a 404 PR number exits non-zero with a reason naming the PR as
-        absent; a simulated auth failure exits non-zero with a DIFFERENT reason
-        naming infrastructure, so the two are not one message; and a payload
-        carrying a delimiter_forge yields a "containment" finding with anchor "pr"
-        in the output rather than only inside contain.render's discarded return.
+        done when: `python3 launchpad/review-agent/run_dimensions.py <n> --stub`
+        against an OPEN pull request exits 0 and prints JSON containing three
+        reports, each with status "complete", outcome "clean", and a completion
+        marker that `findings.validate` accepts; the PR is open and its `pr_diff`
+        surface has state "ok" and non-empty text, asserted rather than assumed —
+        a MERGED pull request is not a valid fixture here, because its head is
+        already an ancestor of the base so the merge base IS the head and the
+        merge-base diff is empty, which passes every SHA assertion below while
+        reviewing nothing (measured on PR 86: merge_base_commit.sha equals
+        headRefOid, 4434519667afac207f8eeb3950cc5c5de726addd); every report's
+        merge_base_sha and head_sha are non-empty and merge_base_sha equals `gh api
+        repos/launchpad-26/buzz/compare/{base_sha}...{head_sha} -q
+        .merge_base_commit.sha` — by SHA, not by branch name, so the criterion
+        survives the head branch being deleted; `--payload` on a captured fixture
+        produces the same three reports with the injected runner asserting `gh` was
+        never spawned; a 404 PR number under a live credential exits non-zero with a
+        reason naming the PR as absent; an invalid credential exits non-zero with a
+        DIFFERENT reason naming infrastructure and never names the PR, so the two are
+        not one message; and a payload carrying a delimiter_forge yields that finding
+        in the top-level `containment.findings` array with its `kind` and
+        `entry_point` intact and its evidence byte-identical to the author's text,
+        alongside a `containment.states` map of seven keys.
 
 STEP 4  The three dimension definitions, each naming what it must NOT    [needs 1, 3]
         review. Tagged against 3 as well as 1 because its done-when runs
@@ -412,10 +581,17 @@ STEP 4  The three dimension definitions, each naming what it must NOT    [needs 
         done-criterion is that "a reviewer that reviews everything reviews nothing
         well", and without exclusions all three dimensions converge on the same
         generic review and #118's dedupe absorbs the cost.
+        Each definition also states STEP 1's anchoring rule in its own words: a
+        defect visible at a line of the diff is reported with anchor "line" and that
+        line; anchor "pr" is for a defect with no file and is not a way to avoid
+        naming one. Without this in the prompt, the rule lives only in a document the
+        reviewer never reads, and anchor "pr" validates for everything.
         done when: three files exist, one per slug; each names both what it
         reviews and what it must not, with the exclusions naming the OTHER TWO
         dimensions' subjects explicitly; each states the finding fields from
-        STEP 1 rather than inventing its own; and `run_dimensions.py --list`
+        STEP 1 rather than inventing its own; each states the anchoring rule
+        including when anchor "pr" is and is not legitimate; none of the three is
+        named "containment", which STEP 1 forbids; and `run_dimensions.py --list`
         prints exactly the three slugs, read from the directory rather than
         hardcoded in two places.
 
@@ -433,9 +609,11 @@ STEP 5  The cross-cutting injection clause, in all three definitions.    [needs 
         per CONTAINMENT.md § Severity contract, with entry_point set to the
         surface it came from.
         This is #117 discharging a debt #120 recorded, not new scope.
-        CONTAINMENT.md states detect.py misses 14 of 35 matrix cases — semantic
-        paraphrase and finding-suppression — and that those are #117's
-        responsibility. The clause goes in all three definitions rather than one,
+        CONTAINMENT.md states detect.py misses 7 of 35 matrix cases — SEMANTIC
+        PARAPHRASE, and only that — and that those are #117's responsibility.
+        Suppression is NOT among them: `detect._SUPPRESS` catches it, so a fixture
+        built from a suppression instruction tests the deterministic layer and not
+        this clause. The clause goes in all three definitions rather than one,
         because the issue requires that one dimension failing does not prevent the
         others reporting; if a single dimension owned semantic injection, that
         dimension failing would drop the coverage to zero silently.
@@ -446,12 +624,17 @@ STEP 5  The cross-cutting injection clause, in all three definitions.    [needs 
         stayed narrow after a broader one produced ten false positives on this
         repository's own issues.
         done when: the clause is byte-identical across all three definition files,
-        asserted by a control rather than by eye; a fixture whose diff contains a
-        paraphrased suppression instruction (one of the 14 classes, not one of the
-        21 detect.py already catches) yields a Blocker finding with the right
-        entry_point from each of the three dimensions independently; and a fixture
-        containing a DESCRIPTION of such an attack, taken verbatim from
-        CONTAINMENT.md itself, yields no injection finding from any of them.
+        asserted by a control rather than by eye; the paraphrase fixture satisfies
+        `len(detect.detect(fixture_text, ep)) == 0` — asserted FIRST, as a
+        precondition on the fixture rather than a property of the result, because a
+        fixture the deterministic layer already catches makes this criterion pass
+        while proving nothing about the gap, and that is how a fixture silently
+        drifts back into the caught set; that same fixture then yields a Blocker
+        finding with the right entry_point from each of the three dimensions
+        independently; and a fixture containing a DESCRIPTION of such an attack,
+        taken verbatim from CONTAINMENT.md itself, yields no injection finding from
+        any of them — measured: `detect.detect` returns zero findings against the
+        whole of CONTAINMENT.md, so a quotation from it is a valid negative control.
 
 STEP 6  Concurrency and isolation — one dimension failing still reports     [needs 3]
         the others. `concurrent.futures` over the three dimensions, with a
@@ -491,13 +674,22 @@ STEP 7  Fixture diffs with planted defects — one per dimension.          [need
             unreadable input yields a pass. Modelled on the real shape
             run_controls.py guards against, where a missing input must report SKIP
             and never PASS.
-        Plus the two injection fixtures STEP 5 requires: one paraphrased attack
-        from the 14 missed classes, one description-of-an-attack quoted from
+        Plus the two injection fixtures STEP 5 requires: one paraphrased attack from
+        the 7 missed classes — semantic paraphrase, NOT a suppression instruction,
+        which detect.py catches — and one description-of-an-attack quoted from
         CONTAINMENT.md.
+        Each fixture's header comment records the LOCATION its defect is planted at:
+        the repo-relative path and the NEW-SIDE line number, at head_sha. That is
+        what makes STEP 9's anchor control possible; without a recorded location
+        there is nothing to compare a finding's file and line against, and "the
+        dimension found it" degrades to "the dimension said something", which anchor
+        "pr" satisfies for free.
         done when: five fixtures exist; each parses as a diff or as a Surface
         payload `fetch.from_payload` accepts; each of the three defect fixtures is
-        a valid input to run_dimensions.py; and each names, in a header comment,
-        the dimension that must find it and the two that must not.
+        a valid input to run_dimensions.py; each names, in a header comment, the
+        dimension that must find it and the two that must not, AND the path and
+        new-side line its defect sits at; and the paraphrase fixture satisfies
+        `len(detect.detect(text, ep)) == 0` per STEP 5.
 
 STEP 8  Recorded reviewer outputs for the deterministic suite.        [needs 3, 4, 7]
         Tagged against 3 and 4, not only 7: a recording is the output of a real
@@ -516,8 +708,12 @@ STEP 8  Recorded reviewer outputs for the deterministic suite.        [needs 3, 
         each is valid against `findings.validate`; each carries the model id and
         date it was recorded; a control asserts the replay path makes no network
         call, by injecting a runner that raises if the real `gh` binary or any HTTP
-        client is invoked; and the recordings show each defect fixture found by
-        its own dimension and not reported by the other two.
+        client is invoked; and the recordings show each defect fixture found by its
+        own dimension and not reported by the other two, WITH the finding anchored at
+        the path and new-side line STEP 7's header records — a finding that names the
+        defect but anchors it at "pr" does not satisfy this criterion, because
+        #117's done-criterion is severity plus file:line and anchor "pr" carries
+        neither field.
 
 STEP 9  The control suite — one control per done-criterion.           [needs 5, 6, 8]
         Tagged against 5 because two of its controls below read the injection
@@ -552,13 +748,28 @@ STEP 9  The control suite — one control per done-criterion.           [needs 5
             done-when proves this once at build time; without a control here it is
             never re-checked, and byte-identity of the clause text is not evidence
             the clause works
-          a contain.Finding conversion control: a payload carrying each of
-            delimiter_forge, delimiter_lookalike and injection_attempt produces a
-            #117 Finding with dimension "containment", anchor "pr", severity
-            Blocker, and evidence rendered post-escape — asserted for all three
-            kinds, since a conversion that handles one and drops two reads as
-            working
-          no dimension may claim the reserved "containment" slug
+          a containment TRANSPORT control: a payload carrying each of
+            delimiter_forge, delimiter_lookalike and injection_attempt puts that
+            finding in the top-level `containment.findings` array with its
+            `severity` Blocker, its `kind`, its `entry_point`, and its `evidence`
+            BYTE-IDENTICAL to the author's text — asserted for all three kinds,
+            since a transport that handles one and drops two reads as working, and
+            asserted on entry_point specifically, because a Blocker naming no
+            surface is the detected-then-dropped case wearing a full record
+          `containment.states` carries all SEVEN entry points — the control counts
+            the keys and compares the set to contain.ENTRY_POINTS, rather than
+            checking the key exists. A six-key map silences #119's incomplete
+            banner, and that failure is invisible from inside #117
+          `containment` is present on a run with no containment findings, as an
+            EMPTY findings array plus a full states map — never a missing key, which
+            #119 reads as an incomplete review
+          no dimension slug is "containment", and no dimension report's findings
+            array carries a finding with a `kind` field
+          the anchor control, against STEP 7's recorded locations: for each of the
+            three defect fixtures, the own-dimension finding in STEP 8's recording
+            carries anchor "line" with the path and new-side line the fixture header
+            names. This is the control that stops anchor "pr" being a way to satisfy
+            every other criterion while naming no location at all
         done when: `python3 launchpad/review-agent/check_dimensions.py` passes; it
         is listed in run_controls.py; `python3
         launchpad/review-agent/run_controls.py` runs it and reports it in the
@@ -674,8 +885,46 @@ GATES  No verify gate is installed in this checkout — .claude/settings.json is
   OPEN rather than left implicit, and the drifting line citations are replaced by
   symbol names — contain.py had moved under this plan's feet between the two
   passes, which is itself the clearest evidence for BUDGET's warning.
-  This revision is once-reviewed at the margin: the second pass's own fixes have
-  not been reviewed. A third pass is available and was not run.
+  serina:review-plan has now run THREE times, and this revision is the result of
+  all three. The third pass returned ELEVEN findings — three Blocker, three High,
+  four Medium, plus one found while persisting the record — and its verified
+  evidence is at launchpad/plans/reviews/2026-08-13-117-plan-review.md. As on the
+  second pass, most were against the earlier passes' own fixes.
+  Third pass, three Blockers, all fixed here. The contain.Finding conversion never
+  mapped `entry_point`, and because both it and `evidence` were declared optional a
+  converter could drop the pair and pass every rule — a published Blocker naming no
+  surface, no excerpt and no location. `finding_id` excluded `entry_point` and
+  `evidence`, so containment findings of one kind collapsed to a single id;
+  demonstrated with two delimiter_lookalike findings from one entry point hashing
+  identically, where contain._dedupe deliberately keeps them apart. And STEP 3's
+  repo probe could not do the job claimed for it: launchpad-26/buzz is PUBLIC, so
+  the repo endpoint answers 200 to a caller with no credential at all.
+  On that last one the reviewer's severity was too high and it said so. The probe's
+  real defect is that it discriminates nothing rather than that it misclassifies a
+  dead token: an invalid token returns "Bad credentials" on the PR endpoint itself,
+  so infrastructure was already caught. The fix stands on its own merits — an
+  identity probe makes the discrimination explicit and correct rather than
+  incidental — but it was a Medium wearing a Blocker's severity, and the record says
+  so rather than letting the fix launder the rating.
+  Three High, all fixed. The detection counts were stale — 28 of 35 caught and 7
+  missed, not 21 and 14 — and STEP 5's fixture was specified from a class detect.py
+  now catches, so the one gap CONTAINMENT.md hands #117 by name had a control that
+  could pass without testing it. Where containment findings lived was ambiguous
+  between a fourth envelope and a merge into the dimension reports, and #118 parses
+  that shape. And no done-when anywhere required a planted defect to be reported at
+  the line it was planted at, so anchor "pr" satisfied every criterion while naming
+  no location.
+  Four Medium, all fixed: a 401 matched two classification branches with no
+  tie-break; #120's tree is committed but unmerged and was described as optional
+  sequencing when five steps require it; STEP 3's acceptance PR was MERGED, so its
+  merge-base diff is empty and the run reviewed nothing; and `evidence` was declared
+  post-escape against a renderer that escapes at render time.
+  The eleventh finding is why OPEN now names #119: it was already built against
+  revision 3 of this contract and earlier revisions of this plan did not say so.
+  This revision is once-reviewed at the margin in the same way its predecessors
+  were: the third pass's own fixes have not been reviewed, and the settlement in
+  STEP 1 is a decision rather than a correction. A fourth pass is available and was
+  not run.
   Then serina:review-code and serina:review-tests after STEP 11, then
   serina:review-adjudicate, then serina:review-final — all BEFORE the push in
   STEP 12, because a review posted after the push only documents what already
@@ -694,16 +943,26 @@ BUDGET  STEP 8 eats the budget, and STEP 3 decides how badly — but the thing m
   and nothing provided it. If STEP 3 is built to its original one-line description
   — two calls and a print — STEPs 6, 7, 8 and 9 all fail their own criteria and the
   cost lands there instead, which is the more expensive place to pay it.
-  #120's tree is committed nowhere. Every module #117 imports — contain.render,
-  fetch.fetch_all, fetch.Surface, review.SEVERITY_ORDER — exists only in another
-  worktree's untracked working directory, on no branch and in no commit. If that
-  work is rebased, renamed, abandoned, or lands with a different signature, STEPs
-  2, 3, 6 and 8 are all rewriting against a moved target, and nothing in this plan
-  detects it early. Before STEP 2, re-verify contain.render's signature and
-  Surface's fields against whatever #120 has actually committed by then, rather
-  than trusting the line numbers quoted in ALREADY TRUE. The cheapest mitigation
-  is ordering: let #120 land first. That is a sequencing decision for whoever runs
-  the fleet, not for this plan.
+  #120's tree is committed but UNMERGED, and its landing first is a precondition
+  rather than a mitigation. Every module #117 imports — contain.render,
+  fetch.fetch_all, fetch.Surface, review.SEVERITY_ORDER — now exists in three
+  pushed commits on `feat/review-agent-untrusted-input`, and in NO tree reachable
+  from this branch: `launchpad/review-agent/` does not exist here, and
+  origin/launchpad is 0 commits behind that branch's 3. So STEP 2 cannot `import
+  review`, and STEP 9 cannot append to a `run_controls.py` that is not present.
+  Earlier revisions called ordering "the cheapest mitigation" and a fleet decision;
+  that was wrong, because five steps cannot start without it. The precondition is
+  discharged by #120 merging to launchpad and this branch rebasing — never by
+  copying those files here, which creates the second source of truth LEFT OUT
+  forbids. Note that STEP 2's first acceptance check was `py_compile`, which
+  compiles a module without resolving its imports and so passes on a findings.py
+  whose `import review` cannot be satisfied; it is now `python3 -c "import
+  findings"`, which fails for the right reason. Once the precondition holds, the
+  residual risk is a rebase moving line numbers: before STEP 2, re-verify
+  contain.render's signature and Surface's fields against what #120 has committed by
+  then rather than trusting the numbers in ALREADY TRUE. That instruction has now
+  paid for itself twice — it caught the 28-of-35 count change and the suppression
+  rule, both of which had silently invalidated STEP 5's fixture specification.
   STEP 8 is fifteen recordings, each needing a real run against a real model, and
   it is the step where "recorded from a real run" quietly becomes "hand-written to
   look like one". A hand-written recording tests nothing STEP 2's validator does
@@ -714,12 +973,22 @@ BUDGET  STEP 8 eats the budget, and STEP 3 decides how badly — but the thing m
   becomes a rewrite of STEPs 3 and 6.
 
 OPEN  Not for a builder to decide.
-  The findings contract is settled here unilaterally. #117's issue says it is
-  "agreed in whichever of the two lands first, then honoured by the other", and
-  this plan takes that mandate. #118 may still object, and if it does the field
-  names in STEP 1 change and STEPs 2, 8 and 9 change with them. Whether the
-  contract should instead be agreed in a comment on #118 before STEP 1 is built is
-  a sequencing call.
+  The findings contract is settled here unilaterally, and it now has TWO consumers,
+  not one. #117's issue says it is "agreed in whichever of the two lands first,
+  then honoured by the other", and this plan takes that mandate. #118 may still
+  object, and if it does the field names in STEP 1 change and STEPs 2, 8 and 9
+  change with them. Whether the contract should instead be agreed in a comment on
+  #118 before STEP 1 is built is a sequencing call.
+  #119 IS ALREADY BUILT AGAINST AN EARLIER REVISION OF THIS CONTRACT, which earlier
+  revisions of this plan did not acknowledge — they named only #118 as a possible
+  objector. `launchpad/plans/2026-08-12-issue-119-publish-one-review.md` on
+  `feat/review-agent-publish` is committed, enumerates this contract's field names
+  explicitly, marks them PROVISIONAL, and records in its own OPEN that "#117 must
+  add one key to its output before #119 can publish a containment finding". STEP 1
+  now adds that key, in the shape #119 specified, and carries a five-point change
+  list so its author can diff revision 3 against this one. Nothing here edits #119's
+  plan; revising it belongs to whoever owns it. If #119 objects to the settlement,
+  the sibling-key decision reopens and STEPs 2, 3 and 9 change with it.
   Whether the pre-flight record is an input to the dimensions at all. #116's plan
   has the record enumerated but NOT BUILT — its branch carries only the plan file.
   This plan therefore has the runner call fetch and contain directly rather than
@@ -747,24 +1016,27 @@ OPEN  Not for a builder to decide.
   has been run against a real diff, so any number is a guess. It is written as a
   flag with a stated default and a note that the default is unmeasured.
   Containment findings from `pr_diff` lose a location that is arguably derivable.
-  STEP 1 maps every contain.Finding to anchor "pr" because the record has no file
-  or line field. For six of the seven entry points that is simply the truth. For
-  `pr_diff` it is a real loss rather than an honest absence: the surface text is a
-  unified diff carrying `+++ b/path` headers and hunk ranges, so an injection
-  attempt embedded in the code itself does have a location — it is just not
-  extracted. Deriving it would mean mapping an excerpt offset back through
+  A contain.Finding has no file and no line field at all, and STEP 1 now carries
+  them raw rather than converting them, so there is no anchor on them to be wrong —
+  but the loss is the same. For six of the seven entry points it is simply the
+  truth. For `pr_diff` it is a real loss rather than an honest absence: the surface
+  text is a unified diff carrying `+++ b/path` headers and hunk ranges, so an
+  injection attempt embedded in the code itself does have a location — it is just
+  not extracted. Deriving it would mean mapping an excerpt offset back through
   contain.py's escaping to a hunk, which is more than #117 was asked for, and
-  guessing it would be the false precision the anchor rule exists to prevent. So
-  it is anchor "pr" for now, recorded here as a named loss rather than left to
-  look like a considered absence. Whoever wants line-anchored injection findings
-  in the diff should file it.
-  A PR the credential can see the repo for but not the PR still reads as absent.
-  STEP 3's repo probe separates "no such PR" from "cannot see it" for the common
-  cases, and GitHub's 404-for-no-access behaviour is why the probe is needed at
-  all. It does not cover a token with repo read access that is nonetheless blocked
-  from one pull request. Whether that case is worth a further probe is a judgement
-  about how the Actions credential in #110 can actually fail, which needs #119's
-  provisioning to be settled first.
+  guessing it would be the false precision the anchor rule exists to prevent.
+  Recorded here as a named loss rather than left to look like a considered absence.
+  Whoever wants line-anchored injection findings in the diff should file it against
+  #120, since the field would have to be added to contain.Finding.
+  A live credential blocked from one specific pull request. STEP 3's identity probe
+  separates a dead credential from an absent PR cleanly, and on a PUBLIC repo a
+  404 under a live credential is genuinely absence. What it does not cover is a
+  live credential that can read the repo but is blocked from one pull request, which
+  returns 403 and is given its own reason string rather than being folded into
+  infrastructure. Whether that 403 branch needs a further probe — and what happens
+  if launchpad-26/buzz is ever made private, where 404 becomes ambiguous again — is
+  a judgement about how the Actions credential in #110 can actually fail, which
+  needs #119's provisioning to be settled first.
 
 LEFT OUT  Deliberately excluded.
   Deciding whether a finding is real — confirm/refute, re-rated severity, dedupe,
@@ -782,9 +1054,10 @@ LEFT OUT  Deliberately excluded.
   only slightly better than a random coin-flip" against 6,642 human-verified
   labels; the AUROC 0.48-0.64 range is one judge on one victim model under two
   attacks and is not quoted here as anything broader.
-  The 21 of 35 attack classes detect.py already catches. Duplicating deterministic
-  detection in a model prompt costs tokens and adds a second source of truth. #117
-  takes the 14 it was handed.
+  The 28 of 35 attack classes detect.py already catches — which now includes
+  suppression, per c64ff7958. Duplicating deterministic detection in a model prompt
+  costs tokens and adds a second source of truth. #117 takes the 7 it was handed,
+  all of them semantic paraphrase.
   Measuring the dimensions' precision and recall. #121 owns the first ten reviews
   and #109's success signals. STEP 10 produces one sample per dimension, which is
   provenance for the falsifiability criterion and explicitly not a rate.
