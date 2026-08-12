@@ -71,6 +71,13 @@ Be careful with it. A stale value is quiet: the relay starts, the site works,
 and pairing sends devices to whatever host name is in that string. The handshake
 payload is a private key. Change it only alongside the route that serves it.
 
+One precondition on that fallback: clients only try `<RELAY_URL>/pair` when the
+relay advertises NIP-43, which it does when it has a stable
+`BUZZ_RELAY_PRIVATE_KEY` **and** `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true` — both
+defaults here. On an open relay (`BUZZ_REQUIRE_RELAY_MEMBERSHIP=false`) clients
+pair against the main relay directly, which works because there is no membership
+gate to fail; the sidecar is then unused.
+
 ### Bringing your own reverse proxy
 
 The sidecar is published on **loopback only** (`BUZZ_PAIR_RELAY_HOST_IP`, default
@@ -95,11 +102,6 @@ reach the port.
 ### Checking it works
 
 ```bash
-# Is the URL advertised?
-curl -sS -H 'Accept: application/nostr+json' "https://<your-domain>" \
-  | grep -o '"pairing_relay_url":"[^"]*"'
-
-# Is something answering on /pair?
 curl -sS -o /dev/null -w "%{http_code}\n" "https://<your-domain>/pair"
 ```
 
@@ -108,6 +110,16 @@ rejects any request that is not a WebSocket upgrade. **404** means no route or
 no sidecar — pairing will fail. **401/403**, or a socket that closes while the
 desktop waits for EOSE, means `/pair` is reaching the *main* relay, which is
 refusing the not-yet-member device.
+
+Only if you set `BUZZ_PAIRING_RELAY_URL`, check that it is advertised:
+
+```bash
+curl -sS -H 'Accept: application/nostr+json' "https://<your-domain>" \
+  | grep -o '"pairing_relay_url":"[^"]*"'
+```
+
+Empty output is correct on a default install — the field is omitted entirely
+when unset, and clients use the `/pair` fallback.
 
 Note that the sidecar requires a `#p` filter: a `REQ` for `kinds:[24134]`
 without one is closed with `#p filter required`. Real clients always send it;
