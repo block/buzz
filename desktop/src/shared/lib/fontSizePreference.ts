@@ -21,6 +21,7 @@ const TYPE_REM_PROPERTY = "--buzz-type-rem";
 const listeners = new Set<() => void>();
 let fontSize: FontSize = DEFAULT_FONT_SIZE;
 let textZoomFactor = 1;
+let listeningForStorageChanges = false;
 
 export function parseFontSize(value: string | null | undefined): FontSize {
   return value === "smaller" || value === "default" || value === "larger"
@@ -54,13 +55,27 @@ function notifyListeners(): void {
   for (const listener of listeners) listener();
 }
 
-/** Apply the persisted preference before React renders to avoid a layout jump. */
-export function initializeFontSizePreference(): void {
+function applyStoredFontSize(): void {
   const nextSize = readStoredFontSize();
   const changed = nextSize !== fontSize;
   fontSize = nextSize;
   applyFontSize(nextSize);
   if (changed) notifyListeners();
+}
+
+function listenForStorageChanges(): void {
+  if (listeningForStorageChanges || !globalThis.window?.addEventListener)
+    return;
+  globalThis.window.addEventListener("storage", (event) => {
+    if (event.key === FONT_SIZE_STORAGE_KEY) applyStoredFontSize();
+  });
+  listeningForStorageChanges = true;
+}
+
+/** Apply the persisted preference before React renders to avoid a layout jump. */
+export function initializeFontSizePreference(): void {
+  applyStoredFontSize();
+  listenForStorageChanges();
 }
 
 /** Combine Cmd +/- zoom with the selected app-wide type scale. */

@@ -4,10 +4,14 @@ import test from "node:test";
 const values = new Map();
 const attributes = new Map();
 const styleValues = new Map();
+const windowListeners = new Map();
 const style = {
   setProperty: (name, value) => styleValues.set(name, value),
 };
 
+globalThis.window = {
+  addEventListener: (type, listener) => windowListeners.set(type, listener),
+};
 globalThis.localStorage = {
   getItem: (key) => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, String(value)),
@@ -59,4 +63,12 @@ test("initializes from the stored font size", () => {
   assert.equal(preference.getFontSize(), "larger");
   assert.equal(attributes.get("data-font-size"), "larger");
   assert.equal(styleValues.get("--buzz-type-rem"), "18.285714px");
+});
+
+test("applies font size changes from another window", () => {
+  values.set(preference.FONT_SIZE_STORAGE_KEY, "smaller");
+  windowListeners.get("storage")({ key: preference.FONT_SIZE_STORAGE_KEY });
+  assert.equal(preference.getFontSize(), "smaller");
+  assert.equal(attributes.get("data-font-size"), "smaller");
+  assert.equal(styleValues.get("--buzz-type-rem"), "16px");
 });

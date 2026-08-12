@@ -9,6 +9,7 @@ export const DEFAULT_CONVERSATION_DENSITY: ConversationDensity = "comfortable";
 
 const listeners = new Set<() => void>();
 let conversationDensity: ConversationDensity = DEFAULT_CONVERSATION_DENSITY;
+let listeningForStorageChanges = false;
 
 export function parseConversationDensity(
   value: string | null | undefined,
@@ -39,13 +40,29 @@ function notifyListeners(): void {
   for (const listener of listeners) listener();
 }
 
-/** Apply the persisted preference before React renders to avoid a layout jump. */
-export function initializeConversationDensityPreference(): void {
+function applyStoredConversationDensity(): void {
   const nextDensity = readStoredConversationDensity();
   const changed = nextDensity !== conversationDensity;
   conversationDensity = nextDensity;
   applyConversationDensity(nextDensity);
   if (changed) notifyListeners();
+}
+
+function listenForStorageChanges(): void {
+  if (listeningForStorageChanges || !globalThis.window?.addEventListener)
+    return;
+  globalThis.window.addEventListener("storage", (event) => {
+    if (event.key === CONVERSATION_DENSITY_STORAGE_KEY) {
+      applyStoredConversationDensity();
+    }
+  });
+  listeningForStorageChanges = true;
+}
+
+/** Apply the persisted preference before React renders to avoid a layout jump. */
+export function initializeConversationDensityPreference(): void {
+  applyStoredConversationDensity();
+  listenForStorageChanges();
 }
 
 function subscribe(listener: () => void): () => void {
