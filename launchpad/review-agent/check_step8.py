@@ -51,9 +51,12 @@ detected = [c for c in diff_cases if detect(c.payload.text, c.entry_point)]
 undetected = [c for c in diff_cases if not detect(c.payload.text, c.entry_point)]
 
 check(len(diff_cases) == 5, f"five payloads routed through pr_diff (got {len(diff_cases)})")
+# Hardcoded on purpose. When the suppression tell was added for #120's second
+# criterion this failed, which is the point: measured recall is a fact the controls
+# state, not one they infer from the code under test.
 check(
-    len(detected) == 3,
-    f"three are detected deterministically, matching step 6's measured recall "
+    len(detected) == 4,
+    f"four are detected deterministically, matching step 6's measured recall "
     f"(got {len(detected)}: {[c.payload.id for c in detected]})",
 )
 

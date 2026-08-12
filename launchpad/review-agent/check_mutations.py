@@ -91,7 +91,6 @@ CONTROLS = [
     "suite.py",
     "check_step8.py",
     "check_step9.py",
-    "check_step3.py",
     "check_invariants.py",
 ]
 

@@ -80,7 +80,15 @@ try:
         ep for ep, st in live["states"].items() if st in ("absent", "oversized", "unparseable")
     }
     check(live_labels == set(ENTRY_POINTS), "(b) --pr 92 accounts for all seven labels")
-    check(code_live in (0, 2), f"(b) --pr 92 exits 0 or 2, got {code_live}")
+    # The plan says exit 0. Accepting 2 as well let this criterion pass with no network
+    # at all — every surface `absent`, still green — which would hide a real break in
+    # the gh calls. run_controls.py already skips this control when offline, so
+    # demanding success here fails loudly instead of silently.
+    check(code_live == 0, f"(b) --pr 92 exits 0, got {code_live}")
+    check(
+        live["states"]["pr_title"] == "ok" and live["states"]["pr_diff"] == "ok",
+        f"(b) the title and diff were genuinely fetched (got {live['states']})",
+    )
 except (json.JSONDecodeError, KeyError):
     check(False, "(b) --pr 92 produced parseable output")
 

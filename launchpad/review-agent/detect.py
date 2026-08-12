@@ -13,8 +13,9 @@ willing to type `>`.
 
 So this layer takes precision and gives up recall, on purpose:
 
-    matrix cases caught   21 / 35   (skip-review, approve, delimiter-breakout)
-    missed                14 / 35   (paraphrase, suppress-a-finding)
+    matrix cases caught   28 / 35   (skip-review, approve, suppress-a-finding,
+                                     delimiter-breakout)
+    missed                 7 / 35   (paraphrase)
     false positives        0        (10 upstream PRs + this repo's review-heavy docs)
 
 **What covers the gap.** Containment, not this. Steps 1–3 escape and envelope every
@@ -48,6 +49,15 @@ _STANDALONE = re.compile(
     re.IGNORECASE,
 )
 
+#: Suppression, which #120's second criterion names alongside skip and approve. Kept
+#: narrow — a negated reporting verb whose object is the reporting itself. Measured at
+#: zero false positives across both benign corpora, including this repo's own issues.
+_SUPPRESS = re.compile(
+    r"(?:do\s+not|don't|never)\s+(?:report|mention|include|list|flag|raise)\b[^.!?]{0,60}"
+    r"\b(?:it|this|them|find|finding|findings|issue|as\s+a\s+finding|in\s+your)\b",
+    re.IGNORECASE,
+)
+
 #: Sentence-ish split. Newlines matter: diffs and comments are line-oriented.
 _SPLIT = re.compile(r"(?<=[.!?:])\s+|\n+")
 
@@ -75,5 +85,5 @@ def detect(text: str, entry_point: str) -> list[Finding]:
     return [
         Finding("injection_attempt", entry_point, sentence[:120].replace("\n", "\\n"))
         for sentence in _sentences(text)
-        if _STANDALONE.search(sentence)
+        if _STANDALONE.search(sentence) or _SUPPRESS.search(sentence)
     ]

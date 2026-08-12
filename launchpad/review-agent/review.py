@@ -39,13 +39,18 @@ COVERAGE_NOTE = (
 )
 
 
-def render_review(
-    findings: list[Finding],
-    states: dict[str, str],
-    *,
-    unreadable: list[str] | None = None,
-) -> str:
-    """The review body, as markdown."""
+UNREADABLE_STATES = ("absent", "oversized", "unparseable")
+
+
+def render_review(findings: list[Finding], states: dict[str, str]) -> str:
+    """The review body, as markdown.
+
+    ``unreadable`` is derived from ``states``, never passed in. It was a keyword
+    argument with no producer anywhere on the branch, so the "this review is
+    incomplete" banner could never render — a caller cannot forget an argument that
+    does not exist.
+    """
+    unreadable = [ep for ep, st in states.items() if st in UNREADABLE_STATES]
     lines = ["## Containment", ""]
 
     if findings:

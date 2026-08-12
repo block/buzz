@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from corpus import load_benign, matrix
@@ -119,7 +120,7 @@ check(
 )
 
 # --- wiring: findings reach the CLI output ---------------------------------
-payload = HERE / "fixtures" / "attack-pr.json"
+payload = Path(tempfile.mkdtemp()) / "attack-pr.json"
 attack = {ep: "" for ep in ("pr_title", "pr_diff", "pr_issue_comments", "pr_review_comments", "pr_review_bodies", "linked_issue")}
 attack["pr_body"] = next(c for c in caught).payload.text
 payload.write_text(json.dumps(attack), encoding="utf-8")

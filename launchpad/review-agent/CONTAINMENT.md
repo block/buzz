@@ -107,7 +107,10 @@ Two rules that follow, and are not negotiable:
 
 1. **Nothing author-controlled goes above the preamble**, or after the closing marker in
    a position a model would read as a new instruction.
-2. **A stage must never be handed raw PR text.** If a stage needs a surface this
+2. **A stage must never place raw PR text in a prompt.** A stage that makes no model
+   call may carry raw text in a labelled structured field — a JSON string is a data
+   position — but the moment text enters a prompt it is enveloped first. See § Contract
+   for later stages, which applies this rule per stage. If a stage needs a surface this
    document does not list, the surface is added here first.
 
 ---
@@ -138,8 +141,8 @@ with no honest reading in pull-request prose. Measured:
 
 | | |
 |---|---|
-| attack matrix caught | 21 of 35 |
-| missed | 14 of 35 — semantic paraphrases and finding-suppression |
+| attack matrix caught | 28 of 35 |
+| missed | 7 of 35 — semantic paraphrase, which has no unambiguous tell |
 | false positives | 0, across 10 upstream PRs and this repo's own review-heavy docs |
 
 **Why it is not broader.** Telling an attack from a *description* of an attack is the
@@ -212,6 +215,14 @@ entirely — see § Detection. Those 14 cases are #117's responsibility, not an 
 A dimension that assumes pre-flight already flagged every attempt will miss two whole
 payload classes. This dependency is written down here because it is otherwise invisible
 from inside #117.
+
+**The disable seam is control-only.** `contain.contain` and `contain.render` accept
+`enabled=False`, and the CLI accepts `--no-contain`. Both exist so the mutation harness
+can prove the controls fail without containment. **No stage may pass either.** They are
+named here because they sit on the exact function this table tells #117 to call, and a
+kwarg that silently disables containment must not be discoverable only by reading the
+source. Guarding them at runtime is tracked in
+[#137](https://github.com/launchpad-26/buzz/issues/137).
 
 **Position, not just marking.** Enveloping text and then placing it above the preamble
 defeats the envelope. The order is: preamble, then blocks, then nothing

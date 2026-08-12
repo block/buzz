@@ -13,6 +13,20 @@ more including two blockers *in material round 1 had already passed*, and round 
 no blockers — two highs, three mediums and a low, all folded in. Round 3 closed nine of
 round 2's ten and caught the tenth as reworded rather than fixed.
 
+Revision 7, 2026-08-12, after `serina:review-final` on the pushed branch: no blockers,
+five highs, all fixed before the PR was opened. The one that mattered: **#120's second
+criterion names three intents — skip, approve, and suppress a finding — and the detector
+covered two**, while the commit said `Closes #120`. A narrow suppression tell was added
+and measured at zero false positives across both benign corpora, taking recall from
+21/35 to 28/35; only semantic paraphrase remains, and it is the one class with no
+unambiguous tell. Also fixed: `CONTAINMENT.md` said "a stage must never be handed raw PR
+text" in § Consumer preamble and permitted exactly that in § Contract for later stages,
+which is the rule #116 depends on; the aggregate byte-cap path dropped delimiter
+findings while withholding content; `review.py`'s incomplete-review banner had no
+producer anywhere on the branch; the CI job installed no PyYAML while a control treats
+its absence as a failure; and step 3's live criterion accepted exit 2, so it passed with
+no network at all — the only weakening on this branch that was never recorded.
+
 Revision 6, 2026-08-12, after `serina:review-code` and `serina:review-tests` ran on the
 finished branch. Between them they found five blockers, and one gutted a result reported
 as done: **the mutation control tested one removal and the result was generalised.**
@@ -190,7 +204,7 @@ STEP 8  Publication control: the attempt must be visible in the rendered review.
         A review that quotes attacker text verbatim has moved the payload into a
         new position, so the attempt must be visible **and** neutralised there.
         done when: for each payload routed through `pr_diff` that the
-        deterministic layer detects — three of five, per step 6's measured
+        deterministic layer detects — four of five, per step 6's measured
         recall, named rather than sampled — the render contains a single finding
         record that both carries severity `Blocker` and quotes the payload in its
         **post-escape** form, asserted on one record rather than as two

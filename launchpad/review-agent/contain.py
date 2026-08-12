@@ -254,7 +254,12 @@ def render(surfaces: dict, nonce: str, *, enabled: bool = True) -> tuple[str, li
             f"{fetch.CAP_PER_INVOCATION}-byte per-invocation cap; no surface is "
             f"rendered, because refusing means withholding rather than warning"
         )
+        # Findings survive refusal. Withholding the content must not withhold the
+        # evidence that someone probed the boundary — CONTAINMENT.md requires all
+        # three kinds to reach the review, and dropping one here would be the
+        # swallowed attack in a different costume.
         for entry_point in ENTRY_POINTS:
+            findings.extend(find_lookalikes(surfaces[entry_point].text, entry_point))
             findings.extend(detect.detect(surfaces[entry_point].text, entry_point))
         return "\n".join(lines), findings, False
 

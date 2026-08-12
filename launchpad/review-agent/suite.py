@@ -33,11 +33,6 @@ class Result:
         return self.contained and (self.got_finding or not self.expected_finding)
 
 
-def _fragment(payload_text: str) -> str:
-    """A slice of the payload that escaping leaves unchanged, so it is findable."""
-    return payload_text.split("\n")[0][:40]
-
-
 def _surfaces_for(case: Case) -> dict[str, Surface]:
     """The payload on its own surface, every other surface fetched-and-empty."""
     return {
@@ -45,18 +40,6 @@ def _surfaces_for(case: Case) -> dict[str, Surface]:
         else Surface(ep, "empty")
         for ep in ENTRY_POINTS
     }
-
-
-def _outside_blocks(document: str) -> str:
-    """Everything in the document that is not inside an envelope block."""
-    import re
-
-    return re.sub(
-        r"<<<BUZZ-UNTRUSTED:(\w+):([0-9a-f]{32})\n.*?\nBUZZ-UNTRUSTED:\1:\2>>>",
-        "",
-        document,
-        flags=re.DOTALL,
-    )
 
 
 def run_case(case: Case, *, enabled: bool = True) -> Result:

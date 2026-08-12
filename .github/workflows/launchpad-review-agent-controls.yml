@@ -35,6 +35,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # check_step11.py parses the workflow with PyYAML and treats a missing parser as
+      # a failure, not a skip. The setup-python tool cache ships pip only, so without
+      # this the first CI run goes red for a reason unrelated to containment.
+      - name: Install control dependencies
+        run: pip install pyyaml
+
       - name: Run containment controls
         working-directory: launchpad/review-agent
         env:
