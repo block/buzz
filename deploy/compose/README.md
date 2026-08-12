@@ -56,20 +56,25 @@ default in `.env.example` — makes the main relay reject it outright. The
 history, just an in-flight match between two kind-24134 subscriptions.
 
 The binary already ships inside the relay image, so this bundle runs it as the
-`pairing-relay` service. Two things have to line up:
+`pairing-relay` service. With `BUZZ_COMPOSE_TLS=true` the bundled `Caddyfile`
+routes `/pair` and `/pair/*` to `pairing-relay:5000`; everything else still goes
+to the relay. That is the whole setup — there is nothing to configure.
 
-1. **A route to the sidecar.** With `BUZZ_COMPOSE_TLS=true` the bundled
-   `Caddyfile` routes `/pair` and `/pair/*` to `pairing-relay:5000`; everything
-   else still goes to the relay.
-2. **An advertised URL.** `BUZZ_PAIRING_RELAY_URL` is published in the relay's
-   NIP-11 document, and clients use it directly. Leave it at
-   `wss://<your-domain>/pair` to match the Caddy route. The value must be
-   `ws://` or `wss://`; the relay refuses to start otherwise.
+`BUZZ_PAIRING_RELAY_URL` is left **unset** deliberately. A client reads the
+relay's NIP-11 document and uses `pairing_relay_url` if it is there; with no
+value, it falls back to `<RELAY_URL>/pair`, which is precisely the route above.
+Set it only when pairing lives somewhere else — a dedicated host name, or a
+proxy that exposes a different path. The value must be `ws://` or `wss://` or
+the relay refuses to start.
+
+Be careful with it. A stale value is quiet: the relay starts, the site works,
+and pairing sends devices to whatever host name is in that string. The handshake
+payload is a private key. Change it only alongside the route that serves it.
 
 ### Bringing your own reverse proxy
 
-The sidecar is published on **loopback only** (`BUZZ_PAIR_RELAY_PORT`, default
-`127.0.0.1:5000`). It performs no authentication and enforces no membership, so
+The sidecar is published on **loopback only** (`BUZZ_PAIR_RELAY_HOST_IP`, default
+`127.0.0.1`). It performs no authentication and enforces no membership, so
 putting it on a public interface would expose an unauthenticated WebSocket
 endpoint to the internet — don't. A proxy running on the same host reaches it at
 `127.0.0.1:5000`; a proxy in another container can join `buzz-net` and use
@@ -78,13 +83,14 @@ endpoint to the internet — don't. A proxy running on the same host reaches it 
 Whatever proxy you use, it must terminate TLS, route only `/pair`, pass the
 WebSocket upgrade headers, and keep read timeouts tight — the sidecar caps each
 connection at 120 seconds itself and delegates slowloris protection to the proxy
-(see `crates/buzz-pair-relay/src/lib.rs`). Then point `BUZZ_PAIRING_RELAY_URL` at
-whatever public URL that proxy serves.
+(see `crates/buzz-pair-relay/src/lib.rs`). If it serves `/pair` on the same host
+name as the relay, you still need no `BUZZ_PAIRING_RELAY_URL`; set it only if the
+public URL differs.
 
 If something genuinely off-box must reach the sidecar without a proxy, set
-`BUZZ_PAIR_RELAY_PORT=0.0.0.0:5000` — but note that pairing then runs
-unencrypted over `ws://`, which iOS will refuse, and the endpoint is open to
-anyone who can reach the port.
+`BUZZ_PAIR_RELAY_HOST_IP=0.0.0.0` — but note that pairing then runs unencrypted
+over `ws://`, which iOS will refuse, and the endpoint is open to anyone who can
+reach the port.
 
 ### Checking it works
 

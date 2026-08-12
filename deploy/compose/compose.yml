@@ -110,10 +110,12 @@ services:
   # Published on loopback only. It has no auth by design, so exposing it on a
   # public interface is not an acceptable default; a reverse proxy on this host
   # reaches it at 127.0.0.1:5000 and compose.caddy.yml unpublishes it entirely.
-  # Override with BUZZ_PAIR_RELAY_PORT — see README.md § Device pairing.
+  # BUZZ_PAIR_RELAY_HOST_IP widens it — see README.md § Device pairing.
   #
-  # The relay advertises BUZZ_PAIRING_RELAY_URL from .env via its env_file, so
-  # this service needs no wiring into the relay's environment block.
+  # Nothing needs to be added to the relay's environment: with
+  # BUZZ_PAIRING_RELAY_URL unset, clients fall back to <RELAY_URL>/pair, which
+  # is the route the Caddyfile serves. Setting it is for split-host setups, and
+  # the relay reads it from .env through its env_file.
   pairing-relay:
     image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
     # The image ENTRYPOINT is buzz-relay, so this must override entrypoint, not
@@ -123,7 +125,7 @@ services:
     environment:
       BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
     ports:
-      - "${BUZZ_PAIR_RELAY_PORT:-127.0.0.1:5000}:5000"
+      - "${BUZZ_PAIR_RELAY_HOST_IP:-127.0.0.1}:${BUZZ_PAIR_RELAY_PORT:-5000}:5000"
     # Same /dev/tcp trick as the relay: the runtime image has bash but no curl.
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
