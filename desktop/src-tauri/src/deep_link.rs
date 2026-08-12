@@ -291,7 +291,15 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     })
 }
 
-/// Handle an incoming `buzz://` deep link URL.
+fn deep_link_scheme_is_supported(scheme: &str, build_scheme: Option<&str>) -> bool {
+    scheme == "buzz" || build_scheme.is_some_and(|configured| configured == scheme)
+}
+
+fn is_supported_deep_link_scheme(scheme: &str) -> bool {
+    deep_link_scheme_is_supported(scheme, option_env!("BUZZ_DESKTOP_BUILD_DEEP_LINK_SCHEME"))
+}
+
+/// Handle an incoming Buzz deep link URL.
 ///
 /// Currently supports:
 /// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
@@ -304,7 +312,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         }
     };
 
-    if url.scheme() != "buzz" {
+    if !is_supported_deep_link_scheme(url.scheme()) {
         eprintln!("buzz-desktop: ignoring unsupported deep link scheme: {url_str}");
         return;
     }
@@ -389,9 +397,23 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        deep_link_scheme_is_supported, parse_add_community_deep_link, parse_join_deep_link,
+        parse_message_deep_link, parse_nostr_bind_deep_link, PendingCommunityDeepLink,
+        PendingCommunityDeepLinks,
     };
+
+    #[test]
+    fn deep_link_scheme_supports_upstream_and_configured_builds() {
+        assert!(deep_link_scheme_is_supported("buzz", None));
+        assert!(deep_link_scheme_is_supported(
+            "buzz-codex-lab",
+            Some("buzz-codex-lab")
+        ));
+        assert!(!deep_link_scheme_is_supported(
+            "buzz-other",
+            Some("buzz-codex-lab")
+        ));
+    }
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
         PendingCommunityDeepLink {

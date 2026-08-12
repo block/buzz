@@ -6,6 +6,7 @@ import {
   detectBuzzDownloadPlatform,
   resolveBuzzDownloadUrlForPlatform,
 } from "@/shared/lib/buzz-download";
+import { buildBuzzJoinDeepLink } from "@/shared/lib/buzz-deployment";
 import { hasNip07Provider } from "@/shared/lib/nostr-signer";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
@@ -108,9 +109,11 @@ export function InvitePage({ code }: { code: string }) {
     setOpening(true);
     try {
       const receipt = await acceptPolicy();
-      const query = new URLSearchParams({ relay, code });
-      if (receipt) query.set("policy_receipt", receipt);
-      window.location.href = `buzz://join?${query.toString()}`;
+      window.location.href = buildBuzzJoinDeepLink({
+        relay,
+        code,
+        policyReceipt: receipt,
+      });
     } finally {
       setOpening(false);
     }
@@ -244,9 +247,7 @@ export function InvitePage({ code }: { code: string }) {
                     : "bg-black text-white hover:bg-black/90 focus-visible:ring-black"
                 }`}
               >
-                <a
-                  href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
-                >
+                <a href={buildBuzzJoinDeepLink({ relay, code })}>
                   Accept invite in Buzz
                 </a>
               </Button>

@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
+const expectedDeepLinkScheme = process.env.VITE_BUZZ_DEEP_LINK_SCHEME ?? "buzz";
+const expectedReleaseRepository =
+  process.env.VITE_BUZZ_RELEASE_REPOSITORY ?? "block/buzz";
+
 test("home page loads with Buzz branding", async ({ page }) => {
   await page.goto("/");
   await expect(
@@ -11,6 +15,51 @@ test("home page loads with Buzz branding", async ({ page }) => {
 test("home page shows repositories section", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("Repositories")).toBeVisible();
+});
+
+test("invite uses the configured desktop and release targets", async ({
+  page,
+}) => {
+  await page.route("**/api/join-policy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ policy: null }),
+    });
+  });
+  const assetUrl = `https://github.com/${expectedReleaseRepository}/releases/download/test/Buzz-Codex-Lab_test_x64-setup.exe`;
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify([
+        {
+          draft: false,
+          prerelease: false,
+          assets: [
+            {
+              name: "Buzz-Codex-Lab_test_x64-setup.exe",
+              browser_download_url: assetUrl,
+            },
+          ],
+        },
+      ]),
+    });
+  });
+
+  await page.goto("/invite/configured-code");
+  await expect(
+    page.getByRole("link", { name: "Accept invite in Buzz" }),
+  ).toHaveAttribute(
+    "href",
+    new RegExp(
+      `^${expectedDeepLinkScheme.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}://join\\?`,
+    ),
+  );
+  await expect(
+    page.getByRole("link", { name: "Download it now" }),
+  ).toHaveAttribute("href", assetUrl);
 });
 
 test("invite requires age and legal consent before opening Buzz", async ({

@@ -76,12 +76,15 @@ $BuildEnvironmentKeys = @(
     "BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY",
     "BUZZ_UPDATER_PUBLIC_KEY",
     "BUZZ_UPDATER_ENDPOINT",
+    "BUZZ_DESKTOP_BUILD_DEEP_LINK_SCHEME",
     "TAURI_SIGNING_PRIVATE_KEY",
     "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
 )
 foreach ($key in $BuildEnvironmentKeys) {
     Remove-Item -LiteralPath "Env:$key" -ErrorAction SilentlyContinue
 }
+$DeepLinkScheme = "buzz-codex-lab"
+$env:BUZZ_DESKTOP_BUILD_DEEP_LINK_SCHEME = $DeepLinkScheme
 
 # Rust embeds dependency source paths in panic metadata and MSVC may record an
 # absolute PDB path in each PE image. Remap the packaging account's home and
@@ -238,6 +241,7 @@ $BuildInfo = [ordered]@{
     bundled_sidecars = $SidecarHashes
     embedded_relay_configuration = $false
     embedded_identity_or_api_key = $false
+    deep_link_scheme = $DeepLinkScheme
     builder_home_path_remapped = $true
     native_source_paths_trimmed = $true
     release_symbols_stripped = $true

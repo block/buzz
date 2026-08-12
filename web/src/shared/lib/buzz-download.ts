@@ -1,7 +1,8 @@
-export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
-const BUZZ_RELEASES_API_URL =
-  "https://api.github.com/repos/block/buzz/releases?per_page=10";
-const CACHE_KEY = "buzz.latestDownload.v1";
+import { BUZZ_RELEASE_REPOSITORY } from "./buzz-deployment";
+
+export const BUZZ_RELEASES_URL = `https://github.com/${BUZZ_RELEASE_REPOSITORY}/releases`;
+const BUZZ_RELEASES_API_URL = `https://api.github.com/repos/${BUZZ_RELEASE_REPOSITORY}/releases?per_page=10`;
+const CACHE_KEY = `buzz.latestDownload.v2:${BUZZ_RELEASE_REPOSITORY}`;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {

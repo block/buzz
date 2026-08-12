@@ -112,3 +112,23 @@ bundled Windows sidecar before creating the NSIS installer.
 Rust and native source paths are remapped or trimmed during release builds. A
 stable incremental Cargo cache is kept under
 `%LOCALAPPDATA%\BuzzCodexLabBuild`; pass `-BuildCacheDirectory` to override it.
+
+## Build The Invite Site
+
+The relay invite landing page must target the Lab application and its release
+repository. Build that Web bundle separately:
+
+```powershell
+.\scripts\build-codex-lab-web.ps1
+```
+
+This writes `web/dist/` with `buzz-codex-lab://` invite links and release
+downloads resolved from `chemyibinjiang/buzz`. Deploy that directory as the
+relay's `BUZZ_WEB_DIR`. The installer does not contain an invite code, relay
+address, account key, or API token; each invitation remains a separate,
+revocable relay URL.
+
+For direct Windows downloads, publish the generated
+`Buzz-Codex-Lab_*_x64-setup.exe` as an asset on a non-draft, non-prerelease
+GitHub Release in `chemyibinjiang/buzz`. If no matching release asset is
+available, the landing page falls back to that repository's Releases page.
