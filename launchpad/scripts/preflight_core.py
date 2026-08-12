@@ -532,7 +532,25 @@ def build_required_gate(
             "source_endpoint": branch_rules.endpoint if not required_by_check else "graphql:isRequired",
         }
 
-    rules = branch_rules.data if isinstance(branch_rules.data, list) else []
+    if not isinstance(branch_rules.data, list):
+        # A shape the reader cannot use is NOT an empty rules list. Coercing it to
+        # [] here would publish `configured: false` — a definite answer — from a
+        # response nobody could read.
+        skips.add(
+            "required_gate",
+            Read(
+                "branch_rules",
+                skip=MALFORMED,
+                detail=f"the rules probe returned {type(branch_rules.data).__name__}, not a list",
+                endpoint=branch_rules.endpoint,
+            ),
+        )
+        return {
+            "configured": True if required_by_check else None,
+            "source_endpoint": "graphql:isRequired" if required_by_check else branch_rules.endpoint,
+        }
+
+    rules = branch_rules.data
     rule_types = {_get(r, "type") for r in rules if isinstance(r, Mapping)}
     by_rules = "required_status_checks" in rule_types
 
@@ -602,6 +620,15 @@ def build_nearest_rules(
         skips.add(
             "nearest_rules",
             Read("tree", skip=MALFORMED, detail="tree is not a list", endpoint=tree.endpoint),
+        )
+        return None
+    if not entries:
+        # A head tree listing nothing cannot be reconciled with a diff that
+        # changed files. Resolving every path to "no rules file" against it would
+        # be an empty read publishing itself as an answer.
+        skips.add(
+            "nearest_rules",
+            Read("tree", skip=EMPTY, detail="the head tree listed no entries at all", endpoint=tree.endpoint),
         )
         return None
 

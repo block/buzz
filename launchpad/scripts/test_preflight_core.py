@@ -51,6 +51,7 @@ PR86_FIXTURES = {
     "checks": "pr86-checks.json",
     "tree": "pr86-tree.json",
     "branch_rules": "rules-branches-launchpad.json",
+    "closing_refs": "pr86-closing-refs.json",
 }
 
 
@@ -834,6 +835,162 @@ class ExitContract(unittest.TestCase):
         unreadable_code, _, _ = run_cli(["86"], FakeGh(fail={"pr": NOT_FOUND}))
         self.assertEqual(unreadable_code, 2)
         self.assertNotEqual(unreadable_code, 1)
+
+
+#: The read each record field is built from, and what an EMPTY answer from that
+#: read looks like on the wire. Seven fields are enumerated in preflight_core;
+#: `skips` is the register the other six report into and has no read of its own,
+#: so it gets its own controls below rather than a row here.
+FIELD_SOURCES = {
+    "pr": ("pr", {}),
+    "closing_issue": (
+        "closing_refs",
+        {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}},
+    ),
+    "diff": ("compare", {}),
+    "checks": ("checks", {"data": {"repository": {"pullRequest": {"commits": {"nodes": []}}}}}),
+    "required_gate": ("branch_rules", []),
+    "nearest_rules": ("tree", {"sha": "0" * 40, "url": "x", "truncated": False, "tree": []}),
+}
+
+#: Two fields where an EMPTY answer is a real answer rather than a skip, each for
+#: a stated reason. Pretending all six behave alike would be a tidier table and a
+#: less honest one.
+EMPTY_IS_AN_ANSWER = {
+    "required_gate": "an empty rules list means no gate is configured, which is the fact to report",
+    "closing_issue": "GitHub answering with no references means the PR closes nothing",
+}
+
+
+class AbsenceIsNeverAValue(unittest.TestCase):
+    """STEP 9 — the mechanical proof, per record field, that a hole stays a hole.
+
+    Six fields, three degradations each: empty, malformed, and erroring. No grep
+    could do this. A grep reports every occurrence and leaves a human to sort the
+    legitimate hits from the real ones, which is not a check that can fail.
+    """
+
+    def build(self, read_name: str, variant: str, payload=None):
+        """Return (record, skips). A required input's failure builds NO record —
+        that is the strongest form of "the field never became a value" — so the
+        skip register comes off the exception instead."""
+        if variant == "empty":
+            degraded = core.Read(read_name, data=payload, endpoint=ENDPOINTS[read_name])
+        elif variant == "malformed":
+            degraded = core.Read(read_name, data="<html>502</html>", endpoint=ENDPOINTS[read_name])
+        else:
+            degraded = unreadable(read_name, core.ABSENT)
+        try:
+            record = core.build_record(reads(**{read_name: degraded}))
+        except core.RecordError as failure:
+            return None, failure.skips
+        return record, record["skips"]
+
+    def assert_not_a_value(self, field: str, record, skips: list[dict]):
+        reported = {s["field"] for s in skips}
+        self.assertTrue(
+            any(f == field or f.startswith(f"{field}.") or f.startswith(f"{field}[") for f in reported),
+            f"{field} was degraded and no skip names it",
+        )
+        for entry in skips:
+            if entry["field"].startswith(field):
+                self.assertIn(entry["reason"], core.SKIP_REASONS, "the reason must be enumerated")
+                self.assertTrue(entry["detail"], "a skip with no detail is a shrug")
+        if field in EMPTY_IS_AN_ANSWER:
+            return  # asserted separately, per EMPTY_IS_AN_ANSWER
+        if record is None:
+            return  # no record was emitted at all, so no field became anything
+        value = record[field]
+        self.assertIsNone(value, f"{field} came back as {value!r} instead of a skip")
+        self.assertNotEqual(value, [], "[] would read as 'nothing there' rather than 'not read'")
+        self.assertNotEqual(value, {}, "{} would read as 'nothing there' rather than 'not read'")
+
+    def test_an_erroring_response_never_becomes_a_value(self):
+        for field, (read_name, _) in FIELD_SOURCES.items():
+            with self.subTest(field=field, variant="erroring"):
+                record, skips = self.build(read_name, "erroring")
+                if record is not None and field == "required_gate":
+                    self.assertIsNone(record[field]["configured"], "unknown, not false")
+                if record is not None and field == "closing_issue":
+                    self.assertIsNone(record[field]["present"], "unknown, not false")
+                self.assert_not_a_value(field, record, skips)
+
+    def test_a_malformed_response_never_becomes_a_value(self):
+        for field, (read_name, _) in FIELD_SOURCES.items():
+            with self.subTest(field=field, variant="malformed"):
+                record, skips = self.build(read_name, "malformed")
+                if record is not None and field == "required_gate":
+                    self.assertIsNone(record[field]["configured"], "malformed is not an empty rules list")
+                if record is not None and field == "closing_issue":
+                    self.assertIsNone(record[field]["present"])
+                self.assert_not_a_value(field, record, skips)
+
+    def test_an_empty_response_is_either_a_skip_or_a_stated_answer(self):
+        for field, (read_name, empty_payload) in FIELD_SOURCES.items():
+            with self.subTest(field=field, variant="empty"):
+                record, skips = self.build(read_name, "empty", empty_payload)
+                if field == "required_gate":
+                    self.assertIs(record[field]["configured"], False, EMPTY_IS_AN_ANSWER[field])
+                    self.assertIn("/rules/branches/", record[field]["source_endpoint"])
+                elif field == "closing_issue":
+                    self.assertIs(record[field]["present"], False, EMPTY_IS_AN_ANSWER[field])
+                    self.assertEqual(record[field]["issue_numbers"], [])
+                else:
+                    self.assert_not_a_value(field, record, skips)
+
+    def test_the_two_empty_is_an_answer_exceptions_are_the_only_ones(self):
+        self.assertEqual(set(EMPTY_IS_AN_ANSWER), {"required_gate", "closing_issue"})
+        self.assertEqual(
+            set(FIELD_SOURCES) | {"skips"},
+            set(core.RECORD_FIELDS),
+            "every record field is either degraded above or is the skip register itself",
+        )
+
+    def test_the_skip_register_reports_every_degradation(self):
+        """`skips` is the seventh field: it has no read, it has this instead."""
+        for field, (read_name, _) in FIELD_SOURCES.items():
+            with self.subTest(field=field):
+                _, skips = self.build(read_name, "malformed")
+                self.assertTrue(skips, f"{field} was degraded and the register is empty")
+                for entry in skips:
+                    self.assertEqual(sorted(entry), ["detail", "endpoint", "field", "reason"])
+
+    def test_a_clean_run_still_publishes_the_skip_it_has(self):
+        """PR 86 is the readable case and still cannot see org rulesets."""
+        record = core.build_record(reads())
+        self.assertEqual(
+            [s["field"] for s in record["skips"]], ["required_gate.org_rulesets"]
+        )
+
+
+class NoNetwork(unittest.TestCase):
+    """STEP 9 — the suite cannot reach GitHub even if a control tried to."""
+
+    def test_no_control_can_spawn_a_process(self):
+        """Break subprocess entirely, then run the whole CLI through the fake."""
+        def explode(*args, **kwargs):
+            raise AssertionError("a control tried to spawn a real process")
+
+        original = fetch.subprocess.run
+        fetch.subprocess.run = explode
+        try:
+            code, out, _ = run_cli(["86"], FakeGh())
+        finally:
+            fetch.subprocess.run = original
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["pr"]["number"], 86)
+
+    def test_the_real_runner_refuses_any_binary_but_gh(self):
+        with self.assertRaises(ValueError):
+            fetch.gh_runner(["curl", "https://example.invalid"])
+        with self.assertRaises(ValueError):
+            fetch.gh_runner([])
+
+    def test_gh_is_the_only_binary_the_runner_is_asked_for(self):
+        fake = FakeGh()
+        run_cli(["86"], fake)
+        self.assertEqual(set(fake.binaries), {"gh"})
+        self.assertEqual(len(fake.calls), 8, "eight reads, and no call made twice")
 
 
 if __name__ == "__main__":
