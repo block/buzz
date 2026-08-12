@@ -183,6 +183,31 @@ export function selectDeferredListRenderState(
 
 export type TimelineBodySurface = "skeleton" | "empty" | "list";
 
+export type TimelineRenderSource = "deferred" | "live" | null;
+
+/**
+ * Select only rows belonging to the active channel. Warm cached rows can bypass
+ * the channel-less initial deferred snapshot; cold loads must wait so they never
+ * paint rows (or an empty state) before their query settles.
+ */
+export function selectTimelineRenderSource({
+  deferredChannelId,
+  liveChannelId,
+  preferLiveSnapshot,
+}: {
+  deferredChannelId: string | null;
+  liveChannelId: string | null;
+  preferLiveSnapshot: boolean;
+}): TimelineRenderSource {
+  if (deferredChannelId === liveChannelId) {
+    return "deferred";
+  }
+  if (preferLiveSnapshot) {
+    return "live";
+  }
+  return null;
+}
+
 export function selectTimelineBodySurface({
   deferredCount,
   preserveSettledEmptyIntro = false,

@@ -18,7 +18,7 @@ import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters"
 import { getThreadReplies } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
 
-const THREAD_PAGE_LIMIT = 200;
+const THREAD_PAGE_LIMIT = 500;
 const MAX_THREAD_PAGES = 500;
 
 /**
@@ -123,7 +123,11 @@ export function useThreadReplies(
       if (!activeChannel || !openThreadRootId) return [];
       return loadThreadReplies(queryClient, activeChannel.id, openThreadRootId);
     },
+    // The observer stays mounted while the panel closes, so an enabled
+    // transition (rather than a remount) must see cached data as stale and
+    // start exactly one background reconciliation on every reopen.
     staleTime: 0,
+    refetchOnMount: "always",
     gcTime: 60 * 60 * 1_000,
   });
 }
@@ -145,7 +149,10 @@ export function useThreadRepliesForRoots(
       queryKey: threadRepliesKey(channelId, rootId),
       enabled: activeChannel !== null && activeChannel.channelType !== "forum",
       queryFn: () => loadThreadReplies(queryClient, channelId, rootId),
+      // Huddle root observers are added/removed as summaries change; always
+      // reconcile cached subtrees when an observer returns.
       staleTime: 0,
+      refetchOnMount: "always",
       gcTime: 60 * 60 * 1_000,
     })),
     combine: (results) => ({

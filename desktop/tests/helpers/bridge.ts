@@ -287,6 +287,8 @@ type MockBridgeOptions = {
    * deliver live reply/aux events while an older response is in flight. */
   threadRepliesDelayMs?: number;
   usersBatchDelayMs?: number;
+  /** Delay (ms) for initial channel-window requests. */
+  initialChannelWindowDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   channelWindowDelayMs?: number;
   profileReadDelayMs?: number;

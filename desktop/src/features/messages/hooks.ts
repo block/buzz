@@ -232,6 +232,8 @@ export function useChannelWindowQuery(channel: Channel | null) {
       queryClient.getQueryData<ChannelWindowStore>(queryKey) ??
       emptyChannelWindowStore(),
     staleTime: Number.POSITIVE_INFINITY,
+    // Retain authoritative window metadata as long as the adjacent messages.
+    gcTime: 60 * 60 * 1_000,
   });
 }
 

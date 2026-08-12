@@ -52,6 +52,7 @@ import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
+import { useThreadRepliesPaintedPerformanceMeasure } from "@/features/messages/useMessagePerformance";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
@@ -325,6 +326,10 @@ export function MessageThreadPanel({
     EMPTY_THREAD_REPLIES,
   );
   const isRepliesPending = deferredThreadReplies !== threadReplies;
+  useThreadRepliesPaintedPerformanceMeasure(
+    threadHeadId,
+    deferredThreadReplies.length,
+  );
   const scrollTargetIsVisibleReply = React.useMemo(
     () =>
       scrollTargetId !== null &&

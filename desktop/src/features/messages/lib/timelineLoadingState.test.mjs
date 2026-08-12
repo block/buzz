@@ -85,6 +85,28 @@ test("initial load holds the skeleton while the cold-load top-up fetches", () =>
   );
 });
 
+test("pre-settle authoritative cache paints while a stale query refetches", () => {
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, dataLength: 8 },
+      false,
+      true,
+    ),
+    false,
+  );
+});
+
+test("pre-settle live-only rows still hold the cold skeleton", () => {
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, dataLength: 8 },
+      false,
+      false,
+    ),
+    true,
+  );
+});
+
 test("pre-settle placeholder rows paint immediately (snapshot revisit)", () => {
   // A revisit painting from the React-Query cache or a persisted snapshot:
   // placeholder rows are a previously-settled timeline, not a partial cold

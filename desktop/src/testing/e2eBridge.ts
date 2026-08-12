@@ -330,6 +330,8 @@ type E2eConfig = {
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
     usersBatchDelayMs?: number;
+    /** Delay (ms) applied only to initial channel-window requests. */
+    initialChannelWindowDelayMs?: number;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     channelWindowDelayMs?: number;
@@ -1100,6 +1102,14 @@ declare global {
     __BUZZ_E2E_COMMAND_LOG__?: Array<{
       command: string;
       payload: unknown;
+    }>;
+    /** Start/end timestamps for deterministic message-performance assertions. */
+    __BUZZ_E2E_MESSAGE_REQUEST_LOG__?: Array<{
+      command: "get_channel_window" | "get_thread_replies";
+      endedAt: number | null;
+      payload: unknown;
+      requestId: number;
+      startedAt: number;
     }>;
     /** Release mock send events that were stored but withheld from live subscribers. */
     __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
@@ -5079,10 +5089,6 @@ async function handleGetChannelWindow(
     return relayQuery(config, [filter]);
   };
 
-  if (!args.cursor) {
-    return execute();
-  }
-
   const probe = window as unknown as {
     __CHANNEL_WINDOW_FETCH_COUNT__?: number;
     __CHANNEL_WINDOW_INFLIGHT__?: number;
@@ -5091,7 +5097,9 @@ async function handleGetChannelWindow(
   probe.__CHANNEL_WINDOW_FETCH_COUNT__ =
     (probe.__CHANNEL_WINDOW_FETCH_COUNT__ ?? 0) + 1;
 
-  const delayMs = getConfig()?.mock?.channelWindowDelayMs ?? 0;
+  const delayMs = args.cursor
+    ? (getConfig()?.mock?.channelWindowDelayMs ?? 0)
+    : (getConfig()?.mock?.initialChannelWindowDelayMs ?? 0);
   if (delayMs <= 0) {
     return execute();
   }
@@ -10132,6 +10140,7 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  window.__BUZZ_E2E_MESSAGE_REQUEST_LOG__ = [];
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
@@ -13123,11 +13132,37 @@ export function maybeInstallE2eTauriMocks() {
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
   };
+  const invokeMockCommand = async (
+    command: string,
+    payload: unknown,
+  ): Promise<unknown> => {
+    const messageCommand =
+      command === "get_channel_window" || command === "get_thread_replies"
+        ? command
+        : null;
+    if (!messageCommand) return handleMockCommand(command, payload);
+
+    const messageRequest: NonNullable<
+      typeof window.__BUZZ_E2E_MESSAGE_REQUEST_LOG__
+    >[number] = {
+      command: messageCommand,
+      endedAt: null,
+      payload,
+      requestId: window.__BUZZ_E2E_MESSAGE_REQUEST_LOG__?.length ?? 0,
+      startedAt: performance.now(),
+    };
+    window.__BUZZ_E2E_MESSAGE_REQUEST_LOG__?.push(messageRequest);
+    try {
+      return await handleMockCommand(command, payload);
+    } finally {
+      messageRequest.endedAt = performance.now();
+    }
+  };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
-    handleMockCommand(command, payload ?? null);
+    invokeMockCommand(command, payload ?? null);
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
-  mockIPC(handleMockCommand, { shouldMockEvents: true });
+  mockIPC(invokeMockCommand, { shouldMockEvents: true });
   const tauriInternals = (
     window as typeof window & {
       __TAURI_INTERNALS__: {
