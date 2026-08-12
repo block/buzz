@@ -111,13 +111,13 @@ export const MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS = 30_000;
 /** Focus-refetch policy for relay-agent and managed-agent queries; consumed by focusRefetchPolicy.test.mjs. */
 export const agentsFocusRefetchPolicy = {
   staleTime: AGENTS_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 /** Focus-refetch policy for the managed-agent-log query; consumed by focusRefetchPolicy.test.mjs. */
 export const managedAgentLogFocusRefetchPolicy = {
   staleTime: MANAGED_AGENT_LOG_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;

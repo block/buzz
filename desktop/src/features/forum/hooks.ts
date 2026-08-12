@@ -22,7 +22,7 @@ export const FORUM_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy shared by forum-posts and forum-thread queries; consumed by focusRefetchPolicy.test.mjs. */
 export const forumFocusRefetchPolicy = {
   staleTime: FORUM_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export function forumPostsQueryKey(channelId: string) {

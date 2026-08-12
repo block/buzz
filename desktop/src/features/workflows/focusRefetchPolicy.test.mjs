@@ -58,13 +58,13 @@ test("workflow-list: skips focus refetch when data is fresh (< 10s)", async () =
   );
 });
 
-test("workflow-list: refetches on focus when data is stale (> 10s)", async () => {
+test("workflow-list: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: workflowListFocusRefetchPolicy.staleTime + 1,
       policy: workflowListFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
 
@@ -78,13 +78,13 @@ test("workflow-runs: skips focus refetch when data is fresh (< 10s)", async () =
   );
 });
 
-test("workflow-runs: refetches on focus when data is stale (> 10s)", async () => {
+test("workflow-runs: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: workflowRunsFocusRefetchPolicy.staleTime + 1,
       policy: workflowRunsFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
 
@@ -98,12 +98,90 @@ test("run-approvals: skips focus refetch when data is fresh (< 5 min)", async ()
   );
 });
 
-test("run-approvals: refetches on focus when data is stale (> 5 min)", async () => {
+test("run-approvals: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: runApprovalsFocusRefetchPolicy.staleTime + 1,
       policy: runApprovalsFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
+});
+
+test("workflow foreground refresh targets only lists and inactive runs", async () => {
+  const { shouldRefreshWorkflowOnForeground } = await import("./hooks.ts");
+  assert.equal(shouldRefreshWorkflowOnForeground(["workflows", "c"], []), true);
+  assert.equal(
+    shouldRefreshWorkflowOnForeground(["workflows-all", "c"], []),
+    true,
+  );
+  assert.equal(
+    shouldRefreshWorkflowOnForeground(["workflow-runs", "w"], []),
+    true,
+  );
+  assert.equal(
+    shouldRefreshWorkflowOnForeground(
+      ["workflow-runs", "w"],
+      [{ status: "completed" }],
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRefreshWorkflowOnForeground(
+      ["workflow-runs", "w"],
+      [{ status: "running" }],
+    ),
+    false,
+  );
+  assert.equal(shouldRefreshWorkflowOnForeground(["run-approvals"], []), false);
+});
+
+test("workflow foreground refresh query contract includes only stale active targets", async () => {
+  const { shouldRefreshWorkflowOnForeground } = await import("./hooks.ts");
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const fetches = [];
+  const subscribe = (queryKey, data, updatedAt) => {
+    queryClient.setQueryData(queryKey, data, { updatedAt });
+    const observer = new QueryObserver(queryClient, {
+      queryKey,
+      queryFn: async () => {
+        fetches.push(queryKey.join(":"));
+        return data;
+      },
+      refetchOnMount: false,
+      staleTime: 10_000,
+    });
+    return observer.subscribe(() => {});
+  };
+  const staleAt = Date.now() - 20_000;
+  const freshAt = Date.now();
+  const unsubscribers = [
+    subscribe(["workflows", "stale-active"], [], staleAt),
+    subscribe(["workflows", "fresh-active"], [], freshAt),
+    subscribe(
+      ["workflow-runs", "inactive"],
+      [{ status: "completed" }],
+      staleAt,
+    ),
+    subscribe(["workflow-runs", "active"], [{ status: "running" }], staleAt),
+  ];
+  queryClient.setQueryData(["workflows-all", "inactive-cache"], [], {
+    updatedAt: staleAt,
+  });
+
+  await queryClient.refetchQueries({
+    predicate: (query) =>
+      shouldRefreshWorkflowOnForeground(query.queryKey, query.state.data),
+    stale: true,
+    type: "active",
+  });
+
+  assert.deepEqual(fetches.sort(), [
+    "workflow-runs:inactive",
+    "workflows:stale-active",
+  ]);
+  for (const unsubscribe of unsubscribers) unsubscribe();
+  queryClient.clear();
 });

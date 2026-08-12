@@ -54,12 +54,12 @@ test("persona-catalog: skips fresh focus refetch", async () => {
   );
 });
 
-test("persona-catalog: refetches genuinely stale data on focus", async () => {
+test("persona-catalog: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: personaCatalogFocusRefetchPolicy.staleTime + 1,
       policy: personaCatalogFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
