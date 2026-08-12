@@ -841,7 +841,7 @@ export function UserProfilePanel({
                   })
               : undefined
           }
-          presenceStatus={presenceStatus}
+          presence={{ loaded: presenceQuery.isSuccess, status: presenceStatus }}
           profile={profile}
           pubkey={effectivePubkey}
           relayAgent={relayAgent}

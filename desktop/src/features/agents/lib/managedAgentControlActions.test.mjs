@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentLive,
+  managedAgentPresence,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -164,5 +167,98 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     events,
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
+  );
+});
+
+// ── Remote-agent liveness (I3: "Presence is the status") ─────────────────────
+// Regression coverage for #4730: a provider-backed agent that has shut down kept reading as
+// live because status is derived from backend_agent_id, which v1 never clears.
+
+const remote = (overrides = {}) =>
+  agent({
+    backend: { type: "provider", id: "mjolnir" },
+    backendAgentId: "vm-1234",
+    status: "deployed",
+    ...overrides,
+  });
+
+const presenceOf = (status, loaded = true) => ({ status, loaded });
+
+test("remote agent with no presence reads as not live once presence has loaded", () => {
+  // get_presence omits offline pubkeys, so "shut down" arrives as an absent entry.
+  assert.equal(isManagedAgentLive(remote(), presenceOf(undefined)), false);
+  assert.equal(isManagedAgentLive(remote(), presenceOf("offline")), false);
+});
+
+test("remote agent that is online or away reads as live", () => {
+  assert.equal(isManagedAgentLive(remote(), presenceOf("online")), true);
+  assert.equal(isManagedAgentLive(remote(), presenceOf("away")), true);
+});
+
+test("remote agent does not flash dead while presence is still loading", () => {
+  // Falling back to the control-plane axis here keeps I3's promise of a *bounded* wrong
+  // signal instead of trading one unbounded lie for another.
+  assert.equal(
+    isManagedAgentLive(remote(), presenceOf(undefined, false)),
+    true,
+  );
+});
+
+test("remote agent that was never deployed is not live regardless of presence", () => {
+  const undeployed = remote({ backendAgentId: null, status: "not_deployed" });
+  assert.equal(isManagedAgentLive(undeployed, presenceOf("online")), false);
+});
+
+test("local agents keep using the pid-probed status, not presence", () => {
+  const running = agent({ status: "running" });
+  // A local agent mid-start may have no presence yet; it is still running.
+  assert.equal(isManagedAgentLive(running, presenceOf(undefined)), true);
+  assert.equal(
+    isManagedAgentLive(agent({ status: "stopped" }), presenceOf("online")),
+    false,
+  );
+});
+
+test("shut-down remote agent offers Deploy, not Shutdown", () => {
+  // The bug: this returned "Shutdown" forever, making the deploy arm unreachable.
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(remote(), presenceOf(undefined)),
+    "Deploy",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(remote(), presenceOf("online")),
+    "Shutdown",
+  );
+});
+
+test("local agent action labels are unchanged", () => {
+  const p = presenceOf(undefined);
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "running" }), p),
+    "Stop",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "stopped" }), p),
+    "Restart Agent",
+  );
+  assert.equal(
+    getManagedAgentPrimaryActionLabel(agent({ status: "not_deployed" }), p),
+    "Start Agent",
+  );
+});
+
+test("managedAgentPresence distinguishes an unloaded lookup from an absent entry", () => {
+  const a = remote();
+  assert.deepEqual(managedAgentPresence(a, undefined), {
+    status: undefined,
+    loaded: false,
+  });
+  assert.deepEqual(managedAgentPresence(a, {}), {
+    status: undefined,
+    loaded: true,
+  });
+  assert.deepEqual(
+    managedAgentPresence(a, { [a.pubkey.toLowerCase()]: "online" }),
+    { status: "online", loaded: true },
   );
 });

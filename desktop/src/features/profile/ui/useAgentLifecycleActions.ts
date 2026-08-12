@@ -2,12 +2,14 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  isManagedAgentActive,
+  isManagedAgentLive,
+  managedAgentPresence,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 
 export function useAgentLifecycleActions({
@@ -23,11 +25,23 @@ export function useAgentLifecycleActions({
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
+  // The live axis for remote agents (I3). Owned here rather than passed in, so every caller of
+  // this hook gets the presence-aware branch; react-query dedupes the subscription.
+  const presenceQuery = usePresenceQuery(
+    managedAgent ? [managedAgent.pubkey] : [],
+  );
+  const presence = managedAgent
+    ? managedAgentPresence(managedAgent, presenceQuery.data)
+    : { status: undefined, loaded: false };
+
   const handleAgentPrimaryAction = React.useCallback(async () => {
     if (!managedAgent) return;
 
     try {
-      if (isManagedAgentActive(managedAgent)) {
+      // Remote agents: a shut-down agent must fall through to the deploy arm. Keying this on
+      // the deployment record instead of presence made that arm unreachable, so a remote agent
+      // could never be brought back from this surface.
+      if (isManagedAgentLive(managedAgent, presence)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],
@@ -58,6 +72,7 @@ export function useAgentLifecycleActions({
   }, [
     channels,
     managedAgent,
+    presence,
     relayAgents,
     startManagedAgent,
     stopManagedAgent,

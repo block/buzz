@@ -2,12 +2,16 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
+  managedAgentsQueryKey,
+  relayAgentsQueryKey,
   useStartManagedAgentMutation,
   useStopManagedAgentMutation,
 } from "@/features/agents/hooks";
 import {
   respawnManagedAgentWithRules,
   isManagedAgentActive,
+  isManagedAgentLive,
+  managedAgentPresence,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -16,6 +20,7 @@ import {
   useManagedAgentRuntimeAction,
 } from "@/features/agents/managedAgentRuntimeHooks";
 import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import {
   channelsQueryKey,
   useRemoveChannelMemberMutation,
@@ -56,6 +61,10 @@ export function useMembersSidebarActions({
   relayUrl,
 }: UseMembersSidebarActionsOptions) {
   const queryClient = useQueryClient();
+  // Remote-agent liveness is relay presence, not the deployment record (I3).
+  const managedPresenceQuery = usePresenceQuery(
+    controllableManagedBots.map((agent) => agent.pubkey),
+  );
   const removeMemberMutation = useRemoveChannelMemberMutation(channelId);
   const startManagedAgentMutation = useStartManagedAgentMutation();
   const stopManagedAgentMutation = useStopManagedAgentMutation();
@@ -170,7 +179,12 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent)) {
+      if (
+        isManagedAgentLive(
+          agent,
+          managedAgentPresence(agent, managedPresenceQuery.data),
+        )
+      ) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
@@ -179,6 +193,13 @@ export function useMembersSidebarActions({
         });
         if (agent.backend.type === "local") {
           clearActiveTurnsForAgentOnStop(agent.pubkey);
+        } else {
+          // `!shutdown` is a message, not a mutation — nothing invalidates on its own.
+          void queryClient.invalidateQueries({ queryKey: ["presence"] });
+          void queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+          void queryClient.invalidateQueries({
+            queryKey: managedAgentsQueryKey,
+          });
         }
         setActionNoticeMessage(
           agent.backend.type === "provider"

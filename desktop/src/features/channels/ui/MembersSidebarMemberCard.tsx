@@ -16,7 +16,8 @@ import {
 
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  isManagedAgentLive,
+  type ManagedAgentPresence,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -71,6 +72,8 @@ type MembersSidebarMemberCardProps = {
   onUnban: (member: ChannelMember) => void;
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
+  /** Whether the presence query has resolved; an absent entry is only "offline" once it has. */
+  presenceLoaded?: boolean;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
   viewerIsOwner: boolean;
@@ -139,12 +142,17 @@ export function MembersSidebarMemberCard({
   onUnban,
   onUntimeout,
   onViewActivity,
+  presenceLoaded = false,
   presenceStatus,
   profileAvatarUrl,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
   const disabled = isActionPending || isArchived;
+  const agentPresence: ManagedAgentPresence = {
+    loaded: presenceLoaded,
+    status: presenceStatus ?? undefined,
+  };
   const canViewActivity =
     memberIsBot &&
     (viewerIsOwner || managedAgent?.backend.type === "local") &&
@@ -214,14 +222,15 @@ export function MembersSidebarMemberCard({
                 ? agentCommunityAvailability(managedAgentRuntime) === "Here"
                   ? "default"
                   : "secondary"
-                : managedAgent && isManagedAgentActive(managedAgent)
+                : managedAgent &&
+                    isManagedAgentLive(managedAgent, agentPresence)
                   ? "default"
                   : "secondary"
             }
           >
             {managedAgentRuntime
               ? agentCommunityAvailability(managedAgentRuntime)
-              : managedAgent && isManagedAgentActive(managedAgent)
+              : managedAgent && isManagedAgentLive(managedAgent, agentPresence)
                 ? "Running"
                 : "Stopped"}
           </Badge>
@@ -265,6 +274,7 @@ export function MembersSidebarMemberCard({
           canRemoveMember={canRemoveMember}
           canViewActivity={canViewActivity}
           disabled={disabled}
+          agentPresence={agentPresence}
           managedAgent={managedAgent}
           member={member}
           memberIsBot={memberIsBot}
@@ -288,6 +298,7 @@ export function MembersSidebarMemberCard({
 const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
+  agentPresence,
   canChangeRole,
   canModerateMember,
   canRemoveMember,
@@ -308,6 +319,7 @@ function MemberActionsMenu({
   onViewActivity,
   pairAction,
 }: {
+  agentPresence: ManagedAgentPresence;
   canChangeRole: boolean;
   canModerateMember: boolean;
   canRemoveMember: boolean;
@@ -367,10 +379,13 @@ function MemberActionsMenu({
             >
               {pairAction
                 ? getPairActionIcon(pairAction)
-                : getManagedAgentActionIcon(managedAgent)}
+                : getManagedAgentActionIcon(managedAgent, agentPresence)}
               {pairAction
                 ? MANAGED_AGENT_PAIR_ACTION_LABELS[pairAction]
-                : getManagedAgentPrimaryActionLabel(managedAgent)}
+                : getManagedAgentPrimaryActionLabel(
+                    managedAgent,
+                    agentPresence,
+                  )}
             </DropdownMenuItem>
             {onEditRespondTo ? (
               <DropdownMenuItem
@@ -501,8 +516,11 @@ function getPairActionIcon(action: ManagedAgentPairAction) {
   return <Play className="h-4 w-4" />;
 }
 
-function getManagedAgentActionIcon(agent: ManagedAgent) {
-  if (isManagedAgentActive(agent)) {
+function getManagedAgentActionIcon(
+  agent: ManagedAgent,
+  presence: ManagedAgentPresence,
+) {
+  if (isManagedAgentLive(agent, presence)) {
     return <Square className="h-4 w-4" />;
   }
 
