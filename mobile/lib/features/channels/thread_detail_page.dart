@@ -17,6 +17,7 @@ import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
+import 'jump_to_latest_button.dart';
 import 'thread_replies_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
@@ -33,6 +34,8 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
+
+part 'thread_detail_page/thread_message.dart';
 
 /// Full-screen thread detail page.
 ///
@@ -116,7 +119,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     final replies = childrenByParent[threadHead.id] ?? const [];
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
+    final isAtTail = useState(true);
     final didJumpToInitialMessage = useRef(false);
+    final didJumpToThreadTail = useRef(false);
     final followsThreadTail = useRef(false);
     final pendingTailAlignment = useRef<double?>(null);
     final tailRealignmentQueued = useRef(false);
@@ -137,7 +142,9 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     useEffect(() {
       void onPositionsChanged() {
-        if (threadTailIsVisible()) followsThreadTail.value = true;
+        final atTail = threadTailIsVisible();
+        if (atTail) followsThreadTail.value = true;
+        if (isAtTail.value != atTail) isAtTail.value = atTail;
       }
 
       itemPositionsListener.itemPositions.addListener(onPositionsChanged);
@@ -145,6 +152,34 @@ class ThreadDetailPage extends HookConsumerWidget {
         onPositionsChanged,
       );
     }, [itemPositionsListener, replies.length]);
+
+    // The composer is painted over the bottom of the list viewport, so the
+    // usable trailing edge sits above the dock rather than at the physical
+    // bottom (1.0). Matches `latestAlignment()` in the channel timeline.
+    double usableTrailingEdge() {
+      final viewportHeight = context.size?.height ?? 0;
+      if (viewportHeight <= 0) return 1.0;
+      final reserved = composerDockHeight.value + Grid.xs;
+      return (1.0 - reserved / viewportHeight).clamp(0.0, 1.0).toDouble();
+    }
+
+    // Second pass of a tail jump: once the tail item has rendered and its
+    // extent is measurable, rest its trailing edge on that usable boundary.
+    // Aligning against 1.0 instead only cleared the composer when the list's
+    // bottom padding happened to cap the scroll — the animated pill path
+    // scrolls that padding offscreen and buried the newest reply.
+    void alignTailAboveComposer(int lastIndex) {
+      final lastPosition = itemPositionsListener.itemPositions.value
+          .where((position) => position.index == lastIndex)
+          .firstOrNull;
+      if (lastPosition == null) return;
+      final extent =
+          lastPosition.itemTrailingEdge - lastPosition.itemLeadingEdge;
+      itemScrollController.jumpTo(
+        index: lastIndex,
+        alignment: usableTrailingEdge() - extent,
+      );
+    }
 
     useEffect(() {
       final messageId = initialMessageId;
@@ -172,6 +207,52 @@ class ThreadDetailPage extends HookConsumerWidget {
       });
       return null;
     }, [initialMessageId, fetchedReplies, replies.length]);
+
+    // Without a deep-link target, opening a thread lands on the newest reply
+    // (matching desktop's thread panel) instead of the head. Wait for the
+    // authoritative thread query so the jump measures the full reply list,
+    // and leave short threads alone when the tail is already on screen.
+    useEffect(() {
+      if (initialMessageId != null ||
+          fetchedReplies == null ||
+          didJumpToThreadTail.value) {
+        return null;
+      }
+      didJumpToThreadTail.value = true;
+      if (replies.isEmpty) return null;
+      final lastIndex = indexForReply(replies.length - 1);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        followsThreadTail.value = true;
+        if (threadTailIsVisible()) return;
+        // Render the tail first, then align its trailing edge with the
+        // viewport bottom once its extent is measurable.
+        itemScrollController.jumpTo(index: lastIndex);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted || !itemScrollController.isAttached) return;
+          alignTailAboveComposer(lastIndex);
+        });
+      });
+      return null;
+    }, [initialMessageId, fetchedReplies == null, replies.length]);
+
+    // Animated return to the newest reply, used by the jump-to-latest pill.
+    Future<void> scrollToTail() async {
+      if (!itemScrollController.isAttached) return;
+      followsThreadTail.value = true;
+      final lastIndex = replies.isEmpty
+          ? headIndex
+          : indexForReply(replies.length - 1);
+      await itemScrollController.scrollTo(
+        index: lastIndex,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted || !itemScrollController.isAttached) return;
+        alignTailAboveComposer(lastIndex);
+      });
+    }
 
     // A top-anchored list doesn't stick to the newest item the way the old
     // reversed one did, so follow the tail explicitly: when a reply arrives
@@ -548,6 +629,18 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
             ),
+          if (!isAtTail.value)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: composerDockHeight.value + Grid.xs,
+              child: Center(
+                child: JumpToLatestButton(
+                  key: const ValueKey('thread-jump-to-latest'),
+                  onPressed: scrollToTail,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -709,287 +802,4 @@ class _ThreadTailMetricsObserver with WidgetsBindingObserver {
 
   @override
   void didChangeMetrics() => onMetricsChanged();
-}
-
-class _ThreadMessage extends ConsumerWidget {
-  final TimelineMessage message;
-  final Map<String, String> channelNames;
-  final String channelId;
-  final String? currentPubkey;
-  final bool showAuthor;
-  final bool isHighlighted;
-  final List<TimelineMessage>? allMessages;
-  final bool isMember;
-  final bool isArchived;
-
-  /// Whether this is the message the thread hangs off, which keeps a standing
-  /// "+" where replies only get one once they carry a reaction.
-  final bool isThreadHead;
-
-  const _ThreadMessage({
-    required this.message,
-    required this.channelNames,
-    required this.channelId,
-    required this.currentPubkey,
-    required this.showAuthor,
-    this.isHighlighted = false,
-    this.allMessages,
-    this.isMember = false,
-    this.isArchived = false,
-    this.isThreadHead = false,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final pk = message.pubkey.toLowerCase();
-    final profile =
-        ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
-        ref.read(userCacheProvider.notifier).get(pk);
-    final displayName = profile?.label ?? shortPubkey(message.pubkey);
-    final canManageMessage =
-        currentPubkey?.toLowerCase() == pk ||
-        (profile?.ownerPubkey != null &&
-            profile?.ownerPubkey == currentPubkey?.toLowerCase());
-
-    final userCache = ref.watch(userCacheProvider);
-    final knownAgentPubkeys = agentPubkeysWithProfileOwners(
-      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
-      profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
-      ],
-    );
-    final mentionNames = <String, String>{};
-    final agentMentionPubkeys = <String>{};
-    for (final mpk in message.mentionPubkeys) {
-      final normalizedPubkey = mpk.toLowerCase();
-      final p = userCache[normalizedPubkey];
-      if (p?.displayName != null) {
-        mentionNames[normalizedPubkey] = p!.displayName!;
-      }
-      if (knownAgentPubkeys.contains(normalizedPubkey)) {
-        agentMentionPubkeys.add(normalizedPubkey);
-      }
-    }
-    final resolvedMentionNames = mentionNamesWithDirectoryLabels(
-      mentionPubkeys: message.mentionPubkeys,
-      profileMentionNames: mentionNames,
-      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
-      agentMentionPubkeys: agentMentionPubkeys,
-    );
-
-    void openMessageActions(Rect anchorRect) {
-      showMessageActions(
-        context: context,
-        ref: ref,
-        message: message,
-        channelId: channelId,
-        canManageMessage: canManageMessage,
-        allMessages: allMessages,
-        currentPubkey: currentPubkey,
-        isMember: isMember,
-        isArchived: isArchived,
-        anchorRect: anchorRect,
-      );
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
-      child: DecoratedBox(
-        key: ValueKey('thread-message-${message.id}'),
-        decoration: BoxDecoration(
-          color: isHighlighted
-              ? context.colors.primary.withValues(alpha: 0.12)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(Radii.md),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(Radii.md),
-          // The media carousel intentionally continues through the list's
-          // trailing gutter. InkWell still clips its ink to [borderRadius],
-          // while leaving overflowing message content visible.
-          clipBehavior: Clip.none,
-          child: MessageLongPressInkWell(
-            key: ValueKey('thread-message-row-${message.id}'),
-            onLongPress: openMessageActions,
-            borderRadius: BorderRadius.circular(Radii.md),
-            highlightColor: context.colors.primary.withValues(alpha: 0.1),
-            child: Padding(
-              padding: EdgeInsets.only(
-                top: showAuthor ? 0 : Grid.xxs,
-                bottom: showAuthor ? 0 : Grid.xxs,
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (showAuthor)
-                    GestureDetector(
-                      onTap: () =>
-                          showUserProfileSheet(context, message.pubkey),
-                      child: _Avatar(profile: profile, pubkey: message.pubkey),
-                    )
-                  else
-                    const SizedBox(width: messageAvatarSize),
-                  const SizedBox(width: messageAvatarContentGap),
-                  Expanded(
-                    child: Padding(
-                      padding: EdgeInsets.only(top: showAuthor ? Grid.half : 0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (showAuthor)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                bottom: Grid.quarter,
-                              ),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: MessageAuthorMeta(
-                                      displayName: displayName,
-                                      username: messageUsernameLabel(profile),
-                                      timestamp: formatMessageTime(
-                                        message.createdAt,
-                                      ),
-                                      nameColor: context.colors.onSurface,
-                                      metadataColor:
-                                          context.colors.onSurfaceVariant,
-                                      onAuthorTap: () => showUserProfileSheet(
-                                        context,
-                                        message.pubkey,
-                                      ),
-                                      displayNameKey: ValueKey(
-                                        'thread-message-author-${message.id}',
-                                      ),
-                                      usernameKey: ValueKey(
-                                        'thread-message-username-${message.id}',
-                                      ),
-                                      timestampKey: ValueKey(
-                                        'thread-message-timestamp-${message.id}',
-                                      ),
-                                    ),
-                                  ),
-                                  if (message.edited) ...[
-                                    const SizedBox(width: Grid.half),
-                                    Text(
-                                      '(edited)',
-                                      style: context.textTheme.labelSmall
-                                          ?.copyWith(
-                                            color:
-                                                context.colors.onSurfaceVariant,
-                                            fontStyle: FontStyle.italic,
-                                          ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          MessageContent(
-                            content: message.content,
-                            mentionNames: resolvedMentionNames,
-                            agentMentionPubkeys: agentMentionPubkeys,
-                            channelNames: channelNames,
-                            tags: message.tags,
-                            baseStyle: messageBodyTextStyle.copyWith(
-                              color: context.colors.onSurface,
-                            ),
-                            scaleEmojiOnly: true,
-                            mediaCarouselTrailingOverflow: Grid.gutter,
-                            onMediaReply: allMessages == null
-                                ? null
-                                : () {
-                                    if (!context.mounted) return;
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute<void>(
-                                        builder: (_) => ThreadDetailPage(
-                                          threadHead: message,
-                                          allMessages: allMessages!,
-                                          channelId: channelId,
-                                          currentPubkey: currentPubkey,
-                                          isMember: isMember,
-                                          isArchived: isArchived,
-                                        ),
-                                      ),
-                                    );
-                                  },
-                            onMediaMore: (viewerContext, imageUrl) =>
-                                showImageActions(
-                                  context: viewerContext,
-                                  ref: ref,
-                                  message: message,
-                                  channelId: channelId,
-                                  imageUrl: imageUrl,
-                                  canManageMessage: canManageMessage,
-                                  onDeleted: () {
-                                    if (viewerContext.mounted) {
-                                      Navigator.of(viewerContext).maybePop();
-                                    }
-                                  },
-                                ),
-                            onChannelTap: (targetChannelId) {
-                              openChannelLink(
-                                context: context,
-                                ref: ref,
-                                channelId: targetChannelId,
-                                currentChannelId: channelId,
-                              );
-                            },
-                            onMentionTap: (pubkey) =>
-                                showUserProfileSheet(context, pubkey),
-                          ),
-                          ReactionRow(
-                            messageId: message.id,
-                            reactions: message.reactions,
-                            onToggle: (emoji) =>
-                                toggleReaction(ref, message, emoji),
-                            showAddButton:
-                                isMember &&
-                                !isArchived &&
-                                (isThreadHead || message.reactions.isNotEmpty),
-                            onAddReaction: () => showAddReactionPicker(
-                              context: context,
-                              ref: ref,
-                              message: message,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _Avatar extends StatelessWidget {
-  final UserProfile? profile;
-  final String pubkey;
-
-  const _Avatar({required this.profile, required this.pubkey});
-
-  @override
-  Widget build(BuildContext context) {
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
-    final avatarUrl = profile?.avatarUrl;
-
-    return AvatarImage(
-      imageUrl: avatarUrl,
-      radius: messageAvatarSize / 2,
-      backgroundColor: context.colors.primaryContainer,
-      fallback: Text(
-        initial,
-        style: context.textTheme.labelMedium?.copyWith(
-          color: context.colors.onPrimaryContainer,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
 }
