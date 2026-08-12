@@ -1921,6 +1921,11 @@ pub async fn workflow_webhook(
         .await
         .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
 
+    state
+        .workflow_engine
+        .record_run_triggered(community_id, run_id)
+        .await;
+
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();

@@ -941,6 +941,11 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
+    state
+        .workflow_engine
+        .record_run_triggered(community_id, run_id)
+        .await;
+
     // 5. Spawn workflow execution
     let engine = Arc::clone(&state.workflow_engine);
     let db = state.db.clone();
@@ -1113,8 +1118,17 @@ async fn handle_approval_grant(
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 6. Resume workflow execution (post-commit, async)
     let community_id = tenant.community();
+    let mut resolved_approval = approval.clone();
+    resolved_approval.status = ApprovalStatus::Granted;
+    resolved_approval.approver_pubkey = Some(self_bytes.clone());
+    resolved_approval.note = note.map(str::to_owned);
+    state
+        .workflow_engine
+        .record_approval_resolution(community_id, &resolved_approval)
+        .await;
+
+    // 6. Resume workflow execution (post-commit, async)
     let run_id = approval.run_id;
     let workflow_id = approval.workflow_id;
     let resume_index = approval.step_index as usize + 1;
@@ -1224,44 +1238,48 @@ async fn handle_approval_deny(
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 6. Cancel the workflow run (post-commit, async)
+    // 6. Cancel the workflow run and persist its lifecycle receipt.
     let community_id = tenant.community();
     let run_id = approval.run_id;
     let pubkey_hex = self_hex.clone();
-    let db = state.db.clone();
+    let run = state
+        .db
+        .get_workflow_run(community_id, run_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db get_workflow_run: {e}")))?;
+    if run.status != RunStatus::WaitingApproval {
+        return Err(IngestError::Rejected(format!(
+            "invalid: workflow run is {} rather than waiting_approval",
+            run.status
+        )));
+    }
 
-    tokio::spawn(async move {
-        let run = match db.get_workflow_run(community_id, run_id).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("approval_deny: failed to fetch run {run_id}: {e}");
-                return;
-            }
-        };
+    let cancel_msg = format!("workflow cancelled: approval denied by {pubkey_hex}");
+    state
+        .db
+        .update_workflow_run(
+            community_id,
+            run_id,
+            RunStatus::Cancelled,
+            run.current_step,
+            &run.execution_trace,
+            Some(&cancel_msg),
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: db cancel workflow_run: {e}")))?;
 
-        if run.status != RunStatus::WaitingApproval {
-            tracing::warn!(
-                "approval_deny: run {run_id} has status '{}', expected 'waiting_approval'",
-                run.status
-            );
-            return;
-        }
-
-        let cancel_msg = format!("workflow cancelled: approval denied by {pubkey_hex}");
-        if let Err(e) = db
-            .update_workflow_run(
-                community_id,
-                run_id,
-                RunStatus::Cancelled,
-                run.current_step,
-                &run.execution_trace,
-                Some(&cancel_msg),
-            )
-            .await
-        {
-            tracing::error!("approval_deny: failed to cancel run {run_id}: {e}");
-        }
-    });
+    let mut resolved_approval = approval.clone();
+    resolved_approval.status = ApprovalStatus::Denied;
+    resolved_approval.approver_pubkey = Some(self_bytes);
+    resolved_approval.note = note.map(str::to_owned);
+    state
+        .workflow_engine
+        .record_approval_resolution(community_id, &resolved_approval)
+        .await;
+    state
+        .workflow_engine
+        .record_run_cancelled(community_id, run_id)
+        .await;
 
     // 7. Return response
     Ok(IngestResult {
@@ -1355,7 +1373,16 @@ async fn resume_workflow_after_approval(
         .unwrap_or_default();
 
     // Execute remaining steps
-    let existing_trace = run.execution_trace.as_array().cloned();
+    let mut existing_trace = run.execution_trace.as_array().cloned().unwrap_or_default();
+    if resume_index > 0 {
+        if let Some(entry) = existing_trace.get_mut(resume_index - 1) {
+            if entry.get("status").and_then(serde_json::Value::as_str) == Some("waiting_approval") {
+                entry["status"] = serde_json::json!("completed");
+                entry["output"] = serde_json::json!({"approval": "granted"});
+            }
+        }
+    }
+    let existing_trace = Some(existing_trace);
     let result = buzz_workflow::executor::execute_from_step(
         &engine,
         community_id,

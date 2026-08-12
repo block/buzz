@@ -8,9 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{is_workflow_execution_kind, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, WorkflowLifecycleEvent};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -354,6 +354,102 @@ impl ActionSink for RelayActionSink {
                     &stored_event,
                     kind_u32,
                     &author_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn emit_workflow_lifecycle(
+        &self,
+        community_id: CommunityId,
+        lifecycle: WorkflowLifecycleEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            if !is_workflow_execution_kind(lifecycle.kind) {
+                return Err(ActionSinkError::InvalidInput(format!(
+                    "invalid workflow lifecycle kind {}",
+                    lifecycle.kind
+                )));
+            }
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow lifecycle community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            let WorkflowLifecycleEvent {
+                kind,
+                workflow_id,
+                run_id,
+                channel_id,
+                content,
+                token_hash,
+                target_pubkeys,
+            } = lifecycle;
+
+            let mut tags = vec![
+                Tag::parse(["d", &workflow_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["run", &run_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
+            ];
+            if let Some(channel_id) = channel_id {
+                tags.push(
+                    Tag::parse(["h", &channel_id.to_string()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("channel tag: {e}")))?,
+                );
+            }
+            if let Some(token_hash) = token_hash {
+                tags.push(
+                    Tag::parse(["t", &token_hash])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("token tag: {e}")))?,
+                );
+            }
+            for pubkey in target_pubkeys {
+                nostr::PublicKey::from_hex(&pubkey).map_err(|e| {
+                    ActionSinkError::InvalidInput(format!("invalid lifecycle target pubkey: {e}"))
+                })?;
+                tags.push(
+                    Tag::parse(["p", &pubkey])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("recipient tag: {e}")))?,
+                );
+            }
+
+            let event = EventBuilder::new(Kind::Custom(kind as u16), content.to_string())
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+            let event_id_hex = event.id.to_hex();
+            let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(community_id, &event, channel_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind,
+                    &relay_pubkey_hex,
                     None,
                 )
                 .await;

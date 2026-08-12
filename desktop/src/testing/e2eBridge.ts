@@ -14,7 +14,11 @@ import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  ChannelTemplate,
+  ExternalAgentRuntime,
+  RelayEvent,
+} from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -2292,6 +2296,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockExternalAgentRuntimes = [];
   mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
     (seed) => ({
       pubkey: seed.pubkey,
@@ -3016,6 +3021,7 @@ let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
+let mockExternalAgentRuntimes: ExternalAgentRuntime[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -12283,6 +12289,69 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "list_external_agent_runtimes":
+        return mockExternalAgentRuntimes.map((runtime) => ({ ...runtime }));
+      case "register_external_agent_runtime": {
+        const input = (
+          payload as {
+            input: {
+              agentPubkey: string;
+              name: string;
+              purpose: string;
+              deploymentScope: string;
+              runnerOwner: string;
+              healthSource: string;
+              shutdownPath: string;
+              allowedChannels: string[];
+              rateLimitPerMinute: number;
+              retirementDate: string;
+            };
+          }
+        ).input;
+        const now = new Date().toISOString();
+        const runtime: ExternalAgentRuntime = {
+          agentPubkey: input.agentPubkey,
+          ownerPubkey: MOCK_IDENTITY_PUBKEY,
+          name: input.name,
+          purpose: input.purpose,
+          deploymentScope: input.deploymentScope,
+          runnerOwner: input.runnerOwner,
+          healthSource: input.healthSource,
+          shutdownPath: input.shutdownPath,
+          allowedChannels: [...input.allowedChannels],
+          mentionOnly: true,
+          mentionFilter: true,
+          rateLimitPerMinute: input.rateLimitPerMinute,
+          retirementDate: input.retirementDate,
+          archived: false,
+          attestationConditions: "",
+          createdAt: now,
+          updatedAt: now,
+        };
+        mockExternalAgentRuntimes = [
+          ...mockExternalAgentRuntimes.filter(
+            (entry) => entry.agentPubkey !== runtime.agentPubkey,
+          ),
+          runtime,
+        ];
+        return { ...runtime };
+      }
+      case "archive_external_agent_runtime": {
+        const agentPubkey = (payload as { agentPubkey: string }).agentPubkey;
+        const index = mockExternalAgentRuntimes.findIndex(
+          (entry) => entry.agentPubkey === agentPubkey && !entry.archived,
+        );
+        if (index < 0) {
+          throw new Error(`active external agent ${agentPubkey} not found`);
+        }
+        const archived = {
+          ...mockExternalAgentRuntimes[index],
+          archived: true,
+          updatedAt: new Date().toISOString(),
+        };
+        mockExternalAgentRuntimes[index] = archived;
+        return { ...archived };
+      }
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},

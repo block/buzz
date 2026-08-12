@@ -304,6 +304,27 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+/** Public register entry for an already-running agent owned by another launcher. */
+export type ExternalAgentRuntime = {
+  agentPubkey: string;
+  ownerPubkey: string;
+  name: string;
+  purpose: string;
+  deploymentScope: string;
+  runnerOwner: string;
+  healthSource: string;
+  shutdownPath: string;
+  allowedChannels: string[];
+  mentionOnly: boolean;
+  mentionFilter: boolean;
+  rateLimitPerMinute: number;
+  retirementDate: string;
+  archived: boolean;
+  attestationConditions: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {

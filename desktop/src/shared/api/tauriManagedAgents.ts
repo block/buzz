@@ -4,6 +4,7 @@ import {
   type RawManagedAgent,
 } from "@/shared/api/tauri";
 import type {
+  ExternalAgentRuntime,
   ManagedAgent,
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
@@ -93,4 +94,42 @@ export async function reconcileManagedAgentRuntimes(
   communities: readonly { relayUrl: string }[],
 ): Promise<ManagedAgentRuntimeStatus[]> {
   return invokeTauri("reconcile_managed_agent_runtimes", { communities });
+}
+
+export type RegisterExternalAgentRuntimeInput = {
+  agentPubkey: string;
+  ownerAuthTag: string;
+  name: string;
+  purpose: string;
+  deploymentScope: string;
+  runnerOwner: string;
+  healthSource: string;
+  shutdownPath: string;
+  allowedChannels: string[];
+  mentionOnly?: boolean;
+  mentionFilter?: boolean;
+  rateLimitPerMinute: number;
+  retirementDate: string;
+};
+
+export async function listExternalAgentRuntimes(): Promise<
+  ExternalAgentRuntime[]
+> {
+  return invokeTauri<ExternalAgentRuntime[]>("list_external_agent_runtimes");
+}
+
+export async function registerExternalAgentRuntime(
+  input: RegisterExternalAgentRuntimeInput,
+): Promise<ExternalAgentRuntime> {
+  return invokeTauri<ExternalAgentRuntime>("register_external_agent_runtime", {
+    input,
+  });
+}
+
+export async function archiveExternalAgentRuntime(
+  agentPubkey: string,
+): Promise<ExternalAgentRuntime> {
+  return invokeTauri<ExternalAgentRuntime>("archive_external_agent_runtime", {
+    agentPubkey,
+  });
 }

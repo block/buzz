@@ -14,6 +14,7 @@ pub(crate) mod custom_harnesses;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;
+pub(crate) mod external_runtimes;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
@@ -53,6 +54,7 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 pub use backend::*;
 pub use discovery::*;
 pub use env_vars::*;
+pub use external_runtimes::*;
 #[cfg(windows)]
 pub(crate) use git_bash::git_bash_available;
 pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};

@@ -7,6 +7,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use serde_json::Value;
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +39,30 @@ impl From<ActionSinkError> for crate::WorkflowError {
     }
 }
 
+/// A durable workflow lifecycle event to be signed and published by the relay.
+///
+/// The workflow engine owns the state transition; the relay owns the Nostr
+/// event, its signature, persistence, and fan-out. Keeping the raw approval
+/// token out of this shape ensures lifecycle events can expose only the stored
+/// token hash used by approval actions.
+#[derive(Clone, Debug)]
+pub struct WorkflowLifecycleEvent {
+    /// The workflow lifecycle kind (for example, 46001 or 46010).
+    pub kind: u32,
+    /// The workflow that owns this lifecycle record.
+    pub workflow_id: Uuid,
+    /// The workflow run represented by this record.
+    pub run_id: Uuid,
+    /// The channel that scopes the workflow, if it has one.
+    pub channel_id: Option<Uuid>,
+    /// The JSON wire payload consumed by Buzz clients.
+    pub content: Value,
+    /// The SHA-256 approval token hash, when this lifecycle event represents an approval.
+    pub token_hash: Option<String>,
+    /// Exact recipients for a targeted approval notification.
+    pub target_pubkeys: Vec<String>,
+}
+
 /// Interface for workflow actions that produce side effects.
 ///
 /// Implemented by the relay to provide direct DB/event access to the executor.
@@ -65,5 +91,12 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Persist and fan out a relay-signed workflow lifecycle event.
+    fn emit_workflow_lifecycle(
+        &self,
+        community_id: CommunityId,
+        lifecycle: WorkflowLifecycleEvent,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

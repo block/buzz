@@ -4,14 +4,17 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        build_external_agent_runtime, build_external_runtime_event, build_managed_agent_summary,
+        current_instance_id, discover_provider_candidates, ensure_persona_is_active,
+        external_runtime_projection_from_event, find_external_runtime_conflict,
+        find_managed_agent_mut, load_external_agent_runtimes, load_managed_agents, load_personas,
+        load_teams, managed_agent_avatar_url, normalize_agent_args, normalize_public_key,
+        provider_deploy, resolve_provider_binary, save_external_agent_runtimes, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ExternalAgentRuntime,
+        ManagedAgentRecord, ManagedAgentSummary, RegisterExternalAgentRuntimeRequest,
+        RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
         DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
@@ -57,6 +60,38 @@ pub(super) fn retain_managed_agent_pending(
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");
     }
+}
+
+/// Queue an owner-signed external-runtime provenance projection.  This uses
+/// the existing kind:30177 retention pipe but never creates a
+/// ManagedAgentRecord, private key, provider deployment, or process handle.
+fn retain_external_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    record: &ExternalAgentRuntime,
+) -> Result<(), String> {
+    use crate::managed_agents::retention::{
+        active_retention_scope, open_retention_db, retain_event, RetainedEvent,
+    };
+    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+    use nostr::JsonUtil;
+
+    let scope = active_retention_scope(app, state)?;
+    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let event = build_external_runtime_event(&scope.owner_keys, record)?;
+    let conn = open_retention_db(&scope.db_path)?;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_MANAGED_AGENT,
+            pubkey: owner_pubkey,
+            d_tag: record.agent_pubkey.clone(),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        },
+    )
 }
 
 /// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
@@ -1348,6 +1383,187 @@ pub async fn delete_managed_agent(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Read the owner-only external-runtime register.  This command has no
+/// lifecycle side effects and intentionally does not merge entries into the
+/// managed-agent list.
+#[tauri::command]
+pub async fn list_external_agent_runtimes(
+    app: AppHandle,
+) -> Result<Vec<ExternalAgentRuntime>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        load_external_agent_runtimes(&app)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+/// Register an already-running external identity without importing its key or
+/// starting a second executor.  The NIP-OA tag is verified against the current
+/// workspace owner and then discarded; only public provenance metadata is
+/// stored locally and queued as an owner-signed kind:30177 projection.
+#[tauri::command]
+pub async fn register_external_agent_runtime(
+    input: RegisterExternalAgentRuntimeRequest,
+    app: AppHandle,
+) -> Result<ExternalAgentRuntime, String> {
+    use tauri::Manager;
+    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+
+    let owner_hex = {
+        let state = app.state::<AppState>();
+        workspace_owner_hex(&state)?
+    };
+    let record = build_external_agent_runtime(&input, &owner_hex, &now_iso())?;
+
+    // A second desktop may have registered the same identity since this
+    // device's local register was last read. Query the current replaceable
+    // provenance head before allowing another scope; a failed read is a
+    // fail-closed registration error rather than an invitation to duplicate.
+    let existing_events = {
+        let state = app.state::<AppState>();
+        crate::relay::query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [KIND_MANAGED_AGENT],
+                "authors": [owner_hex],
+                "#d": [record.agent_pubkey],
+            })],
+        )
+        .await?
+    };
+    for event in &existing_events {
+        let has_agent_coordinate = event.tags.iter().any(|tag| {
+            let values: Vec<&str> = tag.as_slice().iter().map(|value| value.as_str()).collect();
+            values.first() == Some(&"d")
+                && values.get(1).copied() == Some(record.agent_pubkey.as_str())
+        });
+        if !has_agent_coordinate {
+            continue;
+        }
+        let Some(existing) = external_runtime_projection_from_event(event, &record.agent_pubkey)?
+        else {
+            return Err(format!(
+                "agent {} already has a managed-agent provenance event on the active relay; stop/remove that runner before registering an external scope",
+                record.agent_pubkey
+            ));
+        };
+        if existing.archived {
+            continue;
+        }
+        if existing.deployment_scope == record.deployment_scope {
+            return Err(format!(
+                "external agent {} is already registered in this deployment scope on the active relay",
+                record.agent_pubkey
+            ));
+        }
+        return Err(format!(
+            "external agent {} is already active in deployment scope '{}' on the active relay; one identity may have only one live runner scope",
+            record.agent_pubkey, existing.deployment_scope
+        ));
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let agent_pubkey = record.agent_pubkey.clone();
+        let deployment_scope = record.deployment_scope.clone();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+
+        // A local managed record would share the same relay identity and
+        // therefore create two possible executor owners. Registration fails
+        // closed instead of trying to reconcile private keys.
+        if load_managed_agents(&app)?
+            .iter()
+            .any(|managed| managed.pubkey == agent_pubkey)
+        {
+            return Err(format!(
+                "agent {agent_pubkey} already has a local managed-agent record; stop/remove that runner before registering an external scope"
+            ));
+        }
+
+        let mut records = load_external_agent_runtimes(&app)?;
+        if let Some(conflict) =
+            find_external_runtime_conflict(&records, &agent_pubkey, &deployment_scope)
+        {
+            return Err(conflict.message(&agent_pubkey));
+        }
+
+        records.push(record.clone());
+        save_external_agent_runtimes(&app, &records)?;
+        if let Err(error) = retain_external_agent_pending(&app, &state, &record) {
+            records.pop();
+            let rollback_error = save_external_agent_runtimes(&app, &records).err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "failed to retain external-runtime provenance: {error}; rollback also failed: {rollback_error}"
+                ),
+                None => format!("failed to retain external-runtime provenance: {error}"),
+            });
+        }
+        Ok(record)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+/// Archive an external registration while preserving its local and relay
+/// history.  This is not access revocation and does not claim the external
+/// runner stopped; the runner owner remains responsible for its shutdown path.
+#[tauri::command]
+pub async fn archive_external_agent_runtime(
+    agent_pubkey: String,
+    app: AppHandle,
+) -> Result<ExternalAgentRuntime, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let owner_hex = workspace_owner_hex(&state)?;
+        let normalized = normalize_public_key(&agent_pubkey, "agent")?;
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_external_agent_runtimes(&app)?;
+        let record_index = records
+            .iter()
+            .position(|record| record.agent_pubkey == normalized && !record.archived)
+            .ok_or_else(|| format!("active external agent {normalized} not found"))?;
+        let previous = records[record_index].clone();
+        if previous.owner_pubkey != owner_hex {
+            return Err(
+                "external runtime is owned by a different workspace identity; switch to that identity before archiving"
+                    .to_string(),
+            );
+        }
+        let mut archived = previous.clone();
+        archived.archived = true;
+        archived.updated_at = now_iso();
+        records[record_index] = archived.clone();
+        save_external_agent_runtimes(&app, &records)?;
+        if let Err(error) = retain_external_agent_pending(&app, &state, &archived) {
+            records[record_index] = previous;
+            let rollback_error = save_external_agent_runtimes(&app, &records).err();
+            return Err(match rollback_error {
+                Some(rollback_error) => format!(
+                    "failed to retain external-runtime archive provenance: {error}; rollback also failed: {rollback_error}"
+                ),
+                None => format!("failed to retain external-runtime archive provenance: {error}"),
+            });
+        }
+        Ok(archived)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
 
 // Remote agent shutdown is handled entirely by the frontend:

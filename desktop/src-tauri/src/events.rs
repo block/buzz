@@ -91,6 +91,17 @@ fn check_pubkey(pubkey: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a stored approval token hash reference.
+fn check_token_hash(token_hash: &str) -> Result<(), String> {
+    if token_hash.len() != 64 || !token_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "approval token hash must be a 64-character hex string (got {} chars)",
+            token_hash.len()
+        ));
+    }
+    Ok(())
+}
+
 // ── Channel operations ───────────────────────────────────────────────────────
 
 /// Kind 9007 — create channel.
@@ -786,15 +797,17 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
     Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
 }
 
-/// Kind 46030 — grant an approval token (with optional note).
-pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46030 — grant an approval token hash (with optional note).
+pub fn build_approval_grant(token_hash: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    check_token_hash(token_hash)?;
+    let tags = vec![tag(vec!["d", &token_hash.to_ascii_lowercase()])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
-/// Kind 46031 — deny an approval token (with optional note).
-pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+/// Kind 46031 — deny an approval token hash (with optional note).
+pub fn build_approval_deny(token_hash: &str, note: Option<&str>) -> Result<EventBuilder, String> {
+    check_token_hash(token_hash)?;
+    let tags = vec![tag(vec!["d", &token_hash.to_ascii_lowercase()])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -45,6 +47,35 @@ pub struct WorkflowSaveWire {
     pub workflow: WorkflowWire,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_secret: Option<String>,
+}
+
+fn lifecycle_payload(event: &nostr::Event) -> Option<Value> {
+    serde_json::from_str::<Value>(&event.content)
+        .ok()
+        .filter(Value::is_object)
+}
+
+fn lifecycle_run_payload(event: &nostr::Event) -> Option<Value> {
+    let payload = lifecycle_payload(event)?;
+    let kind = event.kind.as_u16() as u32;
+    let run = if (46010..=46012).contains(&kind) {
+        payload.get("run").cloned().unwrap_or(payload)
+    } else {
+        payload
+    };
+    (run.get("id").and_then(Value::as_str).is_some()
+        && run.get("workflow_id").and_then(Value::as_str).is_some())
+    .then_some(run)
+}
+
+fn lifecycle_precedence(kind: u32) -> u8 {
+    match kind {
+        46005..=46007 => 4,
+        46011..=46012 => 3,
+        46010 => 2,
+        46001 => 1,
+        _ => 0,
+    }
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -121,26 +152,46 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    let requested_limit = limit.unwrap_or(20).min(100);
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [46001, 46005, 46006, 46007, 46010, 46011, 46012],
+            "#d": [workflow_id],
+            "limit": 500
+        })],
+    )
+    .await?;
+
+    let mut latest: HashMap<String, (u64, u8, Value)> = HashMap::new();
+    for event in events {
+        let Some(run) = lifecycle_run_payload(&event) else {
+            continue;
+        };
+        if run.get("workflow_id").and_then(Value::as_str) != Some(workflow_id.as_str()) {
+            continue;
+        }
+        let Some(run_id) = run.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let created_at = event.created_at.as_secs();
+        let precedence = lifecycle_precedence(event.kind.as_u16() as u32);
+        if latest
+            .get(run_id)
+            .is_none_or(|(seen_at, seen_precedence, _)| {
+                (created_at, precedence) >= (*seen_at, *seen_precedence)
+            })
+        {
+            latest.insert(run_id.to_owned(), (created_at, precedence, run));
+        }
+    }
+
+    let mut runs: Vec<(u64, u8, Value)> = latest.into_values().collect();
+    runs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    runs.truncate(requested_limit as usize);
+    Ok(runs.into_iter().map(|(_, _, run)| run).collect())
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -245,7 +296,13 @@ pub async fn trigger_workflow(
 ) -> Result<Value, String> {
     let builder = events::build_workflow_trigger(&workflow_id)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    let response = parse_command_response::<Value>(&result.message).unwrap_or(Value::Null);
+    Ok(serde_json::json!({
+        "event_id": result.event_id,
+        "run_id": response.get("run_id").and_then(Value::as_str).unwrap_or(""),
+        "workflow_id": workflow_id,
+        "status": "pending",
+    }))
 }
 
 // ── Approvals ────────────────────────────────────────────────────────────────
@@ -254,15 +311,63 @@ pub async fn trigger_workflow(
 pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
-    // approvals into the frontend's `WorkflowApproval` shape from lifecycle
-    // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Return a bare empty array so the frontend's
-    // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
-    let _ = (workflow_id, run_id);
-    Ok(Vec::new())
+    let mut events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [46010, 46011, 46012],
+            "#d": [workflow_id],
+            "limit": 500
+        })],
+    )
+    .await?;
+    events.sort_by_key(|event| event.created_at.as_secs());
+
+    let mut latest: HashMap<String, (u64, u8, Value)> = HashMap::new();
+    for event in events {
+        let Some(mut approval) = lifecycle_payload(&event) else {
+            continue;
+        };
+        if approval.get("workflow_id").and_then(Value::as_str) != Some(workflow_id.as_str())
+            || approval.get("run_id").and_then(Value::as_str) != Some(run_id.as_str())
+        {
+            continue;
+        }
+        let Some(token) = approval
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let created_at = event.created_at.as_secs();
+        let precedence = match approval.get("status").and_then(Value::as_str) {
+            Some("granted" | "denied") => 2,
+            Some("pending") => 1,
+            _ => 0,
+        };
+        if approval.get("message").is_none() {
+            if let Some((_, _, previous)) = latest.get(&token) {
+                if let Some(message) = previous.get("message") {
+                    approval["message"] = message.clone();
+                }
+            }
+        }
+        let should_replace = latest.get(&token).is_none_or(
+            |(seen_at, seen_precedence, _)| {
+                (created_at, precedence) >= (*seen_at, *seen_precedence)
+            },
+        );
+        if should_replace {
+            latest.insert(token, (created_at, precedence, approval));
+        }
+    }
+
+    Ok(latest
+        .into_values()
+        .map(|(_, _, approval)| approval)
+        .collect())
 }
 
 #[tauri::command]
@@ -273,7 +378,14 @@ pub async fn grant_approval(
 ) -> Result<Value, String> {
     let builder = events::build_approval_grant(&token, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    let response = parse_command_response::<Value>(&result.message).unwrap_or(Value::Null);
+    Ok(serde_json::json!({
+        "event_id": result.event_id,
+        "token": token,
+        "status": response.get("status").and_then(Value::as_str).unwrap_or("granted"),
+        "run_id": response.get("run_id").and_then(Value::as_str).unwrap_or(""),
+        "workflow_id": "",
+    }))
 }
 
 #[tauri::command]
@@ -284,7 +396,14 @@ pub async fn deny_approval(
 ) -> Result<Value, String> {
     let builder = events::build_approval_deny(&token, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    let response = parse_command_response::<Value>(&result.message).unwrap_or(Value::Null);
+    Ok(serde_json::json!({
+        "event_id": result.event_id,
+        "token": token,
+        "status": response.get("status").and_then(Value::as_str).unwrap_or("denied"),
+        "run_id": response.get("run_id").and_then(Value::as_str).unwrap_or(""),
+        "workflow_id": "",
+    }))
 }
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────

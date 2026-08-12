@@ -1,5 +1,5 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -8,9 +8,116 @@ use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
+use crate::CuratedCategory;
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
+
+/// Visible marker applied to content (and event tags) when `--shadow` is set.
+pub(crate) const SHADOW_MARKER: &str = "SHADOW / NOT DELIVERED";
+
+/// Machine-readable tag name for curated agent message category.
+const TAG_BUZZ_CATEGORY: &str = "buzz-category";
+/// Hashtag so clients/relays can filter curated traffic (`#t=buzz-curated`).
+const TAG_CURATED_HASHTAG: &str = "buzz-curated";
+const TAG_BUZZ_CASE: &str = "buzz-case";
+const TAG_BUZZ_SHADOW: &str = "buzz-shadow";
+
+/// Parse a curated category string (wire form). Pure helper for unit tests and
+/// programmatic callers; clap already validates the CLI flag via `ValueEnum`.
+#[cfg(test)]
+pub(crate) fn parse_curated_category(s: &str) -> Result<CuratedCategory, CliError> {
+    match s.trim() {
+        "state-change" => Ok(CuratedCategory::StateChange),
+        "question" => Ok(CuratedCategory::Question),
+        "gate" => Ok(CuratedCategory::Gate),
+        "alert" => Ok(CuratedCategory::Alert),
+        "report" => Ok(CuratedCategory::Report),
+        other => Err(CliError::Usage(format!(
+            "invalid category '{other}'; expected state-change|question|gate|alert|report"
+        ))),
+    }
+}
+
+/// Refuse empty / whitespace-only content and optionally wrap with the shadow marker.
+///
+/// Shadow mode prefixes and suffixes the body with `SHADOW / NOT DELIVERED` so
+/// humans and agents can never mistake a dry-run for a real delivery.
+pub(crate) fn prepare_curated_content(content: &str, shadow: bool) -> Result<String, CliError> {
+    if content.trim().is_empty() {
+        return Err(CliError::Usage(
+            "content must not be empty for curated agent messages".into(),
+        ));
+    }
+    if shadow {
+        Ok(format!("{SHADOW_MARKER}\n{content}\n{SHADOW_MARKER}"))
+    } else {
+        Ok(content.to_string())
+    }
+}
+
+/// Validate optional audit fields; empty strings are refused when the flag is present.
+fn validate_optional_audit_field(name: &str, value: Option<&str>) -> Result<(), CliError> {
+    if let Some(v) = value {
+        if v.trim().is_empty() {
+            return Err(CliError::Usage(format!("--{name} must not be empty")));
+        }
+        if v.chars().any(|c| c.is_control()) {
+            return Err(CliError::Usage(format!(
+                "--{name} must not contain control characters"
+            )));
+        }
+        if v.len() > 1024 {
+            return Err(CliError::Usage(format!(
+                "--{name} exceeds maximum length (1024 bytes)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build machine-readable metadata tags for a curated agent message.
+fn curated_metadata_tags(
+    category: CuratedCategory,
+    case_id: Option<&str>,
+    record_url: Option<&str>,
+    shadow: bool,
+) -> Result<Vec<Tag>, CliError> {
+    let mut tags = Vec::with_capacity(5);
+    tags.push(
+        Tag::parse([TAG_BUZZ_CATEGORY, category.as_str()])
+            .map_err(|e| CliError::Other(format!("invalid category tag: {e}")))?,
+    );
+    // Standard hashtag so filters can select curated vs raw traffic.
+    tags.push(
+        Tag::parse(["t", TAG_CURATED_HASHTAG])
+            .map_err(|e| CliError::Other(format!("invalid curated hashtag: {e}")))?,
+    );
+    tags.push(
+        Tag::parse(["t", category.as_str()])
+            .map_err(|e| CliError::Other(format!("invalid category hashtag: {e}")))?,
+    );
+    if let Some(case_id) = case_id {
+        tags.push(
+            Tag::parse([TAG_BUZZ_CASE, case_id])
+                .map_err(|e| CliError::Other(format!("invalid case tag: {e}")))?,
+        );
+    }
+    if let Some(record_url) = record_url {
+        // NIP-24-style reference URL.
+        tags.push(
+            Tag::parse(["r", record_url])
+                .map_err(|e| CliError::Other(format!("invalid record-url tag: {e}")))?,
+        );
+    }
+    if shadow {
+        tags.push(
+            Tag::parse([TAG_BUZZ_SHADOW, "1"])
+                .map_err(|e| CliError::Other(format!("invalid shadow tag: {e}")))?,
+        );
+    }
+    Ok(tags)
+}
 
 /// Extract the thread root event ID from a Nostr tag array.
 ///
@@ -571,6 +678,61 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+/// Parameters for curated agent message publishing.
+pub struct PublishCuratedParams {
+    pub channel_id: String,
+    pub category: CuratedCategory,
+    pub content: String,
+    pub reply_to: Option<String>,
+    pub case_id: Option<String>,
+    pub record_url: Option<String>,
+    pub shadow: bool,
+}
+
+/// Publish a curated agent message — quiet, category-gated, audit-tagged.
+///
+/// On success prints exactly one line: `<event_id> <category>`.
+pub async fn cmd_publish_curated(
+    client: &BuzzClient,
+    mut p: PublishCuratedParams,
+) -> Result<(), CliError> {
+    p.content = read_or_stdin(&p.content)?;
+    let content = prepare_curated_content(&p.content, p.shadow)?;
+    validate_content_size(&content)?;
+    validate_optional_audit_field("case", p.case_id.as_deref())?;
+    validate_optional_audit_field("record-url", p.record_url.as_deref())?;
+    if let Some(ref r) = p.reply_to {
+        validate_hex64(r)?;
+    }
+    let channel_uuid = parse_uuid(&p.channel_id)?;
+
+    let thread_ref = if let Some(ref r) = p.reply_to {
+        Some(resolve_thread_ref(client, r).await?)
+    } else {
+        None
+    };
+
+    let mut builder =
+        buzz_sdk::build_message(channel_uuid, &content, thread_ref.as_ref(), &[], false, &[])
+            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?;
+
+    for tag in curated_metadata_tags(
+        p.category,
+        p.case_id.as_deref(),
+        p.record_url.as_deref(),
+        p.shadow,
+    )? {
+        builder = builder.tag(tag);
+    }
+
+    let event = client.sign_event(builder)?;
+    let event_id = event.id.to_hex();
+    client.submit_event(event).await?;
+    // Quiet by construction: one confirmation line only.
+    println!("{event_id} {}", p.category.as_str());
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -895,6 +1057,29 @@ pub async fn dispatch(
             )
             .await
         }
+        MessagesCmd::PublishCurated {
+            channel,
+            category,
+            content,
+            reply_to,
+            case_id,
+            record_url,
+            shadow,
+        } => {
+            cmd_publish_curated(
+                client,
+                PublishCuratedParams {
+                    channel_id: channel,
+                    category,
+                    content,
+                    reply_to,
+                    case_id,
+                    record_url,
+                    shadow,
+                },
+            )
+            .await
+        }
         MessagesCmd::SendDiff {
             channel,
             diff,
@@ -993,14 +1178,163 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        curated_metadata_tags, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions,
+        parse_curated_category, parse_member_pubkeys, prepare_curated_content,
+        resolve_names_to_pubkeys, SHADOW_MARKER, TAG_BUZZ_CASE, TAG_BUZZ_CATEGORY, TAG_BUZZ_SHADOW,
+        TAG_CURATED_HASHTAG,
     };
+    use crate::CuratedCategory;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use serde_json::json;
+
+    // --- curated agent message publishing ---
+
+    #[test]
+    fn curated_category_parsing_accepts_all_five() {
+        assert_eq!(
+            parse_curated_category("state-change").unwrap(),
+            CuratedCategory::StateChange
+        );
+        assert_eq!(
+            parse_curated_category("question").unwrap(),
+            CuratedCategory::Question
+        );
+        assert_eq!(
+            parse_curated_category("gate").unwrap(),
+            CuratedCategory::Gate
+        );
+        assert_eq!(
+            parse_curated_category("alert").unwrap(),
+            CuratedCategory::Alert
+        );
+        assert_eq!(
+            parse_curated_category("report").unwrap(),
+            CuratedCategory::Report
+        );
+        // Surrounding whitespace is tolerated for scripted callers.
+        assert_eq!(
+            parse_curated_category("  gate  ").unwrap(),
+            CuratedCategory::Gate
+        );
+    }
+
+    #[test]
+    fn curated_category_parsing_rejects_raw_spam_labels() {
+        for bad in [
+            "",
+            "heartbeat",
+            "progress",
+            "tool-log",
+            "raw",
+            "STATE-CHANGE",
+            "state_change",
+        ] {
+            let err = parse_curated_category(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::error::CliError::Usage(_)),
+                "expected Usage for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_category_as_str_round_trips() {
+        for cat in [
+            CuratedCategory::StateChange,
+            CuratedCategory::Question,
+            CuratedCategory::Gate,
+            CuratedCategory::Alert,
+            CuratedCategory::Report,
+        ] {
+            assert_eq!(parse_curated_category(cat.as_str()).unwrap(), cat);
+        }
+    }
+
+    #[test]
+    fn prepare_curated_content_refuses_empty_and_whitespace() {
+        for empty in ["", "   ", "\n\t  \n"] {
+            let err = prepare_curated_content(empty, false).unwrap_err();
+            assert!(
+                matches!(err, crate::error::CliError::Usage(_)),
+                "expected Usage for {empty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_curated_content_passthrough_without_shadow() {
+        assert_eq!(
+            prepare_curated_content("Case quoted", false).unwrap(),
+            "Case quoted"
+        );
+    }
+
+    #[test]
+    fn prepare_curated_content_applies_shadow_prefix_and_suffix() {
+        let out = prepare_curated_content("Approve PO?", true).unwrap();
+        assert!(
+            out.starts_with(SHADOW_MARKER),
+            "shadow content must be prefixed: {out}"
+        );
+        assert!(
+            out.ends_with(SHADOW_MARKER),
+            "shadow content must be suffixed: {out}"
+        );
+        assert!(out.contains("Approve PO?"));
+        assert_eq!(
+            out,
+            format!("{SHADOW_MARKER}\nApprove PO?\n{SHADOW_MARKER}")
+        );
+    }
+
+    #[test]
+    fn curated_metadata_tags_are_machine_readable() {
+        let tags = curated_metadata_tags(
+            CuratedCategory::Gate,
+            Some("po-42"),
+            Some("https://example.com/po/42"),
+            true,
+        )
+        .unwrap();
+        let as_slices: Vec<Vec<String>> = tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == [TAG_BUZZ_CATEGORY, "gate"]));
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == ["t", TAG_CURATED_HASHTAG]));
+        assert!(as_slices.iter().any(|t| t.as_slice() == ["t", "gate"]));
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == [TAG_BUZZ_CASE, "po-42"]));
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == ["r", "https://example.com/po/42"]));
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == [TAG_BUZZ_SHADOW, "1"]));
+    }
+
+    #[test]
+    fn curated_metadata_tags_omit_optional_fields_when_absent() {
+        let tags = curated_metadata_tags(CuratedCategory::Report, None, None, false).unwrap();
+        let as_slices: Vec<Vec<String>> = tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(as_slices
+            .iter()
+            .any(|t| t.as_slice() == [TAG_BUZZ_CATEGORY, "report"]));
+        assert!(!as_slices
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some(TAG_BUZZ_CASE)));
+        assert!(!as_slices
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some("r")));
+        assert!(!as_slices
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some(TAG_BUZZ_SHADOW)));
+    }
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

@@ -120,6 +120,21 @@ async function waitForInvokeBridge(page: import("@playwright/test").Page) {
   );
 }
 
+test("external runtime register stays provenance-only", async ({ page }) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const section = page.getByTestId("external-runtimes-section");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText("Registration never imports a key");
+
+  await section.getByTestId("external-runtime-register-button").click();
+  await expect(
+    page.getByTestId("external-runtime-register-dialog"),
+  ).toContainText("never receives the runner key");
+  await page.getByRole("button", { name: "Cancel" }).click();
+});
+
 async function invokeTauri<T>(
   page: import("@playwright/test").Page,
   command: string,

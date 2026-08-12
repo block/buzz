@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, WorkflowLifecycleEvent};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -44,9 +44,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
+use buzz_core::kind::{
+    event_kind_u32, is_workflow_execution_kind, KIND_REACTION, KIND_WORKFLOW_APPROVAL_DENIED,
+    KIND_WORKFLOW_APPROVAL_GRANTED, KIND_WORKFLOW_APPROVAL_REQUESTED, KIND_WORKFLOW_COMPLETED,
+    KIND_WORKFLOW_FAILED, KIND_WORKFLOW_TRIGGERED,
+};
 use buzz_core::tenant::CommunityId;
-use buzz_db::workflow::RunStatus;
+use buzz_db::workflow::{ApprovalRecord, ApprovalStatus, CreateApprovalParams, RunStatus};
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -102,6 +106,12 @@ pub struct WorkflowEngine {
     /// `buzz-relay`).
     pub(crate) workflow_cache:
         moka::sync::Cache<(CommunityId, Uuid), Arc<Vec<buzz_db::workflow::WorkflowRecord>>>,
+}
+
+fn exact_pubkey_target(approver_spec: &str) -> Option<String> {
+    let normalized = approver_spec.trim();
+    (normalized.len() == 64 && normalized.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| normalized.to_ascii_lowercase())
 }
 
 impl WorkflowEngine {
@@ -194,6 +204,160 @@ impl WorkflowEngine {
         })
     }
 
+    async fn emit_lifecycle(
+        &self,
+        community_id: CommunityId,
+        lifecycle: WorkflowLifecycleEvent,
+    ) -> Result<(), WorkflowError> {
+        let Some(sink) = self.action_sink.get() else {
+            // DB-only engine tests intentionally run without a relay. The real
+            // relay always installs its sink during AppState construction.
+            tracing::debug!(
+                workflow_id = %lifecycle.workflow_id,
+                run_id = %lifecycle.run_id,
+                kind = lifecycle.kind,
+                "Skipping workflow lifecycle event because no relay sink is installed"
+            );
+            return Ok(());
+        };
+
+        sink.emit_workflow_lifecycle(community_id, lifecycle)
+            .await
+            .map(|_| ())
+            .map_err(WorkflowError::from)
+    }
+
+    fn run_lifecycle_payload(run: &buzz_db::workflow::WorkflowRunRecord) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "id": run.id.to_string(),
+            "workflow_id": run.workflow_id.to_string(),
+            "status": run.status.to_string(),
+            "current_step": run.current_step,
+            "execution_trace": run.execution_trace,
+            "started_at": run.started_at.map(|at| at.timestamp()),
+            "completed_at": run.completed_at.map(|at| at.timestamp()),
+            "error_message": run.error_message,
+            "created_at": run.created_at.timestamp(),
+        })
+    }
+
+    async fn emit_run_lifecycle(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        kind: u32,
+    ) -> Result<(), WorkflowError> {
+        let run = self.db.get_workflow_run(community_id, run_id).await?;
+        let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+        let lifecycle = WorkflowLifecycleEvent {
+            kind,
+            workflow_id: run.workflow_id,
+            run_id,
+            channel_id: workflow.channel_id,
+            content: Self::run_lifecycle_payload(&run),
+            token_hash: None,
+            target_pubkeys: Vec::new(),
+        };
+        self.emit_lifecycle(community_id, lifecycle).await
+    }
+
+    async fn emit_approval_lifecycle(
+        &self,
+        community_id: CommunityId,
+        approval: &ApprovalRecord,
+        kind: u32,
+        message: Option<&str>,
+    ) -> Result<(), WorkflowError> {
+        let workflow = self
+            .db
+            .get_workflow(community_id, approval.workflow_id)
+            .await?;
+        let run = self
+            .db
+            .get_workflow_run(community_id, approval.run_id)
+            .await?;
+        let token_hash = hex::encode(&approval.token);
+        let mut content = serde_json::json!({
+            "schema_version": 1,
+            "token": token_hash,
+            "workflow_id": approval.workflow_id.to_string(),
+            "run_id": approval.run_id.to_string(),
+            "step_id": approval.step_id,
+            "step_index": approval.step_index,
+            "approver_spec": approval.approver_spec,
+            "status": approval.status.to_string(),
+            "approver_pubkey": approval.approver_pubkey.as_ref().map(hex::encode),
+            "note": approval.note,
+            "expires_at": approval.expires_at.to_rfc3339(),
+            "created_at": approval.created_at.timestamp(),
+            "run": Self::run_lifecycle_payload(&run),
+        });
+        if let Some(message) = message {
+            content["message"] = serde_json::Value::String(message.to_owned());
+        }
+
+        let target_pubkeys = exact_pubkey_target(&approval.approver_spec)
+            .into_iter()
+            .collect();
+        let lifecycle = WorkflowLifecycleEvent {
+            kind,
+            workflow_id: approval.workflow_id,
+            run_id: approval.run_id,
+            channel_id: workflow.channel_id,
+            content,
+            token_hash: Some(token_hash),
+            target_pubkeys,
+        };
+        self.emit_lifecycle(community_id, lifecycle).await
+    }
+
+    /// Emit the durable lifecycle event for a newly created workflow run.
+    pub async fn record_run_triggered(&self, community_id: CommunityId, run_id: Uuid) {
+        if let Err(e) = self
+            .emit_run_lifecycle(community_id, run_id, KIND_WORKFLOW_TRIGGERED)
+            .await
+        {
+            tracing::error!(run_id = %run_id, "Failed to emit workflow-triggered lifecycle event: {e}");
+        }
+    }
+
+    /// Emit the durable lifecycle event for a cancelled workflow run.
+    pub async fn record_run_cancelled(&self, community_id: CommunityId, run_id: Uuid) {
+        if let Err(e) = self
+            .emit_run_lifecycle(
+                community_id,
+                run_id,
+                buzz_core::kind::KIND_WORKFLOW_CANCELLED,
+            )
+            .await
+        {
+            tracing::error!(run_id = %run_id, "Failed to emit workflow-cancelled lifecycle event: {e}");
+        }
+    }
+
+    /// Emit the durable lifecycle event for an approval decision.
+    pub async fn record_approval_resolution(
+        &self,
+        community_id: CommunityId,
+        approval: &ApprovalRecord,
+    ) {
+        let kind = match approval.status {
+            ApprovalStatus::Granted => KIND_WORKFLOW_APPROVAL_GRANTED,
+            ApprovalStatus::Denied => KIND_WORKFLOW_APPROVAL_DENIED,
+            ApprovalStatus::Pending | ApprovalStatus::Expired => return,
+        };
+        if let Err(e) = self
+            .emit_approval_lifecycle(community_id, approval, kind, None)
+            .await
+        {
+            tracing::error!(
+                run_id = %approval.run_id,
+                "Failed to emit approval-resolution lifecycle event: {e}"
+            );
+        }
+    }
+
     /// Parse and validate a YAML workflow definition.
     ///
     /// Returns `(WorkflowDef, canonical_json)` on success. The canonical JSON
@@ -221,35 +385,116 @@ impl WorkflowEngine {
 
         match result {
             Ok(result) => {
+                let ExecutionResult {
+                    pending_approval,
+                    step_index,
+                    trace,
+                    ..
+                } = result;
                 let mut full_trace = prefix;
-                full_trace.extend(result.trace);
+                full_trace.extend(trace);
                 let trace_json = serde_json::Value::Array(full_trace);
-                let step_count = result.step_index as i32;
+                let step_count = step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
-                    if let Err(e) = self
+                if let Some(pending) = pending_approval {
+                    let expires_at = i64::try_from(pending.timeout_secs)
+                        .ok()
+                        .and_then(|seconds| {
+                            Utc::now().checked_add_signed(chrono::Duration::seconds(seconds))
+                        });
+                    let Some(expires_at) = expires_at else {
+                        let error = "approval timeout is out of range";
+                        tracing::error!(run_id = %run_id, "{error}");
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(error),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to mark invalid approval timeout as failed: {db_err}");
+                        } else if let Err(emit_err) = self
+                            .emit_run_lifecycle(community_id, run_id, KIND_WORKFLOW_FAILED)
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to emit workflow-failed lifecycle event: {emit_err}");
+                        }
+                        return;
+                    };
+
+                    let workflow_id = match self.db.get_workflow_run(community_id, run_id).await {
+                        Ok(run) => run.workflow_id,
+                        Err(e) => {
+                            tracing::error!(run_id = %run_id, "Failed to resolve workflow for approval: {e}");
+                            return;
+                        }
+                    };
+
+                    let approval = self
                         .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
+                        .suspend_workflow_run_for_approval(
+                            CreateApprovalParams {
+                                community_id,
+                                token: &pending.token,
+                                workflow_id,
+                                run_id,
+                                step_id: &pending.step_id,
+                                step_index: step_count,
+                                approver_spec: &pending.approver_spec,
+                                expires_at,
+                            },
                             step_count,
                             &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
                         )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
+                        .await;
+
+                    match approval {
+                        Ok(approval) => {
+                            tracing::info!(
+                                run_id = %run_id,
+                                step_index,
+                                "Workflow suspended awaiting approval"
+                            );
+                            if let Err(e) = self
+                                .emit_approval_lifecycle(
+                                    community_id,
+                                    &approval,
+                                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                                    Some(&pending.message),
+                                )
+                                .await
+                            {
+                                tracing::error!(run_id = %run_id, "Failed to emit approval-requested lifecycle event: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            let error = format!("failed to persist approval gate: {e}");
+                            tracing::error!(run_id = %run_id, "{error}");
+                            if let Err(db_err) = self
+                                .db
+                                .update_workflow_run(
+                                    community_id,
+                                    run_id,
+                                    RunStatus::Failed,
+                                    step_count,
+                                    &trace_json,
+                                    Some(&error),
+                                )
+                                .await
+                            {
+                                tracing::error!(run_id = %run_id, "Failed to mark approval-persistence error as failed: {db_err}");
+                            } else if let Err(emit_err) = self
+                                .emit_run_lifecycle(community_id, run_id, KIND_WORKFLOW_FAILED)
+                                .await
+                            {
+                                tracing::error!(run_id = %run_id, "Failed to emit workflow-failed lifecycle event: {emit_err}");
+                            }
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -269,6 +514,11 @@ impl WorkflowEngine {
                             run_id = %run_id,
                             "Failed to update run to Completed: {e}"
                         );
+                    } else if let Err(e) = self
+                        .emit_run_lifecycle(community_id, run_id, KIND_WORKFLOW_COMPLETED)
+                        .await
+                    {
+                        tracing::error!(run_id = %run_id, "Failed to emit workflow-completed lifecycle event: {e}");
                     }
                 }
             }
@@ -293,6 +543,11 @@ impl WorkflowEngine {
                         run_id = %run_id,
                         "Failed to update run to Failed: {db_err}"
                     );
+                } else if let Err(emit_err) = self
+                    .emit_run_lifecycle(community_id, run_id, KIND_WORKFLOW_FAILED)
+                    .await
+                {
+                    tracing::error!(run_id = %run_id, "Failed to emit workflow-failed lifecycle event: {emit_err}");
                 }
             }
         }
@@ -418,6 +673,8 @@ impl WorkflowEngine {
                 run_id = %run_id,
                 "Workflow triggered — spawning execution"
             );
+
+            self.record_run_triggered(community_id, run_id).await;
 
             let engine = Arc::clone(self);
             let def_clone = def.clone();
@@ -713,6 +970,8 @@ impl WorkflowEngine {
                     trigger = trigger_type,
                     "Cron trigger fired"
                 );
+
+                self.record_run_triggered(community_id, run_id).await;
 
                 let engine = Arc::clone(self);
                 let def_clone = def.clone();
