@@ -30,6 +30,8 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
+const NATIVE_DELIVERY_TEAM_INSTRUCTIONS: &str = "The harness durably publishes the ordinary final response. Emit exactly one complete final answer as ACP text. Do not use `buzz messages send` to republish that final response. The Buzz CLI may still be used for intentional interim milestones or explicit side effects.";
+
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
@@ -470,6 +472,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
 
+    /// Durably publish completed ACP responses from the harness.
+    #[arg(long, env = "BUZZ_ACP_NATIVE_DELIVERY", default_value_t = false)]
+    pub native_delivery: bool,
+
+    /// Absolute path for native-delivery pending and delivered receipts.
+    #[arg(long, env = "BUZZ_ACP_DELIVERY_OUTBOX_DIR")]
+    pub delivery_outbox_dir: Option<PathBuf>,
+
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
@@ -512,6 +522,10 @@ pub struct Config {
     pub system_prompt: Option<String>,
     /// Team-owned instructions layered separately from the agent system prompt.
     pub team_instructions: Option<String>,
+    /// Whether the harness owns durable publication of completed ACP responses.
+    pub native_delivery: bool,
+    /// Absolute native-delivery receipt root. Present only when enabled.
+    pub delivery_outbox_dir: Option<PathBuf>,
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
@@ -1060,6 +1074,43 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let delivery_outbox_dir = if args.native_delivery {
+            let path = args.delivery_outbox_dir.ok_or_else(|| {
+                ConfigError::ConfigFile(
+                    "native delivery requires an explicit delivery outbox path".into(),
+                )
+            })?;
+            if !path.is_absolute() {
+                return Err(ConfigError::ConfigFile(format!(
+                    "native delivery outbox must be an absolute path: {}",
+                    path.display()
+                )));
+            }
+            Some(path)
+        } else {
+            if args.delivery_outbox_dir.is_some() {
+                tracing::warn!(
+                    "--delivery-outbox-dir is ignored unless --native-delivery is enabled"
+                );
+            }
+            None
+        };
+
+        let mut team_instructions = args
+            .team_instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if args.native_delivery {
+            team_instructions = Some(match team_instructions {
+                Some(existing) => {
+                    format!("{existing}\n\n{NATIVE_DELIVERY_TEAM_INSTRUCTIONS}")
+                }
+                None => NATIVE_DELIVERY_TEAM_INSTRUCTIONS.to_string(),
+            });
+        }
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
@@ -1073,12 +1124,9 @@ impl Config {
             turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
-            team_instructions: args
-                .team_instructions
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            team_instructions,
+            native_delivery: args.native_delivery,
+            delivery_outbox_dir,
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
@@ -1131,7 +1179,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} native_delivery={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1150,6 +1198,7 @@ impl Config {
             self.presence_enabled,
             self.typing_enabled,
             self.memory_enabled,
+            self.native_delivery,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
@@ -1453,6 +1502,8 @@ mod tests {
             heartbeat_prompt: None,
             system_prompt: None,
             team_instructions: None,
+            native_delivery: false,
+            delivery_outbox_dir: None,
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
@@ -2922,6 +2973,100 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    #[test]
+    fn native_delivery_defaults_off_without_an_outbox() {
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        let config = Config::from_args(args).expect("default config should remain valid");
+
+        assert!(!config.native_delivery);
+        assert_eq!(config.delivery_outbox_dir, None);
+        assert!(config.summary().contains("native_delivery=false"));
+    }
+
+    #[test]
+    fn native_delivery_requires_an_explicit_outbox() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--native-delivery",
+        ])
+        .expect("clap should parse args");
+        let error = Config::from_args(args).expect_err("missing outbox must fail closed");
+
+        assert!(error.to_string().contains("delivery outbox"));
+    }
+
+    #[test]
+    fn native_delivery_rejects_a_relative_outbox() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--native-delivery",
+            "--delivery-outbox-dir",
+            "relative-outbox",
+        ])
+        .expect("clap should parse args");
+        let error = Config::from_args(args).expect_err("relative outbox must fail closed");
+
+        assert!(error.to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn native_delivery_opt_in_adds_the_no_republish_instruction() {
+        let outbox = std::env::temp_dir().join("buzz-acp-native-delivery-config-test");
+        let outbox_arg = outbox.to_string_lossy().to_string();
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--native-delivery",
+            "--delivery-outbox-dir",
+            &outbox_arg,
+            "--team-instructions",
+            "Keep existing guidance.",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("valid native delivery config");
+
+        assert!(config.native_delivery);
+        assert_eq!(
+            config.delivery_outbox_dir.as_deref(),
+            Some(outbox.as_path())
+        );
+        let instructions = config
+            .team_instructions
+            .expect("native instruction is present");
+        assert!(instructions.starts_with("Keep existing guidance."));
+        assert!(instructions.contains("Do not use `buzz messages send` to republish"));
+    }
+
+    #[test]
+    fn disabled_native_delivery_ignores_an_outbox_and_keeps_instructions_unchanged() {
+        let outbox = std::env::temp_dir().join("unused-buzz-acp-outbox");
+        let outbox_arg = outbox.to_string_lossy().to_string();
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--delivery-outbox-dir",
+            &outbox_arg,
+            "--team-instructions",
+            "Keep existing guidance.",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("disabled native delivery remains valid");
+
+        assert!(!config.native_delivery);
+        assert_eq!(config.delivery_outbox_dir, None);
+        assert_eq!(
+            config.team_instructions.as_deref(),
+            Some("Keep existing guidance.")
+        );
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
