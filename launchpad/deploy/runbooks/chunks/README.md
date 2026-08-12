@@ -247,6 +247,29 @@ image `ghcr.io/block/buzz:sha-96ae141`, restored to the `pristine` snapshot firs
   `sshd -t` rejected it, the role restored the previous state, refused to reload, and reported
   "sshd is still running its old configuration — you are not locked out" (`rescued=1`). The lockout
   guard is not theoretical.
+- **Chunk 03 runs clean, both jobs.** `./virtual-box/host-dns.sh --ca` does job 1 and job 2 in a
+  single pass with **one** `sudo` prompt, and `--ca-only` needs no local `sudo` at all (its only
+  `sudo` runs inside the VM, where it is passwordless). The script prints the `security
+  add-trusted-cert` command and correctly does not run it. Afterwards: both `/etc/hosts` entries are
+  present under the script's marker comment, the DNS cache is flushed, and `Caddy Local Authority -
+  2026 ECC Root` is in the System keychain. Note that `./deploy run 03` passes no arguments and the
+  script defaults to `DO_DNS=1` / `DO_CA=0`, so the entrypoint runs **job 1 only** and the CA is never
+  fetched.
+- **The CA trust was proven with no `-k` and no `--cacert`**, which is the entire point of the check:
+  `https://buzz-vm.test:8443/` returns `200` with `ssl_verify_result=0` (0 = genuinely verified, not
+  bypassed), the admin vhost `https://admin.buzz-vm.test:8443/reports` returns `200`, and a WebSocket
+  upgrade over the trusted TLS returns `101`.
+- **Chunk 08 is PARTIALLY verified — the build and the launch, nothing past them.** On an Intel Mac
+  **without Hermit** (Node v22.23.1, pnpm 11.4.0, `pnpm install` reporting `Already up to date`),
+  `pnpm -C desktop tauri dev` built in **6m25s** and launched, and the startup line `buzz-desktop:
+  configured identity pubkey <64 hex>` appeared with a value **identical** to `RELAY_OWNER_PUBKEY` in
+  the relay's `.env` — SOP Step 12.4's ownership check works exactly as documented. Two hard
+  requirements the doc had missed surfaced here: `brew install cmake` (`aws-lc-sys`, in both
+  `Cargo.lock` files, builds AWS-LC through CMake) and `. "$HOME/.cargo/env"` in any shell opened
+  before rustup was installed. The GUI half is *not* verified — see the second list.
+- **Rebuilding the VM invalidates `~/.ssh/known_hosts` every time.** Hit for real on 2026-08-12: the
+  deleted `vps-clone-noble` had used port 2222 and left three key entries behind, so ssh refused with
+  `REMOTE HOST IDENTIFICATION HAS CHANGED` rather than prompting. Now a chunk 02 trap.
 - **The `sshd` ordering trap is real, not theoretical.** A pristine guest carries
   `01-dev-parity.conf`, `50-cloud-init.conf` **and** `60-cloudimg-settings.conf`, with `sshd -T`
   reporting `permitrootlogin yes`. A `99-`prefixed hardening file would lose to both `50-` and
@@ -283,12 +306,42 @@ Four traps were found by execution and are now encoded in the chunks; none is in
 - **No production inventory or `group_vars/prod.yml` exists**, so five required-but-empty variables in
   `group_vars/all.yml` (`buzz_domain`, `buzz_relay_url`, `buzz_acme_email`, `buzz_max_connections`,
   `buzz_backup_target`) have nowhere to be set. No play can run against a VPS today.
-- **The desktop app has never been built or launched**, and no client has ever connected. Chunk 08
-  is documented behaviour throughout, including the `wss://` handling, which was read from
-  `desktop/src/features/communities/communityStorage.ts:140`.
-- **Membership refusal is untested** (chunk 09). No key has been added and no non-owner connection
-  attempted; refusal happens during NIP-42 auth, *after* the `101`, so nothing observed so far
-  proves the roster is enforced.
+- **A client HAS now connected successfully, as the owner.** Observed 2026-08-12 after setting
+  `BUZZ_DEV_KEYRING_SERVICE`: the app authenticated as `RELAY_OWNER_PUBKEY` (`2cf82270…`), the relay
+  logged sustained NIP-98 `HTTP bridge request` entries under that pubkey and **no refusals**, and
+  onboarding produced 6 kind:39000 channels with 6 matching kind:39002 memberships. Still not done:
+  **posting a message** — the event store holds no kind:9 or kind:40002, so SOP Step 17 item 18
+  remains unproven and chunk 08 is not yet fully closed.
+- **Transport details, proven earlier the same day.** Observed 2026-08-12:
+  the desktop app reached the relay over `wss://buzz-vm.test:8443`, and the relay logged
+  `WebSocket connection established` from `172.18.0.6` — Caddy's address inside `buzz-net`, so the
+  connection necessarily completed a TLS handshake against the `tls internal` certificate and was
+  proxied through. **Tauri's Rust TLS stack does accept the Caddy local CA once it is trusted in the
+  System keychain**, and the mechanism is visible in the build: `rustls-platform-verifier v0.7.0`
+  compiles in, so verification consults the macOS keychain. Chunk 03's `curl` check was therefore
+  necessary *and* sufficient. Still unproven: creating the `agent-test` channel and posting a
+  message, because the connection was refused at the auth step below before reaching that point.
+- **Membership refusal is PROVEN, closing issue #19's last open claim.** Observed 2026-08-12: a key
+  that was not on the roster authenticated and the relay logged
+  `not a relay member … 403 relay_membership_required`, then closed the connection. Refusal happens
+  during NIP-42 auth, *after* the WebSocket upgrade, exactly as the SOP predicted — so a `101` really
+  does prove nothing about the roster, and the roster really is enforced. The SOP's "whether an
+  unapproved key is actually refused is untested" note can be retired.
+- **`tauri dev` collides with any existing Buzz install on the same Mac, and this is not a footnote.**
+  Observed 2026-08-12: the app authenticated with an identity from the shared `buzz-desktop-dev`
+  macOS keyring rather than the `BUZZ_PRIVATE_KEY` owner identity it had logged at startup, and
+  carried a community from a previous install. `BUZZ_PRIVATE_KEY` sets the *configured* identity —
+  the startup line proves it loads — but does not override a saved community's stored identity. The
+  data directory (`~/Library/Application Support/xyz.block.buzz.app`) is shared for the same reason.
+  The recipe that isolates app identifier, keyring and ports is `just desktop-standalone`, which is
+  **unusable here** because it unsets `BUZZ_PRIVATE_KEY` immediately before launching.
+  **RESOLVED the same day:** export `BUZZ_DEV_KEYRING_SERVICE=buzz-desktop-dev.buzzvm` before
+  launching (`desktop/src-tauri/src/app_state_keyring.rs:13` — any value prefixed
+  `buzz-desktop-dev.` is honoured, anything else silently falls back to the shared default). With it
+  set, the app authenticated as `RELAY_OWNER_PUBKEY` with zero refusals; the stale identity's last
+  appearance predates the relaunch. No keychain entry was deleted and the WebKit store was not
+  touched. It does **not** namespace `localStorage` (the community list, at
+  `~/Library/WebKit/buzz-desktop`, keyed by process name) — that stays shared.
 - **SOP Steps 1–4 have never been run as written** on a clean machine, and
   `virtual-box/build-vps-clone.sh` has not been re-run since its hardcoded password hash was
   replaced by the required `PWHASH` variable. Chunk 02 wraps exactly that script.

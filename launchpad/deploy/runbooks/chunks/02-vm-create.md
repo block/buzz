@@ -89,5 +89,15 @@ There is nothing to roll back to — this chunk *is* the rollback. Re-run it for
 - **The guest hostname (`buzz-dev`) and the community host (`buzz-vm.test:8443`) are different
   things.** The community comes from `RELAY_URL` alone and nothing else
   ([`../relay-build-list.md`](../relay-build-list.md)).
+- **Every run of this chunk invalidates `~/.ssh/known_hosts`.** The rebuilt VM generates new SSH host
+  keys, so the stale `[127.0.0.1]:2222` entries make ssh abort with `WARNING: REMOTE HOST
+  IDENTIFICATION HAS CHANGED!` and **refuse** to connect — not prompt. Hit for real on 2026-08-12,
+  where the deleted `vps-clone-noble` had used the same port and left three entries behind. Clear
+  them, then reconnect and accept the new key:
+  ```bash
+  ssh-keygen -R '[127.0.0.1]:2222'
+  # or, to accept it without a prompt:
+  ssh-keyscan -p 2222 -t ed25519 127.0.0.1 >> ~/.ssh/known_hosts
+  ```
 - **The cloud-init volume label must be exactly `cidata`.** Get it wrong and the VM boots with no
   users, no SSH key, and no way in. If you cannot log in, suspect this first.

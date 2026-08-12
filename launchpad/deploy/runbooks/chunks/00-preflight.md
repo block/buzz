@@ -75,8 +75,10 @@ outstanding.
 
 - Never pipe a producer into `head` in these scripts: `set -o pipefail` turns the resulting SIGPIPE into exit 141 before anything is logged, which is exactly how `build-vps-clone.sh` died (see its comments at lines 47-51 and 76).
 - A running `buzz-dev` holds host port 2222, so preflight fails -- correctly: chunk 01 opens with `unregistervm --delete`, which errors on a running VM. `VBoxManage controlvm buzz-dev poweroff` first (SOP Step 2.7).
+- **A failed port check naming `VBoxHeadl` is your own VM, not a conflict.** Observed 2026-08-12: with `buzz-dev` running, 2222, 8080 and 8443 all fail because `VBoxHeadless` holds them. This is correct for the pre-chunk-02 state preflight is designed for; re-running it against an existing VM is simply outside that design, and the script is deliberately left alone rather than taught to special-case its own VM (SOP Step 2.7).
+- The disk floor is a hard fail, and a VM already on disk is what pushes you under it -- observed 2026-08-12 at 9.4 GiB free against the 15 GiB floor. Free space or delete the VM; do not lower the floor (SOP Step 1).
 - `lsof` without `sudo` only sees your own processes, so a port held by another user's daemon reads as free (SOP Step 2.7).
 - macOS `/bin/bash` is 3.2 from 2007; the script is written to that dialect, so do not add bash 4+ syntax when editing it (SOP Step 0.1 makes the same point about `bash --version`).
 - Ports 80 and 443 are deliberately not checked -- nothing is ever bound to them on the host, which is why the forwards are 8080 and 8443 (hardening-spec.md sec-A.3, sec-B2).
-- The hosts-file checks are warnings, not failures, because chunk 03 is what adds those entries (SOP Step 10).
+- The hosts-file checks are warnings, not failures, because chunk 03 is what adds those entries -- confirmed 2026-08-12, `buzz-vm.test` did not resolve and the run still exited `0` (SOP Step 10).
 - `~/.ssh/id_ed25519.pub` is not overridable here because `build-vps-clone.sh` hardcodes that path; an override would pass preflight and then fail the build (SOP Step 3.2).

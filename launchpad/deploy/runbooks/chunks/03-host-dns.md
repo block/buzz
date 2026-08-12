@@ -42,8 +42,24 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
   ~/vm-images/buzz-dev-caddy-root.crt
 ```
 
-The second command is printed by the script with the absolute path filled in; the script never runs
-it. `--ca` does both jobs in one pass; `--skip-ca` is the explicit form of the default. Overrides:
+If chunk 07 is **already** up when you first reach this chunk, do both jobs in one pass instead --
+verified 2026-08-12: the script asks for `sudo` exactly once (the `/etc/hosts` append) and does the
+CA fetch in the same run:
+
+```bash
+cd ~/code/buzz/launchpad/deploy/virtual-box
+./host-dns.sh --ca
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+  ~/vm-images/buzz-dev-caddy-root.crt
+```
+
+**`./deploy run 03` passes no arguments**, and the script defaults to `DO_DNS=1` / `DO_CA=0` -- so the
+entrypoint runs job 1 **only** and the CA is never fetched and never trusted. Job 2 is always one of
+the two commands above, typed by hand.
+
+The `add-trusted-cert` command is printed by the script with the absolute path filled in; the script
+never runs it. `--ca-only` needs no local `sudo` at all -- its only `sudo` runs inside the VM, where
+it is passwordless. `--skip-ca` is the explicit form of the default. Overrides:
 `DOMAIN`, `ADMIN_DOMAIN`, `HOSTS_FILE`, `VM_HOST`, `VM_PORT`, `VM_USER`, `CADDY_CA_PATH`, `CA_OUT`.
 
 Exit codes: `0` done · `1` manual edit needed, or a name mapped to the wrong address · `2` VM
@@ -91,14 +107,33 @@ or not you have trusted it:
   --cacert ~/vm-images/buzz-dev-caddy-root.crt https://buzz-vm.test:8443/
 ```
 
-Expect `200`. Then, only after running the `add-trusted-cert` command, the same request with no
-`--cacert` must also print `200`:
+Expect `200`. Then, only after running the `add-trusted-cert` command, the trust itself. **These
+three must carry neither `-k` nor `--cacert`** -- proving that the *system* trust store accepts the
+certificate is the entire point, and either flag silently converts the check into a no-op. All three
+were run on 2026-08-12 and returned exactly the values below:
 
 ```bash
-/usr/bin/curl -s -o /dev/null -w '%{http_code}\n' https://buzz-vm.test:8443/
+# The relay, verified rather than bypassed.
+/usr/bin/curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://buzz-vm.test:8443/
+# expect: 200 0        <- ssl_verify_result 0 means genuinely verified, not skipped
+
+# The admin vhost.
+/usr/bin/curl -sS -o /dev/null -w '%{http_code}\n' https://admin.buzz-vm.test:8443/reports
+# expect: 200
+
+# A WebSocket upgrade over the now-trusted TLS. --http1.1 is mandatory (chunk 07 Traps).
+/usr/bin/curl -sS -o /dev/null -w '%{http_code}\n' --http1.1 --max-time 8 \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==" \
+  https://buzz-vm.test:8443/
+# expect: 101
 ```
 
-A `curl: (60)` there means the trust command was not run, or was run against the login keychain.
+Also confirmed after the run: both `/etc/hosts` entries present under the script's marker comment,
+the DNS cache flushed, and `Caddy Local Authority - 2026 ECC Root` present in the System keychain.
+
+A `curl: (60)` on any of the three means the trust command was not run, or was run against the login
+keychain rather than `/Library/Keychains/System.keychain`.
 
 **Rollback**
 
@@ -124,6 +159,7 @@ than piping straight into the keychain. No VM snapshot applies -- nothing in the
 **Traps**
 
 - Job 2 has a hard ordering dependency: the local CA does not exist until Caddy has started at least once, so it exits `3` before chunk 07 -- run the chunk twice, not once (hardening-spec.md sec-A.3).
+- `./deploy run 03` and `./deploy run all` pass no arguments, so they run job 1 only and leave the CA neither fetched nor trusted, with nothing in the output saying so -- job 2 is always typed by hand (`README.md`, "Known limitations of `./deploy run all`").
 - `docker compose down -v` destroys the `buzz-caddy-data` volume and Caddy mints a **new** CA, silently invalidating the trusted root; `remove-trusted-cert` the old one first, then re-fetch and re-trust (`deploy/compose/compose.caddy.yml` volumes).
 - The desktop app is the likelier failure, not the browser: Tauri's Rust TLS stack validates against the system store with no "proceed anyway" prompt, so an untrusted CA is a refused `wss://` connection rather than a warning (SOP Step 12.3 as corrected by hardening-spec.md sec-A.3).
 - Firefox keeps its own trust store and ignores the System keychain entirely, so it still warns after the trust command succeeds (SOP Step 10 browser check).
