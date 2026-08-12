@@ -1,8 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const webPort = process.env.BUZZ_RELEASE_SMOKE_WEB_PORT ?? "4173";
+const webUrl = `http://127.0.0.1:${webPort}`;
+
 export default defineConfig({
   testDir: "./tests/e2e",
-  testMatch: ["**/release-smoke.spec.ts"],
+  testMatch: [
+    "**/release-smoke.spec.ts",
+    "**/dm-history-live-regression.spec.ts",
+  ],
   timeout: 10 * 60_000,
   retries: 0,
   workers: 1,
@@ -16,14 +22,14 @@ export default defineConfig({
   ],
   use: {
     ...devices["Desktop Chrome"],
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: webUrl,
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "python3 -m http.server 4173 -d dist",
+    command: `python3 -m http.server ${webPort} -d dist`,
     cwd: ".",
     reuseExistingServer: false,
-    url: "http://127.0.0.1:4173",
+    url: webUrl,
   },
 });
