@@ -79,6 +79,10 @@ class InitialThreadTailSettle {
               if (generation == _generation) _isComplete = true;
             });
       });
+      // A post-frame callback does not itself request the frame in which it
+      // runs. Slow hydration can otherwise leave this settle parked until an
+      // unrelated redraw.
+      WidgetsBinding.instance.scheduleFrame();
     });
   }
 }

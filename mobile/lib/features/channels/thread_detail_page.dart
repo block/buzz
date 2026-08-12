@@ -256,7 +256,12 @@ class ThreadDetailPage extends HookConsumerWidget {
           (viewportHeight - previousViewportHeight.value).abs() >= 0.5;
       previousViewportHeight.value = viewportHeight;
       if (replies.length <= previous) {
-        if (viewportChanged) queueTailRealignment(animate: false);
+        // Preserve a short thread's valid top anchor when resize leaves its
+        // tail inside the newly measured usable viewport. Long/clipped tails
+        // still follow through the shared intent-serialized correction path.
+        if (viewportChanged && !threadTailIsVisible()) {
+          queueTailRealignment(animate: false);
+        }
         return null;
       }
       final positions = itemPositionsListener.itemPositions.value;

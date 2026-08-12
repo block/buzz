@@ -4698,6 +4698,72 @@ void main() {
     });
 
     testWidgets(
+      'slow initial hydration requests the frame that settles the latest reply',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        completer.complete(replies);
+        await tester.pump();
+        expect(tester.binding.hasScheduledFrame, isTrue);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
       'initial thread hydration settles on the latest reply after pagination',
       (tester) async {
         final rootEvent = _textMsg(
@@ -4959,6 +5025,69 @@ void main() {
       );
     });
 
+    testWidgets(
+      'short followed thread stays top-anchored after viewport resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 3; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: false,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final head = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final latest = find.byKey(
+          const ValueKey('thread-message-group-reply-2'),
+        );
+        final initialHeadTop = tester.getTopLeft(head).dy;
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 100);
+        await tester.pumpAndSettle();
+
+        expect(latest, findsOneWidget);
+        expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+      },
+    );
+
     for (final layout in <({String name, bool isMember, bool isArchived})>[
       (name: 'non-member', isMember: false, isArchived: false),
       (name: 'archived', isMember: true, isArchived: true),
@@ -4980,12 +5109,13 @@ void main() {
               content: 'Root',
               createdAt: 1000,
             );
+            final replyCount = tail.isLong ? 30 : 6;
             final replies = [
-              for (var i = 0; i < 30; i++)
+              for (var i = 0; i < replyCount; i++)
                 _textMsg(
                   id: 'reply-$i',
                   pubkey: 'bob',
-                  content: i == 29 && tail.isLong
+                  content: i == replyCount - 1 && tail.isLong
                       ? List.filled(8, 'Tall latest reply').join('\n')
                       : 'Reply $i',
                   createdAt: 1100 + i,
@@ -5019,8 +5149,14 @@ void main() {
             );
             await tester.pumpAndSettle();
             final latest = find.byKey(
-              const ValueKey('thread-message-group-reply-29'),
+              ValueKey('thread-message-group-reply-${replyCount - 1}'),
             );
+            final head = find.byKey(
+              const ValueKey('thread-message-group-thread-root'),
+            );
+            final initialHeadTop = tail.isLong
+                ? null
+                : tester.getTopLeft(head).dy;
             final list = find.byKey(const ValueKey('thread-message-list'));
             final initialHeight = tester.getSize(list).height;
             void expectTailWithinList() {
@@ -5047,12 +5183,18 @@ void main() {
             ]);
             await tester.pumpAndSettle();
             expectTailWithinList();
+            if (initialHeadTop != null) {
+              expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+            }
             if (!layout.isMember || layout.isArchived) {
               expect(tester.getSize(list).height, lessThan(initialHeight));
             }
             typingNotifier.setEntries(const []);
             await tester.pumpAndSettle();
             expectTailWithinList();
+            if (initialHeadTop != null) {
+              expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+            }
             expect(tester.getSize(list).height, closeTo(initialHeight, 0.5));
           },
         );
