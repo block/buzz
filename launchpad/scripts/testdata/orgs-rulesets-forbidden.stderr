@@ -1,0 +1,2 @@
+gh: Not Found (HTTP 404)
+gh: This API operation needs the "admin:org" scope. To request it, run:  gh auth refresh -h github.com -s admin:org

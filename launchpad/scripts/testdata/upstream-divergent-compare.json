@@ -1,0 +1,196 @@
+{
+  "base_commit": {
+    "sha": "c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "node_id": "C_kwDORgXb2toAKGM2YzZlN2VjYTcwZDZiNTI2YzQzYWY5MjVlNTk2ZTg2MTZiMTlmYjg",
+    "commit": {
+      "author": {
+        "name": "Will Pfleger",
+        "email": "pfleger.will@gmail.com",
+        "date": "2026-08-12T19:06:43Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-08-12T19:06:43Z"
+      },
+      "message": "perf(desktop): coalesce thread-activity localStorage writes (#5693)\n\nEach incoming thread reply drove a full `JSON.stringify` + `setItem` of\nthe ~600 KB thread-activity buffer. A burst of replies serialized the\nwhole blob once per event on the main thread, which is one of the\nrenderer stalls under load in the desktop-longevity arc.\n\nThis collapses the burst into a single debounced write, applying the\ncoalescing pattern Wes introduced for read-state persistence in #5591\n(`readStateManager`) to the thread-activity path.\n\n## What changed\n\n- **`threadActivityStorage.ts`** — coalescing primitives:\n- `scheduleThreadActivityWrite` — first-writer-wins (a pending timer is\n*not* reset), 1s trailing edge. The timer reads the live buffer *at fire\ntime* and re-checks the loaded scope, so N replies within the window\npersist exactly once with the burst's final state, and a write that\noutlives a scope switch can neither land under the new key nor persist\nthe wrong buffer.\n- `flushThreadActivityWrite` — synchronous persist + timer cancel; a\nno-op when nothing is pending.\n- `removeLegacyThreadActivityKey` — idempotent one-time cleanup of the\norphaned pre-relay-scoping `buzz-thread-activity.v1:<pubkey>` key.\n- **`useThreadActivityPersistence.ts`** (new companion hook) — owns the\nloaded scope, the write timer, the `pagehide` /\n`visibilitychange`→hidden / unmount flush, and hydration + legacy\ncleanup on identity/relay change. Mirrors the existing\n`useObservedUnreadPersistence` sibling.\n- **`useUnreadChannels.ts`** — rewired to instantiate the hook and call\n`activityPersistence.schedule(...)` at both writer sites instead of\nwriting per event. The buffer (`threadActivityRef`) stays parent-owned;\nthe hook decides when it is durably persisted. Net **990** lines (was\n1021), back under the 1000-line ceiling.\n\n## Durability\n\n`pagehide`, `visibilitychange`→hidden, unmount, and scope-reseed all\nflush synchronously, so the last burst of replies survives a `Cmd+R` or\nan idle reload that tears the webview down inside the coalescing window.\n\n## Tests\n\n- `threadActivityWriteScheduler.test.mjs` — fake-timer unit coverage:\nburst→one `setItem`, live-buffer-at-fire-time, scope-mismatch rejection,\nstale-scope timer abort, flush persists+cancels, flush no-op, legacy-key\nremoval.\n- `useThreadActivityPersistence.test.mjs` — mounts the real hook via\n`createRoot`+`act`: `pagehide` / visibility / unmount flush of the live\nbuffer, scope switch flushing A under A's key without leaking into B,\nB-bucket rehydration, legacy-key cleanup, and the empty-scope write\nfence.\n\n## Related\n\nBased on [#5591](https://github.com/block/buzz/pull/5591) (Wes) —\n`perf(desktop): coalesce read state localStorage persistence`, the\nproven first-writer-wins coalescing pattern this extends to thread\nactivity.\n\nSigned-off-by: Will Pfleger <pfleger.will@gmail.com>\nCo-authored-by: Duncan <dcfd242e557282d7a1e2cf2e6877522682f1e5c6156dc92ca7d90eaedd3b0f95@buzz.block.builderlab.xyz>",
+      "tree": {
+        "sha": "3add29f19dabafb09be40ab06816b271a910eb5d",
+        "url": "https://api.github.com/repos/block/buzz/git/trees/3add29f19dabafb09be40ab06816b271a910eb5d"
+      },
+      "url": "https://api.github.com/repos/block/buzz/git/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqfMRDCRC1aQ7uu5UhlAAAsTcQAARRS/YKqX2bGQ9gy6W2bKrl\nhPZnPPQYM86zfjyi//qdaLonhvYEr/fLzVFSmAga+BrKldQhyXTmhJlE+ChSYM8y\ndUjIB3bYYwGnSn81CfbzhQ/fXgusweoujm5QgtkB7CX6j95JPSz7UKiLvXaI8u7x\nkoWHbFThloUbKy2rCSP3pY3vVfdKEV6h1NCVa4D8hI8BUhQ7/K3DpZNkcDZqntuk\n2HAJvZztXsvoZq/LRaCTgMBapt8CQFf4Q69evc7L7XFFP8mkp330WWHuaA9Fsoeq\nHr4bWeVTz6q7iGvnITBsU2LnFaOk/aJe24cXVLkJd787NznyC05w7Ipk3f4FghNt\nnzvdZ6EOuO2jY318vXZab7d+fv076Bng4y+DjhSiX+XXmUPbfyr6KR/bOY7U7jl2\nOt0rJ9W6LBcruhpPBHkpVgp2J7p+HqFHMe6jhEt23u4SBzZdABwFXwA5N6f0tL6A\nVlWUCjefWX63UnTLISH1swGqBcLC5uI+qolziZkgwWLLhYgQI2VRCnGV3/XAupwk\nDQqfIRIzPcPO1JSN3UVvqX9LgLBGZrLRYhGSHeJpBJAYYVdKZ5alJy4CA1jC60hz\nrwyg0RIhRstOUvDv1F2E4sjf0fJR9KBTYjJCVQCP78qCGysjrxfEPGrM/HrnmBJM\naKYXtTqWybBWUSofmCMV\n=eDKk\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 3add29f19dabafb09be40ab06816b271a910eb5d\nparent c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5\nauthor Will Pfleger <pfleger.will@gmail.com> 1786561603 -0400\ncommitter GitHub <noreply@github.com> 1786561603 -0700\n\nperf(desktop): coalesce thread-activity localStorage writes (#5693)\n\nEach incoming thread reply drove a full `JSON.stringify` + `setItem` of\nthe ~600 KB thread-activity buffer. A burst of replies serialized the\nwhole blob once per event on the main thread, which is one of the\nrenderer stalls under load in the desktop-longevity arc.\n\nThis collapses the burst into a single debounced write, applying the\ncoalescing pattern Wes introduced for read-state persistence in #5591\n(`readStateManager`) to the thread-activity path.\n\n## What changed\n\n- **`threadActivityStorage.ts`** — coalescing primitives:\n- `scheduleThreadActivityWrite` — first-writer-wins (a pending timer is\n*not* reset), 1s trailing edge. The timer reads the live buffer *at fire\ntime* and re-checks the loaded scope, so N replies within the window\npersist exactly once with the burst's final state, and a write that\noutlives a scope switch can neither land under the new key nor persist\nthe wrong buffer.\n- `flushThreadActivityWrite` — synchronous persist + timer cancel; a\nno-op when nothing is pending.\n- `removeLegacyThreadActivityKey` — idempotent one-time cleanup of the\norphaned pre-relay-scoping `buzz-thread-activity.v1:<pubkey>` key.\n- **`useThreadActivityPersistence.ts`** (new companion hook) — owns the\nloaded scope, the write timer, the `pagehide` /\n`visibilitychange`→hidden / unmount flush, and hydration + legacy\ncleanup on identity/relay change. Mirrors the existing\n`useObservedUnreadPersistence` sibling.\n- **`useUnreadChannels.ts`** — rewired to instantiate the hook and call\n`activityPersistence.schedule(...)` at both writer sites instead of\nwriting per event. The buffer (`threadActivityRef`) stays parent-owned;\nthe hook decides when it is durably persisted. Net **990** lines (was\n1021), back under the 1000-line ceiling.\n\n## Durability\n\n`pagehide`, `visibilitychange`→hidden, unmount, and scope-reseed all\nflush synchronously, so the last burst of replies survives a `Cmd+R` or\nan idle reload that tears the webview down inside the coalescing window.\n\n## Tests\n\n- `threadActivityWriteScheduler.test.mjs` — fake-timer unit coverage:\nburst→one `setItem`, live-buffer-at-fire-time, scope-mismatch rejection,\nstale-scope timer abort, flush persists+cancels, flush no-op, legacy-key\nremoval.\n- `useThreadActivityPersistence.test.mjs` — mounts the real hook via\n`createRoot`+`act`: `pagehide` / visibility / unmount flush of the live\nbuffer, scope switch flushing A under A's key without leaking into B,\nB-bucket rehydration, legacy-key cleanup, and the empty-scope write\nfence.\n\n## Related\n\nBased on [#5591](https://github.com/block/buzz/pull/5591) (Wes) —\n`perf(desktop): coalesce read state localStorage persistence`, the\nproven first-writer-wins coalescing pattern this extends to thread\nactivity.\n\nSigned-off-by: Will Pfleger <pfleger.will@gmail.com>\nCo-authored-by: Duncan <dcfd242e557282d7a1e2cf2e6877522682f1e5c6156dc92ca7d90eaedd3b0f95@buzz.block.builderlab.xyz>",
+        "verified_at": "2026-08-12T19:06:46Z"
+      }
+    },
+    "url": "https://api.github.com/repos/block/buzz/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "html_url": "https://github.com/block/buzz/commit/c6c6e7eca70d6b526c43af925e596e8616b19fb8",
+    "comments_url": "https://api.github.com/repos/block/buzz/commits/c6c6e7eca70d6b526c43af925e596e8616b19fb8/comments",
+    "author": {
+      "login": "wpfleger96",
+      "id": 15384764,
+      "node_id": "MDQ6VXNlcjE1Mzg0NzY0",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15384764?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/wpfleger96",
+      "html_url": "https://github.com/wpfleger96",
+      "followers_url": "https://api.github.com/users/wpfleger96/followers",
+      "following_url": "https://api.github.com/users/wpfleger96/following{/other_user}",
+      "gists_url": "https://api.github.com/users/wpfleger96/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/wpfleger96/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/wpfleger96/subscriptions",
+      "organizations_url": "https://api.github.com/users/wpfleger96/orgs",
+      "repos_url": "https://api.github.com/users/wpfleger96/repos",
+      "events_url": "https://api.github.com/users/wpfleger96/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/wpfleger96/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5",
+        "url": "https://api.github.com/repos/block/buzz/commits/c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5",
+        "html_url": "https://github.com/block/buzz/commit/c3b0ccf383fe4ee936abbe6b9c9134b5728cc2b5"
+      }
+    ]
+  },
+  "merge_base_commit": {
+    "sha": "16b7ae7ce623a57be1461adee3b8fce4115b3c3a",
+    "node_id": "C_kwDORgXb2toAKDE2YjdhZTdjZTYyM2E1N2JlMTQ2MWFkZWUzYjhmY2U0MTE1YjNjM2E",
+    "commit": {
+      "author": {
+        "name": "Taksh Kothari",
+        "email": "takshkothari09@gmail.com",
+        "date": "2026-08-11T23:03:18Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-08-11T23:03:18Z"
+      },
+      "message": "fix(relay): stop panicking the ingest worker on reactions to project events (#5294)\n\nA NIP-25 reaction whose target is a project root or project comment\n(kind\n1621 issue, 1618 PR, or a kind-1 comment on one) carries no h tag, so\nchannel_id is None on the reaction write path. The conformance-trace\nemission asserted a channel was always present:\n\nchannel: channel_label(channel_id.expect(\"reaction path has channel\")),\n\nso the worker panicked at ingest.rs:2824. The row was inserted before\nthe\npanic, so the client saw a failed request for a persisted event and\nretried,\nand the duplicate branch carried the same expect, head-of-line blocking\na\ndurable publish queue forever.\n\nMirror the message write's three-way split at the same seam:\n(Some, true) -> WriteInsert, (Some, false) -> WriteDuplicate, (None, _)\n-> WriteInsertGlobal. The conformance vocabulary already models\nchannel-less\nwrites; only the reaction path was missing it.\n\nCloses #4936\n\nSigned-off-by: Taksh <takshkothari09@gmail.com>\nSigned-off-by: Ravneet Arora <rarora@squareup.com>",
+      "tree": {
+        "sha": "3a27fec10b799067c46ff68df719aa23aff5b9eb",
+        "url": "https://api.github.com/repos/block/buzz/git/trees/3a27fec10b799067c46ff68df719aa23aff5b9eb"
+      },
+      "url": "https://api.github.com/repos/block/buzz/git/commits/16b7ae7ce623a57be1461adee3b8fce4115b3c3a",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqe6o2CRC1aQ7uu5UhlAAAyMwQADw9447/ZhxL9rJPM0DNL7nG\nOYc6vYdESNzbAsYfOknU59iQjPu9ebm+9KVx+VLAGlK9J3Nv0d949cTO+oz58y+y\nsrT8N+rjtYYwZoBpNcv7T7+SuvREeTuZKrwWrNf91ABF+Xkpv2yYMMj6VHsySt5K\nUR3oN2FIsHEc6NvTJQAYB+YgBVKUMgS5yOHZxQ3Wwynnw5v0ydaClYd2ktem81t0\nyARKk9OqDB8IvqcRXfnnZQEZSfqNqCXHCwwDtw97z+wQAtJNXSgWurhw1SFJHYUE\ni/X/T8CVom1R2xuPWFCfUCMxiNUscum0PgOQcIO0w8pRPiVvy7ipTadyPgalOhbU\nWm2WcGyVnSniDfuYt18vLdVA1TCsKxJSZoBUrd0+6eIBHzIAaCdaD3Sf5/8Dh7Uf\nsuErCNIaDrHDuE/oHUa+7CDj7esruZSt0O/ephjOIK5Ya02Wn4lxwAey5Q5RIqbj\nV7X9mQhcBeZg2debj8NMJh1VrT3Pzv+GDxtc8RG0YkYwyqdKM6gN33XQVAaDBxIx\n3pmsT1s3z69yMk0kP37pi9OiFgiUjieDO9/V4oWYfpjNLXBC3Ult2nxrIKYFnTtn\nLqS2CfP2UJg2KzBRKF5ZjWgz1gN3NL1iK2pxXHbhencGDa6t0q8dteKcsUTcS3oq\nocbDq2eu0nKQ19ES+5DX\n=fCkT\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 3a27fec10b799067c46ff68df719aa23aff5b9eb\nparent d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d\nauthor Taksh Kothari <takshkothari09@gmail.com> 1786489398 +0530\ncommitter GitHub <noreply@github.com> 1786489398 +0000\n\nfix(relay): stop panicking the ingest worker on reactions to project events (#5294)\n\nA NIP-25 reaction whose target is a project root or project comment\n(kind\n1621 issue, 1618 PR, or a kind-1 comment on one) carries no h tag, so\nchannel_id is None on the reaction write path. The conformance-trace\nemission asserted a channel was always present:\n\nchannel: channel_label(channel_id.expect(\"reaction path has channel\")),\n\nso the worker panicked at ingest.rs:2824. The row was inserted before\nthe\npanic, so the client saw a failed request for a persisted event and\nretried,\nand the duplicate branch carried the same expect, head-of-line blocking\na\ndurable publish queue forever.\n\nMirror the message write's three-way split at the same seam:\n(Some, true) -> WriteInsert, (Some, false) -> WriteDuplicate, (None, _)\n-> WriteInsertGlobal. The conformance vocabulary already models\nchannel-less\nwrites; only the reaction path was missing it.\n\nCloses #4936\n\nSigned-off-by: Taksh <takshkothari09@gmail.com>\nSigned-off-by: Ravneet Arora <rarora@squareup.com>",
+        "verified_at": "2026-08-11T23:03:24Z"
+      }
+    },
+    "url": "https://api.github.com/repos/block/buzz/commits/16b7ae7ce623a57be1461adee3b8fce4115b3c3a",
+    "html_url": "https://github.com/block/buzz/commit/16b7ae7ce623a57be1461adee3b8fce4115b3c3a",
+    "comments_url": "https://api.github.com/repos/block/buzz/commits/16b7ae7ce623a57be1461adee3b8fce4115b3c3a/comments",
+    "author": {
+      "login": "Chessing234",
+      "id": 134995372,
+      "node_id": "U_kgDOCAvdrA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/134995372?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/Chessing234",
+      "html_url": "https://github.com/Chessing234",
+      "followers_url": "https://api.github.com/users/Chessing234/followers",
+      "following_url": "https://api.github.com/users/Chessing234/following{/other_user}",
+      "gists_url": "https://api.github.com/users/Chessing234/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/Chessing234/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/Chessing234/subscriptions",
+      "organizations_url": "https://api.github.com/users/Chessing234/orgs",
+      "repos_url": "https://api.github.com/users/Chessing234/repos",
+      "events_url": "https://api.github.com/users/Chessing234/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/Chessing234/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d",
+        "url": "https://api.github.com/repos/block/buzz/commits/d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d",
+        "html_url": "https://github.com/block/buzz/commit/d9dc76c0aa7ab8a96b2ecf89325eef6b1536039d"
+      }
+    ]
+  },
+  "status": "diverged",
+  "ahead_by": 1,
+  "behind_by": 14,
+  "total_commits": 1,
+  "files": [
+    {
+      "sha": "ccb079694685a95c09401642e8c200bb98225648",
+      "filename": "crates/buzz-acp/src/acp.rs",
+      "status": "modified",
+      "additions": 44,
+      "deletions": 1,
+      "changes": 45
+    },
+    {
+      "sha": "bacfcacccb62e45ff19e5233d9dd08811caa1638",
+      "filename": "crates/buzz-acp/src/config.rs",
+      "status": "modified",
+      "additions": 72,
+      "deletions": 0,
+      "changes": 72
+    },
+    {
+      "sha": "3d1c464a86bc27756fb74eed130947ccccb5cbb5",
+      "filename": "crates/buzz-acp/src/lib.rs",
+      "status": "modified",
+      "additions": 32,
+      "deletions": 0,
+      "changes": 32
+    }
+  ]
+}
