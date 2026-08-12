@@ -58,6 +58,14 @@ foreach ($command in @("cargo.exe", "corepack.cmd", "node.exe", "rustc.exe")) {
     }
 }
 
+$TrackedChanges = @(& git.exe -C $RepositoryRoot status --porcelain --untracked-files=no)
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not inspect the source worktree."
+}
+if ($TrackedChanges.Count -gt 0) {
+    throw "Refusing to package a worktree with uncommitted tracked changes. Build from a clean commit."
+}
+
 $HostTriple = (& rustc.exe -vV | Select-String -Pattern '^host:\s+(.+)$').Matches.Groups[1].Value
 if ($HostTriple -ne $Target) {
     throw "This test installer currently requires a native $Target toolchain; found $HostTriple."
@@ -242,6 +250,7 @@ $BuildInfo = [ordered]@{
     embedded_relay_configuration = $false
     embedded_identity_or_api_key = $false
     deep_link_scheme = $DeepLinkScheme
+    source_worktree_clean = $true
     builder_home_path_remapped = $true
     native_source_paths_trimmed = $true
     release_symbols_stripped = $true
