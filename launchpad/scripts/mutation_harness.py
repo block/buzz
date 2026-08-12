@@ -4,16 +4,27 @@
     python3 launchpad/scripts/mutation_harness.py
 
 A control that has never been observed failing has not been shown to test
-anything. "The suite passes" is the claim this harness exists to refuse. Two
-phases, and it exits non-zero if either finds a blind spot.
+anything. "The suite passes" is the claim this harness exists to refuse. Three
+phases, and it exits non-zero if any of them finds a blind spot.
 
-**Mutation.** Each check function's body is replaced by a constant and the whole
-suite must go RED. A mutant that SURVIVES is a control gap, named in the output.
-Each target states the constant it becomes, rather than the harness inferring one,
-so the mutation is legible: you can read what the function was reduced to and
-judge whether killing it is a fair test. The constants are chosen to be the
+**Mutation.** Each function in TARGETS has its body replaced by a constant and
+the whole suite must go RED. A mutant that SURVIVES is a control gap, named in
+the output. Each target states the constant it becomes, rather than the harness
+inferring one, so the mutation is legible: you can read what the function was
+reduced to and judge whether killing it is a fair test. The constants are the
 plausible wrong answer a careless implementation would return, not gibberish that
 anything would catch.
+
+TARGETS is not every function in the tree — it is every function whose logic a
+control claims to check. A reviewer found three of those missing (``Read.ok``,
+``RecordError.__init__``, ``_epilogue``); they are in the list now.
+
+**Branch mutation.** Whole-function neutering cannot see a MISSING BRANCH: it
+fails everything indiscriminately, which proves the function is called and
+nothing about any decision inside it. A reviewer proved the gap by deleting the
+org-rulesets 404-to-forbidden case, the 5xx case and the in-band GraphQL errors
+block — each left the suite green while both enclosing functions were in TARGETS
+and both "killed". This phase disables one branch at a time instead.
 
 **Injection.** Each of a list of forbidden imports is added to a module — at the
 top level and inside function bodies — and the no-model check must REFUSE it.
@@ -62,6 +73,11 @@ TARGETS: list[tuple[str, str, str]] = [
     ("preflight_core.py", "Read.__post_init__", "return None"),
     ("preflight_core.py", "Skips.add", "return None"),
     ("preflight_core.py", "_get", "return None"),
+    ("preflight_core.py", "Read.ok", "return True"),
+    # A weak mutant: it dies on an AttributeError rather than on an assertion.
+    # Kept because a reviewer asked why it was absent, and the honest answer is
+    # that it belongs in the list with its weakness named.
+    ("preflight_core.py", "RecordError.__init__", "self.skips = []"),
     # preflight_fetch — the fetch layer and the exit contract
     ("preflight_fetch.py", "_classify_failure", "return (UNREACHABLE, 'stubbed')"),
     ("preflight_fetch.py", "_read", "return Read(name, data={}, endpoint=endpoint)"),
@@ -70,6 +86,104 @@ TARGETS: list[tuple[str, str, str]] = [
     ("preflight_fetch.py", "gh_runner", "return RunResult(0, '{}', '')"),
     ("preflight_fetch.py", "_Parser.error", "raise SystemExit(2)"),
     ("preflight_fetch.py", "build_parser", "return argparse.ArgumentParser()"),
+    ("preflight_fetch.py", "_epilogue", "return ''"),
+]
+
+
+#: (module, label, snippet, replacement) — ONE BRANCH, disabled.
+#:
+#: This phase exists because whole-function mutation cannot see a missing branch.
+#: A reviewer proved it: deleting the org_rulesets 404-to-forbidden case, the 5xx
+#: case, and the whole in-band GraphQL errors block each left the suite green,
+#: while `_read` and `_classify_failure` were both in TARGETS and both "killed".
+#: Neutering a function to a constant fails everything indiscriminately, which
+#: proves the function is called — not that any decision inside it is checked.
+#:
+#: A snippet that no longer matches its source is a HARD ERROR, never a skip: a
+#: branch mutation that silently fails to apply reports itself as a killed mutant.
+BRANCH_MUTATIONS: list[tuple[str, str, str, str]] = [
+    (
+        "preflight_fetch.py",
+        "a 404 on org rulesets stops being forbidden",
+        '            if name == "org_rulesets":\n'
+        '                return FORBIDDEN, f"{detail} (404 for an organization that exists: no admin:org)"\n',
+        "",
+    ),
+    (
+        "preflight_fetch.py",
+        "a 5xx stops being unreachable",
+        "        if 500 <= code <= 599:\n            return UNREACHABLE, detail\n",
+        "",
+    ),
+    (
+        "preflight_fetch.py",
+        "401/403 stop being forbidden",
+        "        if code in (401, 403):\n            return FORBIDDEN, detail\n",
+        "",
+    ),
+    (
+        "preflight_fetch.py",
+        "GraphQL prose absence stops being absent",
+        '    if _GRAPHQL_ABSENT.search(result.stderr or ""):\n        return ABSENT, detail\n',
+        "",
+    ),
+    (
+        "preflight_fetch.py",
+        "an in-band errors array is handed on as data",
+        '    if isinstance(data, Mapping) and data.get("errors"):',
+        "    if False:",
+    ),
+    (
+        "preflight_fetch.py",
+        "the errors type mapping collapses to malformed",
+        "        for error_type, mapped in GRAPHQL_ERROR_REASONS.items():\n"
+        "            if error_type in types:\n"
+        "                reason = mapped\n"
+        "                break\n",
+        "",
+    ),
+    (
+        "preflight_fetch.py",
+        "a broken gh install stops being caught",
+        "    except OSError as exc:",
+        "    except NotImplementedError as exc:",
+    ),
+    (
+        "preflight_core.py",
+        "empty becomes fatal again",
+        '    if skip_entry["reason"] == EMPTY:\n        return False\n',
+        "",
+    ),
+    (
+        "preflight_core.py",
+        "a truncated tree stops being a failure",
+        '    if _get(tree.data, "truncated") is True:',
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "a tree entry's type stops being checked",
+        '        if isinstance(path, str) and kind == "blob"',
+        "        if isinstance(path, str)",
+    ),
+    (
+        "preflight_core.py",
+        "an empty head tree stops being a failure",
+        "    if not entries:",
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "an unpinned diff stops being a failure",
+        "    if not head_sha:",
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "a malformed rules probe is coerced to empty again",
+        "    if not isinstance(branch_rules.data, list):",
+        "    if False:",
+    ),
 ]
 
 
@@ -214,6 +328,38 @@ def main() -> int:
     if survivors:
         print("SURVIVED — these functions can be replaced by a constant and every control still passes:")
         for name in survivors:
+            print(f"  {name}")
+        return 1
+
+    print("\n--- single branches, disabled one at a time ---\n")
+    lived: list[str] = []
+    try:
+        for module, label, snippet, replacement in BRANCH_MUTATIONS:
+            source = originals[module]
+            if snippet not in source:
+                print(f"  {module}::{label}: SNIPPET NOT FOUND — the harness is stale", file=sys.stderr)
+                return 1
+            path = os.path.join(HERE, module)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(source.replace(snippet, replacement, 1))
+            went_red, summary = suite_is_red()
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(source)
+
+            verdict = "RED  (branch is checked)" if went_red else "GREEN — BRANCH UNCHECKED"
+            print(f"  {module:<20} {label:<52} {verdict}")
+            print(f"      {summary}")
+            if not went_red:
+                lived.append(f"{module}: {label}")
+    finally:
+        for name, text in originals.items():
+            with open(os.path.join(HERE, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+    print(f"\n{len(BRANCH_MUTATIONS) - len(lived)}/{len(BRANCH_MUTATIONS)} branches checked")
+    if lived:
+        print("UNCHECKED — these branches can be deleted and every control still passes:")
+        for name in lived:
             print(f"  {name}")
         return 1
 
