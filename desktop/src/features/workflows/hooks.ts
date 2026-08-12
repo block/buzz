@@ -58,18 +58,19 @@ export const runApprovalsFocusRefetchPolicy = {
   refetchOnWindowFocus: false,
 } as const;
 
-export function shouldRefreshWorkflowOnForeground(
+export function shouldRefreshQueryOnForeground(
   queryKey: readonly unknown[],
   data: unknown,
 ): boolean {
   const family = queryKey[0];
   if (family === "workflows" || family === "workflows-all") return true;
+  if (family === "project" && queryKey[2] === "repo-sync-status") return true;
   if (family !== "workflow-runs") return false;
   const runs = data as WorkflowRun[] | undefined;
   return !runs?.some((run) => isActiveWorkflowRunStatus(run.status));
 }
 
-export function useWorkflowForegroundRefresh(): void {
+export function useForegroundQueryRefresh(): void {
   const queryClient = useQueryClient();
   const appFocused = useAppFocused();
   const wasFocused = React.useRef(appFocused);
@@ -80,7 +81,7 @@ export function useWorkflowForegroundRefresh(): void {
 
     void queryClient.refetchQueries({
       predicate: (query) =>
-        shouldRefreshWorkflowOnForeground(query.queryKey, query.state.data),
+        shouldRefreshQueryOnForeground(query.queryKey, query.state.data),
       stale: true,
       type: "active",
     });

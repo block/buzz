@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
-import { useWorkflowForegroundRefresh } from "@/features/workflows/hooks";
+import { useForegroundQueryRefresh } from "@/features/workflows/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { useRelayResumeTriggers } from "@/shared/api/useRelayResumeTriggers";
 
@@ -21,7 +21,7 @@ export function useAppShellLifecycleEffects({
   // Event-driven reconnect: network online / focus / visibility short-circuit
   // the backoff timer when the relay session is degraded (CMD+R gap G1).
   useRelayResumeTriggers();
-  useWorkflowForegroundRefresh();
+  useForegroundQueryRefresh();
 
   // Prevent webview file:/// navigation on file drop outside the composer.
   // Scoped to file drags only (text drag-and-drop into inputs still works).

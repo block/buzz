@@ -108,36 +108,47 @@ test("run-approvals: does not refetch stale data on focus", async () => {
   );
 });
 
-test("workflow foreground refresh targets only lists and inactive runs", async () => {
-  const { shouldRefreshWorkflowOnForeground } = await import("./hooks.ts");
-  assert.equal(shouldRefreshWorkflowOnForeground(["workflows", "c"], []), true);
+test("foreground refresh targets workflow gaps and repo sync", async () => {
+  const { shouldRefreshQueryOnForeground } = await import("./hooks.ts");
+  assert.equal(shouldRefreshQueryOnForeground(["workflows", "c"], []), true);
   assert.equal(
-    shouldRefreshWorkflowOnForeground(["workflows-all", "c"], []),
+    shouldRefreshQueryOnForeground(["workflows-all", "c"], []),
     true,
   );
   assert.equal(
-    shouldRefreshWorkflowOnForeground(["workflow-runs", "w"], []),
+    shouldRefreshQueryOnForeground(["workflow-runs", "w"], []),
     true,
   );
   assert.equal(
-    shouldRefreshWorkflowOnForeground(
+    shouldRefreshQueryOnForeground(
       ["workflow-runs", "w"],
       [{ status: "completed" }],
     ),
     true,
   );
   assert.equal(
-    shouldRefreshWorkflowOnForeground(
+    shouldRefreshQueryOnForeground(
       ["workflow-runs", "w"],
       [{ status: "running" }],
     ),
     false,
   );
-  assert.equal(shouldRefreshWorkflowOnForeground(["run-approvals"], []), false);
+  assert.equal(
+    shouldRefreshQueryOnForeground(
+      ["project", "p", "repo-sync-status", "default"],
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(["project", "p", "issues"], []),
+    false,
+  );
+  assert.equal(shouldRefreshQueryOnForeground(["run-approvals"], []), false);
 });
 
-test("workflow foreground refresh query contract includes only stale active targets", async () => {
-  const { shouldRefreshWorkflowOnForeground } = await import("./hooks.ts");
+test("foreground refresh query contract includes only stale active targets", async () => {
+  const { shouldRefreshQueryOnForeground } = await import("./hooks.ts");
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -161,6 +172,11 @@ test("workflow foreground refresh query contract includes only stale active targ
     subscribe(["workflows", "stale-active"], [], staleAt),
     subscribe(["workflows", "fresh-active"], [], freshAt),
     subscribe(
+      ["project", "p", "repo-sync-status", "default"],
+      { aheadCount: 1 },
+      staleAt,
+    ),
+    subscribe(
       ["workflow-runs", "inactive"],
       [{ status: "completed" }],
       staleAt,
@@ -173,12 +189,13 @@ test("workflow foreground refresh query contract includes only stale active targ
 
   await queryClient.refetchQueries({
     predicate: (query) =>
-      shouldRefreshWorkflowOnForeground(query.queryKey, query.state.data),
+      shouldRefreshQueryOnForeground(query.queryKey, query.state.data),
     stale: true,
     type: "active",
   });
 
   assert.deepEqual(fetches.sort(), [
+    "project:p:repo-sync-status:default",
     "workflow-runs:inactive",
     "workflows:stale-active",
   ]);
