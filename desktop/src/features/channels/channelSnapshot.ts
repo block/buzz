@@ -7,8 +7,9 @@
  * channel list per relay so the sidebar can paint instantly from the snapshot
  * while the live fetch revalidates in the background.
  *
- * Keyed per relay URL (not community id) so equivalent URL formatting maps to
- * one slot and one relay's list never bleeds into another.
+ * Keyed per normalized relay URL and authoritative identity so identities that
+ * share a relay retain independent snapshots without exposing either list to
+ * the other.
  */
 
 import type { Channel } from "@/shared/api/types";
@@ -41,8 +42,15 @@ type StoredChannelSnapshot = ChannelSnapshot & {
   integrity: string;
 };
 
-export function channelSnapshotKey(relayUrl: string): string {
-  return `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}`;
+function channelSnapshotRelayPrefix(relayUrl: string): string {
+  return `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}:`;
+}
+
+export function channelSnapshotKey(
+  relayUrl: string,
+  ownerPubkey: string,
+): string {
+  return `${channelSnapshotRelayPrefix(relayUrl)}${ownerPubkey.toLowerCase()}`;
 }
 
 function snapshotIntegrity(
@@ -113,7 +121,9 @@ export function inspectChannelSnapshot(
   };
 
   try {
-    const raw = window.localStorage.getItem(channelSnapshotKey(relayUrl));
+    const raw = window.localStorage.getItem(
+      channelSnapshotKey(relayUrl, ownerPubkey),
+    );
     if (!raw) return { diagnostics: absent, snapshot: null };
 
     const parsedJson = JSON.parse(raw) as Record<string, unknown>;
@@ -131,7 +141,9 @@ export function inspectChannelSnapshot(
     };
     return { diagnostics, snapshot };
   } catch {
-    const raw = window.localStorage.getItem(channelSnapshotKey(relayUrl));
+    const raw = window.localStorage.getItem(
+      channelSnapshotKey(relayUrl, ownerPubkey),
+    );
     return {
       diagnostics: {
         ...absent,
@@ -169,7 +181,7 @@ export function writeChannelSnapshot(
   try {
     if (!ownerPubkey || !hash) return;
 
-    const key = channelSnapshotKey(relayUrl);
+    const key = channelSnapshotKey(relayUrl, ownerPubkey);
     const previous = window.localStorage.getItem(key);
     if (previous) {
       try {
@@ -205,7 +217,15 @@ export function writeChannelSnapshot(
  */
 export function removeChannelSnapshotForRelay(relayUrl: string): void {
   try {
-    window.localStorage.removeItem(channelSnapshotKey(relayUrl));
+    const prefix = channelSnapshotRelayPrefix(relayUrl);
+    const keys: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) window.localStorage.removeItem(key);
+    // Also clear the superseded relay-only v1/v2 slot.
+    window.localStorage.removeItem(prefix.slice(0, -1));
   } catch {
     // Storage access failures are non-fatal.
   }

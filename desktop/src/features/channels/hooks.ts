@@ -38,6 +38,7 @@ import { useCommunities } from "@/features/communities/useCommunities";
 import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
   inspectChannelSnapshot,
+  type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
 
@@ -53,12 +54,10 @@ export const channelsFocusRefetchPolicy = {
   refetchOnWindowFocus: true,
 } as const;
 /**
- * Query-cache key for the channels payload hash. Stored alongside the channel
- * list so its lifecycle is tied to the channel cache — a community switch that
- * evicts the channel cache implicitly invalidates the stored hash, preventing a
- * stale hash from short-circuiting into an empty list.
+ * Authoritative server list/hash pair. Presentation mutations may patch
+ * `channelsQueryKey`, but may never change or be persisted with this hash.
  */
-const channelsHashKey = ["channels", "_hash"] as const;
+const channelsSnapshotPairKey = ["channels", "_snapshot-pair"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
 const channelMembersQueryKey = (channelId: string) =>
@@ -310,6 +309,13 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
     [ownerPubkey, relayUrl],
   );
   const snapshot = snapshotRead?.snapshot ?? null;
+  const initialSnapshotPair = React.useMemo(
+    () =>
+      snapshot
+        ? { channels: sortChannels(snapshot.channels), hash: snapshot.hash }
+        : null,
+    [snapshot],
+  );
   React.useEffect(() => {
     if (relayUrl && snapshotRead && options?.enabled !== false) {
       markSnapshotDiagnostic(
@@ -329,17 +335,13 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
       (options?.enabled ?? true) && relayUrl !== null && ownerPubkey !== null,
     queryKey: channelsQueryKey,
     queryFn: async () => {
-      // Supply the snapshot hash only when the list it describes is available.
-      // React Query owns any newer in-session pair; on first boot the atomic
-      // localStorage document provides both values together.
-      const cachedChannels =
-        queryClient.getQueryData<Channel[]>(channelsQueryKey) ??
-        snapshot?.channels;
-      const knownHash = cachedChannels
-        ? (queryClient.getQueryData<string>(channelsHashKey) ??
-          snapshot?.hash ??
-          null)
-        : null;
+      // Revalidation uses only an authoritative list/hash pair. The displayed
+      // channels cache is intentionally ignored because successful mutations
+      // patch it before the relay's list/hash has necessarily caught up.
+      const cachedPair =
+        queryClient.getQueryData<ChannelSnapshot>(channelsSnapshotPairKey) ??
+        initialSnapshotPair;
+      const knownHash = cachedPair?.hash ?? null;
 
       const payload = await getChannels(knownHash);
 
@@ -350,37 +352,58 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         payload.channels === null &&
         knownHash !== null &&
         payload.hash === knownHash;
-      const base =
+      const pairChannels =
         payload.channels ??
-        (hasMatchingNotModifiedResponse ? cachedChannels : undefined);
+        (hasMatchingNotModifiedResponse ? cachedPair?.channels : undefined);
 
-      if (!base) {
+      if (!pairChannels) {
         // Missing cache or a mismatched not-modified response: discard the hash
         // and fetch a complete authoritative list before updating persistence.
         const full = await getChannels(null);
         const sorted = sortChannels(
           applyLastMessages(full.channels ?? [], full.lastMessages),
         );
-        queryClient.setQueryData(channelsHashKey, full.hash);
+        const pair = { channels: sorted, hash: full.hash };
+        queryClient.setQueryData(channelsSnapshotPairKey, pair);
         if (relayUrl && ownerPubkey) {
-          writeChannelSnapshot(relayUrl, ownerPubkey, sorted, full.hash);
+          writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
         }
         return sorted;
       }
 
-      const sorted = sortChannels(
-        applyLastMessages(base, payload.lastMessages),
+      const authoritativeChannels = sortChannels(
+        applyLastMessages(pairChannels, payload.lastMessages),
       );
-      queryClient.setQueryData(channelsHashKey, payload.hash);
+      const pair = {
+        channels: authoritativeChannels,
+        hash: payload.hash,
+      };
+      queryClient.setQueryData(channelsSnapshotPairKey, pair);
+      // A matching not-modified result must merge timestamps into whatever is
+      // displayed at completion time. Reading through setQueryData avoids
+      // clobbering an optimistic mutation that landed while the request ran.
+      const sorted =
+        payload.channels === null
+          ? (queryClient.setQueryData<Channel[]>(
+              channelsQueryKey,
+              (displayedChannels) =>
+                sortChannels(
+                  applyLastMessages(
+                    displayedChannels ?? authoritativeChannels,
+                    payload.lastMessages,
+                  ),
+                ),
+            ) ?? authoritativeChannels)
+          : authoritativeChannels;
       if (relayUrl && ownerPubkey) {
-        writeChannelSnapshot(relayUrl, ownerPubkey, sorted, payload.hash);
+        writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
       }
       return sorted;
     },
     // Paint the complete persisted list immediately. `initialDataUpdatedAt: 0`
     // deliberately keeps it stale so every boot still validates against the
     // relay; queryFn reads the matching hash from the same atomic document.
-    initialData: snapshot ? sortChannels(snapshot.channels) : undefined,
+    initialData: initialSnapshotPair?.channels,
     initialDataUpdatedAt: 0,
     refetchInterval,
     ...channelsFocusRefetchPolicy,

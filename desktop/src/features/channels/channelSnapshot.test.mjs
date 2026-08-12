@@ -13,6 +13,10 @@ if (typeof globalThis.window === "undefined") {
   const storage = new Map();
   globalThis.window = {
     localStorage: {
+      get length() {
+        return storage.size;
+      },
+      key: (index) => [...storage.keys()][index] ?? null,
       getItem: (key) => storage.get(key) ?? null,
       setItem: (key, value) => storage.set(key, value),
       removeItem: (key) => storage.delete(key),
@@ -47,13 +51,14 @@ const OWNER = "ABCDEF";
 const HASH = "channels-hash-v2";
 
 test.beforeEach(() => {
-  window.localStorage.removeItem(channelSnapshotKey(RELAY));
+  removeChannelSnapshotForRelay(RELAY);
+  removeChannelSnapshotForRelay("wss://other.example.com");
 });
 
 test("channelSnapshotKey: normalizes trailing slash and case", () => {
   assert.equal(
-    channelSnapshotKey("WSS://Relay.Example.com/"),
-    channelSnapshotKey("wss://relay.example.com"),
+    channelSnapshotKey("WSS://Relay.Example.com/", OWNER),
+    channelSnapshotKey("wss://relay.example.com", OWNER.toLowerCase()),
   );
 });
 
@@ -86,7 +91,7 @@ test("inspection distinguishes absent from invalid snapshots", () => {
     snapshot: null,
   });
 
-  window.localStorage.setItem(channelSnapshotKey(RELAY), "not-json{{{");
+  window.localStorage.setItem(channelSnapshotKey(RELAY, OWNER), "not-json{{{");
   const invalid = inspectChannelSnapshot(RELAY, OWNER);
   assert.equal(invalid.snapshot, null);
   assert.equal(invalid.diagnostics.presence, "invalid");
@@ -116,13 +121,13 @@ test("read for an unknown relay returns null", () => {
 });
 
 test("read rejects malformed JSON", () => {
-  window.localStorage.setItem(channelSnapshotKey(RELAY), "not-json{{{");
+  window.localStorage.setItem(channelSnapshotKey(RELAY, OWNER), "not-json{{{");
   assert.equal(readChannelSnapshot(RELAY, OWNER), null);
 });
 
 test("read rejects a legacy channel-only snapshot", () => {
   window.localStorage.setItem(
-    channelSnapshotKey(RELAY),
+    channelSnapshotKey(RELAY, OWNER),
     JSON.stringify({ version: 1, channels: [makeChannel()] }),
   );
   assert.equal(readChannelSnapshot(RELAY, OWNER), null);
@@ -130,7 +135,7 @@ test("read rejects a legacy channel-only snapshot", () => {
 
 test("read rejects a snapshot whose hash and list were partially changed", () => {
   writeChannelSnapshot(RELAY, OWNER, [makeChannel()], "old-hash");
-  const key = channelSnapshotKey(RELAY);
+  const key = channelSnapshotKey(RELAY, OWNER);
   const stored = JSON.parse(window.localStorage.getItem(key));
   window.localStorage.setItem(
     key,
@@ -146,7 +151,7 @@ test("read rejects a snapshot whose hash and list were partially changed", () =>
 
 test("read rejects a v2 snapshot with a missing hash", () => {
   window.localStorage.setItem(
-    channelSnapshotKey(RELAY),
+    channelSnapshotKey(RELAY, OWNER),
     JSON.stringify({
       version: 2,
       updatedAt: Date.now(),
@@ -162,10 +167,46 @@ test("read rejects a snapshot owned by another identity", () => {
   assert.equal(readChannelSnapshot(RELAY, "different-owner"), null);
 });
 
-test("remove clears the atomic snapshot for that relay", () => {
+test("same-relay identities retain independent snapshots", () => {
+  const ownerAChannels = [makeChannel({ id: "owner-a", name: "Owner A" })];
+  const ownerBChannels = [makeChannel({ id: "owner-b", name: "Owner B" })];
+
+  writeChannelSnapshot(RELAY, OWNER, ownerAChannels, "owner-a-hash");
+  writeChannelSnapshot(
+    RELAY,
+    "different-owner",
+    ownerBChannels,
+    "owner-b-hash",
+  );
+
+  assert.deepEqual(readChannelSnapshot(RELAY, OWNER), {
+    channels: ownerAChannels,
+    hash: "owner-a-hash",
+  });
+  assert.deepEqual(readChannelSnapshot(RELAY, "different-owner"), {
+    channels: ownerBChannels,
+    hash: "owner-b-hash",
+  });
+});
+
+test("remove clears every identity snapshot for that relay", () => {
   writeChannelSnapshot(RELAY, OWNER, [makeChannel()], HASH);
+  writeChannelSnapshot(
+    RELAY,
+    "different-owner",
+    [makeChannel({ id: "owner-b" })],
+    "owner-b-hash",
+  );
+  writeChannelSnapshot(
+    "wss://other.example.com",
+    OWNER,
+    [makeChannel({ id: "other-relay" })],
+    "other-relay-hash",
+  );
   removeChannelSnapshotForRelay(RELAY);
   assert.equal(readChannelSnapshot(RELAY, OWNER), null);
+  assert.equal(readChannelSnapshot(RELAY, "different-owner"), null);
+  assert.notEqual(readChannelSnapshot("wss://other.example.com", OWNER), null);
 });
 
 test("cache write evicts disposable entries and retries at quota", () => {

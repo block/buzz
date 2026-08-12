@@ -10,8 +10,8 @@ const MATCHING_HASH = "mock-hash";
 const READ_DELAY_MS = 600;
 const SNAPSHOT_FRAME_DELAY_MS = 3_000;
 
-function snapshotKey(relayUrl: string) {
-  return `buzz-channels.v1:${relayUrl}`;
+function snapshotKey(relayUrl: string, ownerPubkey = OWNER_PUBKEY) {
+  return `buzz-channels.v1:${relayUrl}:${ownerPubkey.toLowerCase()}`;
 }
 
 function makeSnapshotChannel(index: number, prefix = "snapshot") {
@@ -90,6 +90,7 @@ async function seedSnapshot(
   options: {
     channels?: ReturnType<typeof makeSnapshotChannel>[];
     hash: string;
+    keyOwnerPubkey?: string;
     ownerPubkey?: string;
     relayUrl?: string;
   },
@@ -114,7 +115,10 @@ async function seedSnapshot(
       channels,
       hash: options.hash,
       integrity: snapshotIntegrity(ownerPubkey, options.hash, channels),
-      key: snapshotKey(options.relayUrl ?? RELAY_URL),
+      key: snapshotKey(
+        options.relayUrl ?? RELAY_URL,
+        options.keyOwnerPubkey ?? ownerPubkey,
+      ),
       ownerPubkey,
     },
   );
@@ -158,6 +162,46 @@ async function getChannelsPayloads(page: Page) {
       .filter((entry) => entry.command === "get_channels")
       .map((entry) => entry.payload as { knownHash?: unknown }),
   );
+}
+
+async function mutateDisplayedChannels(page: Page, channelName: string) {
+  await page.evaluate((name) => {
+    const queryClient = window.__BUZZ_E2E_QUERY_CLIENT__ as
+      | {
+          setQueryData: (
+            queryKey: readonly string[],
+            updater: (
+              channels: ReturnType<typeof makeSnapshotChannel>[] | undefined,
+            ) => ReturnType<typeof makeSnapshotChannel>[],
+          ) => unknown;
+        }
+      | undefined;
+    if (!queryClient) {
+      throw new Error("E2E query client seam is not installed.");
+    }
+    queryClient.setQueryData(["channels"], (channels) => {
+      const template = channels?.[0];
+      if (!template) {
+        throw new Error("Displayed channel cache is empty.");
+      }
+      return [...channels, { ...template, id: "optimistic-channel", name }];
+    });
+  }, channelName);
+}
+
+async function readPersistedSnapshot(page: Page) {
+  return page.evaluate((key) => {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const snapshot = JSON.parse(raw) as {
+      channels: Array<{ name: string }>;
+      hash: string;
+    };
+    return {
+      channelNames: snapshot.channels.map((channel) => channel.name),
+      hash: snapshot.hash,
+    };
+  }, snapshotKey(RELAY_URL));
 }
 
 async function trackSnapshotRows(page: Page) {
@@ -245,6 +289,43 @@ test("cold boot paints the complete snapshot, sends its hash, and revalidates", 
   );
 });
 
+test("matching not-modified preserves display mutations without persisting them", async ({
+  page,
+}) => {
+  const optimisticName = "optimistic-local-channel";
+  await seedSnapshot(page, { hash: MATCHING_HASH });
+  await installMockBridge(page, {
+    channelsReadDelayMs: READ_DELAY_MS,
+    honorChannelsKnownHash: true,
+  });
+  await page.goto("/");
+
+  await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
+    FULL_SNAPSHOT.length,
+    { timeout: 500 },
+  );
+  await mutateDisplayedChannels(page, optimisticName);
+  await expect(
+    page.locator('[data-channel-id="optimistic-channel"]'),
+  ).toBeVisible();
+
+  await expect
+    .poll(() => getChannelsPayloads(page))
+    .toEqual([{ knownHash: MATCHING_HASH }]);
+  await expect
+    .poll(() => readPersistedSnapshot(page))
+    .toEqual({
+      channelNames: FULL_SNAPSHOT.map((channel) => channel.name),
+      hash: MATCHING_HASH,
+    });
+  await expect(
+    page.locator('[data-channel-id="optimistic-channel"]'),
+  ).toBeVisible();
+  expect((await readPersistedSnapshot(page))?.channelNames).not.toContain(
+    optimisticName,
+  );
+});
+
 test("first-ever boot without a snapshot sends null and shows loading", async ({
   page,
 }) => {
@@ -278,6 +359,7 @@ test("first-ever boot without a snapshot sends null and shows loading", async ({
 test("a different identity's snapshot is ignored", async ({ page }) => {
   await seedSnapshot(page, {
     hash: "foreign-hash",
+    keyOwnerPubkey: OWNER_PUBKEY,
     ownerPubkey: STALE_COMMUNITY_PUBKEY,
   });
   await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
