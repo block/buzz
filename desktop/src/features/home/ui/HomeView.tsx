@@ -49,6 +49,7 @@ import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import { HomePersonalInboxDetail } from "@/features/home/ui/HomePersonalInboxDetail";
 import {
   useChannelMessagesQuery,
+  useChannelSubscription,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
@@ -296,6 +297,10 @@ export function HomeView({
     homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
+  // Inbox detail renders the active DM as a conversation. Keep its cache live
+  // so an agent's NIP-10 reply arrives here instead of only in its activity
+  // transcript.
+  useChannelSubscription(selectedChannel);
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(
