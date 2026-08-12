@@ -131,14 +131,14 @@ export function MessageThreadPanelSkeleton({
         }
       >
         <div
-          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
+          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-2 pt-1")}
           data-testid="message-thread-head-loading"
         >
           <ThreadMessageSkeleton isHead />
         </div>
         <div
           className={cn(
-            "space-y-2.5 pb-3 pt-1",
+            "space-y-2.5 pb-4 pt-2",
             THREAD_PANEL_MESSAGE_GUTTER_CLASS,
           )}
         >

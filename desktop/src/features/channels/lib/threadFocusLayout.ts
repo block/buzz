@@ -24,7 +24,7 @@ export const THREAD_FOCUS_SLIVER_WIDTH_PX = 72;
  * with auto horizontal margins so the reading measure stays comfortable no
  * matter how wide the window gets.
  */
-export const THREAD_FOCUS_COLUMN_MAX_WIDTH_PX = 880;
+export const THREAD_FOCUS_COLUMN_MAX_WIDTH_PX = 820;
 
 /**
  * Horizontal distance the focus drawer travels on enter/exit.
