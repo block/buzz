@@ -30,7 +30,10 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
-const NATIVE_DELIVERY_TEAM_INSTRUCTIONS: &str = "The harness durably publishes the ordinary final response. Emit exactly one complete final answer as ACP text. Do not use `buzz messages send` to republish that final response. The Buzz CLI may still be used for intentional interim milestones or explicit side effects.";
+pub(crate) const NATIVE_DELIVERY_CHILD_ENV_SENTINEL: &str =
+    "BUZZ_ACP_NATIVE_DELIVERY_CHILD_ISOLATION";
+
+const NATIVE_DELIVERY_TEAM_INSTRUCTIONS: &str = "The harness durably publishes the ordinary final response. Emit exactly one complete final answer as ACP text. Do not use `buzz messages send` to republish that final response. Relay signing credentials are withheld from the child process while native delivery is enabled.";
 
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
@@ -1134,6 +1137,14 @@ impl Config {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         if args.native_delivery {
+            // AcpClient consumes this marker while constructing the child
+            // process and never exposes it to the child. It removes inherited
+            // relay-signing credentials and the interim agy publisher so one
+            // completed turn cannot have two independent publishers.
+            persona_env_vars.push((
+                NATIVE_DELIVERY_CHILD_ENV_SENTINEL.to_string(),
+                "1".to_string(),
+            ));
             team_instructions = Some(match team_instructions {
                 Some(existing) => {
                     format!("{existing}\n\n{NATIVE_DELIVERY_TEAM_INSTRUCTIONS}")
@@ -3110,6 +3121,11 @@ channels = "ALL"
             .expect("native instruction is present");
         assert!(instructions.starts_with("Keep existing guidance."));
         assert!(instructions.contains("Do not use `buzz messages send` to republish"));
+        assert!(instructions.contains("signing credentials are withheld"));
+        assert!(config
+            .persona_env_vars
+            .iter()
+            .any(|(key, value)| { key == NATIVE_DELIVERY_CHILD_ENV_SENTINEL && value == "1" }));
     }
 
     #[test]
@@ -3134,6 +3150,10 @@ channels = "ALL"
             config.team_instructions.as_deref(),
             Some("Keep existing guidance.")
         );
+        assert!(!config
+            .persona_env_vars
+            .iter()
+            .any(|(key, _)| key == NATIVE_DELIVERY_CHILD_ENV_SENTINEL));
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH

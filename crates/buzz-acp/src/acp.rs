@@ -22,6 +22,46 @@ use crate::usage::{
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Parent-process capabilities that must not cross into an agent child while
+/// native delivery owns final-response publication. The `agy-acp` variables
+/// are included because its interim carrier otherwise publishes before ACP
+/// returns `end_turn`, creating a deterministic second reply.
+const NATIVE_DELIVERY_PROTECTED_CHILD_ENV: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_API_TOKEN",
+    "AGY_ACP_BUZZ_PUBLISH",
+    "AGY_ACP_BUZZ_BIN",
+    "AGY_ACP_BUZZ_ARGS",
+    "AGY_ACP_BUZZ_PUBLISH_TIMEOUT_MS",
+];
+
+fn configure_native_delivery_child_isolation(
+    cmd: &mut tokio::process::Command,
+    extra_env: &[(String, String)],
+) -> bool {
+    let enabled = extra_env.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case(crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL) && value == "1"
+    });
+    if enabled {
+        for key in NATIVE_DELIVERY_PROTECTED_CHILD_ENV {
+            cmd.env_remove(key);
+        }
+        cmd.env_remove(crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL);
+    }
+    enabled
+}
+
+fn withhold_native_delivery_child_env(key: &str, isolation_enabled: bool) -> bool {
+    isolation_enabled
+        && (key.eq_ignore_ascii_case(crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL)
+            || NATIVE_DELIVERY_PROTECTED_CHILD_ENV
+                .iter()
+                .any(|protected| key.eq_ignore_ascii_case(protected)))
+}
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -471,6 +511,9 @@ impl AcpClient {
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        let native_delivery_isolation =
+            configure_native_delivery_child_isolation(&mut cmd, extra_env);
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
         // in the parent environment.
@@ -506,6 +549,9 @@ impl AcpClient {
         }
 
         for (key, value) in extra_env {
+            if withhold_native_delivery_child_env(key, native_delivery_isolation) {
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
@@ -3780,6 +3826,41 @@ mod tests {
         let _ = client.handle_session_update(&agent_message_chunk("  \n"));
 
         assert_eq!(client.take_turn_output(), None);
+    }
+
+    #[test]
+    fn native_delivery_withholds_signing_credentials_and_interim_publisher_from_child() {
+        let extra_env = vec![(
+            crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL.into(),
+            "1".into(),
+        )];
+        let mut command = tokio::process::Command::new("unused-child");
+
+        let enabled = configure_native_delivery_child_isolation(&mut command, &extra_env);
+        assert!(enabled);
+
+        let removed: std::collections::HashSet<String> = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().to_string()))
+            .collect();
+        for key in NATIVE_DELIVERY_PROTECTED_CHILD_ENV
+            .iter()
+            .copied()
+            .chain(std::iter::once(
+                crate::config::NATIVE_DELIVERY_CHILD_ENV_SENTINEL,
+            ))
+        {
+            assert!(
+                removed.contains(key),
+                "{key} must be removed from the child"
+            );
+            assert!(withhold_native_delivery_child_env(key, enabled));
+        }
+        assert!(!withhold_native_delivery_child_env(
+            "DELIVERY_TEST_KEEP",
+            enabled
+        ));
     }
 
     /// Build a `session/update` JSON-RPC notification carrying a
