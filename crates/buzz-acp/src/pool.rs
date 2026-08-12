@@ -224,13 +224,14 @@ fn has_system_prompt_support(
     protocol_version: u32,
     agent_name: &str,
     goose_system_prompt_supported: Option<bool>,
+    persistent_system_prompt_supported: bool,
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
-        protocol_version >= 2
+        persistent_system_prompt_supported || protocol_version >= 2
     }
 }
 
@@ -238,12 +239,17 @@ fn session_new_system_prompt<'a>(
     is_goose: bool,
     protocol_version: u32,
     agent_name: &str,
+    persistent_system_prompt_supported: bool,
     prompt: Option<&'a str>,
 ) -> Option<SystemPromptTransport<'a>> {
-    if is_goose || (protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME) {
+    if is_goose {
         None
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         prompt.map(SystemPromptTransport::ClaudeMeta)
+    } else if persistent_system_prompt_supported {
+        prompt.map(SystemPromptTransport::PersistentMeta)
+    } else if protocol_version < 2 {
+        None
     } else {
         prompt.map(SystemPromptTransport::Field)
     }
@@ -255,6 +261,7 @@ impl OwnedAgent {
             self.protocol_version,
             &self.agent_name,
             self.goose_system_prompt_supported,
+            self.acp.persistent_system_prompt_supported(),
         )
     }
 }
@@ -968,8 +975,8 @@ async fn create_session_and_apply_model(
     channel_type: Option<&str>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
-    // single prompt. Standard protocol-v2 agents receive it in `session/new`;
-    // Goose receives it through the custom request below. Legacy agents receive
+    // single prompt. Protocol-v2 or explicitly capable agents receive it in
+    // `session/new`; Goose receives it through the custom request below. Legacy agents receive
     // the same content as user-message sections via `format_prompt`. Core carries
     // its own `[Agent Memory — core]` header, and canvas carries its own
     // `[Channel Canvas]` header; both are appended with a blank-line separator.
@@ -996,17 +1003,20 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
+    let persistent_system_prompt_supported = agent.acp.persistent_system_prompt_supported();
+    let system_prompt_transport = session_new_system_prompt(
+        is_goose,
+        agent.protocol_version,
+        &agent.agent_name,
+        persistent_system_prompt_supported,
+        combined_system_prompt.as_deref(),
+    );
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
             mcp_servers,
-            session_new_system_prompt(
-                is_goose,
-                agent.protocol_version,
-                &agent.agent_name,
-                combined_system_prompt.as_deref(),
-            ),
+            system_prompt_transport,
             session_title.as_deref(),
         )
         .await?;
@@ -4367,33 +4377,33 @@ mod tests {
 
     #[test]
     fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
-        assert!(!has_system_prompt_support(2, "goose", None));
-        assert!(!has_system_prompt_support(2, "goose", Some(false)));
-        assert!(has_system_prompt_support(2, "goose", Some(true)));
-        assert!(has_system_prompt_support(1, "goose", Some(true)));
-        assert!(has_system_prompt_support(2, "buzz-agent", None));
+        assert!(!has_system_prompt_support(2, "goose", None, false));
+        assert!(!has_system_prompt_support(2, "goose", Some(false), false));
+        assert!(has_system_prompt_support(2, "goose", Some(true), false));
+        assert!(has_system_prompt_support(1, "goose", Some(true), false));
+        assert!(has_system_prompt_support(2, "buzz-agent", None, false));
         // Goose never receives system prompt via session/new (uses post-hoc method).
         assert_eq!(
-            session_new_system_prompt(true, 2, "goose", Some("instructions")),
+            session_new_system_prompt(true, 2, "goose", false, Some("instructions")),
             None
         );
         // Protocol-v2 non-goose gets Field transport.
         assert_eq!(
-            session_new_system_prompt(false, 2, "buzz-agent", Some("instructions")),
+            session_new_system_prompt(false, 2, "buzz-agent", false, Some("instructions")),
             Some(SystemPromptTransport::Field("instructions"))
         );
         // Protocol-v1 non-goose, non-claude gets None (legacy user-message framing).
         assert_eq!(
-            session_new_system_prompt(false, 1, "codex", Some("instructions")),
+            session_new_system_prompt(false, 1, "codex", false, Some("instructions")),
             None
         );
         // claude-agent-acp gets ClaudeMeta transport regardless of protocol version.
         assert_eq!(
-            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
+            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, false, Some("instructions")),
             Some(SystemPromptTransport::ClaudeMeta("instructions"))
         );
         assert_eq!(
-            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
+            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, false, Some("instructions")),
             None,
             "goose path must never produce a transport even when agent_name matches"
         );
@@ -4403,8 +4413,317 @@ mod tests {
     fn claude_agent_acp_has_system_prompt_support_regardless_of_protocol_version() {
         // claude-agent-acp declares protocolVersion:1 but supports _meta.systemPrompt;
         // has_system_prompt_support must return true so user-message framing is suppressed.
-        assert!(has_system_prompt_support(1, CLAUDE_AGENT_ACP_NAME, None));
-        assert!(has_system_prompt_support(2, CLAUDE_AGENT_ACP_NAME, None));
+        assert!(has_system_prompt_support(
+            1,
+            CLAUDE_AGENT_ACP_NAME,
+            None,
+            false
+        ));
+        assert!(has_system_prompt_support(
+            2,
+            CLAUDE_AGENT_ACP_NAME,
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn explicit_persistent_system_prompt_capability_enables_protocol_v1_agent() {
+        assert!(has_system_prompt_support(1, "codex-acp", None, true));
+        assert_eq!(
+            session_new_system_prompt(false, 1, "codex-acp", true, Some("instructions")),
+            Some(SystemPromptTransport::PersistentMeta("instructions"))
+        );
+    }
+
+    #[test]
+    fn absent_persistent_system_prompt_capability_preserves_legacy_fallback() {
+        assert!(!has_system_prompt_support(1, "codex-acp", None, false));
+        assert_eq!(
+            session_new_system_prompt(false, 1, "codex-acp", false, Some("instructions")),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_persistent_capability_prefers_meta_over_protocol_v2_field() {
+        assert_eq!(
+            session_new_system_prompt(false, 2, "future-agent", true, Some("instructions")),
+            Some(SystemPromptTransport::PersistentMeta("instructions"))
+        );
+    }
+
+    async fn capture_system_prompt_lifecycle(
+        initialize_result: serde_json::Value,
+    ) -> (serde_json::Value, serde_json::Value, bool, Vec<String>) {
+        let capture_path =
+            std::env::temp_dir().join(format!("buzz-acp-persistent-{}.jsonl", Uuid::new_v4()));
+        let capture = capture_path.to_string_lossy();
+        let initialize_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": initialize_result,
+        })
+        .to_string();
+        let session_new_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"sessionId": "session-1"},
+        })
+        .to_string();
+        let session_prompt_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"stopReason": "end_turn"},
+        })
+        .to_string();
+        let script = format!(
+            r#"read -r _initialize
+printf '%s\n' '{initialize_response}'
+read -r session_new
+printf '%s\n' "$session_new" > '{capture}'
+printf '%s\n' '{session_new_response}'
+read -r session_prompt
+printf '%s\n' "$session_prompt" >> '{capture}'
+printf '%s\n' '{session_prompt_response}'
+sleep 1"#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn lifecycle test agent");
+        acp.initialize()
+            .await
+            .expect("initialize lifecycle test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "codex-acp".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.base_prompt = Some("BASE-CONTENT");
+        ctx.system_prompt = Some("SYSTEM-CONTENT".into());
+        ctx.team_instructions = Some("TEAM-CONTENT".into());
+        ctx.session_title = Some("Codex".into());
+        let core = "[Agent Memory — core]\nCORE-CONTENT";
+        let canvas = "[Channel Canvas]\nCANVAS-CONTENT";
+        let session_id = create_session_and_apply_model(
+            &mut agent,
+            &ctx,
+            Some(core),
+            Some(canvas),
+            Some("test"),
+            None,
+            None,
+        )
+        .await
+        .expect("create lifecycle test session");
+
+        let has_system_prompt_support = agent.has_system_prompt_support();
+        let batch = one_event_batch(Uuid::new_v4());
+        let prompt_blocks = crate::queue::format_prompt(
+            &batch,
+            &crate::queue::FormatPromptArgs {
+                has_system_prompt_support,
+                base_prompt: ctx.base_prompt,
+                system_prompt: ctx.system_prompt.as_deref(),
+                team_instructions: ctx.team_instructions.as_deref(),
+                agent_core: Some(core),
+                agent_canvas: Some(canvas),
+                ..Default::default()
+            },
+        );
+        let prompt_refs: Vec<&str> = prompt_blocks.iter().map(String::as_str).collect();
+        let stop_reason = agent
+            .acp
+            .session_prompt_blocks_with_idle_timeout(
+                &session_id,
+                &prompt_refs,
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("send lifecycle test prompt");
+        assert_eq!(stop_reason, StopReason::EndTurn);
+
+        let captured = std::fs::read_to_string(&capture_path).expect("read lifecycle capture");
+        let _ = std::fs::remove_file(&capture_path);
+        let requests: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("captured request must be JSON"))
+            .collect();
+        assert_eq!(requests.len(), 2, "capture session/new then session/prompt");
+        (
+            requests[0].clone(),
+            requests[1].clone(),
+            has_system_prompt_support,
+            prompt_blocks,
+        )
+    }
+
+    #[tokio::test]
+    async fn persistent_capability_sends_static_prompt_once_and_omits_it_from_user_turn() {
+        let (session_new, session_prompt, supported, prompt_blocks) =
+            capture_system_prompt_lifecycle(json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "codex-acp"},
+            "_meta": {"capabilities": {"persistentSystemPrompt": true}},
+            }))
+            .await;
+        assert!(supported);
+        let combined = "[Base]\nBASE-CONTENT\n\n[System]\nSYSTEM-CONTENT\n\n[Team Instructions]\nTEAM-CONTENT\n\n[Agent Memory — core]\nCORE-CONTENT\n\n[Channel Canvas]\nCANVAS-CONTENT";
+        assert_eq!(
+            session_new,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session/new",
+                "params": {
+                    "cwd": ".",
+                    "mcpServers": [],
+                    "_meta": {
+                        "systemPrompt": combined,
+                        "sessionTitle": "Codex · #test",
+                    },
+                },
+            })
+        );
+        assert_eq!(
+            prompt_blocks.len(),
+            2,
+            "capable turn has context + event only"
+        );
+        let expected_prompt_blocks: Vec<serde_json::Value> = prompt_blocks
+            .iter()
+            .map(|text| json!({"type": "text", "text": text}))
+            .collect();
+        assert_eq!(
+            session_prompt,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": "session-1",
+                    "prompt": expected_prompt_blocks,
+                },
+            })
+        );
+        let user_prompt = prompt_blocks.join("\n");
+        for repeated_static_content in [
+            "[Base]",
+            "BASE-CONTENT",
+            "[System]",
+            "SYSTEM-CONTENT",
+            "[Team Instructions]",
+            "TEAM-CONTENT",
+            "[Agent Memory — core]",
+            "CORE-CONTENT",
+            "[Channel Canvas]",
+            "CANVAS-CONTENT",
+        ] {
+            assert!(
+                !user_prompt.contains(repeated_static_content),
+                "capable user prompt repeated {repeated_static_content}: {user_prompt}"
+            );
+        }
+        assert!(user_prompt.contains("test"), "event content must remain");
+    }
+
+    #[tokio::test]
+    async fn unsupported_capabilities_omit_persistent_metadata_and_preserve_legacy_sections() {
+        let cases = [
+            (
+                "absent",
+                json!({
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "codex-acp"},
+                }),
+            ),
+            (
+                "false",
+                json!({
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "codex-acp"},
+                    "_meta": {"capabilities": {"persistentSystemPrompt": false}},
+                }),
+            ),
+            (
+                "malformed",
+                json!({
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "codex-acp"},
+                    "_meta": {"capabilities": {"persistentSystemPrompt": "true"}},
+                }),
+            ),
+            (
+                "unknown-only",
+                json!({
+                    "protocolVersion": 1,
+                    "agentInfo": {"name": "codex-acp"},
+                    "_meta": {"capabilities": {"futureCapability": true}},
+                }),
+            ),
+        ];
+
+        for (label, initialize_result) in cases {
+            let (session_new, session_prompt, supported, prompt_blocks) =
+                capture_system_prompt_lifecycle(initialize_result).await;
+            assert!(!supported, "{label} metadata must fail closed");
+            assert_eq!(
+                session_new,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": ".",
+                        "mcpServers": [],
+                        "_meta": {"sessionTitle": "Codex · #test"},
+                    },
+                }),
+                "{label} metadata changed the legacy session/new envelope"
+            );
+            assert_eq!(
+                prompt_blocks.len(),
+                7,
+                "legacy turn has five static + context + event blocks"
+            );
+            assert_eq!(
+                &prompt_blocks[..5],
+                [
+                    "[Base]\nBASE-CONTENT",
+                    "[System]\nSYSTEM-CONTENT",
+                    "[Team Instructions]\nTEAM-CONTENT",
+                    "[Agent Memory — core]\nCORE-CONTENT",
+                    "[Channel Canvas]\nCANVAS-CONTENT",
+                ],
+                "{label} legacy static block order changed"
+            );
+            let expected_prompt_blocks: Vec<serde_json::Value> = prompt_blocks
+                .iter()
+                .map(|text| json!({"type": "text", "text": text}))
+                .collect();
+            assert_eq!(
+                session_prompt,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": "session-1",
+                        "prompt": expected_prompt_blocks,
+                    },
+                }),
+                "{label} legacy session/prompt envelope changed"
+            );
+        }
     }
 
     #[test]
@@ -4412,8 +4731,8 @@ mod tests {
         // The renamed @zed-industries package predates the _meta.systemPrompt support,
         // so it must not be treated as capable and stays on legacy user-message framing.
         let old_name = "@zed-industries/claude-code-acp";
-        assert!(!has_system_prompt_support(1, old_name, None));
-        assert!(has_system_prompt_support(2, old_name, None));
+        assert!(!has_system_prompt_support(1, old_name, None, false));
+        assert!(has_system_prompt_support(2, old_name, None, false));
     }
 
     #[test]

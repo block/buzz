@@ -132,6 +132,13 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+fn read_persistent_system_prompt_capability(result: &serde_json::Value) -> bool {
+    result
+        .pointer("/_meta/capabilities/persistentSystemPrompt")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -198,6 +205,9 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent accepts a persistent string-valued `_meta.systemPrompt`
+    /// on session creation.
+    persistent_system_prompt_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -548,6 +558,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            persistent_system_prompt_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -604,6 +615,7 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.persistent_system_prompt_supported = read_persistent_system_prompt_capability(&result);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -625,6 +637,8 @@ impl AcpClient {
     /// - `None` — no system-prompt field in the request (legacy framing).
     /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
     ///   (ACP protocol v2, buzz-agent, goose unused).
+    /// - `Some(SystemPromptTransport::PersistentMeta(text))` — string-valued
+    ///   `_meta.systemPrompt` for agents that explicitly advertise the extension.
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
     ///
@@ -642,24 +656,7 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
-        let mut params = serde_json::json!({
-            "cwd": cwd,
-            "mcpServers": mcp_servers,
-        });
-        match system_prompt {
-            Some(SystemPromptTransport::Field(sp)) => {
-                params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
-            }
-            Some(SystemPromptTransport::ClaudeMeta(sp)) => {
-                // Merge into _meta so sessionTitle (set below) is not clobbered.
-                params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
-            }
-            None => {}
-        }
-        if let Some(title) = session_title {
-            // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
-            params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
-        }
+        let params = build_session_new_params(cwd, mcp_servers, system_prompt, session_title);
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
@@ -865,6 +862,12 @@ impl AcpClient {
     /// for the supervisor's post-initialize log line.
     pub fn steering_supported(&self) -> bool {
         self.steering_supported
+    }
+
+    /// Whether `initialize` advertised string-valued persistent system-prompt
+    /// metadata for session creation.
+    pub fn persistent_system_prompt_supported(&self) -> bool {
+        self.persistent_system_prompt_supported
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -2071,9 +2074,11 @@ pub struct SessionNewResponse {
 
 /// How to deliver a system prompt on `session/new`.
 ///
-/// The two variants match the two mechanisms supported by current adapters:
+/// The variants match the mechanisms supported by current adapters:
 ///
 /// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`PersistentMeta`** — string-valued `_meta.systemPrompt`, gated by the
+///   agent's explicit `_meta.capabilities.persistentSystemPrompt` advertisement.
 /// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
 ///   `claude-agent-acp` to append to the adapter's own native system prompt
 ///   while keeping its tool-use preset intact.
@@ -2081,8 +2086,38 @@ pub struct SessionNewResponse {
 pub enum SystemPromptTransport<'a> {
     /// Deliver as a bare top-level `systemPrompt` field.
     Field(&'a str),
+    /// Deliver as a string-valued `_meta.systemPrompt` extension.
+    PersistentMeta(&'a str),
     /// Deliver as `_meta.systemPrompt: {"append": text}`.
     ClaudeMeta(&'a str),
+}
+
+fn build_session_new_params(
+    cwd: &str,
+    mcp_servers: Vec<McpServer>,
+    system_prompt: Option<SystemPromptTransport<'_>>,
+    session_title: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "cwd": cwd,
+        "mcpServers": mcp_servers,
+    });
+    match system_prompt {
+        Some(SystemPromptTransport::Field(sp)) => {
+            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        }
+        Some(SystemPromptTransport::PersistentMeta(sp)) => {
+            params["_meta"]["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        }
+        Some(SystemPromptTransport::ClaudeMeta(sp)) => {
+            params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
+        }
+        None => {}
+    }
+    if let Some(title) = session_title {
+        params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
+    }
+    params
 }
 
 /// How to switch to a particular model on a session.
@@ -2269,6 +2304,69 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_system_prompt_capability_requires_explicit_true() {
+        assert!(read_persistent_system_prompt_capability(
+            &serde_json::json!({
+                "_meta": {
+                    "capabilities": {
+                        "persistentSystemPrompt": true
+                    }
+                }
+            })
+        ));
+        for result in [
+            serde_json::json!({}),
+            serde_json::json!({"_meta": {"capabilities": {}}}),
+            serde_json::json!({"_meta": {"capabilities": {"persistentSystemPrompt": false}}}),
+            serde_json::json!({"_meta": {"capabilities": {"persistentSystemPrompt": "true"}}}),
+        ] {
+            assert!(!read_persistent_system_prompt_capability(&result));
+        }
+    }
+
+    #[test]
+    fn session_new_params_keep_persistent_claude_and_protocol_transports_distinct() {
+        let persistent = build_session_new_params(
+            "/workspace",
+            vec![],
+            Some(SystemPromptTransport::PersistentMeta("persistent")),
+            Some("Agent · Channel"),
+        );
+        assert_eq!(
+            persistent.pointer("/_meta/systemPrompt"),
+            Some(&serde_json::json!("persistent"))
+        );
+        assert_eq!(
+            persistent.pointer("/_meta/sessionTitle"),
+            Some(&serde_json::json!("Agent · Channel"))
+        );
+        assert!(persistent.get("systemPrompt").is_none());
+
+        let claude = build_session_new_params(
+            "/workspace",
+            vec![],
+            Some(SystemPromptTransport::ClaudeMeta("append")),
+            None,
+        );
+        assert_eq!(
+            claude.pointer("/_meta/systemPrompt"),
+            Some(&serde_json::json!({"append": "append"}))
+        );
+
+        let protocol = build_session_new_params(
+            "/workspace",
+            vec![],
+            Some(SystemPromptTransport::Field("protocol")),
+            None,
+        );
+        assert_eq!(
+            protocol.get("systemPrompt"),
+            Some(&serde_json::json!("protocol"))
+        );
+        assert!(protocol.get("_meta").is_none());
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -4007,6 +4105,38 @@ mod tests {
             !supported,
             "_meta.steering.supported: false must leave steering_supported false"
         );
+    }
+
+    async fn persistent_system_prompt_supported_after_initialize(init_result: &str) -> bool {
+        let script = format!(
+            "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \
+             sleep 5",
+            result = init_result,
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.persistent_system_prompt_supported()
+    }
+
+    #[tokio::test]
+    async fn initialize_records_persistent_system_prompt_capability() {
+        let supported = persistent_system_prompt_supported_after_initialize(
+            r#"{"protocolVersion":1,"agentCapabilities":{},"_meta":{"capabilities":{"persistentSystemPrompt":true}}}"#,
+        )
+        .await;
+        assert!(supported);
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_persistent_system_prompt_unsupported_when_absent() {
+        let supported = persistent_system_prompt_supported_after_initialize(
+            r#"{"protocolVersion":1,"agentCapabilities":{}}"#,
+        )
+        .await;
+        assert!(!supported);
     }
 
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
