@@ -31,10 +31,19 @@ Planned as written below.
 ALREADY TRUE  (verified against git, the working trees, the live GitHub API and
 the sibling worktrees — not against notes)
 
-  Nothing of #119 is built. Branch feat/review-agent-publish is at d897a06e8.
-  `git status` reports a clean tree apart from session scratch under .claude/ and
-  .repoql/. `git ls-files | grep -i publish` matches only unrelated upstream
-  desktop React files. No launchpad/review-agent/ directory exists on this branch.
+  Nothing of #119 is built. `git ls-files | grep -i publish` matches only
+  unrelated upstream desktop React files, and no launchpad/review-agent/ directory
+  exists on this branch.
+  THIS BRANCH MOVES UNDER THIS FILE, so the anchor is dated rather than asserted.
+  It read "at d897a06e8" until an independent review pass checked it: HEAD was
+  eb2bf09d0 when this plan was committed, and 8a405a9f5 ("match #119's plan to
+  render_review's current signature") landed while it was being revised — a commit
+  from another session working in this same worktree. As of 2026-08-13 the branch
+  is at 8a405a9f5 with this plan file itself carrying further staged edits. The
+  substantive claim survives every one of those moves; the SHA did not. This is the
+  pinned-fact rot this plan warns about for review.py's line numbers, applied to
+  its own anchor commit — which is why it is now a dated observation and why a
+  reader should re-run `git log -1` rather than trust the number above.
 
   ADR #110 is decided, and it names #119 by name as what it unblocks. The
   decision comment on #110 chooses GitHub Actions for Phase 1 with a committed
@@ -206,11 +215,24 @@ the sibling worktrees — not against notes)
   human-verified labels. Nothing in #119 depends on either figure.
 
 STEP 1  Record what the review-lifecycle API actually does.                [independent]
-        A throwaway pull request in this fork, and four raw responses captured to
+        A throwaway pull request in this fork, and FIVE raw responses captured to
         launchpad/review-agent/fixtures/review-lifecycle.json: POST a COMMENT
-        review; PUT a new body on its id; DELETE that id; attempt a dismissal.
-        Each entry stores the HTTP status, the response body, and the `gh`
-        command that produced it.
+        review; PUT a new body on its id; DELETE that id; attempt a dismissal; and
+        attempt a PUT on a review THIS TOKEN DID NOT WRITE. Each entry stores the
+        HTTP status, the response body, and the `gh` command that produced it.
+        THE FIFTH IS THE ONE THREE REVIEW PASSES COULD NOT SETTLE, and it is nearly
+        free here. STEP 2's author filter exists because a marked review written by
+        someone else must never become a PUT target, and the consequence of getting
+        that wrong — the agent publishes nothing on that pull request, permanently —
+        depends on GitHub refusing a cross-author PUT. No pass verified that, because
+        verifying it means writing to a public fork, which is exactly what this step
+        already does. This step runs under a HUMAN token, a different identity from
+        the workflow's, so a review already on the pull request under any other login
+        is a ready-made subject: attempt the PUT, record the status verbatim.
+        If GitHub instead ALLOWS it, that is a bigger finding than the one the filter
+        was written for — this agent would be able to overwrite other people's review
+        bodies — and it reopens STEP 2 rather than being worked around. Either
+        outcome is worth a single call.
         This is first because the whole strategy rests on PUT working and DELETE
         not. If PUT turns out to be refused, the answer recorded above ("update in
         place") is not implementable and the plan changes at STEP 2, not at STEP
@@ -223,10 +245,20 @@ STEP 1  Record what the review-lifecycle API actually does.                [inde
           fixtures/reviews-listing.json — the raw `GET /pulls/{n}/reviews`
             response, saved as the UNMERGED per-page bodies with their `Link`
             headers, not as one merged array. STEP 2 and STEP 10 both assert
-            against a recorded listing; neither can produce one, and a listing
-            hand-written to look like gh's output would test this plan's
-            assumption about gh rather than the code. Page one is padded to 30
-            entries so a second page genuinely exists.
+            against a recorded listing and neither can produce one.
+            THE TWO-PAGE CASE IS SYNTHETIC BY NECESSITY, and the fixture says so in
+            its own header. Measured on this fork: PRs 86, 124 and 126 carry 1, 0
+            and 1 reviews. Nothing here has thirty, and growing a second page on a
+            throwaway pull request would take thirty separate submissions. So the
+            fixture holds TWO artefacts, labelled differently and never conflated:
+            the genuinely RECORDED single-page response, which is the authority on
+            what a review object's fields actually are; and a CONSTRUCTED two-page
+            listing, built by replicating that recorded object with distinct `id`s
+            and a real `Link: rel="next"` header copied from a genuine paginated
+            response. An earlier revision said page one was "padded", which is the
+            same construction described in a word that invites hand-authoring — and
+            hand-authoring a listing is the defect the fixture exists to remove.
+            Calling it constructed is honest; calling it recorded is not.
           whether an EDIT is observable to a human. After the PUT, capture the
             pull request's timeline (`GET /issues/{n}/timeline`) and record
             whether the edit appears in it at all. The whole strategy turns
@@ -236,12 +268,18 @@ STEP 1  Record what the review-lifecycle API actually does.                [inde
             judgement call for #121, and it cannot be made without this
             observation. Recording it costs one call; inferring it costs the
             feature's entire value.
-        done when: the fixture exists and contains four entries, each with a
+        done when: the fixture exists and contains FIVE entries, each with a
         non-empty `status`, `body` and `command`; the POST entry's response has
         `state` "COMMENTED" and a numeric `id`; the PUT entry's status and the
-        DELETE entry's status are both recorded verbatim whatever they are;
-        fixtures/reviews-listing.json exists, holds at least two page bodies, and
-        page one holds 30 entries; the timeline response after the PUT is saved
+        DELETE entry's status are both recorded verbatim whatever they are; the
+        cross-author PUT entry records its status verbatim and the fixture states in
+        one line whether GitHub refused it, with STEP 2's author filter cited as what
+        depends on the answer;
+        fixtures/reviews-listing.json exists, holds the recorded single-page
+        response AND a constructed two-page listing whose page one holds 30 entries,
+        each artefact labelled recorded or constructed in the file itself, and no
+        assertion anywhere cites the constructed one as evidence about GitHub;
+        the timeline response after the PUT is saved
         and the fixture states in one line whether the edit is visible in it; and
         the file states which of the two strategies in this plan's header the
         recorded statuses support.
@@ -250,29 +288,70 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
         Three functions over an already-rendered body string. No rendering here,
         no findings, no contract.
           MARKER — a hidden HTML comment, `<!-- launchpad-review-agent:v1 -->`,
-            emitted as the FIRST line of every body. Identification is by marker,
-            not by author login: the workflow token posts as `github-actions[bot]`
-            today and #110 commits to revisiting the identity later, so matching
-            on the author would break at exactly the moment the credential moves.
+            emitted as the FIRST line of every body. Identification is by marker
+            AND by author, and neither alone is sufficient — the marker says "this
+            is our kind of review", the author says "this one is ours".
+            Not by a HARDCODED author login: the workflow token posts as
+            `github-actions[bot]` today and #110 commits to revisiting the identity
+            later, so a literal login in the source would break at exactly the
+            moment the credential moves. The login is resolved at runtime instead,
+            per find_existing below, which keeps that portability while closing the
+            hole the marker alone leaves open. An earlier revision of this bullet
+            read "identification is by marker, NOT by author login" and drew the
+            wrong conclusion from the right premise: what must not be hardcoded is
+            the name, not the comparison.
             publish.py OWNS the constant and publish_render RECEIVES it as
-            render_body's first argument. It must not import it, and publish.py
-            must not import publish_render at module level to hand it over: STEP 7
-            puts `main` in publish.py, so a top-level import each way is a
-            circular import and `python3 publish.py` dies with "cannot import
-            name ... from partially initialized module". Passing the marker in
-            also makes STEP 4 testable on its own with a sentinel value.
+            render_body's first argument. ONE DIRECTION IS BANNED AND THE OTHER IS
+            NORMAL: publish_render must import nothing from publish, and publish.py
+            imports publish_render at module level in the ordinary way.
+            A cycle needs both edges. STEP 7 puts `main` in publish.py, so if
+            publish_render also imported publish for the marker, `python3
+            publish.py` would die with "cannot import name ... from partially
+            initialized module" — which is why the marker is passed in rather than
+            imported. With that edge gone there is no cycle left to prevent, and an
+            earlier revision nevertheless banned BOTH directions, which forbade the
+            normal import and left `main`'s import site unstated. Assert the edge
+            that matters, not both. Passing the marker in also makes STEP 4 testable
+            on its own with a sentinel value.
           find_existing(pr, repo) -> int | None — lists reviews and returns the id
-            of the NEWEST review whose body starts with MARKER, reporting the
-            count when there is more than one rather than silently taking the
-            first. More than one means a previous run raced or a strategy
-            changed; that is a fact to surface, not to paper over.
-            NEWEST, not oldest, and the choice is load-bearing rather than
-            arbitrary. A submitted COMMENT review cannot be deleted, so once two
-            markers exist neither can be retired and one of them stays stale
-            forever. The one a human reaching the bottom of the timeline reads
-            LAST is the newest, so that is the one that must carry the current
-            body. Updating the oldest would leave the most recently-visible
-            review describing a commit the pull request no longer has.
+            of the NEWEST review that carries MARKER **and was written by the
+            agent's own identity**. Both conditions, and the author one is checked
+            FIRST. Reviews carrying the marker under any other author are counted
+            and reported as foreign, never treated as candidates.
+            THE MARKER IS ATTACKER-WRITABLE AND THE AUTHOR FIELD IS NOT. A review
+            body is not agent-controlled territory: any GitHub user with read access
+            can submit a COMMENT review on a pull request in this public fork and
+            write its body, marker and all. Matching on the marker alone therefore
+            lets an outside party choose which review object this agent tries to
+            update. The listing already carries what a filter needs — a review
+            object's fields are `_links, author_association, body, commit_id,
+            html_url, id, node_id, pull_request_url, state, submitted_at, user` —
+            so the fix costs one comparison against data already fetched.
+            Without it, the failure is a denial of publication that an outsider can
+            trigger deliberately: they post a marked review, find_existing returns
+            its id, the PUT is refused because the token does not own it, and the
+            hard-failure rule below means the agent then publishes NOTHING on that
+            pull request, permanently, presenting as an HTTP error rather than as an
+            attack. #119's own criterion calls silence "indistinguishable from a
+            crashed agent"; marker-only matching puts that silence on demand.
+            THE IDENTITY IS RESOLVED AT RUNTIME, NOT HARDCODED — once at startup
+            from `GET /user`, compared against each review's `user.login`. That
+            preserves the whole point of identifying by marker rather than by a
+            literal author name: #110 commits to revisiting the credential, and a
+            hardcoded `github-actions[bot]` would break on the day it moves, which
+            is the failure the marker-over-author choice was made to avoid. Marker
+            for "this is our kind of review", author for "this one is ours".
+            NEWEST AMONG OUR OWN, not oldest, and the two rules are not in tension
+            once the filter exists. A submitted COMMENT review cannot be deleted, so
+            once two of the agent's own markers exist neither can be retired and one
+            stays stale forever. The one a human reaching the bottom of the timeline
+            reads LAST is the newest, so that is the one that must carry the current
+            body. An earlier revision changed oldest to newest WITHOUT adding the
+            author filter, which is the one combination worse than either concern
+            alone: taking the oldest at least required an attacker to plant before
+            the agent's first run, and taking the newest removes even that timing
+            requirement, so a review planted at any moment wins every run
+            thereafter. Filter, then take the newest.
             It PAGINATES — `gh api --paginate` — and asserts it reached the end
             of the listing. GET /pulls/{n}/reviews returns 30 per page, and a
             pull request accumulates reviews from every human as well as this
@@ -321,11 +400,24 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
         so would pass on the circular import the MARKER rule above exists to
         prevent; `grep -nE "APPROVE|REQUEST_CHANGES" publish.py` returns nothing;
         `grep -c "def post_or_update" publish.py` is 1 and its signature has no
-        event parameter; `grep -n "^from publish_render\|^import publish_render"
-        publish.py` returns nothing, so the module-level cycle cannot exist;
+        event parameter; MARKER is a module-level constant in publish.py, asserted by
+        reading `publish.MARKER` after import — the matching assertion, that
+        publish_render imports nothing from publish, belongs to STEP 4's done-when
+        and NOT here, because publish_render.py does not exist until STEP 4 and this
+        step does not depend on it, so a grep against that file here would pass by
+        the file's absence rather than by its contents;
         against STEP 1's recorded listing with no marker find_existing returns
-        None, with one marker returns that id, and with two markers returns the
-        NEWER id AND prints the duplicate count; with the injected transport
+        None, with one marker under the agent's own login returns that id, and with
+        two of its own markers returns the NEWER id AND prints the duplicate count;
+        a listing whose ONLY marked review carries a different `user.login` returns
+        None and reports one FOREIGN marked review — the load-bearing case, since
+        returning that id is the denial-of-publication vector; a listing carrying a
+        foreign marked review submitted AFTER the agent's own returns the agent's
+        own id, not the newer foreign one, so the author filter is proven to run
+        before the newest-wins rule rather than after it; the identity is read from
+        `GET /user` through the injected transport and `grep -n
+        "github-actions\[bot\]" publish.py` returns nothing, so no login is
+        hardcoded; with the injected transport
         serving page two only on `--paginate`, find_existing returns the marked id
         from page two, and the same transport with `--paginate` absent from the
         argv returns None — so the two cases differ and the assertion can fail;
@@ -418,12 +510,35 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         of maintenance: the body is rebuilt from scratch on every run and nothing
         is ever appended to an existing one, so ordering cannot degrade across
         pushes the way an append-only comment would.
+        BOTH SHAs ARE RENDERED, in a header line above everything else: the head
+        SHA the review read and the merge base it was diffed against. An earlier
+        revision threaded `merge_base_sha` through this signature and through STEP
+        7's stdin document and then never rendered, compared or tested it — a value
+        carried the whole length of the interface and dropped at the end, which no
+        type checker sees and no done-when here caught. It was found by an
+        independent review pass counting its occurrences.
+        Rendering it is the right resolution rather than removing it, because
+        #119's criterion is that "a review is valid only for the commit it read" and
+        the commit it read is a PAIR: findings are anchored to new-side line numbers
+        in the merge-base diff, per #117, so a reader given only the head SHA cannot
+        reconstruct which diff a `path:line` refers to. A force-push that rewrites
+        the base makes the same head SHA mean a different diff, and the merge base
+        is what distinguishes them.
         Anchoring follows #117's three rules exactly and renders each accordingly
         — `anchor: line` as `path:line`, `anchor: file` as `path`, `anchor: pr` as
         `(pull request)`. A finding whose anchor and fields disagree is rendered
         under an explicit "malformed finding" heading with its raw record, not
         dropped: a finding silently discarded by the publisher is a finding the
         reviewer believes it reported.
+        THE MALFORMED RECORD IS THE MOST UNTRUSTED THING THIS RENDERER PRINTS, and
+        it gets the same treatment as evidence: serialised, passed through
+        `contain.escape`, and wrapped in a `review.fence_for`-sized fence. It is
+        the path a record takes precisely BECAUSE its fields did not match the
+        contract, so it is the last place to assume any field is well-formed — an
+        attacker-shaped record reaches it by construction, and a `defect` value
+        carrying a long backtick run would otherwise close a fixed fence and spill
+        the rest of the review out of the code block. The fence is sized off the
+        serialised record, not off any single field.
         Every finding renders `defect` and `failure` as separate lines, because
         #119's criterion is "the concrete failure it allows" and a defect with no
         stated consequence is what lets an unfalsifiable finding through.
@@ -449,20 +564,48 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
             containing ``` "would therefore break out of a fixed three-backtick
             fence and corrupt every following section of the review", and a fixed
             fence here would do it in the one place a human is reading.
-        `defect` and `failure` pass through `contain.escape` too. They are
-        model-authored prose, but a model quoting the payload into its own defect
-        line moves the delimiter into a fresh position with fresh authority, which
-        is the whole reason the escape exists. The transform only touches the
-        escape character and the envelope token, so ordinary prose survives it
-        unchanged — it is cheap enough that there is no argument for skipping it.
+        `defect` and `failure` are NOT passed through `contain.escape`, and an
+        earlier revision of this step said they were, on the strength of a claim
+        that measurement falsifies. That revision asserted "the transform only
+        touches the escape character and the envelope token, so ordinary prose
+        survives it unchanged". `contain.ESC` is a single TILDE. Measured:
+          '~/.claude/settings.json is read at startup'
+            -> '~~/.claude/settings.json is read at startup'
+          'the ~ operator inverts bits'  ->  'the ~~ operator inverts bits'
+        `~~text~~` is STRIKETHROUGH in GitHub-flavoured markdown, so a defect line
+        naming two home-relative paths publishes with the passage between them
+        struck through, and a single mention publishes a visible doubled tilde.
+        This fork's own subject matter is dotfile paths — this plan cites
+        `~/.claude/skills/plan-issue/check-plan.sh` — so the corruption would land
+        on the most likely findings, in the one surface a human reads, and no
+        assertion in STEP 10 looks at `defect` rendering at all.
+        `contain.escape` is a boundary guard for text re-entering a delimited
+        envelope. It is not a markdown sanitiser and this body is not fed back to a
+        model in Phase 1. What IS worth neutralising in model-authored prose is the
+        envelope token itself, so `defect` and `failure` have `contain.TOKEN`
+        replaced with `contain.ESC_TOKEN` and nothing else touched. That is the
+        narrow half of the escape, and it leaves a tilde alone.
+        Evidence is a different case and IS shown escaped, because `render_review`
+        escapes containment evidence at review.py:72 and a dimension finding's
+        excerpt must not render by a different rule than a containment finding's.
+        Inside a `fence_for` fence `~~` is literal rather than strikethrough, so
+        the cost is a visible doubled tilde and not a corrupted body — but it does
+        mean the excerpt is not byte-for-byte what the author wrote, so STEP 12
+        says so rather than letting a reader assume otherwise.
         done when: given three report envelopes carrying findings of mixed
         severity, the output lists every Blocker before every High, every High
         before every Medium, and every Medium before every Low; two calls with
-        the same input produce byte-identical strings; a finding with anchor "pr"
+        the same input produce byte-identical strings; the body contains BOTH the
+        head SHA and the merge-base SHA, and a call with two different SHA values
+        produces a body containing both of them rather than one twice — the second
+        half is the assertion, because rendering head_sha into both slots satisfies
+        "contains the head SHA" on its own; a finding with anchor "pr"
         and a non-null `file` appears under "malformed finding" and is still
         present in the output; a finding whose `severity` is "Info" appears under
-        "malformed finding", sorts last, does NOT raise, and triggers the
-        incomplete banner; the body's first line is the `marker` argument, asserted
+        "malformed finding", sorts last and does NOT raise — its banner is STEP 5's
+        assertion, not this step's, because STEP 4 is [independent] and the banner
+        does not exist until STEP 5 builds it; the body's first line is the `marker`
+        argument, asserted
         with a sentinel value rather than with publish.py's constant, so this step
         needs no import from publish.py; `grep -n "^from publish import\|^import
         publish$" publish_render.py` returns nothing; `grep -n "SEVERITY_ORDER *="
@@ -475,18 +618,47 @@ STEP 4  launchpad/review-agent/publish_render.py — the findings body.      [in
         fence of at least five backticks, and the text following it is still
         outside any code block — the assertion is on the fence length and on what
         comes after, because a body that merely contains the excerpt is what a
-        broken fence also produces; `python3 -c "import pathlib,sys;
+        broken fence also produces; a malformed record whose `defect` carries a
+        four-backtick run is likewise fenced longer than that run and escaped, with
+        the text after it still outside any code block — same assertion, applied to
+        the other untrusted path; `python3 -c "import pathlib,sys;
         sys.exit(0 if chr(96)*3 not in
-        pathlib.Path('publish_render.py').read_text() else 1)"` exits 0, so no
-        fixed three-backtick fence is written into the module at all and the only
-        source of a fence is `review.fence_for`; and a run with
-        `containment=None` produces the STEP 5
-        banner and does NOT contain the string "No containment findings".
+        pathlib.Path('publish_render.py').read_text() else 1)"` exits 0, which bans
+        a FIXED fence rather than fencing itself — `review.fence_for` builds its
+        fence from `chr(96)` at runtime and so satisfies this check, and it is the
+        only permitted source of a fence in the module; and a run with
+        `containment=None`
+        does NOT contain the string "No containment findings" — the positive claim
+        is what this step can assert without the banner, and the banner itself is
+        STEP 5's.
+        WHY TWO CLAUSES MOVED OUT OF THIS DONE-WHEN. An earlier revision asserted
+        the incomplete banner here, in a step tagged [independent], while STEP 5
+        [needs 4] is what builds it. That is a done-when observing something its own
+        tag cannot produce: STEP 4 could not close until STEP 5 existed, STEP 5
+        could not start until STEP 4 closed, and the way out of a deadlock like that
+        is always to declare the step done on the clauses that do pass. #117's
+        second review pass found this same defect in four of its steps. Both clauses
+        now live in STEP 5's done-when, which is the step whose tag supports them.
 
 STEP 5  The incomplete case — an unfinished stage is never rendered as done. [needs 4]
         A `stages` manifest of {name, status, reason} entries accompanies the
-        reports, covering stages that emit no envelope of their own — #116's
-        pre-flight and #118's adjudication. A review is INCOMPLETE when any of
+        reports and names EVERY stage the review depended on — #116's pre-flight,
+        #117's three dimensions by slug, and #118's adjudication. Not only the
+        stages that emit no envelope of their own, which is what an earlier revision
+        said and which contradicted this step's own condition (7) and STEP 6's
+        done-when three lines apart: both require dimension names to be IN the
+        manifest, and the definition excluded them.
+        The dimensions are in it because A REPORT CANNOT TESTIFY TO ITS OWN
+        ABSENCE. Every other condition here reads a report that arrived; (7) is the
+        only one that catches a dimension crashing so completely that #117 emits no
+        envelope for it at all, and it has nothing to compare `reports` against
+        unless the manifest says which dimensions were expected. Built to the old
+        definition, the manifest held two entries, neither a dimension, so (7) could
+        never fire: a three-dimension run that produced two reports rendered as
+        COMPLETE. That is the partial review reading as a complete one that #119's
+        done-criteria forbid by name, reached through the one condition written to
+        prevent it. Found by an independent review pass, not by this plan's author.
+        A review is INCOMPLETE when any of
         these TEN conditions holds. The count is stated because an earlier revision
         listed six, called them seven in its own done-when and six again in STEP
         12, and a builder told to test "each of the seven" over a six-item list
@@ -503,7 +675,12 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
                STEP 6, which is where it was stated and where STEP 5 could not see
                it
            (9) the `containment` block is absent or unparseable
-          (10) `containment.states` does not name all seven entry points
+          (10) `set(containment.states)` does not EQUAL
+               `set(contain.ENTRY_POINTS)` — a set comparison against the imported
+               tuple, never a count. "All seven entry points" is satisfied by
+               counting to seven, and the realistic bug is six real keys plus one
+               typo, which counts to seven and passes. The banner names the
+               difference in both directions.
         On (5), and on what #119 CANNOT check. #117's marker is
         BUZZ-DIMENSION-COMPLETE:{dimension}:{nonce} and the nonce is what makes it
         unforgeable — but the nonce appears in NO field of the merged document and
@@ -516,6 +693,16 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
         catches it. A run in which EVERY marker is forged is not detectable here at
         all, and pretending otherwise would be the fail-open. That residual is
         named in OPEN and flagged upstream rather than worked around.
+        (5) IS VACUOUS BELOW TWO REPORTS, and this is stated rather than left for a
+        reader to discover. Agreement needs siblings to disagree with, so a
+        single-dimension run — or a three-dimension run where two came back
+        `status: failed` — has NO nonce checking whatever, while (2) and (7) still
+        fire on the failures. The check's strength is proportional to how many
+        reports survived, and it is zero exactly when the run was already degraded.
+        That is not a reason to drop it; it is the reason the upstream fix matters.
+        A `nonce` key on #117's merged document would make the check absolute and
+        independent of report count, which is why OPEN raises it there rather than
+        treating (5) as sufficient.
         On (10), because a present-but-thin map is the dangerous shape. STEP 4
         derives nothing and `review.render_review` derives its "Incomplete" banner
         from `states` against `UNREADABLE_STATES`. A map populated only for the
@@ -539,9 +726,17 @@ STEP 5  The incomplete case — an unfinished stage is never rendered as done. [
         is the negative control that stops a banner that always fires from passing
         all ten; a two-report input whose markers carry different nonces is
         incomplete while the same input with matching nonces is not; a
-        `containment.states` map naming six entry points is incomplete while the
-        same map with seven is not; and an unparseable report is incomplete rather
-        than raising.
+        `containment.states` map naming six of the seven entry points is incomplete,
+        AND so is one naming seven keys of which one is not in
+        `contain.ENTRY_POINTS` — two inputs, because the second is the one a count
+        lets through; a manifest naming three dimensions against `reports` carrying
+        two is incomplete and the banner names the missing slug; and an unparseable
+        report is incomplete rather than raising.
+        TWO CLAUSES INHERITED FROM STEP 4, which asserted them while tagged
+        [independent] and could not produce them: a finding whose `severity` is
+        outside the ladder triggers the banner, and a `containment=None` input
+        triggers the banner. Both are behavioural assertions about this step's own
+        code, so they belong here.
 
 STEP 6  The clean case — no findings still posts, and says so.               [needs 4]
         Every stage complete and every report `outcome: clean` renders an explicit
@@ -555,12 +750,22 @@ STEP 6  The clean case — no findings still posts, and says so.               [
         condition (8) of STEP 5's list, which is where it now lives. It was stated
         only here in an earlier revision, so STEP 5 enumerated six conditions while
         two of its own done-whens counted seven, and the seventh was this sentence.
+        THE CLEAN PATH MUST BE PROVEN TO POST, not merely to render, and that proof
+        lives in STEP 10 (viii) because the decision to post is in `publish.py`'s
+        `main` and not in the renderer at all. An earlier revision offered `grep -n
+        "return None" publish_render.py` as evidence of "no early return on the clean
+        path". That check cannot fail: it greps the PURE RENDERER, whose contract is
+        `-> str`, so no correct implementation ever returns None from it, and it
+        passes for every implementation. Meanwhile the actual risk — `if not findings
+        and not incomplete: return 0` in `main`, which looks like a reasonable
+        optimisation against the edit-event noise OPEN itself raises — lives in a file
+        that grep never reads. The grep is withdrawn.
         done when: an all-clean input produces a body containing the head SHA, the
         name of every dimension in the manifest, and the no-findings sentence; that
-        body still carries the marker as its first line; `grep -n "return None"
-        publish_render.py` shows no early return on the clean path; and an input
-        with `status: complete` and no `outcome` produces the STEP 5 banner rather
-        than the clean sentence.
+        body still carries the marker as its first line; and an input with `status:
+        complete` and no `outcome` produces the STEP 5 banner rather than the clean
+        sentence. That a clean run POSTS is asserted in STEP 10 (viii), against
+        `main` and through the recorded transport, and is not claimed here.
 
 STEP 7  Wire the renderer into the CLI.                                  [needs 2, 4]
         `publish.py` gains a `main` reading one JSON document on stdin —
@@ -613,6 +818,19 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
           A first step that exits 0 without posting when
             `github.event.pull_request.head.repo.full_name` differs from
             `github.repository`, printing the reason.
+          NO `--repo` FLAG IS NEEDED HERE. STEP 7 requires either `--repo` or
+            `GITHUB_REPOSITORY` and exits non-zero without both; Actions sets
+            `GITHUB_REPOSITORY` for every run, so the default covers this workflow
+            and the flag is for local invocation. Stated because a reader arriving
+            from STEP 7's hard failure will otherwise look for a flag that should
+            not be here — and hardcoding one into the workflow would reintroduce
+            exactly the wrong-the-day-the-fork-is-renamed problem STEP 7 rejects.
+          A STEP that runs `check_publish_scope.py`, in THIS workflow. The live
+            half of that control must execute under the credential it claims to
+            measure, and this is the only workflow whose token is that credential.
+            The script does not exist until STEP 9 writes it; declaring the step
+            here is what makes STEP 9's live half reachable at all, and this file's
+            done-when checks the step's presence rather than the script's behaviour.
           NOT `pull_request_target`. The suite this job runs lives in this
             repository, so a pull request can modify the code the job executes;
             `pull_request_target` would hand that modified code the base
@@ -626,8 +844,11 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
         the `on.pull_request.types` list contains `synchronize`; a `concurrency`
         key is present with `cancel-in-progress: true` AND its `group` value
         contains `${{` and either `pull_request.number` or `github.ref`, so a
-        fixed group name fails this check rather than passing it; and no job in
-        the file declares its own `permissions`.
+        fixed group name fails this check rather than passing it; no job in
+        the file declares its own `permissions`; and the file contains a step
+        invoking `check_publish_scope.py`, asserted on the parsed YAML rather than by
+        eye, because a live credential control that no workflow runs is a control
+        that never executes.
 
 STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control. [needs 8]
         Two assertions, because either alone is weak.
@@ -652,17 +873,42 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
             of absent permission is fail-open, and would report PASS on a network
             blip. If the probe unexpectedly SUCCEEDS the control deletes the ref
             it made and still fails.
-        Outside Actions there is no workflow token, so the live half reports SKIP
-        with a reason and never PASS — the rule run_controls.py already enforces.
-        This is the only step that can demonstrate #119's credential criterion,
-        and it can only do so inside a real workflow run. STEP 3's local evidence
-        does not substitute for it.
+        THE LIVE HALF MUST ASSERT WHICH WORKFLOW IT IS RUNNING IN, and this is the
+        difference between measuring the credential and measuring a different one.
+        It reads `GITHUB_WORKFLOW` and reports SKIP with a reason — never PASS —
+        unless it is the publish workflow. Absent that guard the control is
+        worse than useless: STEP 11 registers it in `run_controls.py`, and that
+        runner is invoked by #120's controls workflow, whose permissions block on
+        `feat/review-agent-untrusted-input` at `c64ff7958` reads
+        `{contents: read, issues: read, pull-requests: read}` under the comment
+        "Read-only, and no write scope of any kind". A ref-create under THAT token
+        returns 403 too — both tokens carry `contents: read` — so the control would
+        report PASS, and the 403 body would be pasted into the pull request as
+        evidence about the publish credential having measured a read-only one. The
+        criterion #119 states — "a control or documented check demonstrates the
+        absence of contents write" — would read as satisfied while nothing had tested
+        the token in question. A control that passes under the wrong token is not a
+        weak control; it is a false one.
+        The "no token outside Actions" SKIP does not cover this. Inside #120's
+        controls workflow there IS a workflow token — it is simply the wrong one — so
+        a guard keyed on the token's existence never fires. The guard has to be keyed
+        on WHICH workflow is running.
+        Outside Actions there is no workflow token at all, so the live half also
+        reports SKIP with a reason and never PASS — the rule run_controls.py already
+        enforces. This is the only step that can demonstrate #119's credential
+        criterion, it can only do so inside a real run of the PUBLISH workflow, and
+        STEP 3's local evidence does not substitute for it.
         done when: the static half fails when handed a copy of the workflow with
         `contents: write` and passes on the real one; the live half reports SKIP
-        with a stated reason when GITHUB_TOKEN is absent; a recorded 404 response
-        fed to the live half yields FAIL rather than PASS; and a real Actions run
-        on this pull request shows the live half reporting PASS with the 403
-        response body pasted into the PR.
+        with a stated reason when GITHUB_TOKEN is absent; the live half reports SKIP
+        with a stated reason when `GITHUB_WORKFLOW` names any workflow other than the
+        publish one — asserted by setting it to the controls workflow's name, which is
+        the exact wrong-token case, and the result must be SKIP and never PASS; a
+        recorded 404 response fed to the live half yields FAIL rather than PASS; and a
+        real Actions run of the PUBLISH workflow on this pull request shows the live
+        half reporting PASS with the 403 response body AND the value of
+        `GITHUB_WORKFLOW` pasted into the PR together, so a reader can see which
+        credential was measured rather than taking it on trust.
 
 STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour controls. [needs 7]
         Recorded inputs, no network, no model. SEVEN assertions covering #119's
@@ -716,9 +962,32 @@ STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour control
                 This is the mutation that produces a second review, so it is the
                 one whose absence would be least visible: nothing else in this
                 suite would notice.
-        done when: all seven assertions run offline and pass; each of the seven
+          (viii) AN ALL-CLEAN INPUT POSTS. `main` is driven end to end over a
+                fixture whose every report is `outcome: clean`, through the injected
+                transport, and the transport records EXACTLY ONE write call. This
+                asserts against `publish.py`, not against the renderer, because the
+                decision to post lives in `main` and nowhere else.
+                Mutation: add `if not findings and not incomplete: return 0` to
+                `main`. That is not a strawman — it looks like a reasonable
+                optimisation against the edit-event noise OPEN itself raises — and
+                before this assertion existed the whole suite passed with it applied:
+                STEP 6 offered only a grep of the pure renderer, whose `-> str`
+                contract means it never returns None in any correct implementation,
+                and STEP 7's done-when exercises `--dry-run`, which posts nothing by
+                definition. The agent would have gone silent on exactly the pull
+                requests where it found nothing, which is #119's criterion verbatim:
+                "A run that produced no confirmed findings still posts... Silence is
+                indistinguishable from a crashed agent."
+          (ix)  A FOREIGN MARKED REVIEW IS NOT A CANDIDATE. Over a listing whose
+                only marked review carries another `user.login`, `main` POSTs a new
+                review and issues no PUT against the foreign id.
+                Mutation: drop the author comparison from find_existing. The
+                assertion then sees a PUT against a review the agent does not own,
+                which is the denial-of-publication vector an outside party can
+                trigger deliberately, so it gets a control rather than only prose.
+        done when: all NINE assertions run offline and pass; each of the nine
         stated mutations, applied one at a time, makes exactly its own assertion
-        fail and is then reverted; the recorded output of all seven mutation runs is
+        fail and is then reverted; the recorded output of all nine mutation runs is
         saved for the PR body; and each assertion prints what it compared rather
         than only PASS.
 
@@ -726,23 +995,47 @@ STEP 11 Register both controls in run_controls.py.                       [needs 
         Two entries appended to CONTROLS: ("check_publish_scope.py", True) and
         ("check_publish_single.py", False). The scope control needs network for
         its live half and is expected to SKIP that half locally.
-        done when: `python3 run_controls.py` runs both, its summary line counts
-        them, and with `gh` unauthenticated the scope control appears in the
-        skipped list with a reason rather than in the passed list.
+        REGISTERING IT HERE DOES NOT MAKE THIS RUNNER ITS HOME. `run_controls.py` is
+        invoked by #120's read-only controls workflow, so the scope control's live
+        half must SKIP there on STEP 9's `GITHUB_WORKFLOW` guard, and its PASS can
+        only ever come from the publish workflow that STEP 8 declares. It is
+        registered here so the static half travels with every other control and so
+        the suite has one entry point, not so that a run of this runner can satisfy
+        #119's credential criterion. A summary line counting it as passed inside the
+        controls workflow would be the false PASS this arrangement exists to prevent.
+        done when: `python3 run_controls.py` runs both and its summary line counts
+        them; with `gh` unauthenticated the scope control appears in the skipped list
+        with a reason rather than in the passed list; and with `GITHUB_WORKFLOW` set
+        to the controls workflow's name the scope control's live half still appears
+        as skipped, so the runner cannot report a live PASS for a token it is not
+        holding.
 
 STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [needs 11]
-        Normative, a sibling to CONTAINMENT.md and in the same voice. States: the
-        marker, why identification is by marker and not by author, and that
+        Normative, a sibling to CONTAINMENT.md and in the same voice. States: that
+        a review is identified by MARKER AND AUTHOR — the marker says "this is our
+        kind of review", the author says "this one is ours" — that the author login
+        is resolved at runtime from `GET /user` and never hardcoded, and that a
+        marked review under any other login is counted as foreign and never
+        updated, because a review body is attacker-writable and marker-only
+        matching hands an outsider a way to silence the agent on a pull request of
+        their choosing; that the live credential control PASSes only from the
+        publish workflow and SKIPs everywhere else, so a PASS from the read-only
+        controls runner is not evidence about the publish token; and that
         publish.py owns it while publish_render receives it; that exactly one
         review object exists per pull request and is updated in place, and that a
         failed PUT raises rather than posting a second review; that when two
         markers do exist it is the NEWEST that is kept current, because the oldest
         cannot be deleted and the newest is what a reader sees last; that the head
         SHA lives in the body because `commit_id` is frozen at submission; the
-        incomplete rule and its TEN triggers; that the clean case posts; that raw
-        evidence is fenced with `review.fence_for` and escaped with
-        `contain.escape`, never with a fixed fence; the credential and its two
-        controls; and the fork-skip behaviour.
+        incomplete rule and its TEN triggers; that the clean case posts; that the
+        body names both the head SHA and the merge base, and why the pair rather
+        than the head alone; that raw evidence is fenced with `review.fence_for`
+        and escaped with `contain.escape`, never with a fixed fence, and that this
+        means a published excerpt shows a doubled tilde where the author wrote one,
+        so a reader does not mistake the renderer's escape for the author's text;
+        that `defect` and `failure` are NOT escaped, with the measured reason —
+        `contain.ESC` is a tilde and `~~` is markdown strikethrough; the credential
+        and its two controls; and the fork-skip behaviour.
         Cross-referenced from CONTAINMENT.md's "Contract for later stages" table
         and from #117's FINDINGS.md, so the three documents point at each other
         rather than diverging quietly.
