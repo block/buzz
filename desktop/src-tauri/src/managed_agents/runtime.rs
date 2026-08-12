@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use super::agent_env::build_buzz_agent_provider_defaults;
+use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
@@ -401,14 +401,6 @@ pub(crate) fn configure_runtime_cli(
 ///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
-///
-/// Seconds a woken lazy harness stays warm before it releases its worker
-/// subprocesses back to the empty-slot state (via `BUZZ_ACP_IDLE_POOL_SLEEP`).
-/// The next accepted event re-wakes it through the same lazy path. Matches the
-/// harness's own 15-minute per-turn idle window so a warm pool survives a
-/// normal back-and-forth but a truly quiet harness stops paying for workers.
-const IDLE_POOL_SLEEP_SECS: u64 = 900;
-
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
@@ -539,20 +531,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
-    // Idle pool re-sleep: a lazy harness that has been woken releases its
-    // worker subprocesses back to the empty-slot state after this many seconds
-    // of quiet, then re-wakes on the next accepted event. Only meaningful when
-    // lazy; the harness ignores it otherwise. Gated to `lazy` here too so the
-    // env reads inert for eager harnesses. The value is a desktop-owned
-    // lifetime policy (reserved key), not user-tunable.
-    command.env(
-        "BUZZ_ACP_IDLE_POOL_SLEEP",
-        if lazy {
-            IDLE_POOL_SLEEP_SECS.to_string()
-        } else {
-            "0".to_string()
-        },
-    );
+    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
