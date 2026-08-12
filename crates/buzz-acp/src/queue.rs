@@ -536,15 +536,58 @@ impl EventQueue {
     /// merged prompt is framed correctly. On a double-cancel, the most recent
     /// reason wins.
     ///
-    /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
-    /// the generic queue — they are stored separately and merged by
-    /// `flush_next()`. No retry throttle, no backoff.
+    /// Cancelled batches normally remain separate for annotated merge framing.
+    /// If the interrupted work contains an edit, the complete interrupted
+    /// sequence instead returns to the ordinary queue so `flush_next()` can
+    /// preserve chronology and isolate the edit at its routing boundary.
+    /// No retry throttle or backoff is applied.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
-        let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
+        let channel_id = batch.channel_id;
+        let mut cancelled = self
+            .cancelled_batches
+            .remove(&channel_id)
+            .unwrap_or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
-        entry.extend(batch.cancelled_events);
-        entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        cancelled.extend(batch.cancelled_events);
+        cancelled.extend(batch.events);
+
+        // Edit routing is defined per independently dispatched prompt. An edit
+        // that remains in `cancelled_events` would be merged with the later
+        // event that caused cancellation, and `format_prompt` would derive
+        // routing only from that later event. Restore the whole interrupted
+        // sequence to the ordinary queue instead; `flush_next`'s chronological
+        // sort and edit boundary then preserve both ordering and edit routing.
+        if cancelled
+            .iter()
+            .any(|event| edit_target_id(&event.event).is_some())
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            for event in cancelled.into_iter().rev() {
+                queue.push_front(QueuedEvent {
+                    channel_id,
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at,
+                });
+            }
+            let withheld = self
+                .withheld_native_steer
+                .get(&channel_id)
+                .map_or(0, Vec::len);
+            while queue.len().saturating_add(withheld) > MAX_PENDING_PER_CHANNEL {
+                queue.pop_back();
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "cancelled edit requeue overflow — dropped newest queued event to enforce cap"
+                );
+            }
+            self.cancel_reasons.remove(&channel_id);
+            return;
+        }
+
+        self.cancelled_batches.insert(channel_id, cancelled);
+        self.cancel_reasons.insert(channel_id, reason);
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -4130,6 +4173,46 @@ mod tests {
             2,
             "should have 2 cancelled events"
         );
+    }
+
+    #[test]
+    fn cancelled_edit_returns_to_queue_and_keeps_routing_boundary() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let target_id = "ab".repeat(32);
+        let edit = EventBuilder::new(Kind::Custom(40003), "edited request")
+            .tags([nostr::Tag::parse(["e", &target_id]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let edit_id = edit.id;
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event: edit,
+            received_at: Instant::now(),
+            prompt_tag: "edit".into(),
+        });
+        let interrupted = q.flush_next().expect("edit should dispatch alone");
+
+        let later = make_queued(ch, "later request");
+        let later_id = later.event.id;
+        q.push(later);
+        q.requeue_as_cancelled(interrupted, CancelReason::Steer);
+        q.mark_complete(ch);
+
+        let restored_edit = q.flush_next().expect("cancelled edit should be restored");
+        assert_eq!(restored_edit.events.len(), 1);
+        assert_eq!(restored_edit.events[0].event.id, edit_id);
+        assert!(restored_edit.cancelled_events.is_empty());
+        assert_eq!(
+            edit_target_id(&restored_edit.events[0].event),
+            Some(target_id)
+        );
+
+        q.mark_complete(ch);
+        let later_batch = q.flush_next().expect("later request should remain queued");
+        assert_eq!(later_batch.events.len(), 1);
+        assert_eq!(later_batch.events[0].event.id, later_id);
+        assert!(later_batch.cancelled_events.is_empty());
     }
 
     #[test]
