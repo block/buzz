@@ -597,3 +597,88 @@ fn unsupported_version_is_rejected() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Unsupported snapshot version"));
 }
+
+#[test]
+fn test_agent_snapshot_survives_full_share_pipeline() {
+    // Cross-contract regression for the production failure: a real
+    // encoded .agent.png must survive export → client sanitize →
+    // relay validation → import decode. Each seam is also covered by
+    // unit tests, but this proves the exact pipeline that broke.
+    use crate::commands::media::sanitize_image_for_upload;
+    use crate::managed_agents::agent_snapshot::{
+        decode_snapshot_png, encode_snapshot_png, AgentSnapshot, AgentSnapshotDefinition,
+        AgentSnapshotMemory, AgentSnapshotProfile, MemoryLevel,
+    };
+
+    let snapshot = AgentSnapshot {
+        format: "buzz-agent-snapshot".to_string(),
+        version: 1,
+        definition: AgentSnapshotDefinition {
+            name: "Tree Trunks".to_string(),
+            source_is_builtin: false,
+            system_prompt: Some("You are a helpful agent.".to_string()),
+            runtime: Some("goose".to_string()),
+            model: None,
+            provider: None,
+            parallelism: Some(1),
+            respond_to: None,
+            respond_to_allowlist: vec![],
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            name_pool: vec![],
+        },
+        profile: AgentSnapshotProfile {
+            display_name: "Tree Trunks".to_string(),
+            about: Some("Shared agent".to_string()),
+            avatar_data_url: None,
+            avatar_url: None,
+        },
+        memory: AgentSnapshotMemory {
+            level: MemoryLevel::None,
+            entries: vec![],
+        },
+    };
+
+    // Export with a real avatar body (what the share flow uploads).
+    let avatar = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        4,
+        4,
+        image::Rgba([200, 120, 40, 255]),
+    ));
+    let mut avatar_png = std::io::Cursor::new(Vec::new());
+    avatar
+        .write_to(&mut avatar_png, image::ImageFormat::Png)
+        .unwrap();
+    let exported = encode_snapshot_png(&snapshot, Some(avatar_png.get_ref())).unwrap();
+
+    // Client upload path.
+    let sanitized = sanitize_image_for_upload(exported, "image/png").unwrap();
+
+    // Relay ingest path.
+    let relay_config = buzz_media_pkg::MediaConfig {
+        s3_endpoint: String::new(),
+        s3_access_key: String::new(),
+        s3_secret_key: String::new(),
+        s3_bucket: String::new(),
+        s3_region: "us-east-1".to_string(),
+        s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
+        max_image_bytes: 50 * 1024 * 1024,
+        max_gif_bytes: 10 * 1024 * 1024,
+        max_video_bytes: 524_288_000,
+        max_file_bytes: 104_857_600,
+        public_base_url: String::new(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    };
+    assert_eq!(
+        buzz_media_pkg::validation::validate_content(&sanitized, &relay_config)
+            .expect("relay rejected a sanitized agent snapshot PNG"),
+        "image/png"
+    );
+
+    // Recipient import path.
+    let imported = decode_snapshot_png(&sanitized)
+        .expect("import failed on a PNG that passed sanitize + relay validation");
+    assert_eq!(imported, snapshot);
+}

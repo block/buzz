@@ -16,6 +16,9 @@ pub enum MediaError {
     ImageTooLarge,
     #[error("invalid image data")]
     InvalidImage,
+    // Mirrors `buzz_image::ImageError::MetadataForbidden`; kept here because
+    // this enum is the HTTP wire contract that relay code matches on. The two
+    // are pinned equal by `metadata_message_matches_across_crates` below.
     #[error("media contains metadata or a non-canonical metadata channel")]
     MetadataForbidden,
     #[error("invalid signature")]
@@ -97,6 +100,23 @@ impl From<s3::error::S3Error> for MediaError {
     }
 }
 
+/// Image pipeline failures map onto the existing media variants rather than a
+/// new wrapper variant.
+///
+/// Deliberate: `MediaError`'s variants carry the HTTP status mapping, and the
+/// image errors are not all the same status as each other's neighbours —
+/// `ImageTooLarge` is 413 while these are 422. Mapping variant-to-variant
+/// keeps every status code exactly where it was; a single collapsed
+/// `Image(_) => 422` arm would silently downgrade the megapixel-bomb check.
+impl From<buzz_image::ImageError> for MediaError {
+    fn from(e: buzz_image::ImageError) -> Self {
+        match e {
+            buzz_image::ImageError::InvalidImage => Self::InvalidImage,
+            buzz_image::ImageError::MetadataForbidden => Self::MetadataForbidden,
+        }
+    }
+}
+
 impl From<serde_json::Error> for MediaError {
     fn from(e: serde_json::Error) -> Self {
         Self::StorageError(e.to_string())
@@ -163,6 +183,48 @@ impl IntoResponse for MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin every status code that crosses the `buzz-image` boundary.
+    ///
+    /// The image pipeline moved into a leaf crate; this asserts the move did
+    /// not renumber anything on the wire. `ImageTooLarge` is included
+    /// deliberately even though it does not cross the boundary — it is 413
+    /// while its neighbours are 422, so it is exactly what a future
+    /// "just collapse these into one arm" refactor would break.
+    #[test]
+    fn image_errors_keep_their_status_codes_across_the_crate_boundary() {
+        assert_eq!(
+            MediaError::from(buzz_image::ImageError::MetadataForbidden)
+                .into_response()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        assert_eq!(
+            MediaError::from(buzz_image::ImageError::InvalidImage)
+                .into_response()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+        assert_eq!(
+            MediaError::ImageTooLarge.into_response().status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the megapixel ceiling is 413, not 422",
+        );
+    }
+
+    /// The 422 body text is user-visible. Both crates spell it, so pin them
+    /// equal rather than trusting two string literals to stay in step.
+    #[test]
+    fn metadata_message_matches_across_crates() {
+        assert_eq!(
+            MediaError::from(buzz_image::ImageError::MetadataForbidden).to_string(),
+            buzz_image::ImageError::MetadataForbidden.to_string(),
+        );
+        assert_eq!(
+            MediaError::from(buzz_image::ImageError::InvalidImage).to_string(),
+            buzz_image::ImageError::InvalidImage.to_string(),
+        );
+    }
 
     #[test]
     fn unsupported_media_maps_to_415() {

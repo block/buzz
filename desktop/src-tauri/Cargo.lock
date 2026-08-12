@@ -1073,6 +1073,7 @@ dependencies = [
  "block2",
  "buzz-agent",
  "buzz-core",
+ "buzz-image",
  "buzz-media",
  "buzz-persona",
  "buzz-sdk",
@@ -1154,12 +1155,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-image"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "infer",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
  "axum",
  "blurhash",
  "buzz-core",
+ "buzz-image",
  "bytes",
  "chrono",
  "futures-core",

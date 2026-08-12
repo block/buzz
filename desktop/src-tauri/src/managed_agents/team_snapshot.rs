@@ -46,7 +46,7 @@ use crate::managed_agents::{
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// tEXt chunk keyword used in `.team.png` files.
-pub const PNG_CHUNK_KEYWORD: &str = "buzz_team_snapshot";
+pub const PNG_CHUNK_KEYWORD: &str = buzz_image::TEAM_SNAPSHOT_KEYWORD;
 
 /// Format discriminator — used for sniffing and validation.
 pub const FORMAT_DISCRIMINATOR: &str = "buzz-team-snapshot";

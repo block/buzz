@@ -1,7 +1,6 @@
 //! Structural GIF metadata stripping for the upload sanitizer.
 //!
-//! Split out of `media.rs` to keep that file under the desktop line-size
-//! limit. The relay rejects media carrying metadata (`MetadataForbidden` in
+//! The relay rejects media carrying metadata (`MetadataForbidden` in
 //! buzz-media's `validate_gif_metadata_free`); these helpers drop the GIF
 //! metadata channels it forbids without re-encoding, so animation timing,
 //! disposal, and pixel data survive byte-identical.
@@ -35,7 +34,7 @@ fn gif_sub_blocks_end(body: &[u8], mut i: usize) -> Option<usize> {
 /// truncated. Returns `None` when the payload isn't structurally parseable as
 /// GIF; the caller then uploads the original bytes and the relay's validator
 /// remains the authority.
-pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
+pub fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
     if !(body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")) || body.len() < 13 {
         return None;
     }
@@ -127,7 +126,7 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::media::sanitize_image_for_upload;
+    use crate::sanitize_image_for_upload;
 
     /// Minimal single-frame GIF89a: header, 2×2 logical screen, 2-entry global
     /// colour table, NETSCAPE looping extension, graphic control extension,
