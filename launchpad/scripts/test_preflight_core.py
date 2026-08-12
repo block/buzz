@@ -484,6 +484,66 @@ class MergeBaseDiff(unittest.TestCase):
         self.assertEqual(skips.entries[0]["reason"], core.MALFORMED)
 
 
+class RequiredGate(unittest.TestCase):
+    """STEP 6 — an empty required set is reported, with the endpoint that answered."""
+
+    def test_every_check_on_pr_86_reports_required_false(self):
+        record = core.build_record(reads())
+        self.assertEqual(len(record["checks"]), len(rollup_contexts(fixture("pr86-checks.json"))))
+        self.assertEqual({c["required"] for c in record["checks"]}, {False})
+
+    def test_no_gate_is_reported_as_false_naming_the_endpoint_that_said_so(self):
+        gate = core.build_record(reads())["required_gate"]
+        self.assertIs(gate["configured"], False)
+        self.assertIn("/rules/branches/", gate["source_endpoint"])
+        self.assertEqual(sorted(gate), ["configured", "source_endpoint"])
+
+    def test_false_is_never_published_without_the_org_ruleset_skip_beside_it(self):
+        """The token cannot see org rulesets, so false means "nothing visible"."""
+        record = core.build_record(reads())
+        self.assertIs(record["required_gate"]["configured"], False)
+        skips = {s["field"]: s["reason"] for s in record["skips"]}
+        self.assertEqual(skips.get("required_gate.org_rulesets"), core.FORBIDDEN)
+
+    def test_org_rulesets_are_skipped_not_asserted_absent(self):
+        entry = next(
+            s for s in core.build_record(reads())["skips"]
+            if s["field"] == "required_gate.org_rulesets"
+        )
+        self.assertIn("admin:org", entry["detail"])
+        self.assertEqual(entry["endpoint"], ENDPOINTS["org_rulesets"])
+
+    def test_a_repo_rule_requiring_checks_is_reported_from_that_endpoint(self):
+        rules = [{"type": "required_status_checks", "ruleset_id": 1}]
+        gate = core.build_record(
+            reads(branch_rules=core.Read("branch_rules", data=rules, endpoint=ENDPOINTS["branch_rules"]))
+        )["required_gate"]
+        self.assertIs(gate["configured"], True)
+        self.assertIn("/rules/branches/", gate["source_endpoint"])
+
+    def test_a_required_context_with_no_readable_rule_is_credited_to_graphql(self):
+        """What an org-level ruleset looks like from underneath it."""
+        recorded = fixture("pr86-checks.json")
+        nodes = rollup_contexts(recorded)
+        nodes[0] = {**nodes[0], "isRequired": True}
+        gate = core.build_record(
+            reads(checks=core.Read("checks", data=recorded, endpoint=ENDPOINTS["checks"]))
+        )["required_gate"]
+        self.assertIs(gate["configured"], True)
+        self.assertEqual(gate["source_endpoint"], "graphql:isRequired")
+
+    def test_an_unreadable_rules_probe_is_unknown_not_false(self):
+        gate = core.build_record(
+            reads(branch_rules=unreadable("branch_rules", core.FORBIDDEN))
+        )["required_gate"]
+        self.assertIsNone(gate["configured"], "unknown, because nothing answered")
+
+    def test_an_unreadable_rules_probe_still_exits_zero(self):
+        code, out, err = run_cli(["86"], FakeGh(fail={"branch_rules": FORBIDDEN_RESULT}))
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(json.loads(out)["required_gate"]["configured"])
+
+
 class CliShell(unittest.TestCase):
     """STEP 3 — the CLI prints a record, and refuses to print a broken one."""
 
