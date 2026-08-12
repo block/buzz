@@ -27,6 +27,44 @@ fn reported_target(
     target
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_gpu_sdk_dll_dirs_discovers_versioned_rocm_and_cuda_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let program_files = temp.path().join("ProgramFiles");
+    let hip_env = temp.path().join("HIP");
+    let cuda_env = temp.path().join("CUDAEnv");
+    let rocm64 = program_files.join("AMD").join("ROCm").join("6.4");
+    let cuda12 = program_files
+        .join("NVIDIA GPU Computing Toolkit")
+        .join("CUDA")
+        .join("v12.4");
+    for dir in [&hip_env, &cuda_env, &rocm64, &cuda12] {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+    }
+
+    let dirs = windows_mesh_gpu_sdk_dll_dirs_from(
+        [
+            ("HIP_PATH_64".into(), hip_env.into_os_string()),
+            ("CUDA_PATH_V12_4".into(), cuda_env.into_os_string()),
+        ],
+        Some(program_files.into_os_string()),
+    );
+
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("HIP/bin") || dir.ends_with("HIP\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("ROCm/6.4/bin") || dir.ends_with("ROCm\\6.4\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("CUDAEnv/bin") || dir.ends_with("CUDAEnv\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("CUDA/v12.4/bin") || dir.ends_with("CUDA\\v12.4\\bin")));
+}
+
 #[test]
 fn buzz_mesh_join_uses_the_same_live_member_from_every_other_node() {
     let targets = vec![

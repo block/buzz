@@ -242,6 +242,71 @@ fn register_windows_dll_directory(app: &AppHandle, dir: &std::path::Path) {
 }
 
 #[cfg(target_os = "windows")]
+fn existing_child_dir(parent: impl AsRef<std::path::Path>, child: &str) -> Option<PathBuf> {
+    let dir = parent.as_ref().join(child);
+    dir.is_dir().then_some(dir)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mesh_gpu_sdk_dll_dirs_from(
+    env_vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    program_files: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let env_vars: Vec<_> = env_vars.into_iter().collect();
+
+    for (key, value) in &env_vars {
+        let key = key.to_string_lossy().to_ascii_uppercase();
+        if key == "HIP_PATH" || key.starts_with("HIP_PATH_") || key == "ROCM_PATH" {
+            if let Some(dir) = existing_child_dir(value, "bin") {
+                dirs.push(dir);
+            }
+        }
+    }
+    if let Some(program_files) = program_files.as_ref() {
+        let rocm_root = PathBuf::from(program_files).join("AMD").join("ROCm");
+        if let Ok(entries) = std::fs::read_dir(rocm_root) {
+            for entry in entries.flatten() {
+                if let Some(dir) = existing_child_dir(entry.path(), "bin") {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+
+    for (key, value) in &env_vars {
+        let key = key.to_string_lossy().to_ascii_uppercase();
+        if key == "CUDA_PATH" || key.starts_with("CUDA_PATH_V") {
+            if let Some(dir) = existing_child_dir(value, "bin") {
+                dirs.push(dir);
+            }
+        }
+    }
+    if let Some(program_files) = program_files.as_ref() {
+        let cuda_root = PathBuf::from(program_files)
+            .join("NVIDIA GPU Computing Toolkit")
+            .join("CUDA");
+        if let Ok(entries) = std::fs::read_dir(cuda_root) {
+            for entry in entries.flatten() {
+                if let Some(dir) = existing_child_dir(entry.path(), "bin") {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    dirs.into_iter()
+        .filter(|dir| seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone())))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_mesh_gpu_sdk_dll_dirs() -> Vec<PathBuf> {
+    windows_mesh_gpu_sdk_dll_dirs_from(std::env::vars_os(), std::env::var_os("ProgramFiles"))
+}
+
+#[cfg(target_os = "windows")]
 fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
     let dependency_dirs = windows_mesh_runtime_dependency_dirs(app);
     if dependency_dirs.is_empty() {
@@ -275,6 +340,13 @@ fn prepare_windows_mesh_runtime_dependencies(app: &AppHandle) {
             }
         }
     }
+
+    registered_dirs.extend(windows_mesh_gpu_sdk_dll_dirs());
+
+    let mut seen = HashSet::new();
+    registered_dirs.retain(|dir| {
+        dir.is_dir() && seen.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()))
+    });
 
     let mut path_entries: Vec<PathBuf> = registered_dirs.clone();
     if let Some(existing) = std::env::var_os("PATH") {
