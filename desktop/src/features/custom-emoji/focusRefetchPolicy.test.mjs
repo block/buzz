@@ -54,12 +54,12 @@ test("custom-emoji: skips fresh focus refetch", async () => {
   );
 });
 
-test("custom-emoji: refetches genuinely stale data on focus", async () => {
+test("custom-emoji: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: customEmojiFocusRefetchPolicy.staleTime + 1,
       policy: customEmojiFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });

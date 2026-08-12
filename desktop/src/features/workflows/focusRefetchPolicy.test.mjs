@@ -58,13 +58,13 @@ test("workflow-list: skips focus refetch when data is fresh (< 10s)", async () =
   );
 });
 
-test("workflow-list: refetches on focus when data is stale (> 10s)", async () => {
+test("workflow-list: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: workflowListFocusRefetchPolicy.staleTime + 1,
       policy: workflowListFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
 
@@ -78,13 +78,13 @@ test("workflow-runs: skips focus refetch when data is fresh (< 10s)", async () =
   );
 });
 
-test("workflow-runs: refetches on focus when data is stale (> 10s)", async () => {
+test("workflow-runs: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: workflowRunsFocusRefetchPolicy.staleTime + 1,
       policy: workflowRunsFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
 });
 
@@ -98,12 +98,107 @@ test("run-approvals: skips focus refetch when data is fresh (< 5 min)", async ()
   );
 });
 
-test("run-approvals: refetches on focus when data is stale (> 5 min)", async () => {
+test("run-approvals: does not refetch stale data on focus", async () => {
   assert.equal(
     await focusRefetchCount({
       ageMs: runApprovalsFocusRefetchPolicy.staleTime + 1,
       policy: runApprovalsFocusRefetchPolicy,
     }),
-    1,
+    0,
   );
+});
+
+test("foreground refresh targets workflow gaps and repo sync", async () => {
+  const { shouldRefreshQueryOnForeground } = await import("./hooks.ts");
+  assert.equal(shouldRefreshQueryOnForeground(["workflows", "c"], []), true);
+  assert.equal(
+    shouldRefreshQueryOnForeground(["workflows-all", "c"], []),
+    true,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(["workflow-runs", "w"], []),
+    true,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(
+      ["workflow-runs", "w"],
+      [{ status: "completed" }],
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(
+      ["workflow-runs", "w"],
+      [{ status: "running" }],
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(
+      ["project", "p", "repo-sync-status", "default"],
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRefreshQueryOnForeground(["project", "p", "issues"], []),
+    false,
+  );
+  assert.equal(shouldRefreshQueryOnForeground(["run-approvals"], []), false);
+});
+
+test("foreground refresh query contract includes only stale active targets", async () => {
+  const { shouldRefreshQueryOnForeground } = await import("./hooks.ts");
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const fetches = [];
+  const subscribe = (queryKey, data, updatedAt) => {
+    queryClient.setQueryData(queryKey, data, { updatedAt });
+    const observer = new QueryObserver(queryClient, {
+      queryKey,
+      queryFn: async () => {
+        fetches.push(queryKey.join(":"));
+        return data;
+      },
+      refetchOnMount: false,
+      staleTime: 10_000,
+    });
+    return observer.subscribe(() => {});
+  };
+  const staleAt = Date.now() - 20_000;
+  const freshAt = Date.now();
+  const unsubscribers = [
+    subscribe(["workflows", "stale-active"], [], staleAt),
+    subscribe(["workflows", "fresh-active"], [], freshAt),
+    subscribe(
+      ["project", "p", "repo-sync-status", "default"],
+      { aheadCount: 1 },
+      staleAt,
+    ),
+    subscribe(
+      ["workflow-runs", "inactive"],
+      [{ status: "completed" }],
+      staleAt,
+    ),
+    subscribe(["workflow-runs", "active"], [{ status: "running" }], staleAt),
+  ];
+  queryClient.setQueryData(["workflows-all", "inactive-cache"], [], {
+    updatedAt: staleAt,
+  });
+
+  await queryClient.refetchQueries({
+    predicate: (query) =>
+      shouldRefreshQueryOnForeground(query.queryKey, query.state.data),
+    stale: true,
+    type: "active",
+  });
+
+  assert.deepEqual(fetches.sort(), [
+    "project:p:repo-sync-status:default",
+    "workflow-runs:inactive",
+    "workflows:stale-active",
+  ]);
+  for (const unsubscribe of unsubscribers) unsubscribe();
+  queryClient.clear();
 });

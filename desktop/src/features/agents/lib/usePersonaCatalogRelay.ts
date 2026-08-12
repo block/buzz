@@ -24,7 +24,7 @@ export const PERSONA_CATALOG_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the persona catalog query; consumed by focusRefetchPolicy.test.mjs. */
 export const personaCatalogFocusRefetchPolicy = {
   staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 
 export function personaCatalogQueryKey(communityId: string | null) {

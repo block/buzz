@@ -50,7 +50,7 @@ export const CHANNELS_FOCUS_STALE_TIME_MS = 5 * 60_000;
 /** Focus-refetch policy for the channels query; consumed by focusRefetchPolicy.test.mjs. */
 export const channelsFocusRefetchPolicy = {
   staleTime: CHANNELS_FOCUS_STALE_TIME_MS,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;
 /**
  * Query-cache key for the channels payload hash. Stored alongside the channel
