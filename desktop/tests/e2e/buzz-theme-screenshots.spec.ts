@@ -686,11 +686,9 @@ test("app font size and conversation density apply independently", async ({
         bodyGap: Number.parseFloat(
           style.getPropertyValue("--conversation-body-gap"),
         ),
-        fontSize: Number.parseFloat(
-          style.getPropertyValue("--conversation-message-font-size"),
-        ),
-        lineHeight: Number.parseFloat(
-          style.getPropertyValue("--conversation-message-line-height"),
+        fontSize: style.getPropertyValue("--conversation-message-font-size"),
+        lineHeight: style.getPropertyValue(
+          "--conversation-message-line-height",
         ),
         paragraphGap: Number.parseFloat(
           style.getPropertyValue("--conversation-paragraph-gap"),
@@ -698,8 +696,8 @@ test("app font size and conversation density apply independently", async ({
         rowPadding: Number.parseFloat(
           style.getPropertyValue("--conversation-row-padding-block"),
         ),
-        timestampFontSize: Number.parseFloat(
-          style.getPropertyValue("--conversation-timestamp-font-size"),
+        timestampFontSize: style.getPropertyValue(
+          "--conversation-timestamp-font-size",
         ),
         timestampLineHeight: Number.parseFloat(
           style.getPropertyValue("--conversation-timestamp-line-height"),
@@ -754,14 +752,14 @@ test("app font size and conversation density apply independently", async ({
   );
   await expect(fontSizeDescription).toHaveText("Adjust text throughout Buzz.");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 17.142857,
     bodyGap: 0.125,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(17.142857px * .875)",
+    lineHeight: "calc(17.142857px * 1.25)",
     paragraphGap: 0.5,
     rowPadding: 0.375,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(17.142857px * .75)",
+    timestampLineHeight: 17.142857,
   });
   await expect
     .poll(() =>
@@ -777,7 +775,7 @@ test("app font size and conversation density apply independently", async ({
           .evaluate((element) => element.getBoundingClientRect().width),
       ]),
     )
-    .toEqual([308.5625, 308.5625, 257.140625]);
+    .toEqual([288, 288, 240]);
   await expect
     .poll(() =>
       previewMessage.evaluate((element) => {
@@ -789,8 +787,8 @@ test("app font size and conversation density apply independently", async ({
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "15px",
     lineHeight: "21.4286px",
-    minHeight: "68.5714px",
-    paddingBlock: "12.8571px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
   await expect
     .poll(readPreviewTimestampScale)
@@ -843,24 +841,24 @@ test("app font size and conversation density apply independently", async ({
   const previewChipTopInset = previewChipBox.y - previewSurfaceBox.y;
   expect(previewChipTopInset).toBeGreaterThanOrEqual(13);
   expect(previewChipTopInset).toBeLessThanOrEqual(15);
-  await expect(previewContent).toHaveCSS("padding-top", "17.1429px");
-  await expect(previewContent).toHaveCSS("padding-right", "17.1429px");
-  await expect(previewContent).toHaveCSS("padding-bottom", "17.1429px");
-  await expect(previewContent).toHaveCSS("padding-left", "17.1429px");
+  await expect(previewContent).toHaveCSS("padding-top", "16px");
+  await expect(previewContent).toHaveCSS("padding-right", "16px");
+  await expect(previewContent).toHaveCSS("padding-bottom", "16px");
+  await expect(previewContent).toHaveCSS("padding-left", "16px");
   expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeGreaterThanOrEqual(
-    17,
+    15,
   );
   expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeLessThanOrEqual(
-    19,
-  );
-  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
     17,
   );
-  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
-    19,
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
+    15,
   );
-  await expect(previewChip).toHaveCSS("padding-top", "4.28571px");
-  await expect(previewChip).toHaveCSS("padding-bottom", "4.28571px");
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
+    17,
+  );
+  await expect(previewChip).toHaveCSS("padding-top", "4px");
+  await expect(previewChip).toHaveCSS("padding-bottom", "4px");
 
   await densityIndicator.evaluate((element) => {
     element.addEventListener(
@@ -884,20 +882,20 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("compact");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 17.142857,
     bodyGap: 0,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(17.142857px * .875)",
+    lineHeight: "calc(17.142857px * 1.25)",
     paragraphGap: 0.375,
     rowPadding: 0.25,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(17.142857px * .75)",
+    timestampLineHeight: 17.142857,
   });
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "15px",
     lineHeight: "21.4286px",
-    minHeight: "68.5714px",
-    paddingBlock: "12.8571px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
   await expect
     .poll(readPreviewTimestampScale)
@@ -919,14 +917,14 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("larger");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 18.285714,
     bodyGap: 0,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(18.285714px * .875)",
+    lineHeight: "calc(18.285714px * 1.25)",
     paragraphGap: 0.375,
     rowPadding: 0.25,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(18.285714px * .75)",
+    timestampLineHeight: 18.285714,
   });
   await expect
     .poll(() =>
@@ -939,8 +937,8 @@ test("app font size and conversation density apply independently", async ({
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "16px",
     lineHeight: "22.8571px",
-    minHeight: "73.1429px",
-    paddingBlock: "13.7143px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
   await expect
     .poll(readPreviewTimestampScale)
@@ -958,20 +956,20 @@ test("app font size and conversation density apply independently", async ({
   await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(spacious).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 18.285714,
     bodyGap: 0.25,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(18.285714px * .875)",
+    lineHeight: "calc(18.285714px * 1.25)",
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(18.285714px * .75)",
+    timestampLineHeight: 18.285714,
   });
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "16px",
     lineHeight: "22.8571px",
-    minHeight: "73.1429px",
-    paddingBlock: "13.7143px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
   await expect
     .poll(readPreviewTimestampScale)
@@ -985,14 +983,14 @@ test("app font size and conversation density apply independently", async ({
   await expect(root).toHaveAttribute("data-font-size", "smaller");
   await expect(smaller).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 16,
     bodyGap: 0.25,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(16px * .875)",
+    lineHeight: "calc(16px * 1.25)",
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(16px * .75)",
+    timestampLineHeight: 16,
   });
   await expect
     .poll(() =>
@@ -1052,20 +1050,20 @@ test("app font size and conversation density apply independently", async ({
     )
     .toBe("comfortable");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 17.142857,
     bodyGap: 0.25,
-    fontSize: 0.875,
-    lineHeight: 1.25,
+    fontSize: "calc(17.142857px * .875)",
+    lineHeight: "calc(17.142857px * 1.25)",
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1,
+    timestampFontSize: "calc(17.142857px * .75)",
+    timestampLineHeight: 17.142857,
   });
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "15px",
     lineHeight: "21.4286px",
-    minHeight: "68.5714px",
-    paddingBlock: "12.8571px",
+    minHeight: "64px",
+    paddingBlock: "12px",
   });
   await page.mouse.up();
   await expect(spacious).toHaveAttribute("aria-pressed", "true");

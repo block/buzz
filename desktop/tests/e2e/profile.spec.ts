@@ -2489,7 +2489,10 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
 
   const getTextScaleState = () =>
     page.evaluate(() => ({
-      fontSize: getComputedStyle(document.documentElement).fontSize,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
+      textRemSize: getComputedStyle(document.documentElement)
+        .getPropertyValue("--buzz-type-rem")
+        .trim(),
       storedScale: localStorage.getItem("buzz:text-scale"),
       webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
         .__BUZZ_E2E_WEBVIEW_ZOOM__,
@@ -2520,7 +2523,8 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "17.6px",
+    rootFontSize: "16px",
+    textRemSize: "18.857143px",
     storedScale: "1.1",
     webviewZoom: 1,
   });
@@ -2528,7 +2532,8 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("-", "Minus");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
+    textRemSize: "17.142857px",
     storedScale: null,
     webviewZoom: 1,
   });
@@ -2537,7 +2542,8 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("+", "Equal", true);
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "19.2px",
+    rootFontSize: "16px",
+    textRemSize: "20.571429px",
     storedScale: "1.2",
     webviewZoom: 1,
   });
@@ -2545,7 +2551,8 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await dispatchPrimaryShortcut("0", "Digit0");
 
   await expect.poll(getTextScaleState).toEqual({
-    fontSize: "16px",
+    rootFontSize: "16px",
+    textRemSize: "17.142857px",
     storedScale: null,
     webviewZoom: 1,
   });

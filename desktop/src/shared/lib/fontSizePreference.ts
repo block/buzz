@@ -7,14 +7,16 @@ export const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 export const DEFAULT_FONT_SIZE: FontSize = "default";
 
 /**
- * Root sizes that map Tailwind's production `text-sm` size (0.875rem) to the
- * three app-wide 14px, 15px, and 16px steps.
+ * Virtual rem sizes used by typography tokens. Keeping the real root at 16px
+ * prevents a text preference from also resizing rem-based layout geometry.
  */
-const BASE_FONT_SIZE_PX: Record<FontSize, number> = {
+const TYPE_REM_SIZE_PX: Record<FontSize, number> = {
   smaller: 14 / 0.875,
   default: 15 / 0.875,
   larger: 16 / 0.875,
 };
+
+const TYPE_REM_PROPERTY = "--buzz-type-rem";
 
 const listeners = new Set<() => void>();
 let fontSize: FontSize = DEFAULT_FONT_SIZE;
@@ -36,16 +38,16 @@ function readStoredFontSize(): FontSize {
   }
 }
 
-function rootFontSizePx(size: FontSize): number {
+function typeRemSizePx(size: FontSize): number {
   return (
-    Math.round(BASE_FONT_SIZE_PX[size] * textZoomFactor * 1_000_000) / 1_000_000
+    Math.round(TYPE_REM_SIZE_PX[size] * textZoomFactor * 1_000_000) / 1_000_000
   );
 }
 
 function applyFontSize(size: FontSize): void {
   const root = globalThis.document?.documentElement;
   root?.setAttribute("data-font-size", size);
-  if (root) root.style.fontSize = `${rootFontSizePx(size)}px`;
+  root?.style.setProperty(TYPE_REM_PROPERTY, `${typeRemSizePx(size)}px`);
 }
 
 function notifyListeners(): void {

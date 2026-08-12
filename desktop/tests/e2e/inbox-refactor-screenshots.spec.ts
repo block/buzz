@@ -414,7 +414,7 @@ test.describe("inbox refactor screenshots", () => {
       ]);
     await expect.poll(readConversationMetrics).toEqual([
       { fontSize: "15px", lineHeight: "21.4286px" },
-      { paddingBottom: "6.42857px", paddingTop: "6.42857px" },
+      { paddingBottom: "6px", paddingTop: "6px" },
       { fontSize: "15px", lineHeight: "17.1429px" },
       { fontSize: "15px", lineHeight: "21.4286px" },
       { fontSize: "12.8571px", lineHeight: "17.1429px" },
@@ -429,7 +429,7 @@ test.describe("inbox refactor screenshots", () => {
     });
     await expect.poll(readConversationMetrics).toEqual([
       { fontSize: "15px", lineHeight: "21.4286px" },
-      { paddingBottom: "4.28571px", paddingTop: "4.28571px" },
+      { paddingBottom: "4px", paddingTop: "4px" },
       { fontSize: "15px", lineHeight: "17.1429px" },
       { fontSize: "15px", lineHeight: "21.4286px" },
       { fontSize: "12.8571px", lineHeight: "17.1429px" },
@@ -438,7 +438,7 @@ test.describe("inbox refactor screenshots", () => {
 
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-font-size", "smaller");
-      root.style.fontSize = "16px";
+      root.style.setProperty("--buzz-type-rem", "16px");
     });
     await expect.poll(readConversationMetrics).toEqual([
       { fontSize: "14px", lineHeight: "20px" },
@@ -454,11 +454,11 @@ test.describe("inbox refactor screenshots", () => {
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "spacious");
       root.setAttribute("data-font-size", "larger");
-      root.style.fontSize = "18.285714px";
+      root.style.setProperty("--buzz-type-rem", "18.285714px");
     });
     await expect.poll(readConversationMetrics).toEqual([
       { fontSize: "16px", lineHeight: "22.8571px" },
-      { paddingBottom: "9.14286px", paddingTop: "9.14286px" },
+      { paddingBottom: "8px", paddingTop: "8px" },
       { fontSize: "16px", lineHeight: "18.2857px" },
       { fontSize: "16px", lineHeight: "22.8571px" },
       { fontSize: "13.7143px", lineHeight: "18.2857px" },
@@ -470,7 +470,7 @@ test.describe("inbox refactor screenshots", () => {
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "comfortable");
       root.setAttribute("data-font-size", "default");
-      root.style.fontSize = "17.142857px";
+      root.style.setProperty("--buzz-type-rem", "17.142857px");
     });
 
     await page.evaluate(() => {
@@ -490,15 +490,18 @@ test.describe("inbox refactor screenshots", () => {
 
     await expect
       .poll(async () => [
-        await page.evaluate(
-          () => window.getComputedStyle(document.documentElement).fontSize,
+        await page.evaluate(() =>
+          window
+            .getComputedStyle(document.documentElement)
+            .getPropertyValue("--buzz-type-rem")
+            .trim(),
         ),
         ...(await readConversationMetrics()),
       ])
       .toEqual([
-        "18.8571px",
+        "18.857143px",
         { fontSize: "16.5px", lineHeight: "23.5714px" },
-        { paddingBottom: "7.07143px", paddingTop: "7.07143px" },
+        { paddingBottom: "6px", paddingTop: "6px" },
         { fontSize: "16.5px", lineHeight: "18.8571px" },
         { fontSize: "16.5px", lineHeight: "23.5714px" },
         { fontSize: "14.1429px", lineHeight: "18.8571px" },

@@ -3,19 +3,35 @@
     /* Catppuccin Latte (mauve accent) */
     --radius: 0.625rem;
     /*
-     * Default conversation type and comfy spacing for channels, DMs, threads,
-     * Inbox, and the composer. The app-wide Font size preference and Cmd +/-
-     * scale these rem values; Conversation density overrides only spacing.
+     * A virtual typography rem. Font preferences and Cmd +/- change this
+     * token while the browser root remains 16px, so text scales without also
+     * resizing rem-based widths, gaps, radii, and controls.
      */
-    --conversation-message-font-size: 0.875rem;
-    --conversation-message-line-height: 1.25rem;
-    --conversation-author-line-height: 1rem;
+    --buzz-type-rem: 1rem;
+    --text-xs: calc(var(--buzz-type-rem) * 0.75);
+    --text-sm: calc(var(--buzz-type-rem) * 0.875);
+    --text-base: var(--buzz-type-rem);
+    --text-lg: calc(var(--buzz-type-rem) * 1.125);
+    --text-xl: calc(var(--buzz-type-rem) * 1.25);
+    --text-2xl: calc(var(--buzz-type-rem) * 1.5);
+    --text-3xl: calc(var(--buzz-type-rem) * 1.875);
+    --text-4xl: calc(var(--buzz-type-rem) * 2.25);
+    --text-5xl: calc(var(--buzz-type-rem) * 3);
+    --text-6xl: calc(var(--buzz-type-rem) * 3.75);
+    /*
+     * Default conversation type and comfy spacing for channels, DMs, threads,
+     * Inbox, and the composer. Font size changes the type tokens only;
+     * Conversation density overrides only spacing.
+     */
+    --conversation-message-font-size: calc(var(--buzz-type-rem) * 0.875);
+    --conversation-message-line-height: calc(var(--buzz-type-rem) * 1.25);
+    --conversation-author-line-height: var(--buzz-type-rem);
     --conversation-body-gap: 0.125rem;
     --conversation-row-padding-block: 0.375rem;
     --conversation-paragraph-gap: 0.5rem;
     --conversation-list-item-gap: 0.375rem;
-    --conversation-timestamp-font-size: 0.75rem;
-    --conversation-timestamp-line-height: 1rem;
+    --conversation-timestamp-font-size: calc(var(--buzz-type-rem) * 0.75);
+    --conversation-timestamp-line-height: var(--buzz-type-rem);
     --background: 220 23.08% 94.9%;
     --foreground: 234 16.02% 35.49%;
     --card: 220 23.08% 94.9%;
