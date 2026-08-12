@@ -498,6 +498,20 @@ def build_required_gate(
     ``launchpad`` while ``launchpad/AGENTS.md`` §6 says the branch is protected.
     Reporting the absence is this script's job; resolving the contradiction is a
     cohort decision.
+
+    **What ``configured: false`` does and does not mean.** It means nothing
+    *visible to this token* requires a check. Two blind spots survive, and both
+    are why the org-ruleset skip must be published alongside the false rather
+    than instead of it:
+
+    - An org-level ruleset is unreadable without ``admin:org``. Its effect leaks
+      through per-context ``isRequired``, which is why that is consulted too.
+    - A required context that **never ran** is absent from the rollup entirely,
+      so ``isRequired`` cannot report it. A ruleset requiring a check that never
+      started is therefore invisible from here.
+
+    So ``configured: false`` is a statement about what could be seen. The skip
+    entry beside it is what stops that being read as a statement about what is.
     """
     if not org_rulesets.ok:
         # SKIP-ONLY. Never "no org rulesets exist" — this token cannot tell.
