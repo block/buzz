@@ -6,7 +6,9 @@
 //! helper that identifies the agents to cascade-delete, using plain
 //! in-memory data structures (no `AppHandle` required).
 
-use super::{collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents};
+use super::{
+    collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents, persona_agent_for_log,
+};
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -76,6 +78,16 @@ fn make_agent(
 }
 
 const PERSONA_ID: &str = "custom:test-persona";
+
+#[test]
+fn persona_delete_log_identity_is_npub_not_hex() {
+    let pubkey = nostr::Keys::generate().public_key();
+    let hex = pubkey.to_hex();
+    let display = persona_agent_for_log(&hex);
+
+    assert!(display.starts_with("npub1"));
+    assert!(!display.contains(&hex));
+}
 
 /// Deleting a persona with two linked agents (one running) returns both their
 /// pubkeys and leaves unlinked agents out of the cascade set.

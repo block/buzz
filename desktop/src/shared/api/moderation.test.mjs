@@ -61,6 +61,65 @@ test("moderation REST identity fields normalize from npub to internal hex", () =
   assert.equal(restriction.actorPubkey, HEX);
 });
 
+test("moderation REST prefers additive npub fields over legacy hex", () => {
+  const legacyHex =
+    "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+  const report = toReport({
+    id: "report-row",
+    report_event_id: "11".repeat(32),
+    reporter_pubkey: legacyHex,
+    reporter_npub: NPUB,
+    target_kind: "pubkey",
+    target: legacyHex,
+    target_npub: NPUB,
+    channel_id: null,
+    report_type: "spam",
+    note: null,
+    status: "resolved",
+    resolved_by: legacyHex,
+    resolved_by_npub: NPUB,
+    resolved_at: null,
+    action_id: null,
+    created_at: "2026-01-01T00:00:00Z",
+  });
+  assert.equal(report.reporterPubkey, HEX);
+  assert.equal(report.target, HEX);
+  assert.equal(report.resolvedBy, HEX);
+
+  const action = toAction({
+    id: "action-row",
+    actor_pubkey: legacyHex,
+    actor_npub: NPUB,
+    action: "ban",
+    target_pubkey: legacyHex,
+    target_npub: NPUB,
+    target_event_id: null,
+    channel_id: null,
+    reason_code: null,
+    public_reason: null,
+    private_reason: null,
+    matched_principal: null,
+    created_at: "2026-01-01T00:00:00Z",
+  });
+  assert.equal(action.actorPubkey, HEX);
+  assert.equal(action.targetPubkey, HEX);
+
+  const restriction = toRestriction({
+    pubkey: legacyHex,
+    npub: NPUB,
+    banned: true,
+    ban_expires_at: null,
+    ban_reason: null,
+    muted_until: null,
+    mute_reason: null,
+    actor_pubkey: legacyHex,
+    actor_npub: NPUB,
+    updated_at: "2026-01-01T00:00:00Z",
+  });
+  assert.equal(restriction.pubkey, HEX);
+  assert.equal(restriction.actorPubkey, HEX);
+});
+
 test("moderation write identities normalize npub to NIP-01 tag hex", () => {
   assert.equal(moderationPubkeyToProtocolHex(NPUB), HEX);
   assert.equal(moderationPubkeyToProtocolHex(HEX.toUpperCase()), HEX);

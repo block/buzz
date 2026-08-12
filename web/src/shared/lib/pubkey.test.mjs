@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { nip19 } from "nostr-tools";
 
 import { formatNpub, pubkeyAvatarLabel, truncatePubkey } from "./pubkey.ts";
 
@@ -16,4 +17,13 @@ test("public-key displays use npub for protocol hex", () => {
 test("malformed values fail closed instead of echoing raw input", () => {
   assert.equal(formatNpub("invalid-pubkey"), "Invalid public key");
   assert.equal(formatNpub("a".repeat(63)), "Invalid public key");
+});
+
+test("off-curve public-key bytes fail closed in hex and npub form", () => {
+  const invalidPoint = "ff".repeat(32);
+  assert.equal(formatNpub(invalidPoint), "Invalid public key");
+  assert.equal(
+    formatNpub(nip19.npubEncode(invalidPoint)),
+    "Invalid public key",
+  );
 });

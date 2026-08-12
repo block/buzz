@@ -117,7 +117,7 @@ function Reports() {
                       <code>
                         {report.targetKind}:{" "}
                         {report.targetKind === "pubkey"
-                          ? truncatePubkey(report.target)
+                          ? truncatePubkey(report.targetNpub ?? report.target)
                           : short(report.target)}
                       </code>
                     </div>
@@ -170,13 +170,15 @@ function ReportDetail({ id }: { id: string }) {
               </dd>
               <dt>Reporter</dt>
               <dd>
-                <code>{formatNpub(report.reporterPubkey)}</code>
+                <code>
+                  {formatNpub(report.reporterNpub ?? report.reporterPubkey)}
+                </code>
               </dd>
               <dt>Target</dt>
               <dd>
                 <code>
                   {report.targetKind === "pubkey"
-                    ? formatNpub(report.target)
+                    ? formatNpub(report.targetNpub ?? report.target)
                     : report.target}
                 </code>
               </dd>
@@ -192,7 +194,12 @@ function ReportDetail({ id }: { id: string }) {
                         <p>{report.message.content}</p>
                         <div className="reported-message-meta">
                           <span>Author</span>
-                          <code>{formatNpub(report.message.authorPubkey)}</code>
+                          <code>
+                            {formatNpub(
+                              report.message.authorNpub ??
+                                report.message.authorPubkey,
+                            )}
+                          </code>
                           <span>Created</span>
                           <time>{date(report.message.createdAt)}</time>
                         </div>
@@ -337,7 +344,9 @@ function FeedbackList() {
                               <span className="record-provenance">
                                 {item.communityHost}
                                 <code>
-                                  {truncatePubkey(item.submitterPubkey)}
+                                  {truncatePubkey(
+                                    item.submitterNpub ?? item.submitterPubkey,
+                                  )}
                                 </code>
                               </span>
                             </div>
@@ -421,8 +430,8 @@ function FeedbackResults({
         item.bodySummary,
         item.communityHost,
         item.category ?? "uncategorized",
-        item.submitterPubkey,
-        formatNpub(item.submitterPubkey),
+        item.submitterNpub ?? item.submitterPubkey,
+        formatNpub(item.submitterNpub ?? item.submitterPubkey),
       ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
     return { communities, filtered };
@@ -480,7 +489,11 @@ function FeedbackDetailView({ id }: { id: string }) {
                 ) : null}
                 <dt>Submitted by</dt>
                 <dd>
-                  <code>{formatNpub(feedback.submitterPubkey)}</code>
+                  <code>
+                    {formatNpub(
+                      feedback.submitterNpub ?? feedback.submitterPubkey,
+                    )}
+                  </code>
                 </dd>
                 <dt>Event</dt>
                 <dd>

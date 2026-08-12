@@ -5,6 +5,7 @@ import {
   getFromHandleLookupQuery,
   isRelaySearchInputSafe,
   prepareRelaySearchInput,
+  redactUnsafeRelaySearchInput,
   shouldEnableRelaySearch,
 } from "./searchInputSafety.ts";
 
@@ -82,4 +83,23 @@ test("user-search preparation redacts secrets before request and cache keys", ()
     normalizedQuery: "",
     safe: true,
   });
+});
+
+test("message-search preparation preserves prose case but redacts secrets", () => {
+  assert.deepEqual(redactUnsafeRelaySearchInput("  Find Alice  "), {
+    trimmedQuery: "Find Alice",
+    safe: true,
+  });
+  for (const value of [
+    NSEC,
+    `find ${NSEC}`,
+    `NOSTR:${NSEC.toUpperCase()}`,
+    "nSeC1truncated",
+  ]) {
+    assert.deepEqual(
+      redactUnsafeRelaySearchInput(value),
+      { trimmedQuery: "", safe: false },
+      value,
+    );
+  }
 });

@@ -256,13 +256,16 @@ type RawReport = {
   id: string;
   report_event_id: string;
   reporter_pubkey: string;
+  reporter_npub?: string;
   target_kind: "event" | "pubkey" | "blob";
   target: string;
+  target_npub?: string | null;
   channel_id: string | null;
   report_type: string;
   note: string | null;
   status: string;
   resolved_by: string | null;
+  resolved_by_npub?: string | null;
   resolved_at: string | null;
   action_id: string | null;
   created_at: string;
@@ -271,8 +274,10 @@ type RawReport = {
 type RawAction = {
   id: string;
   actor_pubkey: string;
+  actor_npub?: string;
   action: string;
   target_pubkey: string | null;
+  target_npub?: string | null;
   target_event_id: string | null;
   channel_id: string | null;
   reason_code: string | null;
@@ -284,32 +289,35 @@ type RawAction = {
 
 type RawRestriction = {
   pubkey: string;
+  npub?: string;
   banned: boolean;
   ban_expires_at: string | null;
   ban_reason: string | null;
   muted_until: string | null;
   mute_reason: string | null;
   actor_pubkey: string;
+  actor_npub?: string;
   updated_at: string;
 };
 
 export function toReport(r: RawReport): ModerationReport {
+  const resolvedBy = r.resolved_by_npub ?? r.resolved_by;
   return {
     id: r.id,
     reportEventId: r.report_event_id,
-    reporterPubkey: moderationPubkeyToProtocolHex(r.reporter_pubkey),
+    reporterPubkey: moderationPubkeyToProtocolHex(
+      r.reporter_npub ?? r.reporter_pubkey,
+    ),
     targetKind: r.target_kind,
     target:
       r.target_kind === "pubkey"
-        ? moderationPubkeyToProtocolHex(r.target)
+        ? moderationPubkeyToProtocolHex(r.target_npub ?? r.target)
         : r.target,
     channelId: r.channel_id,
     reportType: r.report_type,
     note: r.note,
     status: r.status,
-    resolvedBy: r.resolved_by
-      ? moderationPubkeyToProtocolHex(r.resolved_by)
-      : null,
+    resolvedBy: resolvedBy ? moderationPubkeyToProtocolHex(resolvedBy) : null,
     resolvedAt: r.resolved_at,
     actionId: r.action_id,
     createdAt: r.created_at,
@@ -317,12 +325,13 @@ export function toReport(r: RawReport): ModerationReport {
 }
 
 export function toAction(a: RawAction): ModerationAction {
+  const targetPubkey = a.target_npub ?? a.target_pubkey;
   return {
     id: a.id,
-    actorPubkey: moderationPubkeyToProtocolHex(a.actor_pubkey),
+    actorPubkey: moderationPubkeyToProtocolHex(a.actor_npub ?? a.actor_pubkey),
     action: a.action,
-    targetPubkey: a.target_pubkey
-      ? moderationPubkeyToProtocolHex(a.target_pubkey)
+    targetPubkey: targetPubkey
+      ? moderationPubkeyToProtocolHex(targetPubkey)
       : null,
     targetEventId: a.target_event_id,
     channelId: a.channel_id,
@@ -336,13 +345,13 @@ export function toAction(a: RawAction): ModerationAction {
 
 export function toRestriction(b: RawRestriction): CommunityRestriction {
   return {
-    pubkey: moderationPubkeyToProtocolHex(b.pubkey),
+    pubkey: moderationPubkeyToProtocolHex(b.npub ?? b.pubkey),
     banned: b.banned,
     banExpiresAt: b.ban_expires_at,
     banReason: b.ban_reason,
     mutedUntil: b.muted_until,
     muteReason: b.mute_reason,
-    actorPubkey: moderationPubkeyToProtocolHex(b.actor_pubkey),
+    actorPubkey: moderationPubkeyToProtocolHex(b.actor_npub ?? b.actor_pubkey),
     updatedAt: b.updated_at,
   };
 }

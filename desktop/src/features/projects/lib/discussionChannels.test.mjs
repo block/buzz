@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   commitDiscussionQuery,
@@ -11,16 +12,27 @@ import {
   repositoryDiscussionQuery,
 } from "./discussionChannels.ts";
 
-const OWNER = "a".repeat(64);
+const OWNER =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const OWNER_NPUB = npubEncode(OWNER);
 const EVENT_ID = "b".repeat(64);
-const ALICE = "c".repeat(64);
-const BOB = "d".repeat(64);
+const ALICE =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const BOB = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
 
 test("query builders emit the tokens FTS needs, nothing else", () => {
   assert.equal(entityDiscussionQuery(EVENT_ID), EVENT_ID);
   assert.equal(
     repositoryDiscussionQuery({ owner: OWNER, dtag: "buzz-world" }),
-    `${OWNER} buzz-world`,
+    `${OWNER_NPUB} buzz-world OR ${OWNER} buzz-world`,
+  );
+  assert.equal(
+    repositoryDiscussionQuery({ owner: OWNER_NPUB, dtag: "buzz-world" }),
+    `${OWNER_NPUB} buzz-world OR ${OWNER} buzz-world`,
+  );
+  assert.equal(
+    repositoryDiscussionQuery({ owner: "nsec1do-not-relay", dtag: "buzz" }),
+    "",
   );
 });
 
@@ -141,7 +153,7 @@ test("formatNameList reads naturally at every size", () => {
 test("discussionSnippet strips entity links and coordinates", () => {
   assert.equal(
     discussionSnippet(
-      `Can someone review buzz://pr?id=${EVENT_ID}&owner=${OWNER}&d=buzz before Friday?`,
+      `Can someone review buzz://pr?id=${EVENT_ID}&owner=${OWNER_NPUB}&d=buzz before Friday?`,
     ),
     "Can someone review before Friday?",
   );
@@ -150,7 +162,7 @@ test("discussionSnippet strips entity links and coordinates", () => {
     "Deploying tonight",
   );
   assert.equal(
-    discussionSnippet(`buzz://repo?owner=${OWNER}&d=buzz`),
+    discussionSnippet(`buzz://repo?owner=${OWNER_NPUB}&d=buzz`),
     "Shared a link to this.",
   );
 });

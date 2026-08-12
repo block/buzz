@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
+use buzz_core::nostr_identity::canonical_npub_or_invalid;
 use buzz_db::admin_moderation::{
     AdminFeedback, AdminReport, AdminReportDetail, AdminReportedMessage,
 };
@@ -150,14 +151,26 @@ struct AdminReportResponse {
     community_id: Uuid,
     community_host: String,
     report_event_id: String,
+    /// Legacy protocol-hex field retained for existing dashboard clients.
     reporter_pubkey: String,
+    /// Canonical public identity for new clients.
+    reporter_npub: String,
     target_kind: String,
+    /// Legacy target value. Pubkey targets remain protocol hex; event and blob
+    /// targets retain their existing encodings.
     target: String,
+    /// Canonical identity when `target_kind` is `pubkey`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_npub: Option<String>,
     channel_id: Option<Uuid>,
     report_type: String,
     note: Option<String>,
     status: String,
+    /// Legacy protocol-hex resolver retained for existing clients.
     resolved_by: Option<String>,
+    /// Canonical resolver identity for new clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_by_npub: Option<String>,
     resolved_at: Option<DateTime<Utc>>,
     action_id: Option<Uuid>,
     created_at: DateTime<Utc>,
@@ -165,28 +178,29 @@ struct AdminReportResponse {
 
 impl From<AdminReport> for AdminReportResponse {
     fn from(report: AdminReport) -> Self {
-        let target = if report.target_kind == "pubkey" {
-            buzz_core::nostr_identity::canonical_npub_or_invalid(&report.target)
+        let target_npub = if report.target_kind == "pubkey" {
+            Some(canonical_npub_or_invalid(&report.target))
         } else {
-            report.target
+            None
         };
+        let reporter_npub = canonical_npub_or_invalid(&report.reporter_pubkey);
+        let resolved_by_npub = report.resolved_by.as_deref().map(canonical_npub_or_invalid);
         Self {
             id: report.id,
             community_id: report.community_id,
             community_host: report.community_host,
             report_event_id: report.report_event_id,
-            reporter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
-                &report.reporter_pubkey,
-            ),
+            reporter_pubkey: report.reporter_pubkey,
+            reporter_npub,
             target_kind: report.target_kind,
-            target,
+            target: report.target,
+            target_npub,
             channel_id: report.channel_id,
             report_type: report.report_type,
             note: report.note,
             status: report.status,
-            resolved_by: report
-                .resolved_by
-                .map(|pubkey| buzz_core::nostr_identity::canonical_npub_or_invalid(&pubkey)),
+            resolved_by: report.resolved_by,
+            resolved_by_npub,
             resolved_at: report.resolved_at,
             action_id: report.action_id,
             created_at: report.created_at,
@@ -197,7 +211,10 @@ impl From<AdminReport> for AdminReportResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AdminReportedMessageResponse {
+    /// Legacy protocol-hex field retained for existing dashboard clients.
     author_pubkey: String,
+    /// Canonical author identity for new clients.
+    author_npub: String,
     content: String,
     created_at: DateTime<Utc>,
     deleted_at: Option<DateTime<Utc>>,
@@ -205,10 +222,10 @@ struct AdminReportedMessageResponse {
 
 impl From<AdminReportedMessage> for AdminReportedMessageResponse {
     fn from(message: AdminReportedMessage) -> Self {
+        let author_npub = canonical_npub_or_invalid(&message.author_pubkey);
         Self {
-            author_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
-                &message.author_pubkey,
-            ),
+            author_pubkey: message.author_pubkey,
+            author_npub,
             content: message.content,
             created_at: message.created_at,
             deleted_at: message.deleted_at,
@@ -239,7 +256,10 @@ struct FeedbackSummary {
     id: Uuid,
     community_id: Uuid,
     community_host: String,
+    /// Legacy protocol-hex field retained for existing dashboard clients.
     submitter_pubkey: String,
+    /// Canonical submitter identity for new clients.
+    submitter_npub: String,
     category: Option<String>,
     body_summary: String,
     received_at: DateTime<Utc>,
@@ -257,13 +277,13 @@ async fn feedback(
         .into_iter()
         .map(|item| {
             let body_summary = summarize_body(&item.body, &item.tags);
+            let submitter_npub = canonical_npub_or_invalid(&item.submitter_pubkey);
             FeedbackSummary {
                 id: item.id,
                 community_id: item.community_id,
                 community_host: item.community_host,
-                submitter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
-                    &item.submitter_pubkey,
-                ),
+                submitter_pubkey: item.submitter_pubkey,
+                submitter_npub,
                 category: item.category,
                 body_summary,
                 received_at: item.received_at,
@@ -295,7 +315,10 @@ struct AdminFeedbackResponse {
     community_id: Uuid,
     community_host: String,
     event_id: String,
+    /// Legacy protocol-hex field retained for existing dashboard clients.
     submitter_pubkey: String,
+    /// Canonical submitter identity for new clients.
+    submitter_npub: String,
     category: Option<String>,
     body: String,
     tags: serde_json::Value,
@@ -305,14 +328,14 @@ struct AdminFeedbackResponse {
 
 impl From<AdminFeedback> for AdminFeedbackResponse {
     fn from(feedback: AdminFeedback) -> Self {
+        let submitter_npub = canonical_npub_or_invalid(&feedback.submitter_pubkey);
         Self {
             id: feedback.id,
             community_id: feedback.community_id,
             community_host: feedback.community_host,
             event_id: feedback.event_id,
-            submitter_pubkey: buzz_core::nostr_identity::canonical_npub_or_invalid(
-                &feedback.submitter_pubkey,
-            ),
+            submitter_pubkey: feedback.submitter_pubkey,
+            submitter_npub,
             category: feedback.category,
             body: feedback.body,
             tags: feedback.tags,
@@ -680,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_report_projection_uses_npub_for_identities_only() {
+    fn admin_report_projection_adds_npub_without_changing_legacy_fields() {
         let keys = nostr::Keys::generate();
         let pubkey_hex = keys.public_key().to_hex();
         let expected_npub =
@@ -706,11 +729,13 @@ mod tests {
 
         let value = serde_json::to_value(AdminReportResponse::from(report.clone()))
             .expect("serialize report response");
-        assert_eq!(value["reporterPubkey"], expected_npub);
-        assert_eq!(value["target"], expected_npub);
-        assert_eq!(value["resolvedBy"], expected_npub);
+        assert_eq!(value["reporterPubkey"], pubkey_hex);
+        assert_eq!(value["reporterNpub"], expected_npub);
+        assert_eq!(value["target"], pubkey_hex);
+        assert_eq!(value["targetNpub"], expected_npub);
+        assert_eq!(value["resolvedBy"], pubkey_hex);
+        assert_eq!(value["resolvedByNpub"], expected_npub);
         assert_eq!(value["reportEventId"], HASH);
-        assert!(!value.to_string().contains(&pubkey_hex));
 
         let event_target = AdminReportResponse::from(AdminReport {
             target_kind: "event".to_string(),
@@ -721,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_detail_and_feedback_projections_use_npub_without_changing_event_data() {
+    fn admin_detail_and_feedback_add_npub_without_changing_event_data() {
         let keys = nostr::Keys::generate();
         let pubkey_hex = keys.public_key().to_hex();
         let expected_npub =
@@ -754,7 +779,8 @@ mod tests {
             }),
         });
         let detail_value = serde_json::to_value(detail).expect("serialize report detail response");
-        assert_eq!(detail_value["message"]["authorPubkey"], expected_npub);
+        assert_eq!(detail_value["message"]["authorPubkey"], pubkey_hex);
+        assert_eq!(detail_value["message"]["authorNpub"], expected_npub);
         assert_eq!(detail_value["target"], HASH);
 
         let tags = serde_json::json!([["e", HASH]]);
@@ -771,10 +797,10 @@ mod tests {
             received_at: now,
         });
         let feedback_value = serde_json::to_value(feedback).expect("serialize feedback response");
-        assert_eq!(feedback_value["submitterPubkey"], expected_npub);
+        assert_eq!(feedback_value["submitterPubkey"], pubkey_hex);
+        assert_eq!(feedback_value["submitterNpub"], expected_npub);
         assert_eq!(feedback_value["eventId"], HASH);
         assert_eq!(feedback_value["tags"], tags);
-        assert!(!feedback_value.to_string().contains(&pubkey_hex));
     }
 
     #[test]
@@ -799,12 +825,14 @@ mod tests {
         });
 
         assert_eq!(
-            response.reporter_pubkey,
+            response.reporter_npub,
             buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY
         );
         assert_eq!(
-            response.target,
-            buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY
+            response.target_npub.as_deref(),
+            Some(buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY)
         );
+        assert_eq!(response.reporter_pubkey, "ff".repeat(32));
+        assert_eq!(response.target, "ff".repeat(32));
     }
 }

@@ -5,6 +5,7 @@ use tauri::AppHandle;
 use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
+    app_state::identity_npub_for_log_str,
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
@@ -220,8 +221,9 @@ pub fn build_managed_agent_summary(
             record_pubkey,
             missing_persona_id,
         } => {
+            let who = identity_npub_for_log_str(&record_pubkey);
             eprintln!(
-                "orphaned agent instance: pubkey={record_pubkey}, missing_persona_id={missing_persona_id}"
+                "orphaned agent instance: pubkey={who}, missing_persona_id={missing_persona_id}"
             );
             (None, None, None, None)
         }
@@ -338,6 +340,10 @@ pub fn build_managed_agent_summary(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        log_display_label: format!(
+            "{}.log",
+            crate::app_state::identity_npub_for_log_str(&record.pubkey)
+        ),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -463,7 +469,7 @@ pub fn spawn_agent_child(
             .map_err(|e| {
                 format!(
                     "cannot spawn agent {}: {}",
-                    record.pubkey,
+                    identity_npub_for_log_str(&record.pubkey),
                     crate::managed_agents::user_facing_harness_error(&e)
                 )
             })?;
@@ -476,7 +482,7 @@ pub fn spawn_agent_child(
         &format!(
             "\n=== starting {} ({}) at {} ===",
             record.name,
-            record.pubkey,
+            identity_npub_for_log_str(&record.pubkey),
             now_iso()
         ),
     )?;

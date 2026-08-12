@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         config_bridge::{
             read_goose_file_config,
@@ -280,7 +280,7 @@ pub async fn get_agent_config_surface(
         records
             .into_iter()
             .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+            .ok_or_else(|| format!("agent {} not found", identity_npub_for_log_str(&pubkey)))?
     };
 
     let personas = load_personas(&app).unwrap_or_default();
@@ -562,10 +562,11 @@ pub fn persist_agent_effort_level(
     let record = records
         .iter_mut()
         .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        .ok_or_else(|| format!("agent {} not found", identity_npub_for_log_str(&pubkey)))?;
     if record.backend != BackendKind::Local {
         return Err(format!(
-            "agent {pubkey} is not a local agent; remote effort is set at deploy time"
+            "agent {} is not a local agent; remote effort is set at deploy time",
+            identity_npub_for_log_str(&pubkey)
         ));
     }
     record.effort_level = effort_level;

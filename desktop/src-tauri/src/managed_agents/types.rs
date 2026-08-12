@@ -551,6 +551,8 @@ pub struct ManagedAgentSummary {
     pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
+    /// Human-facing canonical label. `log_path` remains the real storage path.
+    pub log_display_label: String,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
@@ -567,6 +569,8 @@ pub struct CreateManagedAgentResponse {
 #[derive(Debug, Serialize)]
 pub struct ManagedAgentLogResponse {
     pub content: String,
+    /// Human-facing canonical label. `log_path` remains the real storage path.
+    pub log_display_label: String,
     pub log_path: String,
 }
 

@@ -3,6 +3,11 @@
 //! These routes are outside the Nostr event data plane. They still use NIP-98
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
+//!
+//! Response identity fields are additive for compatibility. Fields whose
+//! existing names contain `pubkey` (plus `previous_owner`) retain lowercase
+//! protocol hex; adjacent `*_npub` fields are canonical and preferred by new
+//! clients. Inputs accept npub and legacy hex during migration.
 
 use std::sync::Arc;
 
@@ -15,10 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use buzz_core::{CommunityId, TenantContext};
+use buzz_core::{nostr_identity::canonical_npub_or_invalid, CommunityId, TenantContext};
 
 use crate::handlers::community_provisioning::{
-    normalize_candidate_host, parse_pubkey_to_hex, pubkey_hex_to_npub, ProvisionCommunityRequest,
+    normalize_candidate_host, parse_pubkey_to_hex, ProvisionCommunityRequest,
 };
 use crate::state::AppState;
 
@@ -36,6 +41,15 @@ pub struct CommunityAvailabilityQuery {
     host: String,
 }
 
+fn owned_communities_response(owner_pubkey: String, communities: Vec<Value>) -> Value {
+    let owner_npub = canonical_npub_or_invalid(&owner_pubkey);
+    serde_json::json!({
+        "owner_pubkey": owner_pubkey,
+        "owner_npub": owner_npub,
+        "communities": communities,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct TransferCommunityRequest {
     community_id: String,
@@ -46,10 +60,35 @@ struct TransferCommunityRequest {
 #[derive(Debug, Serialize)]
 struct TransferCommunityResponse {
     community_id: String,
+    /// Legacy protocol-hex field retained for existing operator clients.
     new_owner_pubkey: String,
+    /// Canonical public identity for new operator clients.
+    new_owner_npub: String,
     status: &'static str,
+    /// Legacy protocol-hex field retained for existing operator clients.
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_owner: Option<String>,
+    /// Canonical public identity for new operator clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_owner_npub: Option<String>,
+}
+
+fn transfer_community_response(
+    community_id: String,
+    new_owner_pubkey: String,
+    status: &'static str,
+    previous_owner: Option<String>,
+) -> TransferCommunityResponse {
+    let new_owner_npub = canonical_npub_or_invalid(&new_owner_pubkey);
+    let previous_owner_npub = previous_owner.as_deref().map(canonical_npub_or_invalid);
+    TransferCommunityResponse {
+        community_id,
+        new_owner_pubkey,
+        new_owner_npub,
+        status,
+        previous_owner,
+        previous_owner_npub,
+    }
 }
 
 const OPERATOR_REPLAY_SCOPE: &str = "operator-management";
@@ -328,17 +367,18 @@ pub async fn list_owned_communities(
         .await
         .map_err(|e| internal_error(&format!("list owned communities: {e}")))?;
 
-    let owner_npub = pubkey_hex_to_npub(&owner_pubkey)
-        .ok_or_else(|| internal_error("operator owner npub encoding failed"))?;
-    Ok(Json(serde_json::json!({
-        "owner_pubkey": owner_npub,
-        "communities": rows.into_iter().map(|row| serde_json::json!({
-            "community_id": row.id.to_string(),
-            "host": row.host,
-            "created_at": row.created_at,
-            "archived_at": row.archived_at,
-        })).collect::<Vec<_>>(),
-    })))
+    let communities = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "community_id": row.id.to_string(),
+                "host": row.host,
+                "created_at": row.created_at,
+                "archived_at": row.archived_at,
+            })
+        })
+        .collect();
+    Ok(Json(owned_communities_response(owner_pubkey, communities)))
 }
 
 /// Transfer ownership of a community to a new owner pubkey.
@@ -453,21 +493,12 @@ pub async fn transfer_community(
         }
     }
 
-    let new_owner_npub = pubkey_hex_to_npub(&new_owner_pubkey)
-        .ok_or_else(|| internal_error("operator owner npub encoding failed"))?;
-    let previous_owner_npub = previous_owner
-        .as_deref()
-        .map(|owner| {
-            pubkey_hex_to_npub(owner)
-                .ok_or_else(|| internal_error("operator previous-owner npub encoding failed"))
-        })
-        .transpose()?;
-    let response = TransferCommunityResponse {
-        community_id: request.community_id,
-        new_owner_pubkey: new_owner_npub,
+    let response = transfer_community_response(
+        request.community_id,
+        new_owner_pubkey,
         status,
-        previous_owner: previous_owner_npub,
-    };
+        previous_owner,
+    );
 
     Ok(Json(serde_json::to_value(response).map_err(|e| {
         tracing::error!("failed to serialize transfer-community response: {e}");
@@ -512,6 +543,8 @@ pub async fn community_availability(
 mod tests {
     use std::sync::Arc;
 
+    use super::{owned_communities_response, transfer_community_response};
+
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -548,6 +581,55 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
     const INGRESS_HOST: &str = "operator-ingress.example";
+
+    #[test]
+    fn operator_responses_preserve_legacy_hex_and_add_npub() {
+        let owner = Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let owner_npub = public_key_to_npub(&owner.public_key()).expect("encode owner npub");
+
+        let communities = owned_communities_response(
+            owner_hex.clone(),
+            vec![serde_json::json!({ "id": "community" })],
+        );
+        assert_eq!(communities["owner_pubkey"], owner_hex);
+        assert_eq!(communities["owner_npub"], owner_npub);
+
+        let transfer = serde_json::to_value(transfer_community_response(
+            "community".to_string(),
+            owner.public_key().to_hex(),
+            "transferred",
+            Some(owner.public_key().to_hex()),
+        ))
+        .expect("serialize transfer response");
+        assert_eq!(transfer["new_owner_pubkey"], owner.public_key().to_hex());
+        assert_eq!(
+            transfer["new_owner_npub"],
+            public_key_to_npub(&owner.public_key()).expect("encode new owner npub")
+        );
+        assert_eq!(transfer["previous_owner"], owner.public_key().to_hex());
+        assert_eq!(
+            transfer["previous_owner_npub"],
+            public_key_to_npub(&owner.public_key()).expect("encode previous owner npub")
+        );
+    }
+
+    #[test]
+    fn operator_additive_npub_fails_closed_without_changing_legacy_hex() {
+        let invalid_hex = "ff".repeat(32);
+        let response = serde_json::to_value(transfer_community_response(
+            "community".to_string(),
+            invalid_hex.clone(),
+            "transferred",
+            Some(invalid_hex.clone()),
+        ))
+        .expect("serialize transfer response");
+
+        assert_eq!(response["new_owner_pubkey"], invalid_hex);
+        assert_eq!(response["new_owner_npub"], "<invalid-pubkey>");
+        assert_eq!(response["previous_owner"], "ff".repeat(32));
+        assert_eq!(response["previous_owner_npub"], "<invalid-pubkey>");
+    }
 
     fn nip98_auth_header(keys: &Keys, url: &str, method: &str, body: Option<&[u8]>) -> String {
         let mut tags = vec![
@@ -843,8 +925,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
+        let owner_hex = owner.public_key().to_hex();
         assert_eq!(
             json.get("owner_pubkey").and_then(Value::as_str),
+            Some(owner_hex.as_str())
+        );
+        assert_eq!(
+            json.get("owner_npub").and_then(Value::as_str),
             Some(owner_npub.as_str())
         );
     }
@@ -1177,10 +1264,18 @@ mod tests {
         );
         assert_eq!(
             json.get("new_owner_pubkey").and_then(Value::as_str),
+            Some(new_owner_hex.as_str())
+        );
+        assert_eq!(
+            json.get("new_owner_npub").and_then(Value::as_str),
             Some(new_owner_npub.as_str())
         );
         assert_eq!(
             json.get("previous_owner").and_then(Value::as_str),
+            Some(initial_owner_hex.as_str())
+        );
+        assert_eq!(
+            json.get("previous_owner_npub").and_then(Value::as_str),
             Some(initial_owner_npub.as_str())
         );
 

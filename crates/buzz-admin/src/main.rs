@@ -274,6 +274,14 @@ async fn cmd_list_product_feedback(limit: u16) -> Result<i32> {
     let db = connect_db().await?;
     let feedback = db.list_product_feedback(i64::from(limit)).await?;
     let mut output = serde_json::to_value(feedback)?;
+    add_product_feedback_npubs(&mut output)?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(0)
+}
+
+/// Preserve the established machine-JSON `submitter_pubkey` hex field while
+/// adding the canonical identity for current operator consumers.
+fn add_product_feedback_npubs(output: &mut serde_json::Value) -> Result<()> {
     if let Some(items) = output.as_array_mut() {
         for item in items {
             if let Some(pubkey) = item
@@ -281,13 +289,12 @@ async fn cmd_list_product_feedback(limit: u16) -> Result<i32> {
                 .and_then(serde_json::Value::as_str)
                 .map(ToOwned::to_owned)
             {
-                item["submitter_pubkey"] =
+                item["submitter_npub"] =
                     serde_json::Value::String(npub_from_protocol_hex(&pubkey)?);
             }
         }
     }
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(0)
+    Ok(())
 }
 
 async fn cmd_list_members() -> Result<i32> {
@@ -664,4 +671,26 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_feedback_json_adds_npub_without_repurposing_legacy_field() {
+        let keys = Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = public_key_to_npub(&keys.public_key()).expect("npub");
+        let mut output = serde_json::json!([{
+            "event_id": "11".repeat(32),
+            "submitter_pubkey": hex
+        }]);
+
+        add_product_feedback_npubs(&mut output).expect("project feedback");
+
+        assert_eq!(output[0]["submitter_pubkey"], hex);
+        assert_eq!(output[0]["submitter_npub"], npub);
+        assert_eq!(output[0]["event_id"], "11".repeat(32));
+    }
 }

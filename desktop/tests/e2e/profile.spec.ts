@@ -1883,7 +1883,7 @@ test("an older agent message opens the same persona instance as the Agents libra
   await page.getByTestId("user-profile-tab-runtime").click();
   await page.getByTestId("user-profile-instances").click();
   await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
-  await expectHashSearchParam(page, "profile", historicalPubkey);
+  await expectHashSearchParam(page, "profile", npubEncode(historicalPubkey));
   await expectHashSearchParam(page, "profileTab", "runtime");
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
@@ -1960,7 +1960,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
     relayAgents: [
       {
         pubkey:
-          "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
+          "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         name: "nadia",
         agentType: "goose",
         capabilities: ["search", "summaries"],

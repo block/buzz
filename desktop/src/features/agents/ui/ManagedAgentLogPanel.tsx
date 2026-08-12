@@ -24,7 +24,7 @@ export function ManagedAgentLogPanel({
   const isInline = variant === "inline";
   const isBare = chrome === "bare";
   const logFileLabel = selectedAgent
-    ? describeLogFile(selectedAgent.logPath)
+    ? describeLogFile(selectedAgent.logPath, selectedAgent.logDisplayLabel)
     : null;
 
   if (!selectedAgent && isInline) {

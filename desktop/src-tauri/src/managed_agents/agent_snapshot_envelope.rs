@@ -119,8 +119,13 @@ pub(crate) fn parse_canonical_pubkey(field: &str, value: &str) -> Result<PublicK
             "Locked card envelope has a malformed {field} (expected a canonical npub or legacy 64-character lowercase hex key)."
         ));
     }
-    let (pubkey, _) = parse_public_key_compat(value)
-        .map_err(|_| format!("Locked card envelope has an invalid {field}."))?;
+    let (pubkey, _) = parse_public_key_compat(value).map_err(|_| {
+        if is_legacy_hex {
+            format!("Locked card envelope has an invalid {field} (not a curve point).")
+        } else {
+            format!("Locked card envelope has an invalid {field}.")
+        }
+    })?;
     if is_canonical_npub
         && public_key_to_npub(&pubkey)
             .map_err(|_| format!("Locked card envelope has an invalid {field}."))?

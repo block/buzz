@@ -442,7 +442,7 @@ test("Buzz repository metadata stays image-less and exposes default branch", asy
 });
 
 test("Buzz project metadata resolves from the 30621 announcement", async () => {
-  const owner = "cd".repeat(32);
+  const owner = OWNER;
   const result = await fetchBuzzEntityMetadata(
     `buzz://project?owner=${owner}&d=pollinator`,
     async () => [
@@ -467,7 +467,7 @@ test("Buzz project metadata resolves from the 30621 announcement", async () => {
 });
 
 test("Buzz project metadata declines a missing or invalid announcement", async () => {
-  const owner = "cd".repeat(32);
+  const owner = OWNER;
   assert.equal(
     await fetchBuzzEntityMetadata(
       `buzz://project?owner=${owner}&d=pollinator`,

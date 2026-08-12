@@ -10,7 +10,8 @@ import { waitForAnimations } from "../helpers/animations";
 
 const SHOTS = "test-results/pubkey-display";
 
-const AGENT_PUBKEY = "cafef00d".repeat(8);
+const AGENT_PUBKEY =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const PROFILE_PUBKEY = "deadbeef".repeat(8);
 
 function compactNpub(pubkey: string): string {

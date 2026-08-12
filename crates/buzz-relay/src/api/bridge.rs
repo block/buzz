@@ -2201,6 +2201,11 @@ async fn authorize_moderation_read(
 /// Cap on rows returned by a single moderation read.
 const MODERATION_READ_LIMIT: i64 = 500;
 
+// Moderation response compatibility: established identity fields retain
+// lowercase protocol hex for existing HTTP/CLI consumers. Additive npub fields
+// are canonical and preferred by current clients. Event IDs and blob hashes
+// remain hex because they are not public identities.
+
 /// Optional `?status=` and `?limit=` query for moderation reads.
 #[derive(serde::Deserialize, Default)]
 pub struct ModerationReadQuery {
@@ -2275,24 +2280,31 @@ pub async fn moderation_restricted(
 }
 
 fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
-    let (target_kind, target) = match &r.target {
-        buzz_db::moderation::ReportTarget::Event(id) => ("event", hex::encode(id)),
-        buzz_db::moderation::ReportTarget::Pubkey(pk) => {
-            ("pubkey", public_key_bytes_to_npub_or_invalid(pk))
-        }
-        buzz_db::moderation::ReportTarget::Blob(sha) => ("blob", hex::encode(sha)),
+    let (target_kind, target, target_npub) = match &r.target {
+        buzz_db::moderation::ReportTarget::Event(id) => ("event", hex::encode(id), None),
+        buzz_db::moderation::ReportTarget::Pubkey(pk) => (
+            "pubkey",
+            hex::encode(pk),
+            Some(public_key_bytes_to_npub_or_invalid(pk)),
+        ),
+        buzz_db::moderation::ReportTarget::Blob(sha) => ("blob", hex::encode(sha), None),
     };
     serde_json::json!({
         "id": r.id,
         "report_event_id": hex::encode(&r.report_event_id),
-        "reporter_pubkey": public_key_bytes_to_npub_or_invalid(&r.reporter_pubkey),
+        // Existing response fields retain protocol hex. Additive `*_npub`
+        // fields are the canonical identity surface for current clients.
+        "reporter_pubkey": hex::encode(&r.reporter_pubkey),
+        "reporter_npub": public_key_bytes_to_npub_or_invalid(&r.reporter_pubkey),
         "target_kind": target_kind,
         "target": target,
+        "target_npub": target_npub,
         "channel_id": r.channel_id,
         "report_type": r.report_type,
         "note": r.note,
         "status": r.status,
-        "resolved_by": r.resolved_by.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
+        "resolved_by": r.resolved_by.as_ref().map(hex::encode),
+        "resolved_by_npub": r.resolved_by.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
         "resolved_at": r.resolved_at,
         "action_id": r.action_id,
         "created_at": r.created_at,
@@ -2302,9 +2314,11 @@ fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
 fn action_json(a: &buzz_db::moderation::ActionRecord) -> Value {
     serde_json::json!({
         "id": a.id,
-        "actor_pubkey": public_key_bytes_to_npub_or_invalid(&a.actor_pubkey),
+        "actor_pubkey": hex::encode(&a.actor_pubkey),
+        "actor_npub": public_key_bytes_to_npub_or_invalid(&a.actor_pubkey),
         "action": a.action,
-        "target_pubkey": a.target_pubkey.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
+        "target_pubkey": a.target_pubkey.as_ref().map(hex::encode),
+        "target_npub": a.target_pubkey.as_ref().map(|value| public_key_bytes_to_npub_or_invalid(value)),
         "target_event_id": a.target_event_id.as_ref().map(hex::encode),
         "channel_id": a.channel_id,
         "reason_code": a.reason_code,
@@ -2317,13 +2331,15 @@ fn action_json(a: &buzz_db::moderation::ActionRecord) -> Value {
 
 fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
     serde_json::json!({
-        "pubkey": public_key_bytes_to_npub_or_invalid(&b.pubkey),
+        "pubkey": hex::encode(&b.pubkey),
+        "npub": public_key_bytes_to_npub_or_invalid(&b.pubkey),
         "banned": b.banned,
         "ban_expires_at": b.ban_expires_at,
         "ban_reason": b.ban_reason,
         "muted_until": b.muted_until,
         "mute_reason": b.mute_reason,
-        "actor_pubkey": public_key_bytes_to_npub_or_invalid(&b.actor_pubkey),
+        "actor_pubkey": hex::encode(&b.actor_pubkey),
+        "actor_npub": public_key_bytes_to_npub_or_invalid(&b.actor_pubkey),
         "updated_at": b.updated_at,
     })
 }
@@ -2342,7 +2358,7 @@ mod tests {
     }
 
     #[test]
-    fn moderation_projections_emit_identity_fields_as_npub() {
+    fn moderation_projections_add_npub_without_changing_legacy_hex() {
         let identity = Keys::generate().public_key().to_bytes().to_vec();
         let identity_hex = hex::encode(&identity);
         let now = chrono::Utc::now();
@@ -2363,6 +2379,9 @@ mod tests {
         };
         let report = report_json(&report);
         for field in ["reporter_pubkey", "target", "resolved_by"] {
+            assert_eq!(report[field], identity_hex);
+        }
+        for field in ["reporter_npub", "target_npub", "resolved_by_npub"] {
             assert!(report[field].as_str().unwrap().starts_with("npub1"));
         }
 
@@ -2380,14 +2399,10 @@ mod tests {
             created_at: now,
         };
         let action = action_json(&action);
-        assert!(action["actor_pubkey"]
-            .as_str()
-            .unwrap()
-            .starts_with("npub1"));
-        assert!(action["target_pubkey"]
-            .as_str()
-            .unwrap()
-            .starts_with("npub1"));
+        assert_eq!(action["actor_pubkey"], identity_hex);
+        assert_eq!(action["target_pubkey"], identity_hex);
+        assert!(action["actor_npub"].as_str().unwrap().starts_with("npub1"));
+        assert!(action["target_npub"].as_str().unwrap().starts_with("npub1"));
         assert_eq!(action["target_event_id"], hex::encode(vec![0x22; 32]));
 
         let ban = buzz_db::moderation::BanRecord {
@@ -2401,12 +2416,40 @@ mod tests {
             updated_at: now,
         };
         let ban = ban_json(&ban);
-        assert!(ban["pubkey"].as_str().unwrap().starts_with("npub1"));
-        assert!(ban["actor_pubkey"].as_str().unwrap().starts_with("npub1"));
+        assert_eq!(ban["pubkey"], identity_hex);
+        assert_eq!(ban["actor_pubkey"], identity_hex);
+        assert!(ban["npub"].as_str().unwrap().starts_with("npub1"));
+        assert!(ban["actor_npub"].as_str().unwrap().starts_with("npub1"));
+    }
 
-        assert!(!report.to_string().contains(&identity_hex));
-        assert!(!action.to_string().contains(&identity_hex));
-        assert!(!ban.to_string().contains(&identity_hex));
+    #[test]
+    fn moderation_additive_npub_fields_fail_closed_for_invalid_curve_points() {
+        let invalid = vec![0xff; 32];
+        let report = report_json(&buzz_db::moderation::ReportRecord {
+            id: uuid::Uuid::new_v4(),
+            report_event_id: vec![0x11; 32],
+            reporter_pubkey: invalid.clone(),
+            target: buzz_db::moderation::ReportTarget::Pubkey(invalid.clone()),
+            channel_id: None,
+            report_type: "spam".into(),
+            note: None,
+            status: "open".into(),
+            resolved_by: Some(invalid),
+            resolved_at: None,
+            action_id: None,
+            created_at: chrono::Utc::now(),
+        });
+
+        let invalid_hex = "ff".repeat(32);
+        for field in ["reporter_pubkey", "target", "resolved_by"] {
+            assert_eq!(report[field], invalid_hex);
+        }
+        for field in ["reporter_npub", "target_npub", "resolved_by_npub"] {
+            assert_eq!(
+                report[field],
+                buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY
+            );
+        }
     }
 
     fn fresh_tenant(host: &str) -> TenantContext {

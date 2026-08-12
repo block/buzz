@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { HostedNostrIdentity } from "@/features/communities/hostedCommunityIdentity";
+
+export type { HostedNostrIdentity } from "@/features/communities/hostedCommunityIdentity";
+
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
 export const HOSTED_COMMUNITY_LIMIT = 5;
 export const VALID_HOSTED_COMMUNITY_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -14,11 +18,6 @@ export type HostedCommunityApiError = {
   code?: string;
   message?: string;
   setup_needed?: boolean;
-};
-
-export type HostedNostrIdentity = {
-  npub?: string;
-  pubkey_hex?: string;
 };
 
 export type HostedIdentityResponse = {

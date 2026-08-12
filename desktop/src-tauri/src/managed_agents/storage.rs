@@ -229,7 +229,7 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
         format!(
             "agent {} has no private key available — the OS keyring may be unreachable. \
              Refusing to start without an identity; retry once the keyring is reachable.",
-            record.pubkey
+            identity_npub_for_log_str(&record.pubkey)
         )
     })
 }

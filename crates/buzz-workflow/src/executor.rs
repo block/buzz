@@ -11,9 +11,7 @@
 
 use std::collections::HashMap;
 
-use buzz_core::nostr_identity::{
-    canonical_npub, canonical_npub_or_invalid, parse_public_key_compat,
-};
+use buzz_core::nostr_identity::{canonical_npub, parse_public_key_compat};
 use buzz_core::tenant::CommunityId;
 use evalexpr::HashMapContext;
 use serde::{Deserialize, Deserializer, Serializer};
@@ -101,9 +99,12 @@ impl TriggerContext {
 ///
 /// Supports filters:
 /// - `| truncate(N)` — truncate to N characters
-/// `trigger.author` is always rendered as a canonical npub. The `| npub`
-/// filter remains as an idempotent compatibility spelling; `truncate_pubkey`
-/// is a legacy alias.
+/// - `| npub` — render a public key as canonical npub; this is idempotent for
+///   npub input and `truncate_pubkey` remains as a legacy alias
+///
+/// For compatibility with persisted workflow definitions, bare
+/// `{{trigger.author}}` continues to render as protocol hex. New definitions
+/// should use `{{trigger.author | npub}}` when they need a human-facing key.
 ///
 /// Unknown `{{keys}}` are left as literal text (no error, no substitution).
 pub fn resolve_template(
@@ -167,13 +168,6 @@ fn resolve_variable(
     trigger_ctx: &TriggerContext,
     step_outputs: &HashMap<String, JsonValue>,
 ) -> Option<String> {
-    if path == "trigger.author" {
-        if trigger_ctx.author.is_empty() {
-            return Some(String::new());
-        }
-        return Some(canonical_npub_or_invalid(&trigger_ctx.author));
-    }
-
     if let Some(field) = path.strip_prefix("trigger.") {
         return trigger_ctx.get_field(field).map(|s| s.to_owned());
     }
@@ -1327,8 +1321,7 @@ mod tests {
     fn resolve_trigger_author() {
         let ctx = make_trigger();
         let out = resolve_template("By {{trigger.author}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(out, format!("By {AUTHOR_NPUB}"));
-        assert!(!out.contains(AUTHOR_HEX));
+        assert_eq!(out, format!("By {AUTHOR_HEX}"));
     }
 
     #[test]
@@ -1393,10 +1386,7 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(
-            out,
-            format!("{AUTHOR_NPUB} said: P1 incident in production")
-        );
+        assert_eq!(out, format!("{AUTHOR_HEX} said: P1 incident in production"));
     }
 
     #[test]
@@ -1628,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_trigger_author_invalid_value_fails_closed() {
+    fn resolve_npub_filter_non_pubkey_passes_through() {
         let mut ctx = make_trigger();
         ctx.author = "short".to_owned();
         let out = resolve_template(
@@ -1637,7 +1627,7 @@ mod tests {
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(out, buzz_core::nostr_identity::INVALID_PUBLIC_KEY_DISPLAY);
+        assert_eq!(out, "short");
     }
 
     #[test]
@@ -1674,7 +1664,7 @@ mod tests {
         let ctx = make_trigger();
         let out =
             resolve_template("{{trigger.author}}{{trigger.emoji}}", &ctx, &HashMap::new()).unwrap();
-        assert_eq!(out, format!("{AUTHOR_NPUB}fire"));
+        assert_eq!(out, format!("{AUTHOR_HEX}fire"));
     }
 
     #[tokio::test]
@@ -1882,10 +1872,10 @@ mod tests {
     }
 
     #[test]
-    fn trigger_context_legacy_hex_deserializes_to_internal_hex_and_serializes_as_npub() {
-        let value = json!({
+    fn persisted_legacy_trigger_context_keeps_template_contract_after_upgrade() {
+        let legacy_persisted = json!({
             "text": "hello",
-            "author": AUTHOR_HEX.to_ascii_uppercase(),
+            "author": AUTHOR_HEX,
             "channel_id": "",
             "timestamp": "",
             "emoji": "",
@@ -1893,12 +1883,30 @@ mod tests {
             "webhook_fields": {},
         });
 
-        let context: TriggerContext = serde_json::from_value(value).unwrap();
+        let context: TriggerContext = serde_json::from_value(legacy_persisted).unwrap();
         assert_eq!(context.author, AUTHOR_HEX);
+        let rendered = resolve_template(
+            "{{trigger.author}}|{{trigger.author | npub}}",
+            &context,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(rendered, format!("{AUTHOR_HEX}|{AUTHOR_NPUB}"));
 
-        let serialized = serde_json::to_value(&context).unwrap();
-        assert_eq!(serialized["author"], AUTHOR_NPUB);
-        assert_ne!(serialized["author"], AUTHOR_HEX);
+        // New writes stay portable/canonical, but loading that upgraded row
+        // must reconstruct the internal hex value so a later approval resume
+        // does not change templates authored under the legacy contract.
+        let upgraded_persisted = serde_json::to_value(&context).unwrap();
+        assert_eq!(upgraded_persisted["author"], AUTHOR_NPUB);
+
+        let resumed: TriggerContext = serde_json::from_value(upgraded_persisted).unwrap();
+        let resumed_rendered = resolve_template(
+            "{{trigger.author}}|{{trigger.author | npub}}",
+            &resumed,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(resumed_rendered, format!("{AUTHOR_HEX}|{AUTHOR_NPUB}"));
     }
 
     #[test]

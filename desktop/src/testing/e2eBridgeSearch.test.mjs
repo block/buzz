@@ -20,7 +20,7 @@ function hitAt(created_at) {
     event_id: "hit",
     content: "deploy notes",
     kind: 9,
-    pubkey: "a".repeat(64),
+    pubkey: "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
     channel_id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
     channel_name: "general",
     created_at,
@@ -66,7 +66,9 @@ test("channel, author, and text filters still narrow results", () => {
   assert.equal(
     mockSearchHitMatches(hit, {
       ...NO_FILTERS,
-      authorSet: new Set(["b".repeat(64)]),
+      authorSet: new Set([
+        "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      ]),
     }),
     false,
   );
@@ -77,5 +79,53 @@ test("channel, author, and text filters still narrow results", () => {
   assert.equal(
     mockSearchHitMatches(hit, { query: "deploy", authorSet: null }),
     true,
+  );
+});
+
+test("web-search OR arms match canonical and legacy entity-link tokens", () => {
+  const ownerNpub =
+    "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
+  const ownerHex =
+    "ea9b4d7a7a78a3e3729e5568b14d764d4962be0e1f20f749bcf8d9dbbf9a9328";
+  const query = `${ownerNpub} buzz-world OR ${ownerHex} buzz-world`;
+  const canonical = {
+    ...hitAt(1_700_000_000),
+    content: `See buzz://repo?owner=${ownerNpub}&d=buzz-world`,
+  };
+  const legacy = {
+    ...canonical,
+    content: `See buzz://repo?owner=${ownerHex}&d=buzz-world`,
+  };
+
+  assert.equal(
+    mockSearchHitMatches(canonical, {
+      query,
+      searchMode: "fullText",
+      authorSet: null,
+    }),
+    true,
+  );
+  assert.equal(
+    mockSearchHitMatches(legacy, {
+      query,
+      searchMode: "fullText",
+      authorSet: null,
+    }),
+    true,
+  );
+  assert.equal(
+    mockSearchHitMatches(
+      {
+        ...canonical,
+        content: canonical.content.replace("buzz-world", "other"),
+      },
+      { query, searchMode: "fullText", authorSet: null },
+    ),
+    false,
+  );
+  assert.equal(
+    mockSearchHitMatches(canonical, { query, authorSet: null }),
+    false,
+    "prefix mode must not silently interpret full-text OR syntax",
   );
 });

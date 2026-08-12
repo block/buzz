@@ -45,6 +45,7 @@ export function useDiscussionChannels(query: string): {
 } {
   const search = useSearchMessagesQuery(query, {
     limit: DISCUSSION_SEARCH_LIMIT,
+    searchMode: "fullText",
   });
   const hits = React.useMemo(
     () =>

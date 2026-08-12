@@ -10,12 +10,15 @@
  * of the search text, and `buzz://` links tokenize into their query-param
  * values. A PR/issue link contains the entity's 64-hex event id (globally
  * unique token), and every repo/PR/issue link contains the repository
- * coordinate's `owner` pubkey and `d`-tag — so searching those tokens finds
- * exactly the messages linking the entity, across all channels the viewer
- * can read (the relay re-authorizes each hit).
+ * coordinate's canonical `owner` npub and `d`-tag — so searching those
+ * tokens finds exactly the messages linking the entity, across all channels
+ * the viewer can read (the relay re-authorizes each hit). The repository
+ * query also includes the legacy hex owner form so links written by older
+ * Buzz versions remain discoverable.
  */
 
 import type { SearchHit } from "@/shared/api/searchTypes";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 
 export type DiscussionChannel = {
   id: string;
@@ -72,14 +75,21 @@ export function mergeOriginDiscussionChannel(
 
 /**
  * Search text matching messages that link a repository or any of its PRs
- * and issues: all those links carry `owner=<pubkey>&d=<dtag>`, so the owner
- * pubkey and d-tag tokens together identify the repository coordinate.
+ * and issues: all those links carry `owner=<npub>&d=<dtag>`, so the owner
+ * npub and d-tag tokens together identify the repository coordinate.
  */
 export function repositoryDiscussionQuery(repository: {
   owner: string;
   dtag: string;
 }): string {
-  return `${repository.owner} ${repository.dtag}`;
+  const ownerHex = parsePubkeyInput(repository.owner);
+  const ownerNpub = safeNpub(repository.owner);
+  if (!ownerHex || !ownerNpub) return "";
+
+  // Canonical links carry npub. Search the old protocol-hex form as a read
+  // compatibility path because existing messages are immutable. Repeating
+  // the d-tag on both sides keeps the OR scoped to this repository.
+  return `${ownerNpub} ${repository.dtag} OR ${ownerHex} ${repository.dtag}`;
 }
 
 /**

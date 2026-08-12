@@ -40,6 +40,7 @@ import type {
   GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 
 export * from "@/shared/api/tauriChannels";
 export { sendChannelMessage } from "@/shared/api/tauriMessages";
@@ -146,6 +147,7 @@ export type RawManagedAgent = {
   last_exit_code: number | null;
   last_error: string | null;
   last_error_code: number | null;
+  log_display_label?: string;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -165,6 +167,7 @@ type RawCreateManagedAgentResponse = {
 
 type RawManagedAgentLog = {
   content: string;
+  log_display_label?: string;
   log_path: string;
 };
 
@@ -454,6 +457,7 @@ export async function searchMessages(
     q: input.q,
     limit: input.limit,
     channelId: input.channelId,
+    searchMode: input.searchMode,
     authors: input.authors,
     since: input.since,
     until: input.until,
@@ -631,6 +635,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
 }
 
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
+  const fallbackLogNpub = safeNpub(agent.pubkey);
   return {
     pubkey: agent.pubkey,
     name: agent.name,
@@ -666,6 +671,9 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     lastExitCode: agent.last_exit_code,
     lastError: agent.last_error,
     lastErrorCode: agent.last_error_code ?? null,
+    logDisplayLabel:
+      agent.log_display_label ??
+      (fallbackLogNpub ? `${fallbackLogNpub}.log` : "local harness log"),
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
@@ -845,6 +853,7 @@ export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
 
   return {
     content: response.content,
+    logDisplayLabel: response.log_display_label ?? "local harness log",
     logPath: response.log_path,
   };
 }

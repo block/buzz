@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
+use crate::app_state::identity_npub_for_log_str;
+
 use super::{
     append_log_marker, current_instance_id, now_iso, process_belongs_to_us,
     process_has_buzz_marker, process_is_running, terminate_process, ManagedAgentPairRuntime,
@@ -68,18 +70,15 @@ fn stop_managed_agent_pair(
             .map_err(|error| format!("failed to wait for agent shutdown: {error}"))?;
         record.last_exit_code = status.code();
         super::super::remove_agent_runtime_receipt(app, key);
+        let who = identity_npub_for_log_str(&record.pubkey);
         if let Err(error) = append_log_marker(
             &runtime.log_path,
-            &format!(
-                "=== stopped {} ({}) at {} ===",
-                record.name,
-                record.pubkey,
-                now_iso()
-            ),
+            &format!("=== stopped {} ({}) at {} ===", record.name, who, now_iso()),
         ) {
             eprintln!(
                 "buzz-desktop: failed to append stop marker for {} on {}: {error}",
-                record.pubkey, key.relay_url
+                identity_npub_for_log_str(&record.pubkey),
+                key.relay_url
             );
         }
         Ok(())

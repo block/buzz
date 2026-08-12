@@ -80,7 +80,17 @@ pub fn assert_expected_signer(
     else {
         return Ok(());
     };
-    if !expected.eq_ignore_ascii_case(actual_signer_hex) {
+    // This is an app boundary: current callers still carry protocol hex, while
+    // `get_active_workspace` and other portable projections expose npub. Accept
+    // either representation, compare the validated key material, and never
+    // echo malformed caller input into the UI error.
+    let expected = buzz_core_pkg::nostr_identity::parse_public_key_compat(expected)
+        .map(|(key, _)| key)
+        .map_err(|_| "expected signer identity is invalid; not sent".to_string())?;
+    let actual = buzz_core_pkg::nostr_identity::parse_public_key_compat(actual_signer_hex)
+        .map(|(key, _)| key)
+        .map_err(|_| "active signer identity is invalid; not sent".to_string())?;
+    if expected != actual {
         return Err(
             "active identity changed before the message was submitted; not sent".to_string(),
         );
@@ -194,9 +204,12 @@ mod tests {
     fn matching_signer_passes_case_insensitively() {
         let keys = nostr::Keys::generate();
         let hex = keys.public_key().to_hex();
+        let npub = buzz_core_pkg::nostr_identity::public_key_to_npub(&keys.public_key()).unwrap();
         assert_expected_signer(Some(&hex), &hex).unwrap();
         assert_expected_signer(Some(&hex.to_ascii_uppercase()), &hex).unwrap();
         assert_expected_signer(Some(&format!("  {hex} ")), &hex).unwrap();
+        assert_expected_signer(Some(&npub), &hex).unwrap();
+        assert_expected_signer(Some(&format!("nostr:{npub}")), &hex).unwrap();
     }
 
     #[test]
@@ -235,5 +248,14 @@ mod tests {
         assert_expected_signer(None, &hex).unwrap();
         assert_expected_signer(Some(""), &hex).unwrap();
         assert_expected_signer(Some("   "), &hex).unwrap();
+    }
+
+    #[test]
+    fn malformed_expected_signer_fails_closed_without_echoing_input() {
+        let invalid = "not-a-public-key";
+        let actual = nostr::Keys::generate().public_key().to_hex();
+        let error = assert_expected_signer(Some(invalid), &actual).unwrap_err();
+        assert_eq!(error, "expected signer identity is invalid; not sent");
+        assert!(!error.contains(invalid));
     }
 }

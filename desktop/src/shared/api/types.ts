@@ -359,6 +359,8 @@ export type ManagedAgent = {
   lastExitCode: number | null;
   lastError: string | null;
   lastErrorCode: number | null;
+  /** Canonical npub label for display; `logPath` remains the real file path. */
+  logDisplayLabel: string;
   logPath: string;
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;

@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     commands::{export_util::save_bytes_with_dialog, personas::resolve_snapshot_import_behavior},
     managed_agents::team_snapshot::{
         build_team_snapshot, decode_team_snapshot_json, decode_team_snapshot_png,
@@ -639,7 +639,7 @@ pub async fn confirm_team_snapshot_import(
             if existing_records.iter().any(|r| r.pubkey == m.pubkey) {
                 return Err(format!(
                     "generated pubkey {} already exists — retry",
-                    m.pubkey
+                    identity_npub_for_log_str(&m.pubkey)
                 ));
             }
         }
@@ -677,7 +677,10 @@ pub async fn confirm_team_snapshot_import(
             // Clean minted keyring entries.
             for pubkey in &minted_pubkeys {
                 if let Err(e) = crate::managed_agents::storage::try_delete_agent_key(pubkey) {
-                    errors.push(format!("keyring cleanup {pubkey}: {e}"));
+                    errors.push(format!(
+                        "keyring cleanup {}: {e}",
+                        identity_npub_for_log_str(pubkey)
+                    ));
                 }
             }
             // Restore agent store file.

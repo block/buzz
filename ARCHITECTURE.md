@@ -523,7 +523,7 @@ steps:
   - id: page
     if: "str_contains(trigger_text, 'production')"
     action: request_approval
-    from: "{{trigger.author}}"
+    from: "{{trigger.author | npub}}"
     message: "Page on-call?"
 ```
 
@@ -536,16 +536,16 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
-| `send_dm` | Direct message to a user (`npub` or `{{trigger.author}}`) |
+| `send_dm` | Direct message to a user (`npub`; legacy hex remains accepted) |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |
 | `request_approval` | Suspend execution; fields: `from`, `message`, `timeout` (default 24h) |
 | `delay` | Pause execution (max 300 seconds) |
 
-**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. `{{trigger.author}}` renders as a canonical `npub`; the `| npub` filter is accepted as an idempotent compatibility spelling. Single-pass resolution (not recursive). Unknown variables left as literal text.
+**Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. For compatibility with persisted definitions, bare `{{trigger.author}}` retains its protocol-hex result. Use `{{trigger.author | npub}}` for canonical human-facing output; the filter is idempotent for npub input. Single-pass resolution (not recursive). Unknown variables are left as literal text.
 
-**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). For compatibility with existing stored definitions, `trigger_author` remains protocol hex inside this evaluation-only context; portable trigger JSON and rendered templates use `npub`. Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.
+**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation is converted to underscores (`trigger.text` → `trigger_text`). `trigger_author` remains protocol hex, matching bare template substitution. Portable trigger JSON serializes the author as npub and normalizes it back to internal hex when a persisted run is resumed. Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. A 100ms timeout prevents adversarial expressions from blocking.
 
 **Concurrency:** `Arc<Semaphore>` with 100 permits. `try_acquire()` — returns `CapacityExceeded` immediately rather than queuing.
 

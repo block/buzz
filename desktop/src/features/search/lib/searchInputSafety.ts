@@ -9,6 +9,18 @@ export function isRelaySearchInputSafe(input: string): boolean {
   return !containsNsecShapedInput(input);
 }
 
+/** Remove secret-shaped content before it can enter a request or cache key. */
+export function redactUnsafeRelaySearchInput(input: string): {
+  trimmedQuery: string;
+  safe: boolean;
+} {
+  const trimmedQuery = input.trim();
+  if (!isRelaySearchInputSafe(trimmedQuery)) {
+    return { trimmedQuery: "", safe: false };
+  }
+  return { trimmedQuery, safe: true };
+}
+
 /**
  * Normalize a user-entered relay search without retaining secret-shaped text
  * in a request or React Query cache key. The `safe` bit stays separate from
@@ -19,11 +31,8 @@ export function prepareRelaySearchInput(input: string): {
   normalizedQuery: string;
   safe: boolean;
 } {
-  const normalizedQuery = input.trim().toLowerCase();
-  if (!isRelaySearchInputSafe(normalizedQuery)) {
-    return { normalizedQuery: "", safe: false };
-  }
-  return { normalizedQuery, safe: true };
+  const { trimmedQuery, safe } = redactUnsafeRelaySearchInput(input);
+  return { normalizedQuery: trimmedQuery.toLowerCase(), safe };
 }
 
 export function shouldEnableRelaySearch({

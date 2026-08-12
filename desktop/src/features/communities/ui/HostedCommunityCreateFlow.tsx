@@ -1,6 +1,7 @@
 import * as React from "react";
 import { AlertCircle, ExternalLink, LoaderCircle } from "lucide-react";
 
+import { compareHostedCommunityIdentity } from "@/features/communities/hostedCommunityIdentity";
 import {
   bindBuilderlabIdentity,
   cancelBuilderlabLogin,
@@ -27,7 +28,6 @@ import {
 } from "@/features/channels/ui/channelFormStyles";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
-import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 
@@ -147,15 +147,8 @@ export function HostedCommunityCreateFlow({
       setCommunities([]);
     });
 
-  const boundPubkey = identity?.pubkey_hex ?? null;
-  const boundNpub = safeNpub(identity?.npub ?? boundPubkey ?? "");
-  const identityMismatch = Boolean(
-    identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
-  );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  const { boundNpub, localNpub, identityMismatch } =
+    compareHostedCommunityIdentity(identity, localPubkey);
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {

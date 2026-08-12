@@ -27,6 +27,29 @@ pub(crate) mod import;
 // Re-export import-side commands so callers see a flat `snapshot::` namespace.
 pub use import::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
 
+fn agent_reference_for_error(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_scheme = if trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nostr:"))
+    {
+        &trimmed[6..]
+    } else {
+        trimmed
+    };
+    if without_scheme
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("nsec1"))
+    {
+        return "<invalid identity>".to_string();
+    }
+    if buzz_core_pkg::nostr_identity::parse_public_key_compat(value).is_ok() {
+        crate::app_state::identity_npub_for_log_str(value)
+    } else {
+        format!("{value:?}")
+    }
+}
+
 // ── Pure resolver (testable without AppHandle) ────────────────────────────────
 
 /// Inner resolver operating on pre-fetched slices — testable without
@@ -53,7 +76,7 @@ pub(crate) fn resolve_from_lists<'a>(
     if let Some(record) = definitions.iter().find(|a| a.slug.as_deref() == Some(id)) {
         return Ok((record, true));
     }
-    Err(format!("agent {id:?} not found"))
+    Err(format!("agent {} not found", agent_reference_for_error(id)))
 }
 
 /// Validate that `memory_source_pubkey` is an appropriate source for a
@@ -82,13 +105,16 @@ pub(crate) fn validate_memory_source(
     if is_definition {
         // Definition export: the supplied pubkey must be a keyed instance
         // whose persona_id equals the definition slug.
-        let linked = instances
-            .iter()
-            .find(|a| a.pubkey == mpk)
-            .ok_or_else(|| format!("memory_source_pubkey {mpk:?} is not a known agent"))?;
+        let linked = instances.iter().find(|a| a.pubkey == mpk).ok_or_else(|| {
+            format!(
+                "memory_source_pubkey {} is not a known agent",
+                crate::app_state::identity_npub_for_log_str(mpk)
+            )
+        })?;
         if linked.persona_id.as_deref() != Some(def_id) {
             return Err(format!(
-                "memory_source_pubkey {mpk:?} is not linked to definition {def_id:?}"
+                "memory_source_pubkey {} is not linked to definition {def_id:?}",
+                crate::app_state::identity_npub_for_log_str(mpk)
             ));
         }
     } else {
@@ -96,7 +122,9 @@ pub(crate) fn validate_memory_source(
         // This prevents cross-agent memory pairing.
         if mpk != def_id {
             return Err(format!(
-                "memory_source_pubkey {mpk:?} does not match agent {def_id:?}"
+                "memory_source_pubkey {} does not match agent {}",
+                crate::app_state::identity_npub_for_log_str(mpk),
+                crate::app_state::identity_npub_for_log_str(def_id)
             ));
         }
     }

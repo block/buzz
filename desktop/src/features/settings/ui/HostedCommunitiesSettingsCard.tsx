@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { compareHostedCommunityIdentity } from "@/features/communities/hostedCommunityIdentity";
 import {
   HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
@@ -206,15 +207,8 @@ export function HostedCommunitiesSettingsCard() {
   // Connect buttons operate on the *bound* npub's communities, so "Connect"
   // would drop you into a relay your local key isn't a member of. Detect it and
   // block Connect + Create until the identities match.
-  const boundPubkey = identity?.pubkey_hex ?? null;
-  const boundNpub = safeNpub(identity?.npub ?? boundPubkey ?? "");
-  const identityMismatch = Boolean(
-    identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
-  );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  const { boundNpub, localNpub, identityMismatch } =
+    compareHostedCommunityIdentity(identity, localPubkey);
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {

@@ -227,10 +227,11 @@ mod tests {
 
     #[test]
     fn matching_scope_and_signer_pass_on_the_rebuilt_payload() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
         assert_payload_scope(
-            &scoped_payload("wss://tenant-a.example", "aa11"),
+            &scoped_payload("wss://tenant-a.example", &owner),
             Some("wss://tenant-a.example"),
-            Some("aa11"),
+            Some(&owner),
         )
         .unwrap();
     }
@@ -240,10 +241,11 @@ mod tests {
         // Round-8 P1: a stale Projects-A start waited behind another deploy;
         // the rebuild resolved tenant B. The payload actually invoked must be
         // refused — the pre-lock snapshot its caller validated is irrelevant.
+        let owner = nostr::Keys::generate().public_key().to_hex();
         let error = assert_payload_scope(
-            &scoped_payload("wss://tenant-b.example", "aa11"),
+            &scoped_payload("wss://tenant-b.example", &owner),
             Some("wss://tenant-a.example"),
-            Some("aa11"),
+            Some(&owner),
         )
         .unwrap_err();
         assert!(error.contains("active community changed"), "{error}");
@@ -254,10 +256,12 @@ mod tests {
         // Same relay, different owner: an identity switch alone must also be
         // refused — the rebuilt launch.owner_pubkey belongs to a tenant the
         // caller never validated.
+        let captured = nostr::Keys::generate().public_key().to_hex();
+        let switched = nostr::Keys::generate().public_key().to_hex();
         let error = assert_payload_scope(
-            &scoped_payload("wss://tenant-a.example", "bb22"),
+            &scoped_payload("wss://tenant-a.example", &switched),
             Some("wss://tenant-a.example"),
-            Some("aa11"),
+            Some(&captured),
         )
         .unwrap_err();
         assert!(error.contains("active identity changed"), "{error}");
@@ -266,10 +270,11 @@ mod tests {
     #[test]
     fn scoped_caller_with_an_unverifiable_payload_fails_closed() {
         let payload = serde_json::json!({});
+        let owner = nostr::Keys::generate().public_key().to_hex();
         let relay_error =
             assert_payload_scope(&payload, Some("wss://tenant-a.example"), None).unwrap_err();
         assert!(relay_error.contains("no relay"), "{relay_error}");
-        let signer_error = assert_payload_scope(&payload, None, Some("aa11")).unwrap_err();
+        let signer_error = assert_payload_scope(&payload, None, Some(&owner)).unwrap_err();
         assert!(signer_error.contains("no owner identity"), "{signer_error}");
     }
 

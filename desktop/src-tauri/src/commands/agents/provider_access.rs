@@ -3,7 +3,7 @@
 use tauri::AppHandle;
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         find_managed_agent_mut, load_managed_agents, save_managed_agents, BackendKind,
         ManagedAgentRecord,
@@ -81,12 +81,13 @@ pub(crate) async fn reconcile_on_workspace_apply(
             cached_binary_path,
             agent_json,
         } = target;
+        let who = identity_npub_for_log_str(&pubkey);
         let agent_json = match agent_json {
             Ok(agent_json) => agent_json,
             Err(error) => {
                 persist_failure(app, state, &pubkey, &error)?;
                 return Err(format!(
-                    "provider access reconciliation failed for agent {pubkey}: {error}"
+                    "provider access reconciliation failed for agent {who}: {error}"
                 ));
             }
         };
@@ -104,7 +105,7 @@ pub(crate) async fn reconcile_on_workspace_apply(
         .await
         {
             return Err(format!(
-                "provider access reconciliation failed for agent {pubkey}: {error}"
+                "provider access reconciliation failed for agent {who}: {error}"
             ));
         }
     }

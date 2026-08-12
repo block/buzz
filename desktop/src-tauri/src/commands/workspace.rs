@@ -183,7 +183,15 @@ pub async fn apply_workspace(
         // ── Validate before mutating ──────────────────────────────────────────
         let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(nsec_trimmed) => {
-                Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
+                let (secret_key, encoding) =
+                    buzz_core_pkg::nostr_identity::parse_secret_key_compat(nsec_trimmed)
+                        .map_err(|_| "invalid workspace identity; expected a canonical nsec")?;
+                if encoding == buzz_core_pkg::nostr_identity::KeyInputEncoding::LegacyHex {
+                    eprintln!(
+                        "buzz-desktop: workspace identity uses legacy secret hex; store the canonical nsec form"
+                    );
+                }
+                Some(Keys::new(secret_key))
             }
             None => None,
         };
