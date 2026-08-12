@@ -83,6 +83,7 @@ export function ForumComposer({
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
+  const isSubmissionPendingRef = React.useRef(false);
   const onSubmitRef = React.useRef(onSubmit);
   const onSecondarySubmitRef = React.useRef(onSecondarySubmit);
   const submitModeRef = React.useRef(submitMode);
@@ -213,7 +214,7 @@ export function ForumComposer({
 
   // ── Submit ──────────────────────────────────────────────────────────
   const submitMessage = React.useCallback(
-    (submitter = onSubmitRef.current) => {
+    async (submitter = onSubmitRef.current) => {
       const trimmed = contentRef.current.trim();
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
@@ -222,51 +223,54 @@ export function ForumComposer({
         (!trimmed && !hasMedia) ||
         disabledRef.current ||
         isSendingRef.current ||
-        isUploadingRef.current
+        isUploadingRef.current ||
+        isSubmissionPendingRef.current
       ) {
         return;
       }
 
-      const pubkeys = mentions.extractMentionPubkeys(trimmed);
+      isSubmissionPendingRef.current = true;
+      try {
+        const pubkeys = await mentions.revalidateMentionPubkeys(
+          mentions.extractMentionPubkeys(trimmed),
+        );
 
-      // Reuse the shared send-path builder so forum/notes posts emit the same
-      // body + imeta as chat: generic files become `[filename](url)` links with a
-      // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
-      // semantics use `undefined` for "no attachments" (no imeta tags emitted).
-      const { content: finalContent, mediaTags } = buildOutgoingMessage(
-        trimmed,
-        currentPendingImeta,
-      );
+        // Reuse the shared send-path builder so forum/notes posts emit the same
+        // body + imeta as chat: generic files become `[filename](url)` links with a
+        // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
+        // semantics use `undefined` for "no attachments" (no imeta tags emitted).
+        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          trimmed,
+          currentPendingImeta,
+        );
 
-      // Save draft state so we can restore on failure.
-      const savedContent = contentRef.current;
-      const savedImeta = [...currentPendingImeta];
+        // Save draft state so we can restore on failure.
+        const savedContent = contentRef.current;
+        const savedImeta = [...currentPendingImeta];
 
-      setContent("");
-      contentRef.current = "";
-      richText.clearContent();
-      media.setPendingImeta([]);
-      mentions.clearMentions();
-      channelLinks.clearChannels();
-      setIsEmojiPickerOpen(false);
+        setContent("");
+        contentRef.current = "";
+        richText.clearContent();
+        media.setPendingImeta([]);
+        mentions.clearMentions();
+        channelLinks.clearChannels();
+        setIsEmojiPickerOpen(false);
 
-      const result = submitter(finalContent, pubkeys, mediaTags);
-      const completeSubmission = () => {
-        setSubmitMode("primary");
-        if (compact) setIsCompactExpanded(false);
-      };
-
-      // If onSubmit returns a promise, restore draft on failure.
-      if (result && typeof result.then === "function") {
-        result.then(completeSubmission).catch(() => {
+        try {
+          await submitter(finalContent, pubkeys, mediaTags);
+          setSubmitMode("primary");
+          if (compact) setIsCompactExpanded(false);
+        } catch {
           setContent(savedContent);
           contentRef.current = savedContent;
           richText.setContent(savedContent);
           media.setPendingImeta(savedImeta);
           if (compact) setIsCompactExpanded(true);
-        });
-      } else {
-        completeSubmission();
+        }
+      } catch {
+        // Keep the draft intact when authorization refresh fails.
+      } finally {
+        isSubmissionPendingRef.current = false;
       }
     },
     [
@@ -274,6 +278,7 @@ export function ForumComposer({
       media.pendingImetaRef,
       media.setPendingImeta,
       mentions.extractMentionPubkeys,
+      mentions.revalidateMentionPubkeys,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,
