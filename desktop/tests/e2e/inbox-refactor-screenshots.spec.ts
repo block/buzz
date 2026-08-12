@@ -437,37 +437,40 @@ test.describe("inbox refactor screenshots", () => {
     ]);
 
     await page.locator("html").evaluate((root) => {
-      root.setAttribute("data-conversation-font-size", "smaller");
+      root.setAttribute("data-font-size", "smaller");
+      root.style.fontSize = "15px";
     });
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "14px", lineHeight: "19px" },
-      { paddingBottom: "4px", paddingTop: "4px" },
-      { fontSize: "14px", lineHeight: "16px" },
-      { fontSize: "14px", lineHeight: "19px" },
-      { fontSize: "10px", lineHeight: "14px" },
-      { fontSize: "14px", lineHeight: "19px" },
+      { fontSize: "14.0625px", lineHeight: "18.75px" },
+      { paddingBottom: "3.75px", paddingTop: "3.75px" },
+      { fontSize: "14.0625px", lineHeight: "15.9375px" },
+      { fontSize: "14.0625px", lineHeight: "18.75px" },
+      { fontSize: "10.3125px", lineHeight: "15px" },
+      { fontSize: "14.0625px", lineHeight: "18.75px" },
     ]);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/05-thread-context-compact.png` });
 
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "spacious");
-      root.setAttribute("data-conversation-font-size", "larger");
+      root.setAttribute("data-font-size", "larger");
+      root.style.fontSize = "17px";
     });
     await expect.poll(readConversationMetrics).toEqual([
-      { fontSize: "16px", lineHeight: "22px" },
-      { paddingBottom: "8px", paddingTop: "8px" },
-      { fontSize: "16px", lineHeight: "18px" },
-      { fontSize: "16px", lineHeight: "22px" },
-      { fontSize: "12px", lineHeight: "18px" },
-      { fontSize: "16px", lineHeight: "22px" },
+      { fontSize: "15.9375px", lineHeight: "21.25px" },
+      { paddingBottom: "8.5px", paddingTop: "8.5px" },
+      { fontSize: "15.9375px", lineHeight: "18.0625px" },
+      { fontSize: "15.9375px", lineHeight: "21.25px" },
+      { fontSize: "11.6875px", lineHeight: "17px" },
+      { fontSize: "15.9375px", lineHeight: "21.25px" },
     ]);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/06-thread-context-spacious.png` });
 
     await page.locator("html").evaluate((root) => {
       root.setAttribute("data-conversation-density", "comfortable");
-      root.setAttribute("data-conversation-font-size", "default");
+      root.setAttribute("data-font-size", "default");
+      root.style.fontSize = "16px";
     });
 
     await page.evaluate(() => {

@@ -11,8 +11,8 @@ export default {
         "2xs": "0.6875rem", // 11px — meta-text workhorse (timestamps, badges)
         "3xs": "0.5rem", // 8px — tiny glyphs / micro labels
         badge: "0.625rem", // 10px — compact status badges
-        // Shared channel, DM, thread, and composer type. Backed by CSS
-        // variables so font size and density can change independently without
+        // Shared channel, DM, thread, and composer type. Rem-backed variables
+        // keep app-wide font size and keyboard zoom consistent without
         // branching individual components.
         message: [
           "var(--conversation-message-font-size)",

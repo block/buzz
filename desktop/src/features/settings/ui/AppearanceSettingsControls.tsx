@@ -22,11 +22,11 @@ import {
   type ConversationDensity,
 } from "@/shared/lib/conversationDensityPreference";
 import {
-  previewConversationFontSize,
-  setConversationFontSize,
-  useConversationFontSize,
-  type ConversationFontSize,
-} from "@/shared/lib/conversationFontSizePreference";
+  previewFontSize,
+  setFontSize,
+  useFontSize,
+  type FontSize,
+} from "@/shared/lib/fontSizePreference";
 import {
   ACCENT_COLORS,
   DEFAULT_GLASS_OPACITY,
@@ -112,8 +112,8 @@ const CONVERSATION_DENSITY_OPTIONS: readonly {
   },
 ];
 
-const CONVERSATION_FONT_SIZE_OPTIONS: readonly {
-  value: ConversationFontSize;
+const FONT_SIZE_OPTIONS: readonly {
+  value: FontSize;
   label: string;
 }[] = [
   {
@@ -168,10 +168,10 @@ function ConversationPreview() {
     <div className="px-4 py-3" data-testid="conversation-preview">
       <div
         aria-hidden="true"
-        className="relative overflow-hidden rounded-xl border border-border/65 bg-muted/45"
+        className="relative overflow-hidden rounded-xl border border-border/65 bg-transparent"
         data-testid="conversation-preview-surface"
       >
-        <span className="absolute right-3 top-3 inline-flex rounded-full border border-border/65 bg-background/70 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+        <span className="absolute right-3 top-3 inline-flex rounded-full border border-border/65 bg-muted/45 px-2.5 py-1 text-xs font-medium text-muted-foreground">
           Preview
         </span>
         <div className="p-4" data-testid="conversation-preview-content">
@@ -201,31 +201,31 @@ function ConversationPreview() {
   );
 }
 
-/** Independent message type and spacing controls shared by every conversation. */
+/** App-wide type sizing and conversation-specific spacing controls. */
 export function ConversationDisplaySettings() {
   const density = useConversationDensity();
-  const fontSize = useConversationFontSize();
+  const fontSize = useFontSize();
 
   return (
     <>
-      <SettingsOptionRow data-testid="conversation-font-size-row">
+      <SettingsOptionRow data-testid="font-size-row">
         <div className="min-w-0">
           <p className="text-sm font-medium">Font size</p>
           <p
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
           >
-            Adjust message text and line height.
+            Adjust text throughout Buzz.
           </p>
         </div>
         <SettingsSegmentedControl
           className="w-72"
           legend="Font size"
-          onPreviewChange={previewConversationFontSize}
-          onValueChange={setConversationFontSize}
-          optionTestIdPrefix="conversation-font-size"
-          options={CONVERSATION_FONT_SIZE_OPTIONS}
-          testId="conversation-font-size-control"
+          onPreviewChange={previewFontSize}
+          onValueChange={setFontSize}
+          optionTestIdPrefix="font-size"
+          options={FONT_SIZE_OPTIONS}
+          testId="font-size-control"
           value={fontSize}
         />
       </SettingsOptionRow>

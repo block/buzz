@@ -1,13 +1,13 @@
 import * as React from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
+import { applyTextZoomFactor } from "@/shared/lib/fontSizePreference";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const DEFAULT_ZOOM_FACTOR = 1;
 const MIN_ZOOM_FACTOR = 0.75;
 const MAX_ZOOM_FACTOR = 1.5;
 const ZOOM_STEP = 0.1;
-const BASE_FONT_SIZE_PX = 16;
 const TEXT_SCALE_STORAGE_KEY = "buzz:text-scale";
 
 type ZoomAction = "increase" | "decrease" | "reset";
@@ -76,13 +76,12 @@ function readStoredZoomFactor() {
 }
 
 function applyTextScale(zoomFactor: number) {
+  applyTextZoomFactor(zoomFactor);
   if (zoomFactor === DEFAULT_ZOOM_FACTOR) {
-    document.documentElement.style.fontSize = "";
     window.localStorage.removeItem(TEXT_SCALE_STORAGE_KEY);
     return;
   }
 
-  document.documentElement.style.fontSize = `${BASE_FONT_SIZE_PX * zoomFactor}px`;
   window.localStorage.setItem(TEXT_SCALE_STORAGE_KEY, String(zoomFactor));
 }
 

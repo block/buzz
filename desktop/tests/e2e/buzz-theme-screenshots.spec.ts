@@ -9,8 +9,7 @@ const GLASS_BACKGROUND_STORAGE_KEY = "buzz-glass-background";
 const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
 const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
 const CONVERSATION_DENSITY_STORAGE_KEY = "buzz.appearance.conversationDensity";
-const CONVERSATION_FONT_SIZE_STORAGE_KEY =
-  "buzz.appearance.conversationFontSize";
+const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -642,7 +641,7 @@ test("appearance groups theme and preferences into labeled rows", async ({
   ).toBeLessThanOrEqual(0.5);
 });
 
-test("conversation font size and density apply independently", async ({
+test("app font size and conversation density apply independently", async ({
   page,
 }) => {
   await seedTheme(page, "buzz");
@@ -657,13 +656,11 @@ test("conversation font size and density apply independently", async ({
   const densityIndicator = page.getByTestId(
     "conversation-density-control-indicator",
   );
-  const fontSizeControl = page.getByTestId("conversation-font-size-control");
-  const smaller = page.getByTestId("conversation-font-size-smaller");
-  const defaultSize = page.getByTestId("conversation-font-size-default");
-  const larger = page.getByTestId("conversation-font-size-larger");
-  const fontSizeIndicator = page.getByTestId(
-    "conversation-font-size-control-indicator",
-  );
+  const fontSizeControl = page.getByTestId("font-size-control");
+  const smaller = page.getByTestId("font-size-smaller");
+  const defaultSize = page.getByTestId("font-size-default");
+  const larger = page.getByTestId("font-size-larger");
+  const fontSizeIndicator = page.getByTestId("font-size-control-indicator");
   const preview = page.getByTestId("conversation-preview");
   const previewSurface = page.getByTestId("conversation-preview-surface");
   const previewContent = page.getByTestId("conversation-preview-content");
@@ -677,7 +674,7 @@ test("conversation font size and density apply independently", async ({
     .getByTestId("conversation-density-row")
     .locator("[data-settings-subcopy]");
   const fontSizeDescription = page
-    .getByTestId("conversation-font-size-row")
+    .getByTestId("font-size-row")
     .locator("[data-settings-subcopy]");
   const readScale = () =>
     root.evaluate((element) => {
@@ -755,9 +752,7 @@ test("conversation font size and density apply independently", async ({
   await expect(densityDescription).toHaveText(
     "Adjust message and paragraph spacing.",
   );
-  await expect(fontSizeDescription).toHaveText(
-    "Adjust message text and line height.",
-  );
+  await expect(fontSizeDescription).toHaveText("Adjust text throughout Buzz.");
   await expect.poll(readScale).toEqual({
     authorLineHeight: 1.0625,
     bodyGap: 0.125,
@@ -805,17 +800,27 @@ test("conversation font size and density apply independently", async ({
   await expect(fontSizeIndicator).toHaveCSS("transition-property", /transform/);
   await expect
     .poll(async () => {
-      const [previewBackground, controlBackground] = await Promise.all([
-        previewSurface.evaluate(
-          (element) => window.getComputedStyle(element).backgroundColor,
-        ),
-        densityControl.evaluate(
-          (element) => window.getComputedStyle(element).backgroundColor,
-        ),
-      ]);
-      return previewBackground === controlBackground;
+      const [previewBackground, chipBackground, controlBackground] =
+        await Promise.all([
+          previewSurface.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          previewChip.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          densityControl.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+        ]);
+      return {
+        chipMatchesControl: chipBackground === controlBackground,
+        previewBackground,
+      };
     })
-    .toBe(true);
+    .toEqual({
+      chipMatchesControl: true,
+      previewBackground: "rgba(0, 0, 0, 0)",
+    });
   const previewSurfaceBox = await previewSurface.boundingBox();
   const previewChipBox = await previewChip.boundingBox();
   const firstPreviewMessageBox = await firstPreviewMessage.boundingBox();
@@ -864,7 +869,7 @@ test("conversation font size and density apply independently", async ({
   await compact.click();
   await expect(densityIndicator).toHaveAttribute("data-transition-ran", "true");
   await expect(root).toHaveAttribute("data-conversation-density", "compact");
-  await expect(root).toHaveAttribute("data-conversation-font-size", "default");
+  await expect(root).toHaveAttribute("data-font-size", "default");
   await expect(compact).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
@@ -895,27 +900,44 @@ test("conversation font size and density apply independently", async ({
 
   await larger.click();
   await expect(root).toHaveAttribute("data-conversation-density", "compact");
-  await expect(root).toHaveAttribute("data-conversation-font-size", "larger");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(larger).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
       page.evaluate(
         (key) => window.localStorage.getItem(key),
-        CONVERSATION_FONT_SIZE_STORAGE_KEY,
+        FONT_SIZE_STORAGE_KEY,
       ),
     )
     .toBe("larger");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.125,
+    authorLineHeight: 1.0625,
     bodyGap: 0,
-    fontSize: 1,
-    lineHeight: 1.375,
+    fontSize: 0.9375,
+    lineHeight: 1.25,
     paragraphGap: 0.375,
     rowPadding: 0.25,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1.125,
+    timestampFontSize: 0.6875,
+    timestampLineHeight: 1,
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "18px"]);
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["15.9375px", "21.25px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14.875px",
+    lineHeight: "21.25px",
+    minHeight: "68px",
+    paddingBlock: "12.75px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["11.6875px", "17px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.5px", "14.875px", "19.125px"]);
   await waitForAnimations(page);
   await page.getByTestId("appearance-preferences-card").screenshot({
     path: `${SHOTS}/15-conversation-compact-larger.png`,
@@ -923,42 +945,61 @@ test("conversation font size and density apply independently", async ({
 
   await spacious.click();
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
-  await expect(root).toHaveAttribute("data-conversation-font-size", "larger");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(spacious).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1.125,
+    authorLineHeight: 1.0625,
     bodyGap: 0.25,
-    fontSize: 1,
-    lineHeight: 1.375,
+    fontSize: 0.9375,
+    lineHeight: 1.25,
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.75,
-    timestampLineHeight: 1.125,
+    timestampFontSize: 0.6875,
+    timestampLineHeight: 1,
   });
   await expect.poll(readSettingsScale).toEqual({
-    fontSize: "14px",
-    lineHeight: "20px",
-    minHeight: "64px",
-    paddingBlock: "12px",
+    fontSize: "14.875px",
+    lineHeight: "21.25px",
+    minHeight: "68px",
+    paddingBlock: "12.75px",
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "18px"]);
-  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "18px"]);
+  await expect.poll(readPreviewTimestampScale).toEqual(["11.6875px", "17px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.5px", "14.875px", "19.125px"]);
 
   await smaller.click();
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
-  await expect(root).toHaveAttribute("data-conversation-font-size", "smaller");
+  await expect(root).toHaveAttribute("data-font-size", "smaller");
   await expect(smaller).toHaveAttribute("aria-pressed", "true");
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 1,
+    authorLineHeight: 1.0625,
     bodyGap: 0.25,
-    fontSize: 0.875,
-    lineHeight: 1.1875,
+    fontSize: 0.9375,
+    lineHeight: 1.25,
     paragraphGap: 0.625,
     rowPadding: 0.5,
-    timestampFontSize: 0.625,
-    timestampLineHeight: 0.875,
+    timestampFontSize: 0.6875,
+    timestampLineHeight: 1,
   });
-  await expect.poll(readPreviewTimestampScale).toEqual(["10px", "14px"]);
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["14.0625px", "18.75px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "13.125px",
+    lineHeight: "18.75px",
+    minHeight: "60px",
+    paddingBlock: "11.25px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["10.3125px", "15px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["22.5px", "13.125px", "16.875px"]);
   await waitForAnimations(page);
   await page.getByTestId("appearance-preferences-card").screenshot({
     path: `${SHOTS}/16-conversation-spacious-smaller.png`,
@@ -991,7 +1032,7 @@ test("conversation font size and density apply independently", async ({
     controlBox.y + controlBox.height / 2,
   );
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
-  await expect(root).toHaveAttribute("data-conversation-font-size", "default");
+  await expect(root).toHaveAttribute("data-font-size", "default");
   await expect
     .poll(() =>
       page.evaluate(
@@ -1035,7 +1076,7 @@ test("conversation font size and density apply independently", async ({
   expect(smallerBox).not.toBeNull();
   expect(largerBox).not.toBeNull();
   if (!fontSizeControlBox || !smallerBox || !largerBox) {
-    throw new Error("Conversation font size control geometry is missing");
+    throw new Error("Font size control geometry is missing");
   }
   await page.mouse.move(
     smallerBox.x + smallerBox.width / 2,
@@ -1046,7 +1087,7 @@ test("conversation font size and density apply independently", async ({
     largerBox.x + largerBox.width / 2,
     fontSizeControlBox.y + fontSizeControlBox.height / 2,
   );
-  await expect(root).toHaveAttribute("data-conversation-font-size", "larger");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(root).toHaveAttribute(
     "data-conversation-density",
     "comfortable",
@@ -1055,7 +1096,7 @@ test("conversation font size and density apply independently", async ({
     .poll(() =>
       page.evaluate(
         (key) => window.localStorage.getItem(key),
-        CONVERSATION_FONT_SIZE_STORAGE_KEY,
+        FONT_SIZE_STORAGE_KEY,
       ),
     )
     .toBe("default");
@@ -1066,14 +1107,17 @@ test("conversation font size and density apply independently", async ({
         return [style.fontSize, style.lineHeight];
       }),
     )
-    .toEqual(["16px", "22px"]);
+    .toEqual(["15.9375px", "21.25px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.5px", "14.875px", "19.125px"]);
   await page.mouse.up();
   await expect(larger).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
       page.evaluate(
         (key) => window.localStorage.getItem(key),
-        CONVERSATION_FONT_SIZE_STORAGE_KEY,
+        FONT_SIZE_STORAGE_KEY,
       ),
     )
     .toBe("larger");
@@ -1496,8 +1540,8 @@ test("glass background keeps the content panel solid", async ({ page }) => {
   const matchingRadiusControls = [
     page.getByTestId("appearance-color-mode-control"),
     page.getByTestId("appearance-color-mode-indicator"),
-    page.getByTestId("conversation-font-size-control"),
-    page.getByTestId("conversation-font-size-control-indicator"),
+    page.getByTestId("font-size-control"),
+    page.getByTestId("font-size-control-indicator"),
     page.getByTestId("conversation-density-control"),
     page.getByTestId("conversation-density-control-indicator"),
     page.getByTestId("theme-style-trigger"),

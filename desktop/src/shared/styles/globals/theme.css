@@ -4,8 +4,8 @@
     --radius: 0.625rem;
     /*
      * Default conversation type and comfy spacing for channels, DMs, threads,
-     * Inbox, and the composer. Independent Appearance preferences override the
-     * two scales below, while rem units keep Cmd +/- text scaling intact.
+     * Inbox, and the composer. The app-wide Font size preference and Cmd +/-
+     * scale these rem values; Conversation density overrides only spacing.
      */
     --conversation-message-font-size: 0.9375rem;
     --conversation-message-line-height: 1.25rem;
@@ -91,22 +91,6 @@
     --conversation-row-padding-block: 0.5rem;
     --conversation-paragraph-gap: 0.625rem;
     --conversation-list-item-gap: 0.5rem;
-  }
-
-  :root[data-conversation-font-size="smaller"] {
-    --conversation-message-font-size: 0.875rem;
-    --conversation-message-line-height: 1.1875rem;
-    --conversation-author-line-height: 1rem;
-    --conversation-timestamp-font-size: 0.625rem;
-    --conversation-timestamp-line-height: 0.875rem;
-  }
-
-  :root[data-conversation-font-size="larger"] {
-    --conversation-message-font-size: 1rem;
-    --conversation-message-line-height: 1.375rem;
-    --conversation-author-line-height: 1.125rem;
-    --conversation-timestamp-font-size: 0.75rem;
-    --conversation-timestamp-line-height: 1.125rem;
   }
 
   .dark {
