@@ -1392,8 +1392,9 @@ mod tests {
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
-            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
             corporate_identity_jwt: None,
+            canonical_transport_evidence: tokio::sync::Mutex::new(None),
+            canonical_authorization: RwLock::new(None),
             auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
                 buzz_auth::AuthContext {
                     pubkey: agent.public_key(),
@@ -1401,10 +1402,13 @@ mod tests {
                     channel_ids: None,
                     auth_method: buzz_auth::AuthMethod::Nip42,
                     agent_owner_pubkey: None,
-                },
+                }
+                .into(),
             )),
+            status_scope: RwLock::new(None),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx,
+            status_writer: crate::connection::StatusWriter::new(mpsc::channel(1).0),
             ctrl_tx,
             cancel: CancellationToken::new(),
             backpressure_count: Arc::new(AtomicU8::new(0)),

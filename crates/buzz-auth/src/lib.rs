@@ -17,6 +17,8 @@
 
 /// Channel access checking trait and helpers.
 pub mod access;
+/// Blossom transport proof verification for canonical authorization.
+pub mod blossom;
 /// Authentication error types.
 pub mod error;
 /// Sealed transport provenance shared by protected authorization paths.
@@ -39,8 +41,12 @@ pub mod scope;
 pub mod trusted_proxy;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
+pub use blossom::{verify_blossom_authorization_proof, BlossomAuthorizationVerb};
 pub use error::AuthError;
-pub use evidence::{AssertionTransportProfile, SealedTransportEvidence, TrustedProxyNonceClaim};
+pub use evidence::{
+    AssertionTransportProfile, AuthenticatedClientPeer, SealedTransportEvidence,
+    TrustedProxyNonceClaim,
+};
 pub use foundation::{
     ActiveLocalBinding, AuthContext as FinalizedAuthContext, AuthoritativeAuthorizationRecheck,
     AuthorizationAuditConfig, AuthorizationAuditConfigError, AuthorizationError,
@@ -52,18 +58,21 @@ pub use foundation::{
     CanonicalVerifierPolicyId, CurrentBindingStatusEvidenceRequest, DirectEnrollmentMode,
     DirectEnrollmentProposal, FederatedPrincipalStorageKey, LocalAuthorizationPolicy,
     LocalBindingResolution, LocalBindingResolver, LocalBindingResolverCapability,
-    LocalEnrollmentAuthority, NipFiMode, PreparedAuthorization, PreparedAuthorizationRecheck,
-    ProofTransport, RouteCapability, RouteProtection, VerifiedDelegation,
-    VerifiedFederatedAssertion, VerifiedNostrProof, VerifierKeyGeneration, VerifierPolicyStamp,
+    LocalEnrollmentAuthority, LocalStatusEvidenceResolver, NipFiMode, PreparedAuthorization,
+    PreparedAuthorizationRecheck, ProofTransport, RouteCapability, RouteProtection,
+    VerifiedDelegation, VerifiedFederatedAssertion, VerifiedNostrProof, VerifierKeyGeneration,
+    VerifierPolicyStamp,
 };
 pub use nip42::{
-    generate_challenge, verify_nip42_authorization_proof, verify_nip42_event,
-    Nip42AuthorizationProofError,
+    generate_challenge, verify_nip42_authorization_proof, verify_nip42_binding_status_proof,
+    verify_nip42_event, Nip42AuthorizationProofError, Nip42BindingStatusCoordinates,
+    VerifiedBindingStatusProof,
 };
 pub use nip98::{
-    verify_nip42_moderation_command_proof, verify_nip98_event, verify_nip98_invite_claim_proof,
-    verify_nip98_moderation_command_proof, Nip42ModerationCommandCoordinates,
-    Nip98InviteClaimCoordinates, Nip98ModerationCommandCoordinates, VerifiedModerationCommandProof,
+    verify_nip42_moderation_command_proof, verify_nip98_authorization_proof, verify_nip98_event,
+    verify_nip98_invite_claim_proof, verify_nip98_moderation_command_proof,
+    Nip42ModerationCommandCoordinates, Nip98InviteClaimCoordinates,
+    Nip98ModerationCommandCoordinates, VerifiedModerationCommandProof,
     VerifiedNip98InviteClaimProof,
 };
 pub use nip98_replay::{
@@ -77,7 +86,7 @@ pub use scope::{parse_scopes, Scope};
 pub use trusted_proxy::{
     HttpHeaderField, TrustedProxyError, TrustedProxyNonceReplayReader,
     TrustedProxyProvenanceVerifier, TrustedProxyReplayReadError, TrustedProxyRequest,
-    ASSERTION_HEADER_NAME, PROVENANCE_HEADER_NAME,
+    ASSERTION_HEADER_NAME, CLIENT_PEER_HEADER_NAME, PROVENANCE_HEADER_NAME,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

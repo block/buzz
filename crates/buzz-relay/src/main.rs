@@ -17,6 +17,7 @@ use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
+use buzz_relay::authorization_runtime::{InstalledAuthorizationRuntime, ProviderFreeRuntimeMode};
 use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
@@ -153,16 +154,6 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
-    let usage_interval_secs = usage_metrics_interval_secs();
-    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
-    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
-    metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
-    info!(
-        port = config.metrics_port,
-        idle_timeout_secs = usage_idle_timeout_secs,
-        "Prometheus metrics exporter started"
-    );
-
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
@@ -177,10 +168,6 @@ async fn main() -> anyhow::Result<()> {
     })?;
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
-        // Reader-down at boot must not crash or block the relay; this warn-only
-        // ping is the sole boot-time visibility that the replica is unreachable
-        // (the lazy pool with min_connections=0 dials nothing until first use).
-        db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
     }
@@ -195,6 +182,35 @@ async fn main() -> anyhow::Result<()> {
         info!("Database migrations complete");
     } else {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
+    }
+
+    // Install every authority required by handler-owned canonical admission
+    // before application listeners or background subscribers can start.
+    let authorization_runtime = match config.nip_fi.mode() {
+        ProviderFreeRuntimeMode::Off | ProviderFreeRuntimeMode::DenyProtected => {
+            InstalledAuthorizationRuntime::disabled(&config.nip_fi).map_err(|error| {
+                anyhow::anyhow!(
+                    "provider-free authorization startup failed: {}",
+                    error.code()
+                )
+            })?
+        }
+        ProviderFreeRuntimeMode::Enforce => {
+            InstalledAuthorizationRuntime::production(&config.nip_fi)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "provider-free authorization startup failed: {}",
+                        error.code()
+                    )
+                })?
+        }
+    };
+    if db.has_read_pool() {
+        // This compatibility probe cannot start before migration and the
+        // provider-free startup gate. Enforce mode never reaches it until the
+        // non-substitutable role witness is supplied.
+        db.spawn_read_pool_boot_ping();
     }
 
     if let Err(e) = db.ensure_future_partitions(3).await {
@@ -374,24 +390,6 @@ async fn main() -> anyhow::Result<()> {
     );
     info!("Redis pub/sub connected");
 
-    // Spawn Redis pub/sub subscriber for multi-node fan-out.
-    // Events published by other relay instances are received here and
-    // fanned out to local WebSocket subscribers.
-    let pubsub_for_sub = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
-
     let auth = AuthService::new(config.auth.clone());
 
     // Postgres FTS: the searchable row IS the persisted event row (its
@@ -447,7 +445,7 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialize media storage: {e}"))?;
     info!("Media storage connected");
 
-    let (app_state, audit_shutdown) = AppState::new(
+    let (app_state, audit_shutdown) = AppState::new_with_authorization_runtime(
         config.clone(),
         db,
         redis_health_pool,
@@ -458,8 +456,28 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&workflow_engine),
         relay_keypair,
         media_storage,
+        authorization_runtime,
     );
     let state = Arc::new(app_state);
+
+    // One immutable runtime state is now installed and aggregate readiness is
+    // known before any listener or application background subscriber starts.
+    let usage_interval_secs = usage_metrics_interval_secs();
+    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
+    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
+    info!(
+        port = config.metrics_port,
+        idle_timeout_secs = usage_idle_timeout_secs,
+        "Prometheus metrics exporter started"
+    );
+
+    let pubsub_for_sub = Arc::clone(&state.pubsub);
+    tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
+    let pubsub_for_cache = Arc::clone(&state.pubsub);
+    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
+    let pubsub_for_conn_ctrl = Arc::clone(&state.pubsub);
+    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the

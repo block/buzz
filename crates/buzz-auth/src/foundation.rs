@@ -421,8 +421,17 @@ impl CanonicalFederatedAssertionVerifier {
         validation.set_required_spec_claims(&["exp", "iat", "iss", "aud"]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
-        let decoded = decode::<CanonicalRawJwtClaims>(token, &key, &validation)
-            .map_err(|_| CanonicalVerifierError::InvalidToken)?;
+        let decoded =
+            decode::<CanonicalRawJwtClaims>(token, &key, &validation).map_err(|error| {
+                if matches!(
+                    error.kind(),
+                    jsonwebtoken::errors::ErrorKind::ExpiredSignature
+                ) {
+                    CanonicalVerifierError::Expired
+                } else {
+                    CanonicalVerifierError::InvalidToken
+                }
+            })?;
 
         let subject = canonical_claim_string(&decoded.claims.claims, &self.policy.subject_claim)?;
         let issued_at = canonical_claim_i64(&decoded.claims.claims, "iat")?;
@@ -508,6 +517,9 @@ pub enum CanonicalVerifierError {
     /// JWT lifetime was empty, malformed, or exceeded policy.
     #[error("canonical verifier rejected time bounds")]
     InvalidTimeBounds,
+    /// The signed assertion crossed its exact expiry bound.
+    #[error("canonical verifier assertion expired")]
+    Expired,
 }
 
 impl CanonicalVerifierError {
@@ -523,6 +535,7 @@ impl CanonicalVerifierError {
             Self::InvalidKey => "nip_fi_verifier_invalid_key",
             Self::InvalidClaim => "nip_fi_verifier_invalid_claim",
             Self::InvalidTimeBounds => "nip_fi_verifier_invalid_time_bounds",
+            Self::Expired => "nip_fi_auth_expired",
         }
     }
 }
@@ -778,6 +791,26 @@ impl fmt::Debug for CurrentBindingStatusEvidenceRequest {
 /// the configured resolver implementation and must use its atomic recheck plus
 /// `CanonicalCurrentBindingEvidence::accepts_exact_recheck` before delivery;
 /// an arbitrary constructed tuple is never authority by itself.
+pub trait LocalStatusEvidenceResolver: Send + Sync {
+    /// Storage/read failure returned fail closed to composition.
+    type Error: Send;
+
+    /// Read privacy-safe current status without mutating identity state.
+    fn current_status_evidence<'a>(
+        &'a self,
+        request: &'a CurrentBindingStatusEvidenceRequest,
+    ) -> impl Future<Output = Result<CanonicalCurrentBindingEvidence, Self::Error>> + Send + 'a;
+
+    /// Recheck the exact tuple and return PostgreSQL time from the same read.
+    fn recheck_current_status_evidence<'a>(
+        &'a self,
+        evidence: &'a CanonicalCurrentBindingEvidence,
+    ) -> impl Future<Output = Result<(CanonicalCurrentBindingEvidence, DateTime<Utc>), Self::Error>>
+           + Send
+           + 'a;
+}
+
+/// Complete local resolver used by protected authorization composition.
 pub trait LocalBindingResolver: Send + Sync {
     /// Storage/read failure returned fail closed to composition.
     type Error: Send;
@@ -799,12 +832,39 @@ pub trait LocalBindingResolver: Send + Sync {
     ) -> impl Future<Output = Result<CanonicalCurrentBindingEvidence, Self::Error>> + Send + 'a;
 
     /// Recheck the complete evidence tuple atomically against PostgreSQL
-    /// immediately before presentation. Error, staleness, or any tuple mismatch
-    /// withholds presentation without changing authorization.
+    /// immediately before presentation, returning PostgreSQL's time from that
+    /// same read. Error, staleness, or any tuple mismatch withholds
+    /// presentation without changing authorization.
     fn recheck_current_status_evidence<'a>(
         &'a self,
         evidence: &'a CanonicalCurrentBindingEvidence,
-    ) -> impl Future<Output = Result<CanonicalCurrentBindingEvidence, Self::Error>> + Send + 'a;
+    ) -> impl Future<Output = Result<(CanonicalCurrentBindingEvidence, DateTime<Utc>), Self::Error>>
+           + Send
+           + 'a;
+}
+
+impl<R> LocalStatusEvidenceResolver for R
+where
+    R: LocalBindingResolver,
+{
+    type Error = R::Error;
+
+    fn current_status_evidence<'a>(
+        &'a self,
+        request: &'a CurrentBindingStatusEvidenceRequest,
+    ) -> impl Future<Output = Result<CanonicalCurrentBindingEvidence, Self::Error>> + Send + 'a
+    {
+        LocalBindingResolver::current_status_evidence(self, request)
+    }
+
+    fn recheck_current_status_evidence<'a>(
+        &'a self,
+        evidence: &'a CanonicalCurrentBindingEvidence,
+    ) -> impl Future<Output = Result<(CanonicalCurrentBindingEvidence, DateTime<Utc>), Self::Error>>
+           + Send
+           + 'a {
+        LocalBindingResolver::recheck_current_status_evidence(self, evidence)
+    }
 }
 
 /// Whether a route participates in protected composition.
@@ -3155,6 +3215,7 @@ mod tests {
             CanonicalVerifierError::InvalidKey,
             CanonicalVerifierError::InvalidClaim,
             CanonicalVerifierError::InvalidTimeBounds,
+            CanonicalVerifierError::Expired,
         ];
         assert_eq!(
             verifier_errors

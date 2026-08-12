@@ -16,10 +16,11 @@ use std::{
 use buzz_auth::{
     ActiveLocalBinding, AuthoritativeAuthorizationRecheck, AuthorizationError,
     AuthorizationFinalizationRechecker, AuthorizationFinalizer, AuthorizationInput,
-    AuthorizationReason, DirectEnrollmentProposal, FinalizedAuthContext, LocalAuthorizationPolicy,
-    LocalBindingResolution, PreparedAuthorization, PreparedAuthorizationRecheck, ProofTransport,
-    RouteCapability, VerifiedFederatedAssertion, VerifiedModerationCommandProof,
-    VerifiedNip98InviteClaimProof, VerifiedNostrProof, VerifierPolicyStamp,
+    AuthorizationReason, BindingResolutionRequest, DirectEnrollmentProposal, FinalizedAuthContext,
+    LocalAuthorizationPolicy, LocalBindingResolution, LocalBindingResolver, PreparedAuthorization,
+    PreparedAuthorizationRecheck, ProofTransport, RouteCapability, VerifiedFederatedAssertion,
+    VerifiedModerationCommandProof, VerifiedNip98InviteClaimProof, VerifiedNostrProof,
+    VerifierPolicyStamp,
 };
 use buzz_core::{AuthorizationLeaseFence, CommunityId};
 use chrono::{DateTime, Datelike, Duration as TimeDelta, Utc};
@@ -32,6 +33,7 @@ use crate::authorization_events::{
     AuthorizationEventKind, AuthorizationEventOutcome, AuthorizationEventWriteError,
     AuthorizationReasonCode, NewAuthorizationEvent,
 };
+use crate::authorization_resolver::{AuthorizationResolverError, PostgresLocalBindingResolver};
 use crate::identity_enrollment::{
     actor_fingerprint, execute_authoritative_enrollment_tx, EnrollmentDisposition,
     IdentityEnrollmentError, PreparedDirectEnrollment,
@@ -52,8 +54,21 @@ pub enum AdmissionObjectKind {
     ModerationTarget,
     /// One audio session.
     AudioSession,
+    /// One signed event submitted through a protected mutation route.
+    Event,
+    /// One actor's connection-local binding-status authority.
+    BindingStatus,
     /// One server-resolved invitation.
     Invitation,
+}
+
+/// Whether exact protected authority is being prepared for observation or mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalProtectedIntent {
+    /// Side-effect-free authorization for a protected read or connection admission.
+    Read,
+    /// Authorization whose final transaction advances the protected-object authority.
+    Mutation,
 }
 
 impl AdmissionObjectKind {
@@ -66,6 +81,8 @@ impl AdmissionObjectKind {
             Self::Media => 4,
             Self::ModerationTarget => 5,
             Self::AudioSession => 6,
+            Self::Event => 7,
+            Self::BindingStatus => 8,
             Self::Invitation => 9,
         }
     }
@@ -86,6 +103,32 @@ impl AdmissionObject {
         } else {
             Some(Self { kind, key })
         }
+    }
+
+    /// Bind a protected event mutation to its signed event identifier.
+    pub fn event(event_id: [u8; 32]) -> Option<Self> {
+        Self::new(Self::event_kind(), event_id)
+    }
+
+    /// Bind current-status admission to one server-resolved domain and actor.
+    pub fn binding_status(
+        authorization_domain: CommunityId,
+        actor: nostr::PublicKey,
+    ) -> Option<Self> {
+        if authorization_domain.as_uuid().is_nil() {
+            return None;
+        }
+        Self::new(
+            AdmissionObjectKind::BindingStatus,
+            admission_framed_digest(
+                b"buzz:nip-fi:binding-status-target:v1",
+                &[authorization_domain.as_uuid().as_bytes(), actor.as_bytes()],
+            ),
+        )
+    }
+
+    const fn event_kind() -> AdmissionObjectKind {
+        AdmissionObjectKind::Event
     }
 
     /// Closed object namespace.
@@ -904,6 +947,11 @@ const INVITE_CLAIM_RESULT_TYPE: [u8; 32] = [
     0x1e, 0x04, 0x37, 0xbc, 0x43, 0xd1, 0xe4, 0x71, 0x6d, 0xe6, 0xc2, 0xda, 0x2a, 0x39, 0x4e, 0xcd,
 ];
 
+const INVITE_MINT_RESULT_TYPE: [u8; 32] = [
+    0x51, 0xd2, 0x9d, 0xea, 0x74, 0xaa, 0x04, 0xc6, 0xce, 0x07, 0x68, 0x25, 0x38, 0x12, 0x6e, 0xbb,
+    0x38, 0xb8, 0xd8, 0x92, 0xb1, 0x61, 0xda, 0x39, 0xc9, 0x98, 0x21, 0xca, 0x26, 0x19, 0xe5, 0x83,
+];
+
 const PROTECTED_PUBLICATION_RESULT_TYPE: [u8; 32] = [
     0x07, 0xa2, 0x9a, 0x3f, 0x15, 0x45, 0xf0, 0x3b, 0x1b, 0xda, 0x4e, 0xee, 0x5a, 0x25, 0xf0, 0x45,
     0x3f, 0x58, 0x8d, 0x01, 0x81, 0xf8, 0x49, 0x68, 0x87, 0x94, 0x5f, 0xa6, 0xbf, 0x70, 0x0c, 0x9c,
@@ -912,6 +960,16 @@ const PROTECTED_PUBLICATION_RESULT_TYPE: [u8; 32] = [
 const MODERATION_RESULT_TYPE: [u8; 32] = [
     0x1c, 0x3e, 0xdc, 0x9a, 0x25, 0xcd, 0xb1, 0x43, 0x5f, 0x78, 0x99, 0xa1, 0x8d, 0xf6, 0x70, 0x91,
     0x26, 0xf3, 0x20, 0x4f, 0x10, 0x0c, 0x74, 0x93, 0x63, 0x76, 0xf8, 0x14, 0x0d, 0x7b, 0x3f, 0x79,
+];
+
+const BRIDGE_EVENT_RESULT_TYPE: [u8; 32] = [
+    0x3b, 0x08, 0xcc, 0x43, 0x7a, 0x1e, 0x15, 0x24, 0xc8, 0x9a, 0x86, 0xd0, 0x46, 0xd5, 0x6a, 0x7f,
+    0xe5, 0x93, 0x46, 0x18, 0x32, 0xe8, 0xb6, 0xeb, 0x8d, 0x4d, 0x54, 0xfc, 0x6c, 0x14, 0x1a, 0x46,
+];
+
+const BINDING_STATUS_RESULT_TYPE: [u8; 32] = [
+    0x0f, 0xab, 0xfb, 0xfd, 0x11, 0x7a, 0xe2, 0x8c, 0xe6, 0xe5, 0x02, 0xf5, 0x5a, 0xa9, 0xf1, 0x04,
+    0x0d, 0xcf, 0x8d, 0xc9, 0x9f, 0xb5, 0x67, 0xfc, 0xc3, 0xf9, 0x41, 0x2b, 0x00, 0x3b, 0x86, 0x09,
 ];
 
 /// Versioned type binding for one bounded canonical application result.
@@ -944,6 +1002,14 @@ impl AdmissionApplicationResultSchema {
         }
     }
 
+    /// Stable schema for a credential-free canonical relay-invite mint result.
+    pub const fn invite_mint() -> Self {
+        Self {
+            type_key: INVITE_MINT_RESULT_TYPE,
+            version: 1,
+        }
+    }
+
     /// Stable schema for canonical protected-publication results.
     pub const fn protected_publication() -> Self {
         Self {
@@ -956,6 +1022,22 @@ impl AdmissionApplicationResultSchema {
     pub const fn moderation() -> Self {
         Self {
             type_key: MODERATION_RESULT_TYPE,
+            version: 1,
+        }
+    }
+
+    /// Stable schema for canonical HTTP bridge event results.
+    pub const fn bridge_event() -> Self {
+        Self {
+            type_key: BRIDGE_EVENT_RESULT_TYPE,
+            version: 1,
+        }
+    }
+
+    /// Stable schema for canonical connection binding-status admission.
+    pub const fn binding_status() -> Self {
+        Self {
+            type_key: BINDING_STATUS_RESULT_TYPE,
             version: 1,
         }
     }
@@ -1564,6 +1646,534 @@ pub trait AdmissionVerifierRechecker: Send + Sync {
         &'a self,
         expected: VerifierPolicyStamp,
     ) -> Pin<Box<dyn Future<Output = Result<(), AdmissionCommitError>> + Send + 'a>>;
+}
+
+/// Read-only final rechecker for one exact protected object.
+pub struct PostgresCanonicalProtectedReadRechecker {
+    pool: PgPool,
+    object: AdmissionObject,
+    verifier: Arc<dyn AdmissionVerifierRechecker>,
+}
+
+impl fmt::Debug for PostgresCanonicalProtectedReadRechecker {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PostgresCanonicalProtectedReadRechecker([REDACTED])")
+    }
+}
+
+impl AuthorizationFinalizationRechecker for PostgresCanonicalProtectedReadRechecker {
+    async fn recheck<'a>(
+        &'a self,
+        request: &'a PreparedAuthorizationRecheck,
+    ) -> Result<AuthoritativeAuthorizationRecheck, AuthorizationError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| AuthorizationError::StaleRecheck)?;
+        let observation = authoritative_protected_recheck(
+            &mut transaction,
+            self.verifier.as_ref(),
+            request,
+            self.object,
+            CanonicalProtectedIntent::Read,
+        )
+        .await
+        .map_err(|_| AuthorizationError::StaleRecheck)?;
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| AuthorizationError::StaleRecheck)?;
+        Ok(observation)
+    }
+}
+
+struct CanonicalProtectedFinalRechecker {
+    verifier: Arc<dyn AdmissionVerifierRechecker>,
+}
+
+impl AdmissionFinalRechecker for CanonicalProtectedFinalRechecker {
+    fn authoritative_recheck<'a, 'transaction>(
+        &'a self,
+        transaction: &'a mut Transaction<'transaction, Postgres>,
+        request: &'a PreparedAuthorizationRecheck,
+        object: AdmissionObject,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<AuthoritativeAuthorizationRecheck, AdmissionCommitError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(authoritative_protected_recheck(
+            transaction,
+            self.verifier.as_ref(),
+            request,
+            object,
+            CanonicalProtectedIntent::Mutation,
+        ))
+    }
+}
+
+impl crate::Db {
+    /// Read whether one verifier-sealed trusted-proxy nonce is already committed.
+    ///
+    /// This is an early rejection only; canonical final admission still owns
+    /// the compare-and-insert in the same transaction as its receipt.
+    pub async fn trusted_proxy_nonce_is_committed(
+        &self,
+        authorization_domain: CommunityId,
+        claim: &buzz_auth::TrustedProxyNonceClaim,
+    ) -> Result<bool, AdmissionCommitError> {
+        let committed: bool = sqlx::query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 FROM authorization_proxy_nonce_claims \
+               WHERE authorization_domain=$1 AND claim_kind=$2 AND claim_key=$3)",
+        )
+        .bind(authorization_domain.as_uuid())
+        .bind(AdmissionReplayClaimKind::TrustedProxyNonce.database_code())
+        .bind(claim.claim_key().as_slice())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        Ok(committed)
+    }
+
+    /// Prepare existing-binding authority for one exact protected object.
+    ///
+    /// Preparation is observation-only. Reads must pass the returned value to
+    /// [`AuthorizationFinalizer`] with [`Self::canonical_protected_read_rechecker`].
+    /// Mutations must wrap it in [`AdmissionCommitRequest::existing`] and use
+    /// [`Self::canonical_protected_committer`].
+    pub async fn prepare_canonical_protected_authorization(
+        &self,
+        assertion: VerifiedFederatedAssertion,
+        proof: VerifiedNostrProof,
+        capability: RouteCapability,
+        object: AdmissionObject,
+        intent: CanonicalProtectedIntent,
+    ) -> Result<PreparedAuthorization, AdmissionCommitError> {
+        if !protected_capability_matches(object.kind(), capability, intent)
+            || assertion.authorization_domain() != proof.authorization_domain()
+            || proof.target_fingerprint() != object.key()
+        {
+            return Err(AdmissionCommitError::InvalidRequest);
+        }
+        let domain = assertion.authorization_domain();
+        let proof_expires_at = proof.expires_at();
+        let resolution_request = BindingResolutionRequest::Direct {
+            assertion,
+            proof: proof.clone(),
+            capability,
+        };
+        let resolver = PostgresLocalBindingResolver::new(self.clone());
+        let resolution = resolver
+            .resolve(&resolution_request)
+            .await
+            .map_err(map_resolver_error)?;
+        let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+        let policy = prepare_protected_authorization_policy(
+            &self.pool,
+            domain,
+            object,
+            capability,
+            proof_expires_at,
+            authoritative_now,
+            intent,
+        )
+        .await?;
+        let input = AuthorizationInput::new(domain, Uuid::new_v4(), proof, capability)
+            .map_err(|_| AdmissionCommitError::AuthorizationDenied)?;
+        AuthorizationFinalizer::prepare(input, resolution, policy, authoritative_now)
+            .map_err(|_| AdmissionCommitError::AuthorizationDenied)
+    }
+
+    /// Construct the read-only exact-object rechecker paired with preparation.
+    pub fn canonical_protected_read_rechecker(
+        &self,
+        object: AdmissionObject,
+        verifier: Arc<dyn AdmissionVerifierRechecker>,
+    ) -> PostgresCanonicalProtectedReadRechecker {
+        PostgresCanonicalProtectedReadRechecker {
+            pool: self.pool.clone(),
+            object,
+            verifier,
+        }
+    }
+
+    /// Construct the sole transaction committer for exact protected mutations.
+    pub fn canonical_protected_committer(
+        &self,
+        verifier: Arc<dyn AdmissionVerifierRechecker>,
+    ) -> PostgresCanonicalAdmissionCommitter {
+        PostgresCanonicalAdmissionCommitter::new(
+            self.pool.clone(),
+            Arc::new(CanonicalProtectedFinalRechecker { verifier }),
+        )
+    }
+}
+
+fn map_resolver_error(error: AuthorizationResolverError) -> AdmissionCommitError {
+    match error {
+        AuthorizationResolverError::BindingUnavailable
+        | AuthorizationResolverError::DelegationAuthorityUnavailable
+        | AuthorizationResolverError::PolicyUnavailable => {
+            AdmissionCommitError::AuthorizationDenied
+        }
+        AuthorizationResolverError::Database(_)
+        | AuthorizationResolverError::ContractUnavailable => {
+            AdmissionCommitError::DependencyUnavailable
+        }
+    }
+}
+
+/// Return whether one closed protected-object namespace admits a route capability.
+///
+/// This is the canonical provider-neutral matrix used by preparation and by
+/// cross-route conformance tests; transport adapters must not maintain copies.
+pub fn protected_capability_matches(
+    kind: AdmissionObjectKind,
+    capability: RouteCapability,
+    intent: CanonicalProtectedIntent,
+) -> bool {
+    match (kind, intent) {
+        (AdmissionObjectKind::Repository, CanonicalProtectedIntent::Read) => matches!(
+            capability,
+            RouteCapability::ReposRead | RouteCapability::GitRead | RouteCapability::GitStream
+        ),
+        (AdmissionObjectKind::Repository, CanonicalProtectedIntent::Mutation) => matches!(
+            capability,
+            RouteCapability::ReposWrite | RouteCapability::GitWrite
+        ),
+        (AdmissionObjectKind::Media, CanonicalProtectedIntent::Read) => {
+            capability == RouteCapability::MediaRead
+        }
+        (AdmissionObjectKind::Media, CanonicalProtectedIntent::Mutation) => {
+            capability == RouteCapability::MediaWrite
+        }
+        (AdmissionObjectKind::ModerationTarget, _) => capability == RouteCapability::Moderation,
+        (AdmissionObjectKind::AudioSession, CanonicalProtectedIntent::Read) => matches!(
+            capability,
+            RouteCapability::AudioJoin | RouteCapability::AudioMedia
+        ),
+        (AdmissionObjectKind::Event, CanonicalProtectedIntent::Mutation) => {
+            capability == RouteCapability::MessagesWrite
+        }
+        (AdmissionObjectKind::BindingStatus, CanonicalProtectedIntent::Mutation) => {
+            capability == RouteCapability::BindingStatus
+        }
+        (AdmissionObjectKind::Invitation, CanonicalProtectedIntent::Mutation) => {
+            capability == RouteCapability::InviteMint
+        }
+        (AdmissionObjectKind::Domain, CanonicalProtectedIntent::Read) => matches!(
+            capability,
+            RouteCapability::MessagesRead
+                | RouteCapability::MessagesWrite
+                | RouteCapability::Discovery
+        ),
+        (AdmissionObjectKind::Channel, CanonicalProtectedIntent::Read) => matches!(
+            capability,
+            RouteCapability::ChannelsRead
+                | RouteCapability::ChannelsWrite
+                | RouteCapability::MessagesRead
+                | RouteCapability::MessagesWrite
+        ),
+        _ => false,
+    }
+}
+
+async fn prepare_protected_authorization_policy(
+    pool: &PgPool,
+    domain: CommunityId,
+    object: AdmissionObject,
+    capability: RouteCapability,
+    proof_expires_at: DateTime<Utc>,
+    authoritative_now: DateTime<Utc>,
+    intent: CanonicalProtectedIntent,
+) -> Result<LocalAuthorizationPolicy, AdmissionCommitError> {
+    let policy = sqlx::query(
+        "SELECT policy_revision, expires_at FROM identity_enrollment_policies \
+         WHERE community_id=$1 AND effective_at <= $2 \
+           AND (expires_at IS NULL OR $2 < expires_at) \
+         ORDER BY policy_revision DESC LIMIT 1",
+    )
+    .bind(domain.as_uuid())
+    .bind(authoritative_now)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+    let policy_revision = u64::try_from(
+        policy
+            .try_get::<i64, _>("policy_revision")
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+    )
+    .ok()
+    .filter(|value| *value > 0)
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let policy_expires_at: Option<DateTime<Utc>> = policy
+        .try_get("expires_at")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation: i64 = sqlx::query_scalar(
+        "SELECT current_generation FROM authorization_invalidation_domains WHERE community_id=$1",
+    )
+    .bind(domain.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?
+    .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+    let invalidation_generation = u64::try_from(invalidation_generation)
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_epoch = read_protected_epoch_pool(pool, domain, object).await?;
+    let lease_id = Uuid::new_v4();
+    let (authority_epoch, fence) =
+        prepared_object_authority(domain, object, lease_id, current_epoch, intent)?;
+    let mut expires_at = proof_expires_at.min(authoritative_now + TimeDelta::minutes(10));
+    if let Some(policy_expires_at) = policy_expires_at {
+        expires_at = expires_at.min(policy_expires_at);
+    }
+    if expires_at <= authoritative_now {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    LocalAuthorizationPolicy::from_database(
+        domain,
+        lease_id,
+        policy_revision,
+        invalidation_generation,
+        authority_epoch,
+        fence,
+        capability,
+        expires_at,
+        None,
+        None,
+    )
+    .ok_or(AdmissionCommitError::DependencyUnavailable)
+}
+
+async fn authoritative_protected_recheck(
+    transaction: &mut Transaction<'_, Postgres>,
+    verifier: &dyn AdmissionVerifierRechecker,
+    request: &PreparedAuthorizationRecheck,
+    object: AdmissionObject,
+    intent: CanonicalProtectedIntent,
+) -> Result<AuthoritativeAuthorizationRecheck, AdmissionCommitError> {
+    let snapshot = request.lease_dependencies();
+    let (lease_id, domain) = snapshot.identity();
+    let (capability, actor, owner) = snapshot.authority();
+    let (binding_id, binding_version) = snapshot.binding();
+    let (request_fingerprint, target, _, _) = snapshot.request_binding();
+    let (policy_revision, invalidation_generation, authority_epoch) =
+        snapshot.dependency_versions();
+    if !protected_capability_matches(object.kind(), capability, intent)
+        || target != object.key()
+        || owner.is_some()
+        || request_fingerprint == &[0; 32]
+    {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    let verifier_stamp = request
+        .verifier_stamp()
+        .ok_or(AdmissionCommitError::AuthorizationDenied)?;
+    verifier.recheck(verifier_stamp).await?;
+
+    let binding_current: Option<bool> = sqlx::query_scalar(
+        "SELECT binding_state=1 \
+                AND (expires_at IS NULL OR transaction_timestamp() < expires_at) \
+         FROM identity_bindings \
+         WHERE community_id=$1 AND binding_id=$2 AND binding_version=$3 \
+           AND event_author_pubkey=$4 FOR SHARE",
+    )
+    .bind(domain.as_uuid())
+    .bind(binding_id)
+    .bind(to_i64(binding_version)?)
+    .bind(actor.to_bytes().as_slice())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    sqlx::query("LOCK TABLE identity_enrollment_policies IN SHARE MODE")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_policy: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(policy_revision) FROM identity_enrollment_policies \
+         WHERE community_id=$1 AND effective_at <= transaction_timestamp() \
+           AND (expires_at IS NULL OR transaction_timestamp() < expires_at)",
+    )
+    .bind(domain.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_generation: Option<i64> = sqlx::query_scalar(
+        "SELECT current_generation FROM authorization_invalidation_domains \
+         WHERE community_id=$1 FOR SHARE",
+    )
+    .bind(domain.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let current_epoch = read_protected_epoch_transaction(transaction, domain, object).await?;
+    let (expected_epoch, expected_fence) =
+        prepared_object_authority(domain, object, lease_id, current_epoch, intent)?;
+    if binding_current != Some(true)
+        || current_policy != Some(to_i64(policy_revision)?)
+        || current_generation != Some(to_i64_allow_zero(invalidation_generation)?)
+        || expected_epoch != authority_epoch
+        || expected_fence != snapshot.fence()
+    {
+        return Err(AdmissionCommitError::AuthorizationDenied);
+    }
+    let authoritative_now: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    Ok(AuthoritativeAuthorizationRecheck::from_authoritative_parts(
+        snapshot,
+        Some(verifier_stamp),
+        authoritative_now,
+    ))
+}
+
+async fn read_protected_epoch_pool(
+    pool: &PgPool,
+    domain: CommunityId,
+    object: AdmissionObject,
+) -> Result<Option<(u64, AuthorizationLeaseFence)>, AdmissionCommitError> {
+    let row = sqlx::query(
+        "SELECT \
+           (SELECT authority_epoch FROM authorization_authority_epochs \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3) AS authority_epoch, \
+           (SELECT fence FROM authorization_authority_epochs \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3) AS fence, \
+           (SELECT authority_epoch FROM protected_object_authority \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3) AS protected_epoch, \
+           (SELECT fence FROM protected_object_authority \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3) AS protected_fence",
+    )
+    .bind(domain.as_uuid())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    parse_protected_epoch(Some(row))
+}
+
+async fn read_protected_epoch_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    domain: CommunityId,
+    object: AdmissionObject,
+) -> Result<Option<(u64, AuthorizationLeaseFence)>, AdmissionCommitError> {
+    let row = sqlx::query(
+        "SELECT \
+           (SELECT authority_epoch FROM authorization_authority_epochs \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR UPDATE) \
+             AS authority_epoch, \
+           (SELECT fence FROM authorization_authority_epochs \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR UPDATE) AS fence, \
+           (SELECT authority_epoch FROM protected_object_authority \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR UPDATE) \
+             AS protected_epoch, \
+           (SELECT fence FROM protected_object_authority \
+             WHERE community_id=$1 AND object_kind=$2 AND object_key=$3 FOR UPDATE) \
+             AS protected_fence",
+    )
+    .bind(domain.as_uuid())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    parse_protected_epoch(Some(row))
+}
+
+fn parse_protected_epoch(
+    row: Option<sqlx::postgres::PgRow>,
+) -> Result<Option<(u64, AuthorizationLeaseFence)>, AdmissionCommitError> {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let epoch = row
+        .try_get::<Option<i64>, _>("authority_epoch")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let fence = row
+        .try_get::<Option<Vec<u8>>, _>("fence")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let protected_epoch = row
+        .try_get::<Option<i64>, _>("protected_epoch")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    let protected_fence = row
+        .try_get::<Option<Vec<u8>>, _>("protected_fence")
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+    match (epoch, fence, protected_epoch, protected_fence) {
+        (None, None, None, None) => Ok(None),
+        (Some(epoch), Some(fence), Some(protected_epoch), Some(protected_fence))
+            if epoch == protected_epoch && fence == protected_fence =>
+        {
+            let epoch = u64::try_from(epoch)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+            let fence = AuthorizationLeaseFence::from_bytes(
+                fence
+                    .try_into()
+                    .map_err(|_| AdmissionCommitError::DependencyUnavailable)?,
+            )
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            Ok(Some((epoch, fence)))
+        }
+        _ => Err(AdmissionCommitError::DependencyUnavailable),
+    }
+}
+
+fn prepared_object_authority(
+    domain: CommunityId,
+    object: AdmissionObject,
+    lease_id: Uuid,
+    current: Option<(u64, AuthorizationLeaseFence)>,
+    intent: CanonicalProtectedIntent,
+) -> Result<(u64, AuthorizationLeaseFence), AdmissionCommitError> {
+    match (current, intent) {
+        (Some((epoch, fence)), CanonicalProtectedIntent::Read) => Ok((epoch, fence)),
+        (None, CanonicalProtectedIntent::Read) => {
+            Ok((1, protected_object_fence(domain, object, lease_id, 1)?))
+        }
+        (current, CanonicalProtectedIntent::Mutation) => {
+            let current_epoch = match current {
+                Some((epoch, _fence)) => epoch,
+                None => 0,
+            };
+            let epoch = current_epoch
+                .checked_add(1)
+                .ok_or(AdmissionCommitError::DependencyUnavailable)?;
+            Ok((
+                epoch,
+                protected_object_fence(domain, object, lease_id, epoch)?,
+            ))
+        }
+    }
+}
+
+fn protected_object_fence(
+    domain: CommunityId,
+    object: AdmissionObject,
+    lease_id: Uuid,
+    epoch: u64,
+) -> Result<AuthorizationLeaseFence, AdmissionCommitError> {
+    let digest = admission_framed_digest(
+        b"buzz:canonical-protected-object-fence:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            &object.kind().database_code().to_be_bytes(),
+            object.key(),
+            lease_id.as_bytes(),
+            &epoch.to_be_bytes(),
+        ],
+    );
+    AuthorizationLeaseFence::from_bytes(digest)
+        .map_err(|_| AdmissionCommitError::DependencyUnavailable)
 }
 
 /// Server-resolved invitation resource accepted by canonical admission.
@@ -3615,7 +4225,7 @@ fn reason_code(reason: AuthorizationReason) -> i16 {
     }
 }
 
-fn capability_code(capability: RouteCapability) -> i16 {
+pub(crate) fn capability_code(capability: RouteCapability) -> i16 {
     match capability {
         RouteCapability::MessagesRead => 1,
         RouteCapability::MessagesWrite => 2,
@@ -3855,13 +4465,13 @@ mod tests {
 
     const TEST_VERIFIER_ISSUER: &str = "https://verifier.example";
     const TEST_VERIFIER_AUDIENCE: &str = "buzz-relay-test";
-
     fn loopback_test_database_url() -> String {
         format!(
             "{}://{}:{}@{}:{}/{}",
             "postgres", "buzz", "buzz_dev", "localhost", 5432, "buzz"
         )
     }
+
     fn base64_url(input: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";

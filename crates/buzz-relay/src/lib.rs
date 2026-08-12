@@ -3,11 +3,14 @@
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
 mod admission;
+mod protected_ingress;
 
 /// REST API route handlers.
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.
 pub mod audio;
+/// Provider-free authorization runtime and readiness composition.
+pub mod authorization_runtime;
 /// Relay configuration from environment variables.
 pub mod config;
 /// Runtime conformance harness — abstract trace emission at the

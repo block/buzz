@@ -8,7 +8,7 @@
 use std::{
     fmt,
     future::Future,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
     str::FromStr,
     time::Duration,
@@ -20,15 +20,21 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::evidence::{proof_transport_code, SealedTransportEvidence, TrustedProxyNonceClaim};
+use crate::evidence::{
+    proof_transport_code, AssertionTransportProfile, AuthenticatedClientPeer,
+    SealedTransportEvidence, TrustedProxyNonceClaim,
+};
 use crate::ProofTransport;
 
 /// Exact NIP-FI assertion header name.
 pub const ASSERTION_HEADER_NAME: &str = "nostr-federated-identity";
 /// Exact NIP-FI trusted-proxy provenance header name.
 pub const PROVENANCE_HEADER_NAME: &str = "nostr-federated-identity-provenance";
+/// Exact authenticated end-client peer header name for v2 provenance.
+pub const CLIENT_PEER_HEADER_NAME: &str = "nostr-federated-identity-client-peer";
 
-const MAC_DOMAIN: &[u8] = b"NIP-FI-PROXY-1";
+const MAC_DOMAIN_V1: &[u8] = b"NIP-FI-PROXY-1";
+const MAC_DOMAIN_V2: &[u8] = b"NIP-FI-PROXY-2";
 const MIN_SECRET_BYTES: usize = 32;
 const MAX_SECRET_BYTES: usize = 4096;
 const MAX_ACTIVE_SECRETS: usize = 4;
@@ -163,6 +169,9 @@ pub enum TrustedProxyError {
     /// Required provenance field was absent; direct ingress cannot fall back.
     #[error("trusted-proxy provenance is missing")]
     MissingProvenance,
+    /// V2 provenance did not include the proxy-authenticated end-client peer.
+    #[error("trusted-proxy client peer is missing")]
+    MissingClientPeer,
     /// A protected field was repeated, combined, or ambiguously encoded.
     #[error("trusted-proxy header is ambiguous")]
     AmbiguousHeader,
@@ -172,6 +181,9 @@ pub enum TrustedProxyError {
     /// Provenance framing, timestamp, nonce, or MAC was malformed.
     #[error("trusted-proxy provenance is malformed")]
     MalformedProvenance,
+    /// End-client peer framing was non-canonical or malformed.
+    #[error("trusted-proxy client peer is malformed")]
+    MalformedClientPeer,
     /// Server-resolved request coordinates were not canonical.
     #[error("trusted-proxy request binding is invalid")]
     InvalidRequest,
@@ -199,9 +211,11 @@ impl TrustedProxyError {
             Self::InvalidConfiguration => "nip_fi_proxy_invalid_configuration",
             Self::MissingAssertion => "nip_fi_proxy_missing_assertion",
             Self::MissingProvenance => "nip_fi_proxy_missing_provenance",
+            Self::MissingClientPeer => "nip_fi_proxy_missing_client_peer",
             Self::AmbiguousHeader => "nip_fi_proxy_ambiguous_header",
             Self::MalformedAssertion => "nip_fi_proxy_malformed_assertion",
             Self::MalformedProvenance => "nip_fi_proxy_malformed_provenance",
+            Self::MalformedClientPeer => "nip_fi_proxy_malformed_client_peer",
             Self::InvalidRequest => "nip_fi_proxy_invalid_request",
             Self::Expired => "nip_fi_proxy_expired",
             Self::FutureDated => "nip_fi_proxy_future_dated",
@@ -212,7 +226,11 @@ impl TrustedProxyError {
     }
 }
 
-/// Verifies `trusted-proxy-hmac-v1` provenance under a finite secret set.
+/// Verifies trusted-proxy HMAC v1/v2 provenance under a finite secret set.
+///
+/// V2 additionally authenticates a canonical end-client IP address and seals it
+/// as an opaque admission key. Callers never need to retain or key on the raw
+/// address.
 pub struct TrustedProxyProvenanceVerifier {
     active_secrets: Vec<Box<[u8]>>,
     maximum_provenance_age_seconds: u64,
@@ -303,8 +321,27 @@ impl TrustedProxyProvenanceVerifier {
         )?;
         let assertion = parse_bearer_assertion(assertion_field)?;
         let parsed = self.parse_provenance(provenance_field, now)?;
+        let authenticated_client_peer = match parsed.version {
+            ProvenanceVersion::V1 => None,
+            ProvenanceVersion::V2 => {
+                let field = exact_header(
+                    headers,
+                    CLIENT_PEER_HEADER_NAME,
+                    TrustedProxyError::MissingClientPeer,
+                    64,
+                )?;
+                Some(parse_client_peer(field)?)
+            }
+        };
         let assertion_digest: [u8; 32] = Sha256::digest(assertion.as_bytes()).into();
-        let mac_input = mac_input(parsed.timestamp, &parsed.nonce, &assertion_digest, request);
+        let mac_input = mac_input(
+            parsed.version,
+            parsed.timestamp,
+            &parsed.nonce,
+            &assertion_digest,
+            request,
+            authenticated_client_peer.as_ref(),
+        );
         let mut authenticated = 0_u8;
         for secret in &self.active_secrets {
             let mut mac = <ProvenanceMac as KeyInit>::new_from_slice(secret)
@@ -315,6 +352,10 @@ impl TrustedProxyProvenanceVerifier {
         if authenticated != 1 {
             return Err(TrustedProxyError::InvalidMac);
         }
+        let authenticated_client_peer = authenticated_client_peer
+            .as_ref()
+            .map(|peer| self.seal_client_peer(peer))
+            .transpose()?;
 
         let claim_key = framed_digest(b"buzz:nip-fi:trusted-proxy-nonce:v1", &[&parsed.nonce]);
         let claim = TrustedProxyNonceClaim::new(claim_key, parsed.expires_at);
@@ -338,6 +379,29 @@ impl TrustedProxyProvenanceVerifier {
             request.transport,
             parsed.expires_at,
             claim,
+            parsed.version.profile(),
+            authenticated_client_peer,
+        ))
+    }
+
+    fn seal_client_peer(
+        &self,
+        peer: &ParsedClientPeer,
+    ) -> Result<AuthenticatedClientPeer, TrustedProxyError> {
+        // The first configured secret is the stable admission-key secret for
+        // the active rotation window, regardless of which accepted secret
+        // authenticated this request. Rotation may reset only finite counters.
+        let secret = self
+            .active_secrets
+            .first()
+            .ok_or(TrustedProxyError::InvalidConfiguration)?;
+        let mut mac = <ProvenanceMac as KeyInit>::new_from_slice(secret)
+            .map_err(|_| TrustedProxyError::InvalidConfiguration)?;
+        mac.update(b"buzz:nip-fi:authenticated-client-peer:v1");
+        mac.update(&(peer.canonical.len() as u64).to_be_bytes());
+        mac.update(peer.canonical.as_bytes());
+        Ok(AuthenticatedClientPeer::new(
+            mac.finalize().into_bytes().into(),
         ))
     }
 
@@ -349,9 +413,11 @@ impl TrustedProxyProvenanceVerifier {
         let field =
             std::str::from_utf8(field).map_err(|_| TrustedProxyError::MalformedProvenance)?;
         let mut components = field.split('.');
-        if components.next() != Some("v1") {
-            return Err(TrustedProxyError::MalformedProvenance);
-        }
+        let version = match components.next() {
+            Some("v1") => ProvenanceVersion::V1,
+            Some("v2") => ProvenanceVersion::V2,
+            _ => return Err(TrustedProxyError::MalformedProvenance),
+        };
         let timestamp_text = components
             .next()
             .ok_or(TrustedProxyError::MalformedProvenance)?;
@@ -393,6 +459,7 @@ impl TrustedProxyProvenanceVerifier {
             .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
             .ok_or(TrustedProxyError::MalformedProvenance)?;
         Ok(ParsedProvenance {
+            version,
             timestamp,
             nonce,
             mac,
@@ -408,10 +475,55 @@ impl fmt::Debug for TrustedProxyProvenanceVerifier {
 }
 
 struct ParsedProvenance {
+    version: ProvenanceVersion,
     timestamp: u64,
     nonce: Vec<u8>,
     mac: [u8; 32],
     expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy)]
+enum ProvenanceVersion {
+    V1,
+    V2,
+}
+
+impl ProvenanceVersion {
+    const fn profile(self) -> AssertionTransportProfile {
+        match self {
+            Self::V1 => AssertionTransportProfile::TrustedProxyHmacV1,
+            Self::V2 => AssertionTransportProfile::TrustedProxyHmacV2,
+        }
+    }
+
+    const fn mac_domain(self) -> &'static [u8] {
+        match self {
+            Self::V1 => MAC_DOMAIN_V1,
+            Self::V2 => MAC_DOMAIN_V2,
+        }
+    }
+}
+
+struct ParsedClientPeer {
+    canonical: Box<str>,
+}
+
+fn parse_client_peer(field: &[u8]) -> Result<ParsedClientPeer, TrustedProxyError> {
+    let text = std::str::from_utf8(field).map_err(|_| TrustedProxyError::MalformedClientPeer)?;
+    let parsed = IpAddr::from_str(text).map_err(|_| TrustedProxyError::MalformedClientPeer)?;
+    let canonical = match parsed {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or(IpAddr::V6(address), IpAddr::V4),
+        address => address,
+    }
+    .to_string();
+    if canonical != text {
+        return Err(TrustedProxyError::MalformedClientPeer);
+    }
+    Ok(ParsedClientPeer {
+        canonical: canonical.into_boxed_str(),
+    })
 }
 
 fn exact_header<'a>(
@@ -588,14 +700,20 @@ fn canonical_unsigned_decimal(value: &str) -> bool {
 }
 
 fn mac_input(
+    version: ProvenanceVersion,
     timestamp: u64,
     nonce: &[u8],
     assertion_digest: &[u8; 32],
     request: &TrustedProxyRequest,
+    authenticated_client_peer: Option<&ParsedClientPeer>,
 ) -> Vec<u8> {
+    let mac_domain = version.mac_domain();
+    let peer_bytes = authenticated_client_peer
+        .map(|peer| peer.canonical.as_bytes())
+        .unwrap_or_default();
     let mut input = Vec::with_capacity(
-        MAC_DOMAIN.len()
-            + 8 * 9
+        mac_domain.len()
+            + 8 * 10
             + 8
             + 1
             + nonce.len()
@@ -604,9 +722,10 @@ fn mac_input(
             + request.method.len()
             + request.authority.len()
             + request.path_and_query.len()
-            + request.body_digest.len(),
+            + request.body_digest.len()
+            + peer_bytes.len(),
     );
-    input.extend_from_slice(MAC_DOMAIN);
+    input.extend_from_slice(mac_domain);
     append_length_prefixed(&mut input, &timestamp.to_be_bytes());
     append_length_prefixed(&mut input, nonce);
     append_length_prefixed(&mut input, assertion_digest);
@@ -619,6 +738,9 @@ fn mac_input(
     append_length_prefixed(&mut input, request.path_and_query.as_bytes());
     append_length_prefixed(&mut input, &request.body_digest);
     append_length_prefixed(&mut input, &[proof_transport_code(request.transport)]);
+    if matches!(version, ProvenanceVersion::V2) {
+        append_length_prefixed(&mut input, peer_bytes);
+    }
     input
 }
 

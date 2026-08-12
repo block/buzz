@@ -31,6 +31,8 @@ pub mod authorization_restore;
 pub mod authorization_version;
 /// Channel and membership persistence.
 pub mod channel;
+/// Crash-recoverable current-binding status delivery journal.
+pub mod client_status_delivery;
 /// Direct message channel persistence.
 pub mod dm;
 /// Database error types.

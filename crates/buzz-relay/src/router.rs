@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{ConnectInfo, FromRequest, MatchedPath, State, WebSocketUpgrade},
+    extract::{FromRequest, MatchedPath, State, WebSocketUpgrade},
     http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json},
@@ -23,16 +23,41 @@ use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
 use crate::api;
 use crate::audio;
+use crate::authorization_runtime::ProviderFreeRuntimeMode;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::state::AppState;
+
+struct DatabaseTrustedProxyReplay<'a>(&'a buzz_db::Db);
+
+impl buzz_auth::TrustedProxyNonceReplayReader for DatabaseTrustedProxyReplay<'_> {
+    fn is_committed<'a>(
+        &'a self,
+        authorization_domain: buzz_core::CommunityId,
+        claim: &'a buzz_auth::TrustedProxyNonceClaim,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<bool, buzz_auth::TrustedProxyReplayReadError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.0
+                .trusted_proxy_nonce_is_committed(authorization_domain, claim)
+                .await
+                .map_err(|_| buzz_auth::TrustedProxyReplayReadError)
+        })
+    }
+}
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
 /// Pure Nostr protocol: WebSocket (NIP-01), HTTP bridge (NIP-98), media (Blossom),
 /// git (smart HTTP), NIP-05, and health probes.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    route_policy::assert_startup_inventory();
     let media_body_limit = state
         .config
         .media
@@ -194,35 +219,82 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // before its handler can perform reads or writes.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            enforce_corporate_identity_route_inventory,
+            enforce_nip_fi_route_inventory,
         ))
+        .layer(middleware::from_fn(attach_machine_error_code))
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
 }
 
-async fn enforce_corporate_identity_route_inventory(
+async fn attach_machine_error_code(request: Request<Body>, next: Next) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let code = crate::api::ApiErrorCode::for_status(response.status()).as_str();
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-buzz-error-code"),
+            axum::http::HeaderValue::from_static(code),
+        );
+    }
+    response
+}
+
+async fn enforce_nip_fi_route_inventory(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
     next: Next,
 ) -> axum::response::Response {
-    enforce_route_inventory_for_requirement(state.config.corporate_identity.require, request, next)
-        .await
+    enforce_route_inventory_for_runtime(
+        state.authorization_runtime.mode(),
+        state.authorization_runtime.is_ready(),
+        request,
+        next,
+    )
+    .await
 }
 
-async fn enforce_route_inventory_for_requirement(
-    corporate_identity_required: bool,
+#[cfg(test)]
+async fn enforce_route_inventory_for_mode(
+    mode: ProviderFreeRuntimeMode,
     request: Request<Body>,
     next: Next,
 ) -> axum::response::Response {
-    if !corporate_identity_required {
+    enforce_route_inventory_for_runtime(mode, true, request, next).await
+}
+
+async fn enforce_route_inventory_for_runtime(
+    mode: ProviderFreeRuntimeMode,
+    runtime_ready: bool,
+    request: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    if mode == ProviderFreeRuntimeMode::Off {
         return next.run(request).await;
     }
     let matched_path = request.extensions().get::<MatchedPath>();
     let policy = matched_path
         .and_then(|path| route_policy::classify_matched_route(request.method(), path.as_str()));
-    if policy.is_some() {
-        return next.run(request).await;
+    if let Some(policy) = policy {
+        if matches!(
+            policy,
+            route_policy::CorporateIdentityRoutePolicy::Exempt(_)
+        ) {
+            return next.run(request).await;
+        }
+        return match mode {
+            ProviderFreeRuntimeMode::Off => next.run(request).await,
+            ProviderFreeRuntimeMode::Enforce if runtime_ready => next.run(request).await,
+            ProviderFreeRuntimeMode::Enforce => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "protected route unavailable: canonical authority is not ready",
+            )
+                .into_response(),
+            ProviderFreeRuntimeMode::DenyProtected => (
+                StatusCode::FORBIDDEN,
+                "protected route denied by emergency policy",
+            )
+                .into_response(),
+        };
     }
     if matched_path.is_some_and(|path| route_policy::is_known_matched_path(path.as_str())) {
         // Axum's method fallback also runs route layers. Return its semantic
@@ -240,13 +312,14 @@ async fn enforce_route_inventory_for_requirement(
     tracing::error!(
         method = %request.method(),
         matched_path = matched_path.map(|path| path.as_str()).unwrap_or("<missing>"),
-        "rejecting route missing corporate identity policy classification"
+        "rejecting route missing provider-free authorization classification"
     );
-    (
+    crate::api::coded_api_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "route unavailable: identity policy is not configured",
+        crate::api::ApiErrorCode::DependencyUnavailable,
+        "route unavailable: authorization policy is not configured",
     )
-        .into_response()
+    .into_response()
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -254,7 +327,7 @@ fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tr
 }
 
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
-    let corporate_identity_policy = request
+    let authorization_policy = request
         .extensions()
         .get::<MatchedPath>()
         .and_then(|path| route_policy::classify_matched_route(request.method(), path.as_str()))
@@ -265,7 +338,7 @@ fn make_http_span(request: &Request<Body>) -> tracing::Span {
         "http.request",
         otel.kind = "server",
         http.request.method = %request.method(),
-        buzz.corporate_identity.route_policy = corporate_identity_policy,
+        buzz.nip_fi.route_policy = authorization_policy,
     )
 }
 
@@ -315,12 +388,6 @@ async fn nip11_or_ws_handler(
     headers: HeaderMap,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
-    let addr = req
-        .extensions()
-        .get::<ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0)
-        .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
-
     let accept = headers
         .get("accept")
         .and_then(|v| v.to_str().ok())
@@ -374,10 +441,70 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
-    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
-        &headers,
-        &state.config.corporate_identity,
-    );
+    let corporate_identity_jwt = if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        None
+    } else {
+        crate::corporate_identity::identity_jwt_from_headers(
+            &headers,
+            &state.config.corporate_identity,
+        )
+    };
+
+    let canonical_transport_evidence = if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce
+    {
+        let verifier = match state.authorization_runtime.trusted_proxy_verifier() {
+            Ok(verifier) => verifier,
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "relay: canonical transport authority is unavailable",
+                )
+                    .into_response();
+            }
+        };
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map_or("/", axum::http::uri::PathAndQuery::as_str);
+        let request = match buzz_auth::TrustedProxyRequest::from_server_request(
+            tenant.community(),
+            buzz_auth::ProofTransport::Nip42,
+            req.method().as_str(),
+            raw_host,
+            path_and_query,
+            &[],
+        ) {
+            Ok(request) => request,
+            Err(_) => return StatusCode::FORBIDDEN.into_response(),
+        };
+        let mut fields = Vec::new();
+        for name in headers.keys() {
+            for value in headers.get_all(name).iter() {
+                fields.push(buzz_auth::HttpHeaderField::new(
+                    name.as_str(),
+                    value.as_bytes(),
+                ));
+            }
+        }
+        match verifier
+            .verify(
+                &fields,
+                &request,
+                chrono::Utc::now(),
+                &DatabaseTrustedProxyReplay(&state.db),
+            )
+            .await
+        {
+            Ok(evidence) if evidence.authenticated_client_peer().is_some() => Some(evidence),
+            Ok(_) => return StatusCode::FORBIDDEN.into_response(),
+            Err(buzz_auth::TrustedProxyError::ReplayUnavailable) => {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            Err(_) => return StatusCode::FORBIDDEN.into_response(),
+        }
+    } else {
+        None
+    };
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
@@ -393,7 +520,13 @@ async fn nip11_or_ws_handler(
             }
             limit_relay_websocket(ws, max_frame_bytes)
                 .on_upgrade(move |socket| {
-                    handle_connection(socket, state, addr, tenant, corporate_identity_jwt)
+                    handle_connection(
+                        socket,
+                        state,
+                        tenant,
+                        corporate_identity_jwt,
+                        canonical_transport_evidence,
+                    )
                 })
                 .into_response()
         }
@@ -433,7 +566,7 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
+/// Readiness probe — checks shutdown, authorization, Postgres, and Redis.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use std::time::Duration;
 
@@ -441,6 +574,17 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "shutting_down"})),
+        )
+            .into_response();
+    }
+
+    if !state.authorization_runtime.is_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "authorization_runtime": "unavailable"
+            })),
         )
             .into_response();
     }
@@ -474,6 +618,10 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "service": "buzz-relay",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": uptime_secs,
+        "authorization_runtime": {
+            "mode": format!("{:?}", state.authorization_runtime.mode()),
+            "ready": state.authorization_runtime.is_ready(),
+        },
     }))
 }
 
@@ -533,26 +681,81 @@ mod tests {
 
     use super::*;
 
-    async fn require_route_inventory(
+    async fn enforce_provider_free_inventory(
         request: Request<Body>,
         next: Next,
     ) -> axum::response::Response {
-        enforce_route_inventory_for_requirement(true, request, next).await
+        enforce_route_inventory_for_mode(ProviderFreeRuntimeMode::Enforce, request, next).await
+    }
+
+    async fn off_provider_free_inventory(
+        request: Request<Body>,
+        next: Next,
+    ) -> axum::response::Response {
+        enforce_route_inventory_for_mode(ProviderFreeRuntimeMode::Off, request, next).await
+    }
+
+    async fn deny_provider_free_inventory(
+        request: Request<Body>,
+        next: Next,
+    ) -> axum::response::Response {
+        enforce_route_inventory_for_mode(ProviderFreeRuntimeMode::DenyProtected, request, next)
+            .await
+    }
+
+    async fn unavailable_provider_free_inventory(
+        request: Request<Body>,
+        next: Next,
+    ) -> axum::response::Response {
+        enforce_route_inventory_for_runtime(ProviderFreeRuntimeMode::Enforce, false, request, next)
+            .await
     }
 
     #[tokio::test]
-    async fn route_inventory_preserves_405_and_rejects_new_unclassified_handlers() {
+    async fn healthy_enforce_reaches_handlers_and_preserves_public_exemptions() {
         let app = Router::new()
             .route("/events", post(|| async { StatusCode::OK }))
+            .route("/api/invites", post(|| async { StatusCode::OK }))
+            .route("/operator/communities", get(|| async { StatusCode::OK }))
+            .route("/api/join-policy", get(|| async { StatusCode::OK }))
             .route("/new-unclassified-route", get(|| async { StatusCode::OK }))
-            .route_layer(middleware::from_fn(require_route_inventory));
+            .route_layer(middleware::from_fn(enforce_provider_free_inventory));
 
-        let allowed = app
+        let event = app
             .clone()
             .oneshot(Request::post("/events").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(event.status(), StatusCode::OK);
+
+        let relay_invite = app
+            .clone()
+            .oneshot(Request::post("/api/invites").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(relay_invite.status(), StatusCode::OK);
+
+        let operator = app
+            .clone()
+            .oneshot(
+                Request::get("/operator/communities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.status(), StatusCode::OK);
+
+        let public_policy = app
+            .clone()
+            .oneshot(
+                Request::get("/api/join-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(public_policy.status(), StatusCode::OK);
 
         let unsupported = app
             .clone()
@@ -574,6 +777,126 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unclassified.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn off_mode_preserves_protected_and_unclassified_handler_reachability() {
+        let app = Router::new()
+            .route("/events", post(|| async { StatusCode::OK }))
+            .route("/new-unclassified-route", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn(off_provider_free_inventory));
+        let protected = app
+            .clone()
+            .oneshot(Request::post("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(protected.status(), StatusCode::OK);
+        let unclassified = app
+            .oneshot(
+                Request::get("/new-unclassified-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unclassified.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn deny_protected_and_missing_provider_close_before_handlers() {
+        let deny = Router::new()
+            .route("/events", post(|| async { StatusCode::OK }))
+            .route("/api/join-policy", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn(deny_provider_free_inventory));
+        let protected = deny
+            .clone()
+            .oneshot(Request::post("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(protected.status(), StatusCode::FORBIDDEN);
+        let exempt = deny
+            .oneshot(
+                Request::get("/api/join-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exempt.status(), StatusCode::OK);
+
+        let unavailable = Router::new()
+            .route("/events", post(|| async { StatusCode::OK }))
+            .route("/api/join-policy", get(|| async { StatusCode::OK }))
+            .route_layer(middleware::from_fn(unavailable_provider_free_inventory));
+        let protected = unavailable
+            .clone()
+            .oneshot(Request::post("/events").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(protected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let exempt = unavailable
+            .oneshot(
+                Request::get("/api/join-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exempt.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn every_http_error_status_carries_the_stable_machine_code() {
+        let app = Router::new()
+            .route(
+                "/status/{code}",
+                get(
+                    |axum::extract::Path(code): axum::extract::Path<u16>| async move {
+                        StatusCode::from_u16(code).expect("valid test status")
+                    },
+                ),
+            )
+            .layer(middleware::from_fn(attach_machine_error_code));
+
+        for (status, expected) in [
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+            (StatusCode::UNAUTHORIZED, "authentication_required"),
+            (StatusCode::FORBIDDEN, "authorization_denied"),
+            (StatusCode::NOT_FOUND, "resource_not_found"),
+            (StatusCode::CONFLICT, "conflict"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            (StatusCode::SERVICE_UNAVAILABLE, "dependency_unavailable"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/status/{}", status.as_u16()))
+                        .body(Body::empty())
+                        .expect("status request"),
+                )
+                .await
+                .expect("status response");
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-buzz-error-code")
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected),
+                "{status}"
+            );
+        }
+
+        let success = app
+            .oneshot(
+                Request::get("/status/200")
+                    .body(Body::empty())
+                    .expect("success request"),
+            )
+            .await
+            .expect("success response");
+        assert!(success.headers().get("x-buzz-error-code").is_none());
     }
 
     #[test]

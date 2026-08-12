@@ -562,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 35);
+        assert_eq!(migrations.len(), 38);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1118,6 +1118,103 @@ mod tests {
                 "final projection insert guard must reserve authority binding for the deferred guard: {required}",
             );
         }
+
+        assert_eq!(migrations[35].version, 38);
+        let status_delivery = migrations[35].sql.as_str();
+        for required in [
+            "CREATE TABLE client_status_transition_heads",
+            "CREATE TABLE client_status_transitions",
+            "CREATE TABLE client_status_delivery_outbox",
+            "CREATE TABLE client_status_delivery_events",
+            "CREATE TABLE client_status_delivery_capacity",
+            "client_status_delivery_capacity_guard_v1",
+            "client_status_delivery_capacity_insert_v1",
+            "client_status_delivery_state_guard_v1",
+            "client_status_delivery_retain_v1",
+            "client_status_delivery_event_guard_v1",
+            "client_status_delivery_outbox_ready",
+        ] {
+            assert!(
+                status_delivery.contains(required),
+                "migration 0038 missing status-delivery outbox invariant: {required}",
+            );
+        }
+        assert!(!status_delivery.contains("event_author_pubkey"));
+        assert!(!status_delivery.contains("connection_id"));
+
+        assert_eq!(migrations[36].version, 39);
+        let status_connection_scope = migrations[36].sql.as_str();
+        for required in [
+            "connection_fingerprint BYTEA NOT NULL",
+            "client_status_transition_private_evidence",
+            "client_status_transition_connection_revision",
+            "client_status_transition_connection_identity",
+            "client_status_policy_connection_fence_v1",
+            "NEW.connection_fingerprint IS DISTINCT FROM OLD.connection_fingerprint",
+            "head.connection_fingerprint=delivery.connection_fingerprint",
+        ] {
+            assert!(
+                status_connection_scope.contains(required),
+                "migration 0039 missing status connection-scope invariant: {required}",
+            );
+            assert!(
+                desired_schema.contains(required),
+                "desired schema missing status connection-scope invariant: {required}",
+            );
+        }
+        for retired in [
+            "PRIMARY KEY (community_id, subject_fingerprint, signer_fingerprint)",
+            "UNIQUE (community_id, subject_fingerprint, signer_fingerprint, status_revision)",
+            "head.subject_fingerprint=transition.subject_fingerprint",
+            "head.signer_fingerprint=transition.signer_fingerprint",
+        ] {
+            assert!(
+                !desired_schema.contains(retired),
+                "desired schema retains pre-0039 status identity: {retired}",
+            );
+        }
+        for ordered_columns in [
+            "updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),\n    connection_fingerprint BYTEA NOT NULL",
+            "retain_until TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp() + INTERVAL '1 day',\n    connection_fingerprint BYTEA NOT NULL",
+        ] {
+            assert!(
+                desired_schema.contains(ordered_columns),
+                "desired schema column order diverges from migrated status catalog",
+            );
+        }
+        assert!(desired_schema.contains(
+            "OR (NEW.last_failure_reason = 2\n                AND (OLD.claim_id IS NULL OR NEW.completion_claim_id = OLD.claim_id))"
+        ));
+
+        assert_eq!(migrations[37].version, 40);
+        let event_status_object_kinds = migrations[37].sql.as_str();
+        for required in [
+            "authorization_admission_results_object_kind_check",
+            "authorization_authority_epochs_object_kind_check",
+            "protected_object_authority_object_kind_check",
+            "object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)",
+            "NOT VALID",
+            "VALIDATE CONSTRAINT",
+        ] {
+            assert!(
+                event_status_object_kinds.contains(required),
+                "migration 0040 missing Event/BindingStatus object-kind closure: {required}",
+            );
+        }
+        for constraint in [
+            "authorization_admission_results_object_kind_check",
+            "authorization_authority_epochs_object_kind_check",
+            "protected_object_authority_object_kind_check",
+        ] {
+            let required = format!(
+                "CONSTRAINT {constraint} CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9))"
+            );
+            assert_eq!(
+                desired_schema.matches(&required).count(),
+                1,
+                "desired schema must carry the final 0040 contract for {constraint}",
+            );
+        }
     }
 
     #[test]
@@ -1360,7 +1457,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(37));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(40));
     }
 
     #[tokio::test]

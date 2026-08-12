@@ -19,8 +19,6 @@ use jsonwebtoken::{
     jwk::{Jwk, JwkSet},
     Algorithm,
 };
-#[cfg(test)]
-use nostr::{Event, EventBuilder, Kind, Tag};
 use nostr::{FromBech32, PublicKey, Timestamp};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -33,8 +31,6 @@ use buzz_auth::{
     CanonicalFederatedAssertionVerifier, CanonicalVerifierError, CanonicalVerifierKeySet,
     CanonicalVerifierPolicy, ProofTransport, VerifierKeyGeneration, VerifierPolicyStamp,
 };
-#[cfg(test)]
-use buzz_core::kind::KIND_USER_TRUSTED_ASSERTION;
 use buzz_core::CommunityId;
 use buzz_db::identity_binding::{BindIdentityResult, SOURCE_DB_BINDING, SOURCE_JWT_NPUB};
 
@@ -420,7 +416,7 @@ impl buzz_db::authorization_admission::AdmissionVerifierRechecker for CorporateI
     }
 }
 
-impl crate::state::InviteAssertionVerifier for CorporateIdentityService {
+impl crate::state::CanonicalAssertionVerifier for CorporateIdentityService {
     fn verify<'a>(
         &'a self,
         token: &'a str,
@@ -434,7 +430,7 @@ impl crate::state::InviteAssertionVerifier for CorporateIdentityService {
             dyn std::future::Future<
                     Output = Result<
                         buzz_auth::VerifiedFederatedAssertion,
-                        crate::state::InviteAssertionError,
+                        crate::state::CanonicalAssertionError,
                     >,
                 > + Send
                 + 'a,
@@ -454,9 +450,9 @@ impl crate::state::InviteAssertionVerifier for CorporateIdentityService {
                 CorporateIdentityError::Jwks(_)
                 | CorporateIdentityError::Db(_)
                 | CorporateIdentityError::FoundationIntegrationRequired => {
-                    crate::state::InviteAssertionError::Unavailable
+                    crate::state::CanonicalAssertionError::Unavailable
                 }
-                _ => crate::state::InviteAssertionError::Denied,
+                _ => crate::state::CanonicalAssertionError::Denied,
             })
         })
     }
@@ -826,7 +822,14 @@ impl CorporateIdentityError {
         if status.is_server_error() {
             warn!(error = %self, "corporate identity enforcement failed");
         }
-        (status, Json(serde_json::json!({ "error": message })))
+        let code = match self {
+            Self::Jwks(_) | Self::Db(_) | Self::FoundationIntegrationRequired => {
+                crate::api::ApiErrorCode::DependencyUnavailable
+            }
+            Self::MissingJwt => crate::api::ApiErrorCode::AuthenticationRequired,
+            _ => crate::api::ApiErrorCode::AuthorizationDenied,
+        };
+        crate::api::coded_api_error(status, code, message)
     }
 }
 
@@ -876,6 +879,12 @@ async fn verify_corporate_identity_inner(
     auth_tag_json: Option<&str>,
 ) -> Result<CorporateIdentityProof, CorporateIdentityError> {
     let Some(service) = state.corporate_identity.as_ref() else {
+        if state.config.corporate_identity.require {
+            return Err(match identity_jwt {
+                Some(_) => CorporateIdentityError::FoundationIntegrationRequired,
+                None => CorporateIdentityError::MissingJwt,
+            });
+        }
         return Ok(CorporateIdentityProof::NotRequired);
     };
 
@@ -1017,80 +1026,6 @@ async fn require_final_verifier_stamp(
         Err(CorporateIdentityError::InvalidJwt(
             "canonical verifier generation changed before finalization".to_owned(),
         ))
-    }
-}
-
-#[cfg(test)]
-fn build_identity_assertion(
-    relay_keypair: &nostr::Keys,
-    subject: PublicKey,
-    display_name: Option<&str>,
-    expires_at: u64,
-    created_at: Timestamp,
-) -> Result<Event, String> {
-    let subject = subject.to_hex();
-    let active = if display_name.is_some() {
-        "true"
-    } else {
-        "false"
-    };
-    let expires_at = expires_at.to_string();
-    let mut tags = vec![
-        Tag::parse(["d", subject.as_str()]),
-        Tag::parse(["p", subject.as_str()]),
-        Tag::parse(["verified", "relay"]),
-        Tag::parse(["active", active]),
-        Tag::parse(["expiration", expires_at.as_str()]),
-    ];
-    if let Some(display_name) = display_name {
-        tags.push(Tag::parse(["display_name", display_name]));
-    }
-    let tags = tags
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("invalid corporate identity assertion tag: {error}"))?;
-
-    EventBuilder::new(Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
-        .tags(tags)
-        .custom_created_at(created_at)
-        .sign_with_keys(relay_keypair)
-        .map_err(|error| format!("failed to sign corporate identity assertion: {error}"))
-}
-
-#[cfg(test)]
-fn identity_assertion_matches(
-    event: &Event,
-    subject: &str,
-    display_name: Option<&str>,
-    expires_at: u64,
-) -> bool {
-    let has_tag = |name: &str, value: &str| {
-        event.tags.iter().any(|tag| {
-            let parts = tag.as_slice();
-            parts.len() == 2 && parts[0] == name && parts[1] == value
-        })
-    };
-    has_tag("d", subject)
-        && has_tag("p", subject)
-        && has_tag("verified", "relay")
-        && has_tag(
-            "active",
-            if display_name.is_some() {
-                "true"
-            } else {
-                "false"
-            },
-        )
-        && has_tag("expiration", &expires_at.to_string())
-        && display_name.is_none_or(|name| has_tag("display_name", name))
-}
-
-#[cfg(test)]
-fn identity_assertion_expiration(display_name: Option<&str>, jwt_expires_at: u64, now: u64) -> u64 {
-    if display_name.is_some() {
-        jwt_expires_at.min(now.saturating_add(IDENTITY_ASSERTION_MAX_TTL_SECS))
-    } else {
-        0
     }
 }
 
@@ -1334,6 +1269,71 @@ fn record_corporate_identity_denial(error: &CorporateIdentityError) {
 }
 
 #[cfg(test)]
+pub(crate) mod canonical_test_support {
+    use aws_lc_rs::{
+        rand::SystemRandom,
+        rsa::KeySize,
+        signature::{KeyPair, RsaKeyPair, RsaPublicKeyComponents, RSA_PKCS1_SHA256},
+    };
+    use base64::Engine;
+    use jsonwebtoken::jwk::Jwk;
+    use serde_json::Value;
+
+    fn rsa_private_key(index: usize) -> &'static RsaKeyPair {
+        static KEYS: std::sync::OnceLock<[RsaKeyPair; 2]> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| {
+            std::array::from_fn(|_| {
+                RsaKeyPair::generate(KeySize::Rsa2048).expect("generate canonical test key")
+            })
+        })
+        .get(index)
+        .expect("canonical test key index")
+    }
+
+    pub(crate) fn jwk(key_index: usize, kid: &str) -> Jwk {
+        let components =
+            RsaPublicKeyComponents::<Vec<u8>>::from(rsa_private_key(key_index).public_key());
+        serde_json::from_value(serde_json::json!({
+            "kty": "RSA",
+            "n": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(components.n),
+            "e": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(components.e),
+            "kid": kid,
+            "alg": "RS256",
+            "use": "sig",
+            "key_ops": ["verify"],
+        }))
+        .expect("derive canonical test JWK")
+    }
+
+    pub(crate) fn signed_jwt(claims: &Value, key_index: usize, kid: &str) -> String {
+        let header = serde_json::json!({
+            "alg": "RS256",
+            "typ": "JWT",
+            "kid": kid,
+        });
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("serialize canonical test JWT header"));
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(claims).expect("serialize canonical test JWT claims"));
+        let signing_input = format!("{header}.{claims}");
+        let private_key = rsa_private_key(key_index);
+        let mut signature = vec![0_u8; private_key.public_modulus_len()];
+        private_key
+            .sign(
+                &RSA_PKCS1_SHA256,
+                &SystemRandom::new(),
+                signing_input.as_bytes(),
+                &mut signature,
+            )
+            .expect("sign canonical test JWT");
+        format!(
+            "{signing_input}.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{
@@ -1362,6 +1362,20 @@ mod tests {
         )
     }
 
+    #[derive(Clone)]
+    struct CapturedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("captured log lock").extend(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn test_config() -> CorporateIdentityConfig {
         CorporateIdentityConfig {
             require: true,
@@ -1373,7 +1387,6 @@ mod tests {
             audience: "buzz-relay".to_string(),
             uid_claim: "sub".to_string(),
             display_claim: "email".to_string(),
-            public_display_claim: None,
             npub_claim: Some("buzz_npub".to_string()),
         }
     }
@@ -1518,84 +1531,6 @@ mod tests {
 
         cancel.cancelled().await;
         task.await.expect("revalidation task");
-    }
-
-    #[test]
-    fn identity_projects_as_relay_signed_nip85_assertion_without_provider_details() {
-        let relay = Keys::generate();
-        let subject = Keys::generate().public_key();
-        let event = build_identity_assertion(
-            &relay,
-            subject,
-            Some("Example User"),
-            456,
-            Timestamp::from(123),
-        )
-        .unwrap();
-
-        assert_eq!(event.kind.as_u16() as u32, KIND_USER_TRUSTED_ASSERTION);
-        assert_eq!(event.pubkey, relay.public_key());
-        assert!(event.verify_id());
-        assert!(event.verify_signature());
-        assert!(identity_assertion_matches(
-            &event,
-            &subject.to_hex(),
-            Some("Example User"),
-            456,
-        ));
-        assert!(
-            !event
-                .tags
-                .iter()
-                .any(|tag| tag.as_slice().first().is_some_and(|name| name == "uid")),
-            "the public assertion must not expose the stable corporate uid"
-        );
-        assert!(
-            !event
-                .tags
-                .iter()
-                .any(|tag| tag.as_slice().first().is_some_and(|name| name == "issuer")),
-            "the public assertion must not expose the upstream identity provider"
-        );
-    }
-
-    #[test]
-    fn identity_assertions_are_bounded_and_can_be_retired() {
-        let relay = Keys::generate();
-        let subject = Keys::generate().public_key();
-        let now = 1_000;
-
-        assert_eq!(
-            identity_assertion_expiration(
-                Some("Example User"),
-                now + IDENTITY_ASSERTION_MAX_TTL_SECS + 1,
-                now,
-            ),
-            now + IDENTITY_ASSERTION_MAX_TTL_SECS,
-        );
-        assert_eq!(
-            identity_assertion_expiration(Some("Example User"), now + 60, now),
-            now + 60,
-        );
-        assert_eq!(identity_assertion_expiration(None, u64::MAX, now), 0);
-
-        let retired = build_identity_assertion(&relay, subject, None, 0, Timestamp::from(now))
-            .expect("build inactive assertion");
-        assert!(identity_assertion_matches(
-            &retired,
-            &subject.to_hex(),
-            None,
-            0,
-        ));
-        assert!(retired.tags.iter().any(|tag| {
-            tag.as_slice().first().is_some_and(|part| part == "active")
-                && tag.as_slice().get(1).is_some_and(|part| part == "false")
-        }));
-        assert!(!retired.tags.iter().any(|tag| {
-            tag.as_slice()
-                .first()
-                .is_some_and(|part| part == "display_name")
-        }));
     }
 
     #[test]
@@ -1967,6 +1902,86 @@ mod tests {
         ));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn attacker_kid_is_absent_from_bounded_structured_denial_log() {
+        const RAW_KID_MARKER: &str = "F170_RAW_KID_CANARY_DO_NOT_LOG";
+
+        let response = http_response(
+            "200 OK",
+            &["Content-Type: application/json"],
+            r#"{"keys":[]}"#,
+        );
+        let (uri, requests, server) = spawn_http_server(response).await;
+        let mut config = test_config();
+        config.jwks_uri = uri;
+        let service = CorporateIdentityService::new(config);
+        *service.jwks.write().await = Some(CachedJwks {
+            set: JwkSet { keys: Vec::new() },
+            generation: VerifierKeyGeneration::new(1).expect("positive generation"),
+            expires_at: Instant::now() + Duration::from_secs(60),
+        });
+        let attacker_kid = format!("{RAW_KID_MARKER}\n\"forged_field\":\"{}\"", "k".repeat(768));
+        let error = service
+            .jwk_snapshot_for_kid(&attacker_kid)
+            .await
+            .expect_err("attacker-controlled kid must miss after the bounded refresh");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output_writer = Arc::clone(&output);
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || CapturedLogWriter(Arc::clone(&output_writer)))
+            .finish();
+        let (status, Json(body)) = tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                error = %error,
+                error_debug = ?error,
+                "corporate identity denial canary"
+            );
+            error.into_api_error()
+        });
+
+        let captured = String::from_utf8(output.lock().expect("captured log lock").clone())
+            .expect("structured log is UTF-8");
+        let records: Vec<Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("structured log is JSON"))
+            .collect();
+        assert_eq!(records.len(), 1, "canary must capture exactly one event");
+        let fields = records[0]["fields"]
+            .as_object()
+            .expect("structured event fields");
+        assert_eq!(
+            fields.get("message").and_then(Value::as_str),
+            Some("corporate identity denial canary")
+        );
+        assert_eq!(
+            fields.get("error").and_then(Value::as_str),
+            Some("corporate identity JWKS unavailable: kid not found after JWKS refresh")
+        );
+        assert_eq!(
+            fields.get("error_debug").and_then(Value::as_str),
+            Some("CorporateIdentityError([REDACTED])")
+        );
+        for field in ["message", "error", "error_debug"] {
+            assert!(
+                fields[field].as_str().expect("string log field").len() <= 96,
+                "{field} must stay bounded"
+            );
+        }
+        assert!(!captured.contains(RAW_KID_MARKER));
+        assert!(!captured.contains(&attacker_kid));
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "dependency_unavailable");
+        assert_eq!(body["error"], "relay identity verification failed");
+        assert!(serde_json::to_vec(&body).expect("serialize API body").len() <= 128);
+        assert!(!body.to_string().contains(RAW_KID_MARKER));
     }
 
     #[tokio::test]

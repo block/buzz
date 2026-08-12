@@ -21,13 +21,20 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{Html, Json},
 };
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Sha256;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
 use buzz_core::invite::{
-    hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
-    MIN_INVITE_TTL_SECS, V2_PREFIX,
+    encode_v2_code, hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS,
+    MAX_INVITE_USES, MIN_INVITE_TTL_SECS, V2_PREFIX, V2_SECRET_LEN,
+};
+use buzz_db::authorization_admission::{
+    AdmissionApplicationContext, AdmissionApplicationEffect, AdmissionApplicationOutcome,
+    AdmissionApplicationResult, AdmissionApplicationResultSchema, AdmissionCommitError,
+    AdmissionCommitOutcome, AdmissionObjectKind, CanonicalAdmissionCommitter as _,
 };
 
 use crate::invite_token;
@@ -58,6 +65,129 @@ pub struct MintInviteRequest {
     /// must be an integer from 1 through [`MAX_INVITE_USES`].
     #[serde(default)]
     pub max_uses: Option<i32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CanonicalInviteMintResult {
+    invite_id: uuid::Uuid,
+    expires_at: i64,
+    max_uses: Option<i32>,
+    uses_remaining: Option<i32>,
+}
+
+struct CanonicalInviteMintEffect {
+    token_hash: [u8; 32],
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+    intent_digest: [u8; 32],
+}
+
+impl CanonicalInviteMintEffect {
+    fn new(token_hash: [u8; 32], ttl_secs: u64, max_uses: Option<i32>) -> Self {
+        let max_uses_bytes = max_uses.unwrap_or_default().to_be_bytes();
+        let intent_digest = crate::protected_ingress::fingerprint(
+            b"buzz:nip-fi:invite-mint-application-intent:v1",
+            &[&token_hash, &ttl_secs.to_be_bytes(), &max_uses_bytes],
+        );
+        Self {
+            token_hash,
+            ttl_secs,
+            max_uses,
+            intent_digest,
+        }
+    }
+}
+
+impl std::fmt::Debug for CanonicalInviteMintEffect {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CanonicalInviteMintEffect([REDACTED])")
+    }
+}
+
+impl AdmissionApplicationEffect for CanonicalInviteMintEffect {
+    fn intent_digest(&self) -> [u8; 32] {
+        self.intent_digest
+    }
+
+    fn result_schema(&self) -> AdmissionApplicationResultSchema {
+        AdmissionApplicationResultSchema::invite_mint()
+    }
+
+    fn apply<'a, 'transaction>(
+        &'a mut self,
+        transaction: &'a mut sqlx::Transaction<'transaction, sqlx::Postgres>,
+        context: &'a AdmissionApplicationContext<'a>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<AdmissionApplicationOutcome, AdmissionCommitError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if context.authorization().capability() != buzz_auth::RouteCapability::InviteMint
+                || context.object().kind() != AdmissionObjectKind::Invitation
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+            let actor = context.authorization().actor_pubkey().to_hex();
+            let role: Option<String> = sqlx::query_scalar(
+                "SELECT role FROM relay_members WHERE community_id=$1 AND pubkey=$2",
+            )
+            .bind(context.authorization_domain().as_uuid())
+            .bind(&actor)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            if !matches!(role.as_deref(), Some("owner" | "admin")) {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+            let ttl =
+                i64::try_from(self.ttl_secs).map_err(|_| AdmissionCommitError::InvalidRequest)?;
+            let expires_at = context
+                .authoritative_now()
+                .checked_add_signed(chrono::Duration::seconds(ttl))
+                .ok_or(AdmissionCommitError::InvalidRequest)?;
+            let invite_id: uuid::Uuid = sqlx::query_scalar(
+                "INSERT INTO relay_invites \
+                 (community_id,token_hash,max_uses,expires_at,created_by) \
+                 VALUES ($1,$2,$3,$4,$5) RETURNING id",
+            )
+            .bind(context.authorization_domain().as_uuid())
+            .bind(self.token_hash.as_slice())
+            .bind(self.max_uses)
+            .bind(expires_at)
+            .bind(&actor)
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let payload = serde_json::to_vec(&CanonicalInviteMintResult {
+                invite_id,
+                expires_at: expires_at.timestamp(),
+                max_uses: self.max_uses,
+                uses_remaining: self.max_uses,
+            })
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let result = AdmissionApplicationResult::new(self.result_schema(), 1, payload)?;
+            let effect_digest = crate::protected_ingress::fingerprint(
+                b"buzz:nip-fi:invite-mint-application-effect:v1",
+                &[
+                    context.authorization_domain().as_uuid().as_bytes(),
+                    context.operation_id().as_bytes(),
+                    context.request_fingerprint(),
+                    &self.intent_digest,
+                    result.payload(),
+                ],
+            );
+            AdmissionApplicationOutcome::new(result, effect_digest)
+        })
+    }
+}
+
+struct CanonicalInviteMintResponse {
+    code: String,
+    result: CanonicalInviteMintResult,
 }
 
 fn validate_mint_request(
@@ -284,6 +414,219 @@ async fn authenticate(
     Ok((tenant, pubkey, identity_proof))
 }
 
+async fn authenticate_mint(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<
+    (
+        buzz_core::TenantContext,
+        nostr::PublicKey,
+        Option<crate::corporate_identity::CorporateIdentityProof>,
+    ),
+    (StatusCode, Json<Value>),
+> {
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::DenyProtected {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ));
+    }
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Off {
+        return authenticate(state, headers, "/api/invites", body)
+            .await
+            .map(|(tenant, pubkey, proof)| (tenant, pubkey, Some(proof)));
+    }
+
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+        })?;
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");
+    let (pubkey, _) =
+        bridge::verify_bridge_auth_with_options(headers, "POST", &url, Some(body), true, true)?;
+    Ok((tenant, pubkey, None))
+}
+
+fn canonical_invite_code(
+    relay_keys: &nostr::Keys,
+    domain: buzz_core::CommunityId,
+    mint_seed: uuid::Uuid,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let key = invite_token::derive_invite_key(relay_keys);
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key)
+        .map_err(|_| internal_error("canonical invite key unavailable"))?;
+    mac.update(b"buzz:canonical-invite-mint-secret:v1");
+    mac.update(domain.as_uuid().as_bytes());
+    mac.update(mint_seed.as_bytes());
+    let secret: [u8; V2_SECRET_LEN] = mac.finalize().into_bytes().into();
+    Ok(encode_v2_code(&secret))
+}
+
+async fn authorize_canonical_invite_mint(
+    state: &AppState,
+    tenant: &buzz_core::TenantContext,
+    headers: &HeaderMap,
+    body: &[u8],
+    pubkey: nostr::PublicKey,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+) -> Result<CanonicalInviteMintResponse, (StatusCode, Json<Value>)> {
+    let domain = tenant.community();
+    let target_key = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:invite-mint-target:v1",
+        &[domain.as_uuid().as_bytes(), pubkey.as_bytes()],
+    );
+    let object = buzz_db::authorization_admission::AdmissionObject::new(
+        buzz_db::authorization_admission::AdmissionObjectKind::Invitation,
+        target_key,
+    )
+    .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "invite_authorization_denied"))?;
+    let expected_url = bridge::nip98_expected_url(&state.config.relay_url, tenant, "/api/invites");
+    let body_digest =
+        crate::protected_ingress::fingerprint(b"buzz:nip-fi:invite-mint-body:v1", &[body]);
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:invite-mint-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            pubkey.as_bytes(),
+            expected_url.as_bytes(),
+            &body_digest,
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:invite-mint-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            tenant.host().as_bytes(),
+            expected_url.as_bytes(),
+            b"POST",
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        crate::authorization_runtime::ProtectedIngress::InviteMint,
+        domain,
+        buzz_auth::RouteCapability::InviteMint,
+        object,
+        buzz_auth::ProofTransport::Nip98,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )
+    .map_err(map_invite_authorization_error)?;
+    let assertion_token = crate::protected_ingress::exact_assertion(
+        headers,
+        &state.config.corporate_identity.jwt_header,
+    )
+    .map_err(map_invite_authorization_error)?;
+    let assertion =
+        crate::protected_ingress::verify_assertion(state, &assertion_token, coordinates)
+            .await
+            .map_err(map_invite_authorization_error)?;
+    let event_json = bridge::exact_nip98_authorization_event(headers)
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "invalid invite authorization"))?;
+    let proof = buzz_auth::verify_nip98_authorization_proof(
+        &event_json,
+        &expected_url,
+        "POST",
+        Some(body),
+        &assertion,
+        buzz_auth::ProofTransport::Nip98,
+        request_fingerprint,
+        *object.key(),
+        transport_context_fingerprint,
+    )
+    .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid invite authorization"))?;
+    let request = crate::protected_ingress::prepare_mutation(state, coordinates, assertion, proof)
+        .await
+        .map_err(map_invite_authorization_error)?;
+    let code = canonical_invite_code(&state.relay_keypair, domain, request.operation_id())?;
+    let effect = CanonicalInviteMintEffect::new(hash_v2_code(&code), ttl_secs, max_uses);
+    let expected_intent = effect.intent_digest();
+    let request = request
+        .with_application_effect(Box::new(effect))
+        .map_err(map_canonical_invite_commit_error)?;
+    let committer = crate::protected_ingress::mutation_committer(state)
+        .map_err(map_invite_authorization_error)?;
+    let outcome = committer
+        .commit(request)
+        .await
+        .map_err(map_canonical_invite_commit_error)?;
+    let (receipt, result) = match outcome {
+        AdmissionCommitOutcome::Committed {
+            receipt,
+            application_result: Some(result),
+            application_result_binding: Some(binding),
+            ..
+        } if binding.authorization_domain() == domain
+            && binding.object() == object
+            && binding.application_intent_digest() == &expected_intent =>
+        {
+            (receipt, result)
+        }
+        AdmissionCommitOutcome::ExactReplay {
+            receipt,
+            application_result: Some(result),
+        } => (receipt, result),
+        _ => return Err(internal_error("canonical invite result unavailable")),
+    };
+    if receipt.authorization_domain() != domain
+        || receipt.object() != object
+        || result.schema() != AdmissionApplicationResultSchema::invite_mint()
+        || result.code() != 1
+    {
+        return Err(internal_error("canonical invite result binding mismatch"));
+    }
+    let result: CanonicalInviteMintResult = serde_json::from_slice(result.payload())
+        .map_err(|_| internal_error("canonical invite result invalid"))?;
+    Ok(CanonicalInviteMintResponse { code, result })
+}
+
+fn map_canonical_invite_commit_error(error: AdmissionCommitError) -> (StatusCode, Json<Value>) {
+    match error {
+        AdmissionCommitError::InvalidRequest
+        | AdmissionCommitError::RecordedInvalidRequest
+        | AdmissionCommitError::AuthorizationDenied
+        | AdmissionCommitError::RecordedAuthorizationDenied
+        | AdmissionCommitError::IntentConflict
+        | AdmissionCommitError::RecordedIntentConflict
+        | AdmissionCommitError::ReplayRejected
+        | AdmissionCommitError::RecordedReplayRejected => {
+            api_error(StatusCode::FORBIDDEN, "invite_authorization_denied")
+        }
+        AdmissionCommitError::AuditUnavailable
+        | AdmissionCommitError::RecordedAuditUnavailable
+        | AdmissionCommitError::DependencyUnavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ),
+    }
+}
+
+fn map_invite_authorization_error(
+    error: crate::protected_ingress::ProtectedIngressError,
+) -> (StatusCode, Json<Value>) {
+    match error {
+        crate::protected_ingress::ProtectedIngressError::Denied => {
+            api_error(StatusCode::FORBIDDEN, "invite_authorization_denied")
+        }
+        crate::protected_ingress::ProtectedIngressError::Expired => {
+            api_error(StatusCode::UNAUTHORIZED, error.code())
+        }
+        crate::protected_ingress::ProtectedIngressError::Unavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_authorization_unavailable",
+        ),
+    }
+}
+
 async fn record_atomic_identity_rejection(
     state: &AppState,
     community_id: buzz_core::CommunityId,
@@ -314,24 +657,9 @@ pub async fn mint_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey, identity_proof) =
-        authenticate(&state, &headers, "/api/invites", &body).await?;
+    let (tenant, pubkey, identity_proof) = authenticate_mint(&state, &headers, &body).await?;
 
-    // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
-    let member = state
-        .db
-        .get_relay_member(tenant.community(), &sender_hex)
-        .await
-        .map_err(|e| internal_error(&format!("invite mint role lookup: {e}")))?;
-    let role = member.map(|m| m.role).unwrap_or_default();
-    if role != "owner" && role != "admin" {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "only relay owners and admins can create invites",
-        ));
-    }
-
     let request: MintInviteRequest = if body.is_empty() {
         MintInviteRequest::default()
     } else {
@@ -344,14 +672,67 @@ pub async fn mint_invite(
     };
 
     let (ttl, max_uses) = validate_mint_request(&request)?;
-    crate::corporate_identity::finalize_corporate_identity(
-        &state,
-        tenant.community(),
-        pubkey,
-        identity_proof,
-    )
-    .await
-    .map_err(|error| error.into_api_error())?;
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            // Authz mirrors kind:9030 (add member): owner or admin only.
+            let member = state
+                .db
+                .get_relay_member(tenant.community(), &sender_hex)
+                .await
+                .map_err(|e| internal_error(&format!("invite mint role lookup: {e}")))?;
+            let role = member.map(|m| m.role).unwrap_or_default();
+            if role != "owner" && role != "admin" {
+                return Err(api_error(
+                    StatusCode::FORBIDDEN,
+                    "only relay owners and admins can create invites",
+                ));
+            }
+            let identity_proof = identity_proof.ok_or_else(|| {
+                api_error(StatusCode::UNAUTHORIZED, "identity verification required")
+            })?;
+            crate::corporate_identity::finalize_corporate_identity(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+            )
+            .await
+            .map_err(|error| error.into_api_error())?;
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            let minted = authorize_canonical_invite_mint(
+                &state, &tenant, &headers, &body, pubkey, ttl, max_uses,
+            )
+            .await?;
+            tracing::info!(
+                community = %tenant.community(),
+                minted_by = %sender_hex,
+                invite_id = %minted.result.invite_id,
+                expires_at = minted.result.expires_at,
+                max_uses = ?minted.result.max_uses,
+                "canonical relay invite minted or replayed"
+            );
+            let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
+                "https"
+            } else {
+                "http"
+            };
+            return Ok(Json(serde_json::json!({
+                "code": minted.code,
+                "expires_at": u64::try_from(minted.result.expires_at)
+                    .map_err(|_| internal_error("canonical invite expiry invalid"))?,
+                "max_uses": minted.result.max_uses,
+                "uses_remaining": minted.result.uses_remaining,
+                "url": format!("{scheme}://{}/invite/{}", tenant.host(), minted.code),
+            })));
+        }
+        buzz_auth::NipFiMode::DenyProtected => {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invite_authorization_unavailable",
+            ));
+        }
+    }
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
@@ -843,10 +1224,13 @@ async fn claim_invite_enforced(
         Ok(assertion) => assertion,
         Err(assertion_error) => {
             let reason = match assertion_error {
-                crate::state::InviteAssertionError::Unavailable => {
+                crate::state::CanonicalAssertionError::Unavailable => {
                     buzz_db::authorization_events::ProtectedDenialReason::DependencyUnavailable
                 }
-                crate::state::InviteAssertionError::Denied => {
+                crate::state::CanonicalAssertionError::Denied => {
+                    buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied
+                }
+                crate::state::CanonicalAssertionError::Expired => {
                     buzz_db::authorization_events::ProtectedDenialReason::AuthorizationDenied
                 }
             };
@@ -1004,15 +1388,18 @@ fn exact_federated_assertion(headers: &HeaderMap) -> Result<String, (StatusCode,
 }
 
 fn canonical_assertion_error(
-    error: crate::state::InviteAssertionError,
+    error: crate::state::CanonicalAssertionError,
 ) -> (StatusCode, Json<Value>) {
     match error {
-        crate::state::InviteAssertionError::Unavailable => api_error(
+        crate::state::CanonicalAssertionError::Unavailable => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "invite_authorization_unavailable",
         ),
-        crate::state::InviteAssertionError::Denied => {
+        crate::state::CanonicalAssertionError::Denied => {
             api_error(StatusCode::FORBIDDEN, "invite_authorization_denied")
+        }
+        crate::state::CanonicalAssertionError::Expired => {
+            api_error(StatusCode::UNAUTHORIZED, "nip_fi_auth_expired")
         }
     }
 }

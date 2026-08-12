@@ -1111,7 +1111,11 @@ pub struct ThreadMetadataParams<'a> {
     pub broadcast: bool,
 }
 
-async fn insert_event_with_thread_metadata_tx(
+/// Insert one event and its optional thread metadata inside a caller-owned transaction.
+///
+/// Canonical admission uses this boundary so the event row, authorization
+/// receipt, replay identity, audit record, and typed result commit together.
+pub async fn insert_event_with_thread_metadata_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     event: &Event,

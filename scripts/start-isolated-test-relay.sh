@@ -97,6 +97,7 @@ psql_h -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 export PGSCHEMA_PLAN_HOST=localhost PGSCHEMA_PLAN_PORT=${PG_PORT}
 export PGSCHEMA_PLAN_DB=buzz PGSCHEMA_PLAN_USER=buzz PGSCHEMA_PLAN_PASSWORD=buzz_dev
 export PGHOST=localhost PGPORT=${PG_PORT} PGUSER=buzz PGDATABASE=buzz
+psql_h -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 psql_h < scripts/attach-schema-partitions.sql
 ok "Schema applied"

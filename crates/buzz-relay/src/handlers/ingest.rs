@@ -11,34 +11,39 @@ use uuid::Uuid;
 
 use buzz_auth::Scope;
 use buzz_core::kind::{
-    event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    event_kind_u32, is_ephemeral, is_identity_archive_request_kind, is_parameterized_replaceable,
+    is_relay_admin_kind, is_replaceable, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE,
+    KIND_AGENT_TURN_METRIC, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST,
+    KIND_BOOKMARK_SET, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
+use buzz_db::authorization_admission::{
+    AdmissionApplicationContext, AdmissionApplicationEffect, AdmissionApplicationOutcome,
+    AdmissionApplicationResult, AdmissionApplicationResultSchema, AdmissionCommitError,
+    AdmissionCommitOutcome, AdmissionCommitRequest, AdmissionObject, CanonicalAdmissionCommitter,
+};
 use nostr::Event;
 
 use crate::state::AppState;
@@ -97,6 +102,25 @@ fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError
         )));
     }
     Ok(())
+}
+
+pub(crate) fn canonical_bridge_kind_supported(kind: u32) -> bool {
+    !is_ephemeral(kind)
+        && !is_replaceable(kind)
+        && !is_parameterized_replaceable(kind)
+        && !buzz_core::kind::is_command_kind(kind)
+        && !is_relay_admin_kind(kind)
+        && !is_identity_archive_request_kind(kind)
+        && !buzz_core::kind::is_relay_only_kind(kind)
+        && !crate::handlers::side_effects::is_side_effect_kind(kind)
+        && !matches!(
+            kind,
+            KIND_PRODUCT_FEEDBACK
+                | KIND_REPORT
+                | KIND_REACTION
+                | KIND_NIP29_CREATE_GROUP
+                | super::push_lease::KIND_PUSH_LEASE
+        )
 }
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
@@ -718,6 +742,7 @@ fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(),
 }
 
 /// Owned thread metadata for the DB insert.
+#[derive(Clone)]
 pub(crate) struct ThreadMetadataOwned {
     pub event_id: Vec<u8>,
     pub event_created_at: chrono::DateTime<Utc>,
@@ -743,6 +768,180 @@ impl ThreadMetadataOwned {
             depth: self.depth,
             broadcast: self.broadcast,
         }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CanonicalBridgeEventResult {
+    event_id: String,
+    accepted: bool,
+    message: String,
+}
+
+struct CanonicalBridgeEventEffect {
+    domain: CommunityId,
+    object: AdmissionObject,
+    event: Event,
+    channel_id: Option<Uuid>,
+    thread_metadata: Option<ThreadMetadataOwned>,
+    intent_digest: [u8; 32],
+}
+
+impl CanonicalBridgeEventEffect {
+    fn new(
+        domain: CommunityId,
+        object: AdmissionObject,
+        event: Event,
+        channel_id: Option<Uuid>,
+        thread_metadata: Option<ThreadMetadataOwned>,
+    ) -> Self {
+        let channel = channel_id.map_or([0; 16], |value| *value.as_bytes());
+        let thread_digest = thread_metadata.as_ref().map_or([0; 32], |metadata| {
+            crate::protected_ingress::fingerprint(
+                b"buzz:nip-fi:bridge-thread-metadata:v1",
+                &[
+                    &metadata.event_id,
+                    metadata.channel_id.as_bytes(),
+                    &metadata.parent_event_id,
+                    &metadata.root_event_id,
+                    &metadata.depth.to_be_bytes(),
+                    &[u8::from(metadata.broadcast)],
+                ],
+            )
+        });
+        let intent_digest = crate::protected_ingress::fingerprint(
+            b"buzz:nip-fi:bridge-event-application-intent:v1",
+            &[
+                domain.as_uuid().as_bytes(),
+                object.key(),
+                event.id.as_bytes(),
+                &channel,
+                &thread_digest,
+            ],
+        );
+        Self {
+            domain,
+            object,
+            event,
+            channel_id,
+            thread_metadata,
+            intent_digest,
+        }
+    }
+}
+
+impl AdmissionApplicationEffect for CanonicalBridgeEventEffect {
+    fn intent_digest(&self) -> [u8; 32] {
+        self.intent_digest
+    }
+
+    fn result_schema(&self) -> AdmissionApplicationResultSchema {
+        AdmissionApplicationResultSchema::bridge_event()
+    }
+
+    fn apply<'a, 'transaction>(
+        &'a mut self,
+        transaction: &'a mut sqlx::Transaction<'transaction, sqlx::Postgres>,
+        context: &'a AdmissionApplicationContext<'a>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<AdmissionApplicationOutcome, AdmissionCommitError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if context.authorization_domain() != self.domain
+                || context.object() != self.object
+                || context.authorization().capability() != buzz_auth::RouteCapability::MessagesWrite
+                || context.authorization().actor_pubkey() != self.event.pubkey
+            {
+                return Err(AdmissionCommitError::AuthorizationDenied);
+            }
+            let thread = self
+                .thread_metadata
+                .as_ref()
+                .map(ThreadMetadataOwned::as_params);
+            let (_, inserted) = buzz_db::event::insert_event_with_thread_metadata_tx(
+                transaction,
+                self.domain,
+                &self.event,
+                self.channel_id,
+                thread,
+            )
+            .await
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let payload = serde_json::to_vec(&CanonicalBridgeEventResult {
+                event_id: self.event.id.to_hex(),
+                accepted: true,
+                message: if inserted {
+                    String::new()
+                } else {
+                    "duplicate:".to_owned()
+                },
+            })
+            .map_err(|_| AdmissionCommitError::DependencyUnavailable)?;
+            let result = AdmissionApplicationResult::new(
+                self.result_schema(),
+                if inserted { 1 } else { 2 },
+                payload,
+            )?;
+            let effect_digest = crate::protected_ingress::fingerprint(
+                b"buzz:nip-fi:bridge-event-application-effect:v1",
+                &[
+                    context.authorization_domain().as_uuid().as_bytes(),
+                    context.operation_id().as_bytes(),
+                    context.request_fingerprint(),
+                    &self.intent_digest,
+                    result.payload(),
+                ],
+            );
+            AdmissionApplicationOutcome::new(result, effect_digest)
+        })
+    }
+}
+
+fn canonical_bridge_event_result(
+    result: AdmissionApplicationResult,
+    expected_event_id: &str,
+) -> Result<(IngestResult, bool), IngestError> {
+    if result.schema() != AdmissionApplicationResultSchema::bridge_event()
+        || !matches!(result.code(), 1 | 2)
+    {
+        return Err(IngestError::Internal(
+            "error: canonical event result schema mismatch".to_owned(),
+        ));
+    }
+    let decoded: CanonicalBridgeEventResult = serde_json::from_slice(result.payload())
+        .map_err(|_| IngestError::Internal("error: canonical event result malformed".to_owned()))?;
+    if decoded.event_id != expected_event_id
+        || !decoded.accepted
+        || (result.code() == 1 && !decoded.message.is_empty())
+        || (result.code() == 2 && decoded.message != "duplicate:")
+    {
+        return Err(IngestError::Internal(
+            "error: canonical event result binding mismatch".to_owned(),
+        ));
+    }
+    Ok((
+        IngestResult {
+            event_id: decoded.event_id,
+            accepted: decoded.accepted,
+            message: decoded.message,
+        },
+        result.code() == 1,
+    ))
+}
+
+fn map_canonical_event_commit_error(error: AdmissionCommitError) -> IngestError {
+    match error {
+        AdmissionCommitError::DependencyUnavailable
+        | AdmissionCommitError::AuditUnavailable
+        | AdmissionCommitError::RecordedAuditUnavailable => {
+            IngestError::Internal("error: canonical event authority unavailable".to_owned())
+        }
+        _ => IngestError::AuthFailed("restricted: canonical event denied".to_owned()),
     }
 }
 
@@ -1913,6 +2112,41 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    ingest_event_owned(state, tenant, event, auth, None)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// Execute HTTP bridge ingestion with one prepared canonical mutation.
+pub async fn ingest_event_with_canonical_admission(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth: IngestAuth,
+    admission: AdmissionCommitRequest,
+) -> Result<(IngestResult, CanonicalIngestDisposition), IngestError> {
+    ingest_event_owned(state, tenant, event, auth, Some(admission)).await
+}
+
+/// Whether an ingest response came from legacy storage, a fresh canonical
+/// co-commit, or the immutable typed result of an exact replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalIngestDisposition {
+    /// Off-mode legacy behavior.
+    Legacy,
+    /// Fresh canonical application DML and receipt committed together.
+    Committed,
+    /// Existing typed result returned without repeating application DML.
+    ExactReplay,
+}
+
+async fn ingest_event_owned(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth: IngestAuth,
+    canonical_admission: Option<AdmissionCommitRequest>,
+) -> Result<(IngestResult, CanonicalIngestDisposition), IngestError> {
     // Captured before `event` moves into the inner fn: the stored-events
     // counter below is emitted at this shared seam so WebSocket and HTTP
     // transports are counted identically.
@@ -1928,7 +2162,23 @@ pub async fn ingest_event(
         "ingest_event_exited_without_trace",
     );
 
-    let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+    let canonical = canonical_admission.is_some();
+    let mut disposition = (!canonical).then_some(CanonicalIngestDisposition::Legacy);
+    let mut result = ingest_event_inner(
+        state,
+        &tracer,
+        tenant,
+        event,
+        auth,
+        canonical_admission,
+        &mut disposition,
+    )
+    .await;
+    if result.is_ok() && disposition.is_none() {
+        result = Err(IngestError::Internal(
+            "error: canonical event admission did not reach its transaction owner".to_owned(),
+        ));
+    }
 
     // Fleet-wide stored counter: kind + author_type only, no community tag
     // (see the cardinality rationale on buzz_events_received_total —
@@ -1964,7 +2214,10 @@ pub async fn ingest_event(
     // path that forgets to emit), Drop records an ImplBug step on
     // the underlying tracer — the checker treats that as
     // CoverageBreach.
-    result
+    result.map(|result| match disposition {
+        Some(disposition) => (result, disposition),
+        None => (result, CanonicalIngestDisposition::Legacy),
+    })
 }
 
 async fn ingest_event_inner(
@@ -1973,10 +2226,21 @@ async fn ingest_event_inner(
     tenant: &TenantContext,
     event: Event,
     auth: IngestAuth,
+    canonical_admission: Option<AdmissionCommitRequest>,
+    canonical_disposition: &mut Option<CanonicalIngestDisposition>,
 ) -> Result<IngestResult, IngestError> {
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
+
+    if canonical_admission.is_some()
+        && !canonical_bridge_kind_supported(kind_u32)
+        && !buzz_core::kind::is_moderation_command_kind(kind_u32)
+    {
+        return Err(IngestError::Rejected(
+            "restricted: event kind requires a dedicated canonical mutation owner".to_owned(),
+        ));
+    }
 
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
@@ -2120,9 +2384,26 @@ async fn ingest_event_inner(
     // The handler independently checks the durable ban state before executing
     // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
-        super::moderation_commands::handle_moderation_command(tenant, state, &event, &auth)
-            .await
-            .map_err(IngestError::Rejected)?;
+        let disposition = super::moderation_commands::handle_moderation_command(
+            tenant,
+            state,
+            &event,
+            &auth,
+            canonical_admission,
+        )
+        .await
+        .map_err(IngestError::Rejected)?;
+        *canonical_disposition = Some(match disposition {
+            super::moderation_commands::ModerationCommandDisposition::Legacy => {
+                CanonicalIngestDisposition::Legacy
+            }
+            super::moderation_commands::ModerationCommandDisposition::Committed => {
+                CanonicalIngestDisposition::Committed
+            }
+            super::moderation_commands::ModerationCommandDisposition::ExactReplay => {
+                CanonicalIngestDisposition::ExactReplay
+            }
+        });
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2927,7 +3208,95 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if let Some(request) = canonical_admission {
+        let object = request.object();
+        if object
+            != AdmissionObject::event(event.id.to_bytes()).ok_or_else(|| {
+                IngestError::Rejected("invalid: event identifier is unavailable".to_owned())
+            })?
+        {
+            return Err(IngestError::AuthFailed(
+                "restricted: canonical event target mismatch".to_owned(),
+            ));
+        }
+        let effect = CanonicalBridgeEventEffect::new(
+            tenant.community(),
+            object,
+            event.clone(),
+            channel_id,
+            thread_meta.clone(),
+        );
+        let intent_digest = effect.intent_digest();
+        let request = request
+            .with_application_effect(Box::new(effect))
+            .map_err(map_canonical_event_commit_error)?;
+        let committer =
+            crate::protected_ingress::mutation_committer(state).map_err(|error| match error {
+                crate::protected_ingress::ProtectedIngressError::Denied => {
+                    IngestError::AuthFailed("restricted: canonical event denied".to_owned())
+                }
+                crate::protected_ingress::ProtectedIngressError::Expired => {
+                    IngestError::AuthFailed("nip_fi_auth_expired".to_owned())
+                }
+                crate::protected_ingress::ProtectedIngressError::Unavailable => {
+                    IngestError::Internal("error: canonical event authority unavailable".to_owned())
+                }
+            })?;
+        let outcome = committer
+            .commit(request)
+            .await
+            .map_err(map_canonical_event_commit_error)?;
+        let (result, inserted, exact_replay) = match outcome {
+            AdmissionCommitOutcome::Committed {
+                application_result: Some(result),
+                application_result_binding: Some(binding),
+                ..
+            } if binding.authorization_domain() == tenant.community()
+                && binding.object() == object
+                && binding.application_intent_digest() == &intent_digest =>
+            {
+                let (result, inserted) = canonical_bridge_event_result(result, &event_id_hex)?;
+                (result, inserted, false)
+            }
+            AdmissionCommitOutcome::ExactReplay {
+                application_result: Some(result),
+                ..
+            } => {
+                let (result, inserted) = canonical_bridge_event_result(result, &event_id_hex)?;
+                (result, inserted, true)
+            }
+            _ => {
+                return Err(IngestError::Internal(
+                    "error: canonical event result is unavailable".to_owned(),
+                ));
+            }
+        };
+        if exact_replay {
+            *canonical_disposition = Some(CanonicalIngestDisposition::ExactReplay);
+            let claimed = claimed_community_from_event(&event);
+            let action = match channel_id {
+                Some(channel) => TraceAction::WriteDuplicate {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    channel: channel_label(channel),
+                    claimed_community: claimed,
+                },
+                None => TraceAction::WriteInsertGlobal {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    claimed_community: claimed,
+                },
+            };
+            emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+            return Ok(result);
+        }
+        *canonical_disposition = Some(CanonicalIngestDisposition::Committed);
+        if !inserted {
+            return Ok(result);
+        }
+        (
+            buzz_core::StoredEvent::with_received_at(event.clone(), Utc::now(), channel_id, true),
+            true,
+        )
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3083,6 +3452,17 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn canonical_bridge_rejects_legacy_side_effect_owners_before_ingest() {
+        assert!(canonical_bridge_kind_supported(1));
+        for kind in [9030, 9031, 9032, 9033, 9035, 9036] {
+            assert!(
+                !canonical_bridge_kind_supported(kind),
+                "kind {kind} must not reach legacy relay-admin/archive DML"
+            );
+        }
+    }
 
     #[test]
     fn reaction_validation_accepts_wrapped_max_shortcode() {

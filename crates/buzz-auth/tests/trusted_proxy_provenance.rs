@@ -13,7 +13,7 @@ use buzz_auth::{
     AssertionTransportProfile, HttpHeaderField, ProofTransport, TrustedProxyError,
     TrustedProxyNonceClaim, TrustedProxyNonceReplayReader, TrustedProxyProvenanceVerifier,
     TrustedProxyReplayReadError, TrustedProxyRequest, ASSERTION_HEADER_NAME,
-    PROVENANCE_HEADER_NAME,
+    CLIENT_PEER_HEADER_NAME, PROVENANCE_HEADER_NAME,
 };
 use buzz_core::CommunityId;
 use chrono::{TimeZone, Utc};
@@ -157,6 +157,61 @@ fn sign_provenance_in_domain(
     )
 }
 
+struct PeerProvenance<'a> {
+    timestamp: u64,
+    nonce: &'a [u8],
+    client_peer: &'a str,
+}
+
+fn sign_peer_provenance(
+    assertion: &str,
+    method: &str,
+    authority: &str,
+    path_and_query: &str,
+    body: &[u8],
+    provenance: PeerProvenance<'_>,
+) -> String {
+    let PeerProvenance {
+        timestamp,
+        nonce,
+        client_peer,
+    } = provenance;
+    let canonical_path = if path_and_query.is_empty() {
+        "/".to_owned()
+    } else if path_and_query.starts_with('?') {
+        format!("/{path_and_query}")
+    } else {
+        path_and_query.to_owned()
+    };
+    let assertion_digest: [u8; 32] = Sha256::digest(assertion.as_bytes()).into();
+    let body_digest: [u8; 32] = Sha256::digest(body).into();
+    let transport = [2_u8]; // ProofTransport::Nip98, frozen wire code.
+    let mut input = b"NIP-FI-PROXY-2".to_vec();
+    for value in [
+        timestamp.to_be_bytes().as_slice(),
+        nonce,
+        &assertion_digest,
+        DOMAIN_A.as_uuid().as_bytes(),
+        method.as_bytes(),
+        authority.as_bytes(),
+        canonical_path.as_bytes(),
+        &body_digest,
+        &transport,
+        client_peer.as_bytes(),
+    ] {
+        input.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        input.extend_from_slice(value);
+    }
+    let mut mac = <TestMac as KeyInit>::new_from_slice(&PRIMARY_SECRET)
+        .expect("HMAC-SHA-256 accepts the test key");
+    mac.update(&input);
+    format!(
+        "v2.{timestamp}.{}.{}",
+        base64url(nonce),
+        base64url(&mac.finalize().into_bytes())
+    )
+}
+
 fn base64url(value: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::new();
@@ -215,6 +270,19 @@ fn headers<'a>(assertion: &'a str, provenance: &'a str) -> Vec<HttpHeaderField<'
     ]
 }
 
+fn peer_headers<'a>(
+    assertion: &'a str,
+    provenance: &'a str,
+    client_peer: &'a str,
+) -> Vec<HttpHeaderField<'a>> {
+    let mut headers = headers(assertion, provenance);
+    headers.push(HttpHeaderField::new(
+        CLIENT_PEER_HEADER_NAME,
+        client_peer.as_bytes(),
+    ));
+    headers
+}
+
 #[tokio::test]
 async fn valid_provenance_seals_redacted_move_only_evidence() {
     let verifier = verifier();
@@ -243,6 +311,7 @@ async fn valid_provenance_seals_redacted_move_only_evidence() {
         AssertionTransportProfile::TrustedProxyHmacV1
     );
     assert_eq!(evidence.transport(), ProofTransport::Nip98);
+    assert!(evidence.authenticated_client_peer().is_none());
     assert_eq!(evidence.proxy_expires_at().timestamp(), (NOW + 60) as i64);
     assert_eq!(
         evidence.nonce_claim().retain_until().timestamp(),
@@ -258,6 +327,169 @@ async fn valid_provenance_seals_redacted_move_only_evidence() {
     assert_eq!(
         format!("{:?}", evidence.nonce_claim()),
         "TrustedProxyNonceClaim([REDACTED])"
+    );
+}
+
+#[tokio::test]
+async fn v2_provenance_preserves_clients_behind_proxy_fan_in() {
+    let verifier = verifier();
+    let request = request("GET", "relay.example.com:443", "/", b"");
+    let assertion = assertion_header(proxy_assertion());
+    let replay = ReplayReader::default();
+    let peer_a = "192.0.2.10";
+    let peer_b = "192.0.2.11";
+    let provenance_a = sign_peer_provenance(
+        proxy_assertion(),
+        "GET",
+        "relay.example.com:443",
+        "/",
+        b"",
+        PeerProvenance {
+            timestamp: NOW,
+            nonce: &[0x1a; 16],
+            client_peer: peer_a,
+        },
+    );
+    let provenance_b = sign_peer_provenance(
+        proxy_assertion(),
+        "GET",
+        "relay.example.com:443",
+        "/",
+        b"",
+        PeerProvenance {
+            timestamp: NOW,
+            nonce: &[0x1b; 16],
+            client_peer: peer_b,
+        },
+    );
+    let provenance_a_again = sign_peer_provenance(
+        proxy_assertion(),
+        "GET",
+        "relay.example.com:443",
+        "/",
+        b"",
+        PeerProvenance {
+            timestamp: NOW,
+            nonce: &[0x1d; 16],
+            client_peer: peer_a,
+        },
+    );
+
+    let evidence_a = verifier
+        .verify(
+            &peer_headers(&assertion, &provenance_a, peer_a),
+            &request,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("authenticated peer A");
+    let evidence_b = verifier
+        .verify(
+            &peer_headers(&assertion, &provenance_b, peer_b),
+            &request,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("authenticated peer B");
+    let evidence_a_again = verifier
+        .verify(
+            &peer_headers(&assertion, &provenance_a_again, peer_a),
+            &request,
+            now(),
+            &replay,
+        )
+        .await
+        .expect("authenticated peer A with a new nonce");
+
+    assert_eq!(
+        evidence_a.profile(),
+        AssertionTransportProfile::TrustedProxyHmacV2
+    );
+    let authenticated_a = evidence_a.authenticated_client_peer().expect("v2 peer key");
+    let authenticated_b = evidence_b.authenticated_client_peer().expect("v2 peer key");
+    let authenticated_a_again = evidence_a_again
+        .authenticated_client_peer()
+        .expect("stable v2 peer key");
+    assert_eq!(
+        authenticated_a.admission_key(),
+        authenticated_a_again.admission_key()
+    );
+    assert_ne!(
+        authenticated_a.admission_key(),
+        authenticated_b.admission_key()
+    );
+    assert_eq!(
+        format!("{authenticated_a:?}"),
+        "AuthenticatedClientPeer([REDACTED])"
+    );
+    assert!(!format!("{evidence_a:?}").contains(peer_a));
+}
+
+#[tokio::test]
+async fn v2_peer_is_required_canonical_and_mac_bound() {
+    let verifier = verifier();
+    let request = request("GET", "relay.example.com:443", "/", b"");
+    let assertion = assertion_header(proxy_assertion());
+    let replay = ReplayReader::default();
+    let peer = "198.51.100.20";
+    let provenance = sign_peer_provenance(
+        proxy_assertion(),
+        "GET",
+        "relay.example.com:443",
+        "/",
+        b"",
+        PeerProvenance {
+            timestamp: NOW,
+            nonce: &[0x1c; 16],
+            client_peer: peer,
+        },
+    );
+
+    assert_eq!(
+        verifier
+            .verify(&headers(&assertion, &provenance), &request, now(), &replay)
+            .await
+            .unwrap_err(),
+        TrustedProxyError::MissingClientPeer
+    );
+    assert_eq!(
+        verifier
+            .verify(
+                &peer_headers(&assertion, &provenance, "198.51.100.21"),
+                &request,
+                now(),
+                &replay,
+            )
+            .await
+            .unwrap_err(),
+        TrustedProxyError::InvalidMac
+    );
+    assert_eq!(
+        verifier
+            .verify(
+                &peer_headers(&assertion, &provenance, "::ffff:198.51.100.20"),
+                &request,
+                now(),
+                &replay,
+            )
+            .await
+            .unwrap_err(),
+        TrustedProxyError::MalformedClientPeer
+    );
+
+    let mut duplicate = peer_headers(&assertion, &provenance, peer);
+    duplicate.push(HttpHeaderField::new(
+        "Nostr-Federated-Identity-Client-Peer",
+        peer.as_bytes(),
+    ));
+    assert_eq!(
+        verifier
+            .verify(&duplicate, &request, now(), &replay)
+            .await
+            .unwrap_err(),
+        TrustedProxyError::AmbiguousHeader
     );
 }
 

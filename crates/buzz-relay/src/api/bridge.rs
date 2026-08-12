@@ -13,7 +13,9 @@ use axum::{
 use base64::Engine;
 use serde_json::Value;
 
-use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
+use buzz_auth::{
+    LimitType, Nip98ReplayGuard, ProofTransport, RouteCapability, DEFAULT_REPLAY_TTL_SECS,
+};
 use buzz_core::TenantContext;
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
@@ -127,7 +129,7 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
-fn exact_nip98_authorization_event(headers: &HeaderMap) -> Option<Arc<str>> {
+pub(crate) fn exact_nip98_authorization_event(headers: &HeaderMap) -> Option<Arc<str>> {
     let mut values = headers.get_all("authorization").iter();
     let value = values.next()?.to_str().ok()?;
     if values.next().is_some() {
@@ -227,6 +229,364 @@ async fn finalize_bridge_corporate_identity(
         .await
         .map(|_| ())
         .map_err(|e| e.into_api_error())
+}
+
+async fn enforce_bridge_membership(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey_bytes: &[u8],
+    auth_tag: Option<&str>,
+) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<Value>)> {
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        pubkey_bytes,
+        auth_tag,
+    )
+    .await
+    .map(|owner| {
+        owner.or_else(|| {
+            if state.config.require_relay_membership {
+                None
+            } else {
+                super::relay_members::extract_nip_oa_owner(pubkey_bytes, auth_tag)
+            }
+        })
+    })
+}
+
+async fn verify_bridge_identity_for_mode(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    auth_tag: Option<&str>,
+) -> Result<Option<crate::corporate_identity::CorporateIdentityProof>, (StatusCode, Json<Value>)> {
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag)
+                .await
+                .map(Some)
+        }
+        buzz_auth::NipFiMode::Enforce => Ok(None),
+        buzz_auth::NipFiMode::DenyProtected => Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: protected ingress denied",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_bridge_identity_for_mode(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    legacy_proof: Option<crate::corporate_identity::CorporateIdentityProof>,
+    method: &str,
+    expected_url: &str,
+    body: Option<&[u8]>,
+    capability: RouteCapability,
+    ingress: crate::authorization_runtime::ProtectedIngress,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            let proof = legacy_proof.ok_or_else(|| {
+                api_error(StatusCode::UNAUTHORIZED, "identity verification required")
+            })?;
+            finalize_bridge_corporate_identity(state, tenant, pubkey, proof).await
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            authorize_canonical_bridge(
+                state,
+                tenant,
+                headers,
+                pubkey,
+                method,
+                expected_url,
+                body,
+                capability,
+                ingress,
+            )
+            .await
+        }
+        buzz_auth::NipFiMode::DenyProtected => Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: protected ingress denied",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn authorize_canonical_bridge(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    method: &str,
+    expected_url: &str,
+    body: Option<&[u8]>,
+    capability: RouteCapability,
+    ingress: crate::authorization_runtime::ProtectedIngress,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let domain = tenant.community();
+    let object =
+        crate::protected_ingress::domain_object(domain).map_err(map_protected_bridge_error)?;
+    let body_bytes = match body {
+        Some(body) => body,
+        None => &[],
+    };
+    let body_digest =
+        crate::protected_ingress::fingerprint(b"buzz:nip-fi:bridge-body:v1", &[body_bytes]);
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:bridge-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            pubkey.as_bytes(),
+            method.as_bytes(),
+            expected_url.as_bytes(),
+            &body_digest,
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:bridge-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            tenant.host().as_bytes(),
+            method.as_bytes(),
+            expected_url.as_bytes(),
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        ingress,
+        domain,
+        capability,
+        object,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion_token = crate::protected_ingress::exact_assertion(
+        headers,
+        &state.config.corporate_identity.jwt_header,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion =
+        crate::protected_ingress::verify_assertion(state, &assertion_token, coordinates)
+            .await
+            .map_err(map_protected_bridge_error)?;
+    let event_json = exact_nip98_authorization_event(headers).ok_or_else(|| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    let proof = buzz_auth::verify_nip98_authorization_proof(
+        &event_json,
+        expected_url,
+        method,
+        body,
+        &assertion,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        *object.key(),
+        transport_context_fingerprint,
+    )
+    .map_err(|_| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    crate::protected_ingress::authorize_read(state, coordinates, assertion, proof)
+        .await
+        .map(|_| ())
+        .map_err(map_protected_bridge_error)
+}
+
+async fn prepare_canonical_bridge_mutation(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    expected_url: &str,
+    body: &[u8],
+    target: (
+        crate::authorization_runtime::ProtectedIngress,
+        RouteCapability,
+        buzz_db::authorization_admission::AdmissionObject,
+    ),
+) -> Result<buzz_db::authorization_admission::AdmissionCommitRequest, (StatusCode, Json<Value>)> {
+    let domain = tenant.community();
+    let (ingress, capability, object) = target;
+    let body_digest = crate::protected_ingress::fingerprint(b"buzz:nip-fi:bridge-body:v1", &[body]);
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:bridge-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            pubkey.as_bytes(),
+            b"POST",
+            expected_url.as_bytes(),
+            &body_digest,
+            object.key(),
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:bridge-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            tenant.host().as_bytes(),
+            b"POST",
+            expected_url.as_bytes(),
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        ingress,
+        domain,
+        capability,
+        object,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion_token = crate::protected_ingress::exact_assertion(
+        headers,
+        &state.config.corporate_identity.jwt_header,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion =
+        crate::protected_ingress::verify_assertion(state, &assertion_token, coordinates)
+            .await
+            .map_err(map_protected_bridge_error)?;
+    let event_json = exact_nip98_authorization_event(headers).ok_or_else(|| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    let proof = buzz_auth::verify_nip98_authorization_proof(
+        &event_json,
+        expected_url,
+        "POST",
+        Some(body),
+        &assertion,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        *object.key(),
+        transport_context_fingerprint,
+    )
+    .map_err(|_| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    crate::protected_ingress::prepare_mutation(state, coordinates, assertion, proof)
+        .await
+        .map_err(map_protected_bridge_error)
+}
+
+fn map_protected_bridge_error(
+    error: crate::protected_ingress::ProtectedIngressError,
+) -> (StatusCode, Json<Value>) {
+    match error {
+        crate::protected_ingress::ProtectedIngressError::Denied => {
+            api_error(StatusCode::FORBIDDEN, "restricted: authorization denied")
+        }
+        crate::protected_ingress::ProtectedIngressError::Expired => {
+            api_error(StatusCode::UNAUTHORIZED, error.code())
+        }
+        crate::protected_ingress::ProtectedIngressError::Unavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "restricted: authorization unavailable",
+        ),
+    }
+}
+
+async fn authorize_canonical_moderation_read(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    path: &str,
+    expected_url: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let domain = tenant.community();
+    let target_key = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:moderation-read-target:v1",
+        &[domain.as_uuid().as_bytes(), path.as_bytes()],
+    );
+    let object = buzz_db::authorization_admission::AdmissionObject::new(
+        buzz_db::authorization_admission::AdmissionObjectKind::ModerationTarget,
+        target_key,
+    )
+    .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "restricted: authorization denied"))?;
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:moderation-read-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            pubkey.as_bytes(),
+            path.as_bytes(),
+            expected_url.as_bytes(),
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:moderation-read-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            tenant.host().as_bytes(),
+            expected_url.as_bytes(),
+            b"GET",
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        crate::authorization_runtime::ProtectedIngress::ModerationRead,
+        domain,
+        RouteCapability::Moderation,
+        object,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion_token = crate::protected_ingress::exact_assertion(
+        headers,
+        &state.config.corporate_identity.jwt_header,
+    )
+    .map_err(map_protected_bridge_error)?;
+    let assertion =
+        crate::protected_ingress::verify_assertion(state, &assertion_token, coordinates)
+            .await
+            .map_err(map_protected_bridge_error)?;
+    let event_json = exact_nip98_authorization_event(headers).ok_or_else(|| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    let proof = buzz_auth::verify_nip98_authorization_proof(
+        &event_json,
+        expected_url,
+        "GET",
+        None,
+        &assertion,
+        ProofTransport::Nip98,
+        request_fingerprint,
+        *object.key(),
+        transport_context_fingerprint,
+    )
+    .map_err(|_| {
+        api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid canonical NIP-98 authorization",
+        )
+    })?;
+    crate::protected_ingress::authorize_read(state, coordinates, assertion, proof)
+        .await
+        .map(|_| ())
+        .map_err(map_protected_bridge_error)
 }
 
 /// Construct the NIP-98 `u`-tag expected URL for a request bound to `tenant`.
@@ -818,19 +1178,22 @@ async fn submit_event_authed(
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
 ) -> SubmitOutcome {
-    // Admission and replay checks fire before body parse — a 429 or replay
-    // reject on a malformed body must still be attributed.
-    if let Err(e) = enforce_http_admission(state, tenant, &pubkey).await {
-        return SubmitOutcome::Err {
-            status: e.0,
-            response: e,
-        };
-    }
-    if let Err(e) = check_nip98_replay(state, tenant, event_id_bytes).await {
-        return SubmitOutcome::Err {
-            status: e.0,
-            response: e,
-        };
+    // Off retains its exact legacy quota/replay behavior. Enforce uses the
+    // canonical PostgreSQL receipt and typed result, so no Redis mutation can
+    // precede final admission or turn a committed event into a 429 response.
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Off {
+        if let Err(e) = enforce_http_admission(state, tenant, &pubkey).await {
+            return SubmitOutcome::Err {
+                status: e.0,
+                response: e,
+            };
+        }
+        if let Err(e) = check_nip98_replay(state, tenant, event_id_bytes).await {
+            return SubmitOutcome::Err {
+                status: e.0,
+                response: e,
+            };
+        }
     }
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -861,7 +1224,7 @@ async fn submit_event_authed(
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     let identity_proof =
-        match verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await {
+        match verify_bridge_identity_for_mode(state, tenant, headers, pubkey, auth_tag).await {
             Ok(proof) => proof,
             Err(e) => {
                 return SubmitOutcome::Err {
@@ -870,40 +1233,138 @@ async fn submit_event_authed(
                 };
             }
         };
-    let nip_oa_owner = match super::relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        auth_tag,
-    )
-    .await
-    {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
+    let mut nip_oa_owner = if state.config.nip_fi_mode == buzz_auth::NipFiMode::Off {
+        match enforce_bridge_membership(state, tenant, &pubkey_bytes, auth_tag).await {
+            Ok(owner) => owner,
+            Err(e) => {
+                return SubmitOutcome::Err {
+                    status: e.0,
+                    response: e,
+                };
             }
-        }),
-        Err(e) => {
+        }
+    } else {
+        None
+    };
+    let expected_url = nip98_expected_url(&state.config.relay_url, tenant, "/events");
+    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce
+        && !buzz_core::kind::is_moderation_command_kind(kind_u32)
+        && !crate::handlers::ingest::canonical_bridge_kind_supported(kind_u32)
+    {
+        let e = api_error(
+            StatusCode::BAD_REQUEST,
+            "restricted: event kind requires a dedicated canonical mutation owner",
+        );
+        return SubmitOutcome::Err {
+            status: e.0,
+            response: e,
+        };
+    }
+    let canonical_admission = match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            if let Err(e) = finalize_bridge_identity_for_mode(
+                state,
+                tenant,
+                headers,
+                pubkey,
+                identity_proof,
+                "POST",
+                &expected_url,
+                Some(body),
+                RouteCapability::MessagesWrite,
+                crate::authorization_runtime::ProtectedIngress::BridgeEvent,
+            )
+            .await
+            {
+                return SubmitOutcome::Err {
+                    status: e.0,
+                    response: e,
+                };
+            }
+            None
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            let target = if buzz_core::kind::is_moderation_command_kind(kind_u32) {
+                match crate::handlers::moderation_commands::prepare_moderation_application_effect(
+                    tenant, &event,
+                ) {
+                    Ok(effect) => (
+                        crate::authorization_runtime::ProtectedIngress::ModerationWrite,
+                        RouteCapability::Moderation,
+                        effect.admission_object(),
+                    ),
+                    Err(message) => {
+                        let e = api_error(StatusCode::BAD_REQUEST, &message);
+                        return SubmitOutcome::Err {
+                            status: e.0,
+                            response: e,
+                        };
+                    }
+                }
+            } else {
+                let object = match buzz_db::authorization_admission::AdmissionObject::event(
+                    event.id.to_bytes(),
+                ) {
+                    Some(object) => object,
+                    None => {
+                        let e = api_error(StatusCode::BAD_REQUEST, "invalid event identifier");
+                        return SubmitOutcome::Err {
+                            status: e.0,
+                            response: e,
+                        };
+                    }
+                };
+                (
+                    crate::authorization_runtime::ProtectedIngress::BridgeEvent,
+                    RouteCapability::MessagesWrite,
+                    object,
+                )
+            };
+            match prepare_canonical_bridge_mutation(
+                state,
+                tenant,
+                headers,
+                pubkey,
+                &expected_url,
+                body,
+                target,
+            )
+            .await
+            {
+                Ok(request) => Some(request),
+                Err(e) => {
+                    return SubmitOutcome::Err {
+                        status: e.0,
+                        response: e,
+                    };
+                }
+            }
+        }
+        buzz_auth::NipFiMode::DenyProtected => {
+            let e = api_error(
+                StatusCode::FORBIDDEN,
+                "restricted: protected ingress denied",
+            );
             return SubmitOutcome::Err {
                 status: e.0,
                 response: e,
             };
         }
     };
-    if let Err(e) = finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await
-    {
-        return SubmitOutcome::Err {
-            status: e.0,
-            response: e,
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        nip_oa_owner = match enforce_bridge_membership(state, tenant, &pubkey_bytes, auth_tag).await
+        {
+            Ok(owner) => owner,
+            Err(e) => {
+                return SubmitOutcome::Err {
+                    status: e.0,
+                    response: e,
+                };
+            }
         };
     }
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
-    }
 
-    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let moderation_evidence = buzz_core::kind::is_moderation_command_kind(kind_u32)
         .then(|| {
             exact_nip98_authorization_event(headers).map(|authorization_event| {
@@ -921,8 +1382,34 @@ async fn submit_event_authed(
         moderation_evidence,
     };
 
-    match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {
-        Ok(result) => {
+    let ingested = match canonical_admission {
+        Some(request) => {
+            crate::handlers::ingest::ingest_event_with_canonical_admission(
+                state, tenant, event, auth, request,
+            )
+            .await
+        }
+        None => crate::handlers::ingest::ingest_event(state, tenant, event, auth)
+            .await
+            .map(|result| {
+                (
+                    result,
+                    crate::handlers::ingest::CanonicalIngestDisposition::Legacy,
+                )
+            }),
+    };
+    match ingested {
+        Ok((result, disposition)) => {
+            if matches!(
+                disposition,
+                crate::handlers::ingest::CanonicalIngestDisposition::Committed
+                    | crate::handlers::ingest::CanonicalIngestDisposition::Legacy
+            ) {
+                if let Some(owner) = nip_oa_owner {
+                    super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner)
+                        .await;
+                }
+            }
             let response = Json(serde_json::json!({
                 "event_id": result.event_id,
                 "accepted": result.accepted,
@@ -1047,13 +1534,29 @@ async fn query_events_authed(
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    enforce_http_admission(state, tenant, &pubkey).await?;
-    check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     let identity_proof =
-        verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await?;
+        verify_bridge_identity_for_mode(state, tenant, headers, pubkey, auth_tag).await?;
+    let expected_url = nip98_expected_url(&state.config.relay_url, tenant, "/query");
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        finalize_bridge_identity_for_mode(
+            state,
+            tenant,
+            headers,
+            pubkey,
+            None,
+            "POST",
+            &expected_url,
+            Some(body),
+            RouteCapability::MessagesRead,
+            crate::authorization_runtime::ProtectedIngress::BridgeQuery,
+        )
+        .await?;
+    }
+    enforce_http_admission(state, tenant, &pubkey).await?;
+    check_nip98_replay(state, tenant, event_id_bytes).await?;
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -1098,7 +1601,21 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Off {
+        finalize_bridge_identity_for_mode(
+            state,
+            tenant,
+            headers,
+            pubkey,
+            identity_proof,
+            "POST",
+            &expected_url,
+            Some(body),
+            RouteCapability::MessagesRead,
+            crate::authorization_runtime::ProtectedIngress::BridgeQuery,
+        )
+        .await?;
+    }
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1493,13 +2010,29 @@ async fn count_events_authed(
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    enforce_http_admission(state, tenant, &pubkey).await?;
-    check_nip98_replay(state, tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     let identity_proof =
-        verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await?;
+        verify_bridge_identity_for_mode(state, tenant, headers, pubkey, auth_tag).await?;
+    let expected_url = nip98_expected_url(&state.config.relay_url, tenant, "/count");
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        finalize_bridge_identity_for_mode(
+            state,
+            tenant,
+            headers,
+            pubkey,
+            None,
+            "POST",
+            &expected_url,
+            Some(body),
+            RouteCapability::MessagesRead,
+            crate::authorization_runtime::ProtectedIngress::BridgeCount,
+        )
+        .await?;
+    }
+    enforce_http_admission(state, tenant, &pubkey).await?;
+    check_nip98_replay(state, tenant, event_id_bytes).await?;
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -1536,7 +2069,21 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Off {
+        finalize_bridge_identity_for_mode(
+            state,
+            tenant,
+            headers,
+            pubkey,
+            identity_proof,
+            "POST",
+            &expected_url,
+            Some(body),
+            RouteCapability::MessagesRead,
+            crate::authorization_runtime::ProtectedIngress::BridgeCount,
+        )
+        .await?;
+    }
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -2195,12 +2742,18 @@ async fn authorize_moderation_read(
             state.config.corporate_identity.require,
         ),
     )?;
-    check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     let identity_proof =
-        verify_bridge_corporate_identity(state, &tenant, headers, pubkey, auth_tag).await?;
+        verify_bridge_identity_for_mode(state, &tenant, headers, pubkey, auth_tag).await?;
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        authorize_canonical_moderation_read(state, &tenant, headers, pubkey, path, &url).await?;
+    }
+    check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    // Canonical Enforce admission precedes this distributed legacy quota.
+    // Fresh admitted signatures still bound queue work before any queue query.
+    enforce_http_admission(state, &tenant, &pubkey).await?;
 
     crate::handlers::moderation_authz::authorize_moderation_action(
         &tenant,
@@ -2217,7 +2770,21 @@ async fn authorize_moderation_read(
             "restricted: moderator access required",
         )
     })?;
-    finalize_bridge_corporate_identity(state, &tenant, pubkey, identity_proof).await?;
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            let proof = identity_proof.ok_or_else(|| {
+                api_error(StatusCode::UNAUTHORIZED, "identity verification required")
+            })?;
+            finalize_bridge_corporate_identity(state, &tenant, pubkey, proof).await?;
+        }
+        buzz_auth::NipFiMode::Enforce => {}
+        buzz_auth::NipFiMode::DenyProtected => {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "restricted: protected ingress denied",
+            ));
+        }
+    }
 
     Ok(tenant)
 }
@@ -2353,8 +2920,33 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+
+    fn test_status_writer(
+        send_tx: tokio::sync::mpsc::Sender<axum::extract::ws::Message>,
+    ) -> crate::connection::StatusWriter {
+        let (status_tx, mut status_rx) =
+            tokio::sync::mpsc::channel::<crate::connection::StatusWrite>(8);
+        tokio::spawn(async move {
+            while let Some(status) = status_rx.recv().await {
+                let acknowledgement = send_tx
+                    .send(axum::extract::ws::Message::Text(status.text.into()))
+                    .await
+                    .map(|()| crate::connection::StatusWriteAck {
+                        identity: status.identity,
+                    })
+                    .map_err(|_| ());
+                let succeeded = acknowledgement.is_ok();
+                let _ = status.flushed.send(acknowledgement);
+                if !succeeded {
+                    break;
+                }
+            }
+        });
+        crate::connection::StatusWriter::new(status_tx)
+    }
 
     fn redis_pool() -> deadpool_redis::Pool {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
@@ -3514,14 +4106,47 @@ mod tests {
     async fn bridge_handler_test_state_with_corporate_identity(
         require_corporate_identity: bool,
     ) -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_with_rate_limit(require_corporate_identity, None).await
+    }
+
+    async fn bridge_handler_test_state_with_rate_limit(
+        require_corporate_identity: bool,
+        human_api_calls_per_min: Option<u64>,
+    ) -> Option<Arc<crate::state::AppState>> {
+        build_bridge_handler_test_state(
+            require_corporate_identity,
+            human_api_calls_per_min,
+            None,
+            None,
+        )
+        .await
+        .map(|(state, _)| state)
+    }
+
+    async fn build_bridge_handler_test_state(
+        require_corporate_identity: bool,
+        human_api_calls_per_min: Option<u64>,
+        canonical_runtime: Option<(
+            crate::authorization_runtime::ProviderFreeRuntimeConfig,
+            crate::authorization_runtime::InstalledAuthorizationRuntime,
+        )>,
+        database_url: Option<&str>,
+    ) -> Option<(Arc<crate::state::AppState>, sqlx::PgPool)> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        config.database_url = database_url.unwrap_or(TEST_DB_URL).to_owned();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         config.relay_url = "wss://bridge-test.local".to_string();
         config.require_auth_token = false;
         config.require_relay_membership = false;
+        if let Some((runtime_config, _)) = canonical_runtime.as_ref() {
+            config.nip_fi_mode = buzz_auth::NipFiMode::Enforce;
+            config.nip_fi = runtime_config.clone();
+        }
+        if let Some(limit) = human_api_calls_per_min {
+            config.auth.rate_limits.human_api_calls_per_min = limit;
+        }
         config.corporate_identity.require = require_corporate_identity;
         if require_corporate_identity {
             config.corporate_identity.jwks_uri = "http://127.0.0.1:9/jwks".to_string();
@@ -3529,7 +4154,7 @@ mod tests {
             config.corporate_identity.audience = "buzz-relay".to_string();
         }
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -3548,20 +4173,831 @@ mod tests {
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
 
-        let (mut state, _audit_shutdown) = crate::state::AppState::new(
-            config,
-            db,
-            redis_pool,
-            audit,
-            pubsub,
-            auth,
-            search,
-            workflow_engine,
-            Keys::generate(),
-            media_storage,
-        );
+        let (mut state, _audit_shutdown) = match canonical_runtime {
+            Some((_, runtime)) => crate::state::AppState::new_with_authorization_runtime(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                Keys::generate(),
+                media_storage,
+                runtime,
+            ),
+            None => crate::state::AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                Keys::generate(),
+                media_storage,
+            ),
+        };
         state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
-        Some(Arc::new(state))
+        Some((Arc::new(state), pool))
+    }
+
+    struct StaticBridgeJwksLoader(Vec<u8>);
+
+    #[async_trait]
+    impl crate::authorization_runtime::JwksDocumentLoader for StaticBridgeJwksLoader {
+        async fn load(
+            &self,
+            _source: &crate::authorization_runtime::JwksSourceConfig,
+            _expected_issuer: &str,
+            _policy: crate::authorization_runtime::JwksRefreshPolicy,
+        ) -> Result<Vec<u8>, crate::authorization_runtime::RuntimeAuthorizationError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct UnavailableStatusEvidence;
+
+    #[async_trait]
+    impl crate::authorization_runtime::CurrentStatusEvidenceSource for UnavailableStatusEvidence {
+        async fn current(
+            &self,
+            _request: &buzz_auth::CurrentBindingStatusEvidenceRequest,
+        ) -> Result<
+            buzz_core::CanonicalCurrentBindingEvidence,
+            crate::authorization_runtime::StatusSessionError,
+        > {
+            Err(crate::authorization_runtime::StatusSessionError::EvidenceUnavailable)
+        }
+
+        async fn recheck(
+            &self,
+            _evidence: &buzz_core::CanonicalCurrentBindingEvidence,
+        ) -> Result<
+            (
+                buzz_core::CanonicalCurrentBindingEvidence,
+                chrono::DateTime<chrono::Utc>,
+            ),
+            crate::authorization_runtime::StatusSessionError,
+        > {
+            Err(crate::authorization_runtime::StatusSessionError::EvidenceUnavailable)
+        }
+    }
+
+    async fn install_bridge_binding(
+        pool: &sqlx::PgPool,
+        community: buzz_core::CommunityId,
+        actor: nostr::PublicKey,
+        issuer: &str,
+        subject: &str,
+    ) {
+        let operation_id = uuid::Uuid::new_v4();
+        let history_id = uuid::Uuid::new_v4();
+        let binding_id = uuid::Uuid::new_v4();
+        let request_fingerprint = [71_u8; 32];
+        let actor_bytes = actor.to_bytes();
+        let mut transaction = pool.begin().await.expect("begin bridge binding fixture");
+        sqlx::query(
+            "INSERT INTO identity_enrollment_policies \
+             (community_id,policy_revision,enrollment_mode,policy_digest,effective_at) \
+             VALUES ($1,1,2,$2,transaction_timestamp()-interval '1 second') \
+             ON CONFLICT (community_id,policy_revision) DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind([72_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge policy");
+        sqlx::query(
+            "INSERT INTO authorization_invalidation_domains (community_id,current_generation) \
+             VALUES ($1,0) ON CONFLICT (community_id) DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge invalidation domain");
+        sqlx::query(
+            "INSERT INTO authorization_event_capacity \
+             (community_id,max_events_per_domain,max_bytes_per_domain,max_envelope_bytes) \
+             VALUES ($1,32,2097152,16384) ON CONFLICT (community_id) DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge audit capacity");
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id,operation_id,request_fingerprint,operation_kind,actor_fingerprint, \
+              outcome_code,result_digest) VALUES ($1,$2,$3,1,$4,1,$5)",
+        )
+        .bind(community.as_uuid())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .bind(actor_bytes.as_slice())
+        .bind([73_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge binding receipt");
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id,event_id,event_kind,outcome_code,reason_code,actor_kind, \
+              actor_fingerprint,operation_id,request_fingerprint,correlation_id,attempt_id, \
+              occurred_at,canonical_envelope,envelope_digest) \
+             VALUES ($1,$2,1,1,1,1,$3,$4,$5,$6,$7,transaction_timestamp(),$8,$9)",
+        )
+        .bind(community.as_uuid())
+        .bind(uuid::Uuid::new_v4())
+        .bind(actor_bytes.as_slice())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::new_v4())
+        .bind([1_u8].as_slice())
+        .bind([74_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge binding event");
+        let binding_version: i64 = sqlx::query_scalar(
+            "INSERT INTO identity_bindings \
+             (community_id,binding_id,issuer,subject,principal_fingerprint,event_author_pubkey, \
+              binding_state,lifecycle_revision,binding_provenance,policy_revision, \
+              enrollment_evidence_digest,birth_history_id,creation_operation_id, \
+              creation_request_fingerprint) \
+             VALUES ($1,$2,$3,$4,$5,$6,1,1,2,1,$7,$8,$9,$10) RETURNING binding_version",
+        )
+        .bind(community.as_uuid())
+        .bind(binding_id)
+        .bind(issuer)
+        .bind(subject)
+        .bind([75_u8; 32].as_slice())
+        .bind(actor_bytes.as_slice())
+        .bind([76_u8; 32].as_slice())
+        .bind(history_id)
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("insert bridge binding");
+        sqlx::query(
+            "INSERT INTO identity_lifecycle_history \
+             (community_id,history_id,transition_kind,outcome_code,successor_binding_id, \
+              successor_binding_version,successor_lifecycle_revision,successor_state, \
+              operation_id,request_fingerprint,transition_digest) \
+             VALUES ($1,$2,1,1,$3,$4,1,1,$5,$6,$7)",
+        )
+        .bind(community.as_uuid())
+        .bind(history_id)
+        .bind(binding_id)
+        .bind(binding_version)
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .bind([77_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge binding history");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id,pubkey,role,added_by) \
+             VALUES ($1,$2,'owner',NULL)",
+        )
+        .bind(community.as_uuid())
+        .bind(actor.to_hex())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert bridge moderation owner");
+        transaction
+            .commit()
+            .await
+            .expect("commit bridge binding fixture");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL and Redis"]
+    async fn live_enforce_bridge_event_co_commits_and_replays_without_legacy_redis_mutation() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{header, Request};
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        use tower::ServiceExt;
+
+        const KID: &str = "bridge-canonical-test";
+        const ISSUER: &str = "https://bridge-issuer.example";
+        const AUDIENCE: &str = "buzz-bridge-test";
+        let admin_url = TEST_DB_URL
+            .rsplit_once('/')
+            .map(|(prefix, _)| format!("{prefix}/postgres"))
+            .expect("test database URL has a database name");
+        let admin = sqlx::PgPool::connect(&admin_url)
+            .await
+            .expect("connect PostgreSQL admin database");
+        let stale_databases: Vec<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'buzz_reachability_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .expect("list stale disposable bridge databases");
+        for stale_database in stale_databases {
+            let suffix = stale_database
+                .strip_prefix("buzz_reachability_")
+                .expect("query prefix is exact");
+            if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE \"{stale_database}\" WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await
+            .expect("drop stale disposable bridge database");
+        }
+        let database_name = format!("buzz_reachability_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database_name}\""
+        )))
+        .execute(&admin)
+        .await
+        .expect("create disposable bridge database");
+        let database_url = TEST_DB_URL
+            .rsplit_once('/')
+            .map(|(prefix, _)| format!("{prefix}/{database_name}"))
+            .expect("derive disposable bridge database URL");
+
+        let actor = Keys::generate();
+        let subject = format!("bridge-user-{}", uuid::Uuid::new_v4());
+        let jwk = crate::corporate_identity::canonical_test_support::jwk(0, KID);
+        let jwks = serde_json::to_vec(&jsonwebtoken::jwk::JwkSet { keys: vec![jwk] })
+            .expect("serialize bridge JWKS");
+        let runtime_config = crate::authorization_runtime::ProviderFreeRuntimeConfig::from_optional_json(Some(
+            r#"{
+                "issuer":"https://bridge-issuer.example",
+                "audience":"buzz-bridge-test",
+                "subject_claim":"sub",
+                "event_author_claim":"event_author",
+                "maximum_token_lifetime_seconds":600,
+                "jwks":{"jwks_uri":"https://bridge-issuer.example/keys"},
+                "lease":{"maximum_seconds":300},
+                "policy_revision":1,
+                "audit":{"max_events_per_domain":32,"max_bytes_per_domain":2097152,"max_envelope_bytes":16384},
+                "client_status_admission":{"max_presentations_per_domain":32,"max_presentations_per_actor":8,"max_presentations_per_peer":8},
+                "transport":{"kind":"sealed_test_transport"},
+                "enrollment":{"kind":"canonical_admission"},
+                "restore":{"kind":"operation_manifest"}
+            }"#,
+        ))
+        .expect("parse bridge runtime config");
+        let enforce = runtime_config.enforce().expect("enforce config");
+        let verifier = Arc::new(
+            crate::authorization_runtime::DynamicVerifier::new(
+                enforce.verifier_policy().clone(),
+                enforce.issuer().to_owned(),
+                enforce.jwks_source().clone(),
+                crate::authorization_runtime::JwksRefreshPolicy::new(
+                    64 * 1024,
+                    std::time::Duration::from_secs(2),
+                    std::time::Duration::from_secs(300),
+                )
+                .expect("bridge refresh policy"),
+                Arc::new(StaticBridgeJwksLoader(jwks)),
+            )
+            .expect("bridge dynamic verifier"),
+        );
+        let snapshot = verifier
+            .refresh(chrono::Utc::now())
+            .await
+            .expect("publish bridge JWKS");
+        let runtime =
+            crate::authorization_runtime::InstalledAuthorizationRuntime::for_canonical_assertion_test(
+                verifier,
+                snapshot,
+            );
+        let (state, pool) = build_bridge_handler_test_state(
+            false,
+            None,
+            Some((runtime_config, runtime)),
+            Some(&database_url),
+        )
+        .await
+        .expect("build live canonical bridge state");
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("run bridge migrations");
+        let host = format!("bridge-canonical-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create bridge community")
+            .id;
+        install_bridge_binding(&pool, community, actor.public_key(), ISSUER, &subject).await;
+
+        let event = EventBuilder::new(Kind::TextNote, "canonical bridge event")
+            .sign_with_keys(&actor)
+            .expect("sign bridge event");
+        let body = serde_json::to_vec(&event).expect("serialize bridge event");
+        let expected_url = format!("https://{host}/events");
+        let payload = hex::encode(Sha256::digest(&body));
+        let authorization_event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", expected_url.as_str()]).expect("bridge u tag"),
+                Tag::parse(["method", "POST"]).expect("bridge method tag"),
+                Tag::parse(["payload", payload.as_str()]).expect("bridge payload tag"),
+            ])
+            .sign_with_keys(&actor)
+            .expect("sign bridge NIP-98 event");
+        let authorization_json =
+            serde_json::to_string(&authorization_event).expect("serialize NIP-98 event");
+        let authorization = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(authorization_json.as_bytes())
+        );
+        let now = chrono::Utc::now().timestamp();
+        let assertion = crate::corporate_identity::canonical_test_support::signed_jwt(
+            &serde_json::json!({
+                "iss": ISSUER,
+                "aud": AUDIENCE,
+                "sub": subject,
+                "event_author": actor.public_key().to_hex(),
+                "iat": now - 1,
+                "nbf": now - 1,
+                "exp": now + 300,
+            }),
+            0,
+            KID,
+        );
+        let assertion_header = state.config.corporate_identity.jwt_header.clone();
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/events")
+                .header(header::HOST, &host)
+                .header(header::AUTHORIZATION, &authorization)
+                .header(&assertion_header, &assertion)
+                .body(Body::from(body.clone()))
+                .expect("build canonical bridge request")
+        };
+        let first = crate::router::build_router(state.clone())
+            .oneshot(request())
+            .await
+            .expect("first bridge response");
+        let first_status = first.status();
+        let first_body = to_bytes(first.into_body(), 64 * 1024)
+            .await
+            .expect("read first bridge response");
+        assert_eq!(
+            first_status,
+            StatusCode::OK,
+            "unexpected bridge response: {}",
+            String::from_utf8_lossy(&first_body)
+        );
+        let second = crate::router::build_router(state.clone())
+            .oneshot(request())
+            .await
+            .expect("replayed bridge response");
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = to_bytes(second.into_body(), 64 * 1024)
+            .await
+            .expect("read replayed bridge response");
+        assert_eq!(first_body, second_body);
+
+        let stored: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count stored bridge event");
+        assert_eq!(stored, 1);
+        let canonical_results: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_admission_results \
+             WHERE community_id=$1 AND object_kind=7 AND object_key=$2 \
+               AND application_code=1",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count canonical bridge result");
+        assert_eq!(canonical_results, 1);
+
+        let moderation_target = Keys::generate().public_key();
+        let moderation_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_MODERATION_BAN as u16),
+            "",
+        )
+        .tag(Tag::parse(["p", moderation_target.to_hex().as_str()]).expect("moderation target tag"))
+        .sign_with_keys(&actor)
+        .expect("sign bridge moderation command");
+        let moderation_body =
+            serde_json::to_vec(&moderation_event).expect("serialize moderation command");
+        let moderation_payload = hex::encode(Sha256::digest(&moderation_body));
+        let moderation_authorization_event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", expected_url.as_str()]).expect("moderation u tag"),
+                Tag::parse(["method", "POST"]).expect("moderation method tag"),
+                Tag::parse(["payload", moderation_payload.as_str()])
+                    .expect("moderation payload tag"),
+            ])
+            .sign_with_keys(&actor)
+            .expect("sign moderation NIP-98 event");
+        let moderation_authorization = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_string(&moderation_authorization_event)
+                    .expect("serialize moderation NIP-98 event")
+                    .as_bytes()
+            )
+        );
+        let moderation_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/events")
+                .header(header::HOST, &host)
+                .header(header::AUTHORIZATION, &moderation_authorization)
+                .header(&assertion_header, &assertion)
+                .body(Body::from(moderation_body.clone()))
+                .expect("build canonical moderation request")
+        };
+        let first_moderation = crate::router::build_router(state.clone())
+            .oneshot(moderation_request())
+            .await
+            .expect("first bridge moderation response");
+        assert_eq!(first_moderation.status(), StatusCode::OK);
+        let first_moderation_body = to_bytes(first_moderation.into_body(), 64 * 1024)
+            .await
+            .expect("read first moderation response");
+        let replayed_moderation = crate::router::build_router(state.clone())
+            .oneshot(moderation_request())
+            .await
+            .expect("replayed bridge moderation response");
+        assert_eq!(replayed_moderation.status(), StatusCode::OK);
+        let replayed_moderation_body = to_bytes(replayed_moderation.into_body(), 64 * 1024)
+            .await
+            .expect("read replayed moderation response");
+        assert_eq!(first_moderation_body, replayed_moderation_body);
+        let moderation_actions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM moderation_actions WHERE community_id=$1 \
+             AND target_pubkey=$2 AND action='ban'",
+        )
+        .bind(community.as_uuid())
+        .bind(moderation_target.to_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("count co-committed moderation actions");
+        assert_eq!(moderation_actions, 1);
+        let moderation_results: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_admission_results \
+             WHERE community_id=$1 AND object_kind=5",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count canonical moderation result");
+        assert_eq!(moderation_results, 1);
+
+        let invite_body = serde_json::to_vec(&serde_json::json!({
+            "ttl_secs": 3600,
+            "max_uses": 2,
+        }))
+        .expect("serialize invite mint request");
+        let invite_url = format!("https://{host}/api/invites");
+        let invite_payload = hex::encode(Sha256::digest(&invite_body));
+        let invite_authorization_event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", invite_url.as_str()]).expect("invite u tag"),
+                Tag::parse(["method", "POST"]).expect("invite method tag"),
+                Tag::parse(["payload", invite_payload.as_str()]).expect("invite payload tag"),
+            ])
+            .sign_with_keys(&actor)
+            .expect("sign invite NIP-98 event");
+        let invite_authorization = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_string(&invite_authorization_event)
+                    .expect("serialize invite NIP-98 event")
+                    .as_bytes()
+            )
+        );
+        let invite_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/invites")
+                .header(header::HOST, &host)
+                .header(header::AUTHORIZATION, &invite_authorization)
+                .header(&assertion_header, &assertion)
+                .body(Body::from(invite_body.clone()))
+                .expect("build canonical invite request")
+        };
+        let first_invite = crate::router::build_router(state.clone())
+            .oneshot(invite_request())
+            .await
+            .expect("first invite mint response");
+        assert_eq!(first_invite.status(), StatusCode::OK);
+        let first_invite_body = to_bytes(first_invite.into_body(), 64 * 1024)
+            .await
+            .expect("read first invite response");
+        let replayed_invite = crate::router::build_router(state.clone())
+            .oneshot(invite_request())
+            .await
+            .expect("replayed invite mint response");
+        assert_eq!(replayed_invite.status(), StatusCode::OK);
+        let replayed_invite_body = to_bytes(replayed_invite.into_body(), 64 * 1024)
+            .await
+            .expect("read replayed invite response");
+        assert_eq!(first_invite_body, replayed_invite_body);
+        let invite_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM relay_invites WHERE community_id=$1 AND created_by=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(actor.public_key().to_hex())
+        .fetch_one(&pool)
+        .await
+        .expect("count co-committed invite rows");
+        assert_eq!(invite_rows, 1);
+        let invite_results: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_admission_results \
+             WHERE community_id=$1 AND object_kind=9 AND application_code=1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count canonical invite results");
+        assert_eq!(invite_results, 1);
+
+        // Drive the real AUTH owner with an opaque peer and opted-in status
+        // scope. This proves the transport peer survives canonical AUTH into
+        // the frozen connection context and that live Enforce AUTH activates
+        // status rather than merely leaving the helper reachable in tests.
+        let challenge = format!("bridge-auth-{}", uuid::Uuid::new_v4());
+        let relay_url = format!("wss://{host}");
+        let auth_event = EventBuilder::auth(
+            &challenge,
+            nostr::RelayUrl::parse(&relay_url).expect("parse AUTH relay URL"),
+        )
+        .tag(
+            Tag::parse([
+                buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG,
+                "1",
+                uuid::Uuid::new_v4().to_string().as_str(),
+                state.relay_keypair.public_key().to_hex().as_str(),
+            ])
+            .expect("build binding-status scope"),
+        )
+        .sign_with_keys(&actor)
+        .expect("sign canonical AUTH event");
+        let authenticated_peer = buzz_auth::AuthenticatedClientPeer::for_test([0x92; 32]);
+        let evidence = buzz_auth::SealedTransportEvidence::for_test(
+            community,
+            assertion.clone(),
+            b"GET",
+            host.as_bytes(),
+            b"/",
+            [0; 32],
+            buzz_auth::ProofTransport::Nip42,
+            chrono::Utc::now() + chrono::Duration::seconds(300),
+            authenticated_peer,
+        );
+        let (send_tx, mut send_rx) = tokio::sync::mpsc::channel(16);
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let status_writer = test_status_writer(send_tx.clone());
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: TenantContext::resolved(community, &host),
+            corporate_identity_jwt: None,
+            canonical_transport_evidence: tokio::sync::Mutex::new(Some(evidence)),
+            canonical_authorization: tokio::sync::RwLock::new(None),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Pending {
+                challenge: challenge.clone(),
+            }),
+            status_scope: tokio::sync::RwLock::new(None),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx,
+            status_writer,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        crate::handlers::auth::handle_auth(auth_event, Arc::clone(&conn), Arc::clone(&state)).await;
+        let mut frames = Vec::new();
+        while let Ok(frame) = send_rx.try_recv() {
+            frames.push(format!("{frame:?}"));
+        }
+        let mut control_frames = Vec::new();
+        while let Ok(frame) = ctrl_rx.try_recv() {
+            control_frames.push(format!("{frame:?}"));
+        }
+        let status_results: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_admission_results \
+             WHERE community_id=$1 AND object_kind=8",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("count canonical AUTH status results");
+        {
+            let auth = conn.auth_state.read().await;
+            let crate::connection::AuthState::Authenticated(context) = &*auth else {
+                panic!(
+                    "canonical AUTH did not authenticate the connection: status_results={status_results} data={frames:?} control={control_frames:?}"
+                );
+            };
+            assert_eq!(
+                context.authenticated_client_peer(),
+                Some(&authenticated_peer)
+            );
+            assert_eq!(context.authorization().pubkey, actor.public_key());
+        }
+        assert_eq!(status_results, 1);
+        assert!(conn.canonical_authorization.read().await.is_some());
+        let bootstrap_index = frames
+            .iter()
+            .position(|frame| {
+                frame.contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_BOOTSTRAP_SUB_ID)
+            })
+            .expect("real AUTH must deliver the status bootstrap");
+        let current_index = frames
+            .iter()
+            .position(|frame| {
+                frame.contains(buzz_core::client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID)
+            })
+            .expect("real AUTH must deliver authoritative current status");
+        let acknowledgement_index = frames
+            .iter()
+            .position(|frame| frame.contains("true"))
+            .expect("real AUTH must acknowledge after activation");
+        assert!(
+            bootstrap_index < current_index && current_index < acknowledgement_index,
+            "AUTH ordering must be bootstrap, authoritative current, then success: {frames:?}"
+        );
+        assert!(control_frames.is_empty());
+        assert!(conn.clear_client_binding_status_task().await);
+        conn.cancel.cancel();
+
+        // Keep canonical admission live but fail the evidence source that the
+        // real AUTH owner awaits before it may acknowledge success.
+        *state.client_status_evidence_override.write().await =
+            Some(Arc::new(UnavailableStatusEvidence));
+        let failed_actor = Keys::generate();
+        let failed_subject = format!("bridge-status-failure-{}", uuid::Uuid::new_v4());
+        let failed_host = format!(
+            "bridge-status-failure-{}.local",
+            uuid::Uuid::new_v4().simple()
+        );
+        let failed_community = state
+            .db
+            .ensure_configured_community(&failed_host)
+            .await
+            .expect("create failed-status community")
+            .id;
+        install_bridge_binding(
+            &pool,
+            failed_community,
+            failed_actor.public_key(),
+            ISSUER,
+            &failed_subject,
+        )
+        .await;
+        let failed_challenge = format!("bridge-auth-failure-{}", uuid::Uuid::new_v4());
+        let failed_relay_url = format!("wss://{failed_host}");
+        let failed_auth_event = EventBuilder::auth(
+            &failed_challenge,
+            nostr::RelayUrl::parse(&failed_relay_url).expect("parse failed AUTH relay URL"),
+        )
+        .tag(
+            Tag::parse([
+                buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG,
+                "1",
+                uuid::Uuid::new_v4().to_string().as_str(),
+                state.relay_keypair.public_key().to_hex().as_str(),
+            ])
+            .expect("build failed binding-status scope"),
+        )
+        .sign_with_keys(&failed_actor)
+        .expect("sign failing canonical AUTH event");
+        let failed_now = chrono::Utc::now().timestamp();
+        let failed_assertion = crate::corporate_identity::canonical_test_support::signed_jwt(
+            &serde_json::json!({
+                "iss": ISSUER,
+                "aud": AUDIENCE,
+                    "sub": failed_subject,
+                    "event_author": failed_actor.public_key().to_hex(),
+                "iat": failed_now - 1,
+                "nbf": failed_now - 1,
+                "exp": failed_now + 300,
+                "nonce": uuid::Uuid::new_v4().to_string(),
+            }),
+            0,
+            KID,
+        );
+        let failed_evidence = buzz_auth::SealedTransportEvidence::for_test(
+            failed_community,
+            failed_assertion,
+            b"GET",
+            failed_host.as_bytes(),
+            b"/",
+            [0; 32],
+            buzz_auth::ProofTransport::Nip42,
+            chrono::Utc::now() + chrono::Duration::seconds(300),
+            authenticated_peer,
+        );
+        let (failed_send_tx, mut failed_send_rx) = tokio::sync::mpsc::channel(16);
+        let (failed_ctrl_tx, mut failed_ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let failed_status_writer = test_status_writer(failed_send_tx.clone());
+        let failed_conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant: TenantContext::resolved(failed_community, &failed_host),
+            corporate_identity_jwt: None,
+            canonical_transport_evidence: tokio::sync::Mutex::new(Some(failed_evidence)),
+            canonical_authorization: tokio::sync::RwLock::new(None),
+            auth_state: tokio::sync::RwLock::new(crate::connection::AuthState::Pending {
+                challenge: failed_challenge,
+            }),
+            status_scope: tokio::sync::RwLock::new(None),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            send_tx: failed_send_tx,
+            status_writer: failed_status_writer,
+            ctrl_tx: failed_ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        crate::handlers::auth::handle_auth(
+            failed_auth_event,
+            Arc::clone(&failed_conn),
+            Arc::clone(&state),
+        )
+        .await;
+        let mut failed_frames = Vec::new();
+        while let Ok(frame) = failed_send_rx.try_recv() {
+            failed_frames.push(format!("{frame:?}"));
+        }
+        let mut failed_control_frames = Vec::new();
+        while let Ok(frame) = failed_ctrl_rx.try_recv() {
+            failed_control_frames.push(format!("{frame:?}"));
+        }
+        assert!(
+            failed_frames.iter().all(|frame| !frame.contains("true")),
+            "failed PG status evidence must precede and suppress AUTH success: {failed_frames:?}"
+        );
+        assert!(
+            failed_frames.iter().any(|frame| frame.contains(
+                buzz_core::client_binding_bootstrap::CLIENT_BINDING_BOOTSTRAP_SUB_ID
+            )),
+            "the negative case must reach live status activation before PG evidence fails: {failed_frames:?}"
+        );
+        assert!(
+            failed_frames
+                .iter()
+                .chain(failed_control_frames.iter())
+                .any(|frame| frame.contains("false")),
+            "failed activation must send a negative AUTH result: data={failed_frames:?} control={failed_control_frames:?}"
+        );
+        assert!(matches!(
+            &*failed_conn.auth_state.read().await,
+            crate::connection::AuthState::Failed
+        ));
+        assert!(failed_conn.canonical_authorization.read().await.is_none());
+        assert!(failed_conn.cancel.is_cancelled());
+        assert!(!failed_conn.clear_client_binding_status_task().await);
+
+        let tenant = TenantContext::resolved(community, &host);
+        let rate_key = buzz_auth::rate_limit::rate_limit_key(
+            &tenant,
+            &actor.public_key(),
+            &buzz_auth::LimitType::ApiCalls,
+        );
+        let replay_key = buzz_auth::nip98_replay_key(&tenant, &authorization_event.id);
+        let moderation_replay_key =
+            buzz_auth::nip98_replay_key(&tenant, &moderation_authorization_event.id);
+        let invite_replay_key =
+            buzz_auth::nip98_replay_key(&tenant, &invite_authorization_event.id);
+        let mut redis = state
+            .redis_pool
+            .get()
+            .await
+            .expect("borrow live bridge Redis");
+        let legacy_keys: i64 = redis::cmd("EXISTS")
+            .arg(&[
+                rate_key,
+                replay_key,
+                moderation_replay_key,
+                invite_replay_key,
+            ])
+            .query_async(&mut *redis)
+            .await
+            .expect("read legacy bridge Redis keys");
+        assert_eq!(legacy_keys, 0);
+
+        drop(redis);
+        drop(state);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE \"{database_name}\" WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable bridge database");
     }
 
     #[test]
@@ -3607,6 +5043,87 @@ mod tests {
             response.status(),
             StatusCode::UNAUTHORIZED,
             "a valid NIP-98 moderator request without an identity JWT must fail before role authorization"
+        );
+    }
+
+    #[test]
+    fn repeated_moderation_reads_are_bounded_before_identity_binding_work() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let Some(state) = rt.block_on(bridge_handler_test_state_with_rate_limit(false, Some(1)))
+        else {
+            return;
+        };
+        let host = format!(
+            "bridge-moderation-limit-{}.local",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = rt
+            .block_on(state.db.ensure_configured_community(&host))
+            .expect("ensure moderation limit community")
+            .id;
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_bytes();
+        assert!(rt
+            .block_on(
+                state
+                    .db
+                    .get_active_identity_binding_by_pubkey(community, &pubkey)
+            )
+            .expect("read initial identity binding")
+            .is_none());
+
+        let signed_url = format!("https://{host}/moderation/reports");
+        let event_json = build_nip98_event_json(&keys, &signed_url, "GET");
+        let auth = nip98_auth_headers(&event_json)
+            .get(header::AUTHORIZATION)
+            .cloned()
+            .expect("authorization header");
+        let request = || {
+            Request::builder()
+                .method("GET")
+                .uri("/moderation/reports")
+                .header(header::HOST, &host)
+                .header(header::AUTHORIZATION, auth.clone())
+                .body(Body::empty())
+                .expect("build moderation request")
+        };
+
+        let first = rt
+            .block_on(crate::router::build_router(state.clone()).oneshot(request()))
+            .expect("first moderation response");
+        assert_eq!(
+            first.status(),
+            StatusCode::FORBIDDEN,
+            "the first request must pass admission and reach moderator authorization"
+        );
+
+        let second = rt
+            .block_on(crate::router::build_router(state.clone()).oneshot(request()))
+            .expect("second moderation response");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            second
+                .headers()
+                .get("x-buzz-error-code")
+                .and_then(|value| value.to_str().ok()),
+            Some("rate_limited")
+        );
+        assert!(
+            rt.block_on(
+                state
+                    .db
+                    .get_active_identity_binding_by_pubkey(community, &pubkey)
+            )
+            .expect("read final identity binding")
+            .is_none(),
+            "bounded moderation reads must not enroll or persist an identity binding"
         );
     }
 

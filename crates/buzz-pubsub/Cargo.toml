@@ -24,3 +24,4 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+buzz-auth = { workspace = true, features = ["dev"] }

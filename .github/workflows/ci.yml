@@ -506,6 +506,9 @@ jobs:
           PGSCHEMA_PLAN_USER: buzz
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
+          docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
+            -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
@@ -666,6 +669,9 @@ jobs:
           PGSCHEMA_PLAN_USER: buzz
           PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
+          docker exec -e PGPASSWORD=buzz_dev buzz-postgres \
+            psql -U buzz -d buzz -v ON_ERROR_STOP=1 \
+            -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
             psql -U buzz -d buzz -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql
@@ -715,6 +721,12 @@ jobs:
           docker exec -e PGPASSWORD="${BUZZ_TEST_POSTGRES_PASSWORD}" buzz-postgres \
             psql -U buzz -d postgres -v ON_ERROR_STOP=1 \
             -c "CREATE DATABASE buzz_identity_tests"
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(/migration::tests::(migration_nip_fi_lifecycle_tests|migration_nip_fi_operator_audit_tests|nip_fi_invitation_object_tests)::/)' \
+            --no-tests=fail \
+            --test-threads 1 \
+            --run-ignored all
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-db) and test(/migration::tests::nip_fi_(authorization_tests|direct_final_tests)::/)' \

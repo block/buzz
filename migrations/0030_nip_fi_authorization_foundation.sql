@@ -1,7 +1,7 @@
 -- Provider-free NIP-FI authorization, audit, fencing, and restore foundation.
 --
 -- There is no provider registry/SPI/profile/evidence table, durable lease or
--- audio admission ledger, 30382 projection, delivery queue, exporter claim,
+-- audio admission ledger, public identity projection, delivery queue, exporter claim,
 -- acknowledgement, retry scheduler, or online retention/compaction workflow.
 
 -- Durable one-way activation marker and current domain invalidation generation.

@@ -31,6 +31,7 @@ use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
+use crate::authorization_runtime::InstalledAuthorizationRuntime;
 use crate::config::Config;
 use crate::connection::{ConnectionSubscriptions, RestartClose};
 use crate::corporate_identity::CorporateIdentityService;
@@ -38,17 +39,19 @@ use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 
-/// Provider-neutral failure returned by the invite assertion adapter.
+/// Provider-neutral failure returned by a canonical assertion adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InviteAssertionError {
+pub(crate) enum CanonicalAssertionError {
     /// The presented evidence did not satisfy the exact route coordinates.
     Denied,
+    /// The assertion was otherwise well-formed but its validity ended.
+    Expired,
     /// The configured verifier could not provide current authoritative state.
     Unavailable,
 }
 
-/// Provider-neutral assertion verifier used by canonical invite admission.
-pub(crate) trait InviteAssertionVerifier: Send + Sync {
+/// Provider-neutral assertion verifier shared by every canonical ingress.
+pub(crate) trait CanonicalAssertionVerifier: Send + Sync {
     /// Verify one assertion against exact server-derived request coordinates.
     #[allow(clippy::too_many_arguments)]
     fn verify<'a>(
@@ -61,22 +64,23 @@ pub(crate) trait InviteAssertionVerifier: Send + Sync {
         transport_context_fingerprint: [u8; 32],
     ) -> std::pin::Pin<
         Box<
-            dyn Future<Output = Result<buzz_auth::VerifiedFederatedAssertion, InviteAssertionError>>
-                + Send
+            dyn Future<
+                    Output = Result<buzz_auth::VerifiedFederatedAssertion, CanonicalAssertionError>,
+                > + Send
                 + 'a,
         >,
     >;
 }
 
 /// Installed provider-neutral verifier and transaction-time rechecker.
-pub(crate) struct CanonicalInviteAuthority {
-    assertion_verifier: Arc<dyn InviteAssertionVerifier>,
+pub(crate) struct CanonicalProtectedAuthority {
+    assertion_verifier: Arc<dyn CanonicalAssertionVerifier>,
     final_rechecker: Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker>,
 }
 
-impl CanonicalInviteAuthority {
+impl CanonicalProtectedAuthority {
     /// Borrow the verifier used before canonical preparation.
-    pub(crate) fn assertion_verifier(&self) -> &dyn InviteAssertionVerifier {
+    pub(crate) fn assertion_verifier(&self) -> &dyn CanonicalAssertionVerifier {
         self.assertion_verifier.as_ref()
     }
 
@@ -85,6 +89,71 @@ impl CanonicalInviteAuthority {
         &self,
     ) -> Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker> {
         Arc::clone(&self.final_rechecker)
+    }
+}
+
+impl CanonicalAssertionVerifier for crate::authorization_runtime::DynamicVerifier {
+    fn verify<'a>(
+        &'a self,
+        token: &'a str,
+        authorization_domain: CommunityId,
+        transport: buzz_auth::ProofTransport,
+        target_fingerprint: [u8; 32],
+        request_fingerprint: [u8; 32],
+        transport_context_fingerprint: [u8; 32],
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<
+                    Output = Result<buzz_auth::VerifiedFederatedAssertion, CanonicalAssertionError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            crate::authorization_runtime::DynamicVerifier::verify(
+                self,
+                token,
+                authorization_domain,
+                transport,
+                target_fingerprint,
+                request_fingerprint,
+                transport_context_fingerprint,
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(|error| match error {
+                crate::authorization_runtime::RuntimeAuthorizationError::AssertionDenied => {
+                    CanonicalAssertionError::Denied
+                }
+                crate::authorization_runtime::RuntimeAuthorizationError::AssertionExpired => {
+                    CanonicalAssertionError::Expired
+                }
+                _ => CanonicalAssertionError::Unavailable,
+            })
+        })
+    }
+}
+
+impl buzz_db::authorization_admission::AdmissionVerifierRechecker
+    for crate::authorization_runtime::DynamicVerifier
+{
+    fn recheck<'a>(
+        &'a self,
+        expected: buzz_auth::VerifierPolicyStamp,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Result<(), buzz_db::authorization_admission::AdmissionCommitError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if self.accepts_stamp(expected, chrono::Utc::now()).await {
+                Ok(())
+            } else {
+                Err(buzz_db::authorization_admission::AdmissionCommitError::AuthorizationDenied)
+            }
+        })
     }
 }
 
@@ -643,6 +712,15 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// Optional corporate identity verifier.
     pub corporate_identity: Option<Arc<CorporateIdentityService>>,
+    /// One immutable provider-free authorization runtime installation.
+    pub authorization_runtime: Arc<InstalledAuthorizationRuntime>,
+    /// Test-only evidence seam for ordered AUTH failure regression coverage.
+    #[cfg(test)]
+    pub(crate) client_status_evidence_override: Arc<
+        tokio::sync::RwLock<
+            Option<Arc<dyn crate::authorization_runtime::CurrentStatusEvidenceSource>>,
+        >,
+    >,
     /// Full-text search service.
     pub search: Arc<SearchService>,
     /// Registry of active client subscriptions.
@@ -773,16 +851,21 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Return the installed provider-neutral authority for invite admission.
-    pub(crate) fn canonical_invite_authority(&self) -> Option<CanonicalInviteAuthority> {
-        let service = self.corporate_identity.as_ref()?.clone();
-        let assertion_verifier: Arc<dyn InviteAssertionVerifier> = service.clone();
+    /// Return the installed provider-neutral authority for protected admission.
+    pub(crate) fn canonical_protected_authority(&self) -> Option<CanonicalProtectedAuthority> {
+        let verifier = self.authorization_runtime.verifier().ok()?.clone();
+        let assertion_verifier: Arc<dyn CanonicalAssertionVerifier> = verifier.clone();
         let final_rechecker: Arc<dyn buzz_db::authorization_admission::AdmissionVerifierRechecker> =
-            service;
-        Some(CanonicalInviteAuthority {
+            verifier;
+        Some(CanonicalProtectedAuthority {
             assertion_verifier,
             final_rechecker,
         })
+    }
+
+    /// Compatibility accessor for the canonical invite admission path.
+    pub(crate) fn canonical_invite_authority(&self) -> Option<CanonicalProtectedAuthority> {
+        self.canonical_protected_authority()
     }
 
     /// Constructs `AppState` from its component services.
@@ -803,50 +886,50 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let authorization_runtime = InstalledAuthorizationRuntime::fail_closed(&config.nip_fi);
+        Self::new_with_authorization_runtime(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            relay_keypair,
+            media_storage,
+            authorization_runtime,
+        )
+    }
+
+    /// Constructs `AppState` with a complete immutable authorization runtime.
+    /// Production uses this entry point only after ordered startup succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_authorization_runtime(
+        config: Config,
+        db: Db,
+        redis_pool: deadpool_redis::Pool,
+        audit: impl Into<Option<AuditService>>,
+        pubsub: Arc<PubSubManager>,
+        auth: AuthService,
+        search: SearchService,
+        workflow_engine: Arc<WorkflowEngine>,
+        relay_keypair: nostr::Keys,
+        media_storage: MediaStorage,
+        authorization_runtime: InstalledAuthorizationRuntime,
+    ) -> (Self, AuditShutdownHandle) {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
-        let corporate_identity =
-            crate::corporate_identity::service_from_config(&config.corporate_identity);
+        // The retained legacy shape serves held adapters only. Production
+        // cannot construct its verifier or mutate its removed identity tables.
+        let corporate_identity = None;
 
         let audit_arc = audit.into().map(Arc::new);
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
         let audit_for_worker = audit_arc.clone();
         let audit_cancel = CancellationToken::new();
         let audit_cancel_worker = audit_cancel.clone();
-        let audit_worker_handle = tokio::spawn(async move {
-            let Some(audit_for_worker) = audit_for_worker else {
-                audit_cancel_worker.cancelled().await;
-                return;
-            };
-            // Normal operation: process entries as they arrive.
-            loop {
-                tokio::select! {
-                    entry = audit_rx.recv() => {
-                        match entry {
-                            Some(entry) => log_audit_entry(&audit_for_worker, entry).await,
-                            None => break, // channel closed
-                        }
-                    }
-                    _ = audit_cancel_worker.cancelled() => {
-                        // Close the receiver: rejects future sends and lets us
-                        // drain everything already buffered without a race.
-                        audit_rx.close();
-                        break;
-                    }
-                }
-            }
-            // Drain: recv() returns buffered entries, then None once empty.
-            let mut drained = 0u32;
-            while let Some(entry) = audit_rx.recv().await {
-                log_audit_entry(&audit_for_worker, entry).await;
-                drained += 1;
-            }
-            if drained > 0 {
-                tracing::info!(drained, "audit worker flushed remaining entries");
-            }
-            tracing::warn!("audit log worker exited (expected on shutdown)");
-        });
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
@@ -879,6 +962,9 @@ impl AppState {
             pubsub,
             auth: Arc::new(auth),
             corporate_identity,
+            authorization_runtime: Arc::new(authorization_runtime),
+            #[cfg(test)]
+            client_status_evidence_override: Arc::new(tokio::sync::RwLock::new(None)),
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
@@ -959,6 +1045,37 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
         };
+        // State, including the immutable authorization runtime, is complete
+        // before the first background worker can observe or serve it.
+        let audit_worker_handle = tokio::spawn(async move {
+            let Some(audit_for_worker) = audit_for_worker else {
+                audit_cancel_worker.cancelled().await;
+                return;
+            };
+            loop {
+                tokio::select! {
+                    entry = audit_rx.recv() => {
+                        match entry {
+                            Some(entry) => log_audit_entry(&audit_for_worker, entry).await,
+                            None => break,
+                        }
+                    }
+                    _ = audit_cancel_worker.cancelled() => {
+                        audit_rx.close();
+                        break;
+                    }
+                }
+            }
+            let mut drained = 0u32;
+            while let Some(entry) = audit_rx.recv().await {
+                log_audit_entry(&audit_for_worker, entry).await;
+                drained += 1;
+            }
+            if drained > 0 {
+                tracing::info!(drained, "audit worker flushed remaining entries");
+            }
+            tracing::warn!("audit log worker exited (expected on shutdown)");
+        });
         (
             state,
             AuditShutdownHandle {
@@ -1517,11 +1634,14 @@ mod tests {
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 "test.local".to_string(),
             ),
-            remote_addr: "127.0.0.1:1234".parse().unwrap(),
             corporate_identity_jwt: None,
+            canonical_transport_evidence: tokio::sync::Mutex::new(None),
+            canonical_authorization: tokio::sync::RwLock::new(None),
             auth_state: RwLock::new(AuthState::Failed),
+            status_scope: RwLock::new(None),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),
+            status_writer: crate::connection::StatusWriter::new(mpsc::channel(1).0),
             ctrl_tx,
             cancel: cancel.clone(),
             backpressure_count: Arc::clone(&bp),

@@ -10,7 +10,7 @@
 use axum::http::Method;
 
 /// Why a route deliberately does not use tenant corporate-identity auth.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum CorporateIdentityExemption {
     /// Public relay metadata (NIP-05, NIP-11-adjacent information).
     PublicMetadata,
@@ -31,14 +31,12 @@ pub(super) enum CorporateIdentityExemption {
 }
 
 /// Corporate-identity policy for a registered route.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum CorporateIdentityRoutePolicy {
     /// Authenticate and enforce corporate identity during this HTTP request.
     Required,
     /// Enforce when the upgraded WebSocket performs its protocol auth flow.
     RequiredAtSessionAuth,
-    /// Public only when protected media reads are disabled; otherwise required.
-    RequiredWhenMediaReadsProtected,
     /// Deliberately outside tenant corporate-identity authentication.
     Exempt(CorporateIdentityExemption),
 }
@@ -49,7 +47,6 @@ impl CorporateIdentityRoutePolicy {
         match self {
             Self::Required => "required",
             Self::RequiredAtSessionAuth => "required_at_session_auth",
-            Self::RequiredWhenMediaReadsProtected => "required_when_media_reads_protected",
             Self::Exempt(CorporateIdentityExemption::PublicMetadata) => "exempt_public_metadata",
             Self::Exempt(CorporateIdentityExemption::HealthProbe) => "exempt_health_probe",
             Self::Exempt(CorporateIdentityExemption::JoinBootstrap) => "exempt_join_bootstrap",
@@ -73,9 +70,6 @@ struct RoutePolicyRule {
 
 const REQUIRED: CorporateIdentityRoutePolicy = CorporateIdentityRoutePolicy::Required;
 const SESSION: CorporateIdentityRoutePolicy = CorporateIdentityRoutePolicy::RequiredAtSessionAuth;
-const PROTECTED_MEDIA: CorporateIdentityRoutePolicy =
-    CorporateIdentityRoutePolicy::RequiredWhenMediaReadsProtected;
-
 const fn exempt(exemption: CorporateIdentityExemption) -> CorporateIdentityRoutePolicy {
     CorporateIdentityRoutePolicy::Exempt(exemption)
 }
@@ -259,12 +253,12 @@ const ROUTE_POLICY_RULES: &[RoutePolicyRule] = &[
     RoutePolicyRule {
         method: "GET",
         matched_path: "/media/{sha256_ext}",
-        policy: PROTECTED_MEDIA,
+        policy: REQUIRED,
     },
     RoutePolicyRule {
         method: "HEAD",
         matched_path: "/media/{sha256_ext}",
-        policy: PROTECTED_MEDIA,
+        policy: REQUIRED,
     },
     // Git smart HTTP is tenant-authenticated on every request.
     RoutePolicyRule {
@@ -359,6 +353,23 @@ pub(super) fn allowed_methods(matched_path: &str) -> Option<String> {
     (!methods.is_empty()).then(|| methods.join(", "))
 }
 
+/// Validate the policy table before the application begins serving requests.
+///
+/// Runtime middleware remains the authoritative backstop for an accidentally
+/// unclassified route. This startup check rejects ambiguous inventories before
+/// a listener is exposed, independent of legacy identity feature flags.
+pub(super) fn assert_startup_inventory() {
+    let mut seen = std::collections::HashSet::new();
+    for rule in ROUTE_POLICY_RULES {
+        assert!(
+            seen.insert((rule.method, rule.matched_path)),
+            "duplicate route policy for {} {}",
+            rule.method,
+            rule.matched_path
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -406,7 +417,52 @@ mod tests {
     }
 
     #[test]
-    fn websocket_and_media_policies_capture_deferred_and_conditional_auth() {
+    fn protected_route_matrix_is_exact() {
+        let actual: HashSet<_> = ROUTE_POLICY_RULES
+            .iter()
+            .filter_map(|rule| {
+                matches!(
+                    rule.policy,
+                    CorporateIdentityRoutePolicy::Required
+                        | CorporateIdentityRoutePolicy::RequiredAtSessionAuth
+                )
+                .then_some((rule.method, rule.matched_path, rule.policy))
+            })
+            .collect();
+        let expected: HashSet<_> = [
+            (
+                "GET",
+                "/",
+                CorporateIdentityRoutePolicy::RequiredAtSessionAuth,
+            ),
+            (
+                "GET",
+                "/huddle/{channel_id}/audio",
+                CorporateIdentityRoutePolicy::RequiredAtSessionAuth,
+            ),
+            ("POST", "/events", REQUIRED),
+            ("POST", "/query", REQUIRED),
+            ("POST", "/count", REQUIRED),
+            ("POST", "/api/invites", REQUIRED),
+            ("POST", "/api/invites/claim", REQUIRED),
+            ("GET", "/moderation/reports", REQUIRED),
+            ("GET", "/moderation/audit", REQUIRED),
+            ("GET", "/moderation/restricted", REQUIRED),
+            ("PUT", "/upload", REQUIRED),
+            ("PUT", "/media/upload", REQUIRED),
+            ("GET", "/media/{sha256_ext}", REQUIRED),
+            ("HEAD", "/media/{sha256_ext}", REQUIRED),
+            ("GET", "/git/{owner}/{repo}/info/refs", REQUIRED),
+            ("POST", "/git/{owner}/{repo}/git-upload-pack", REQUIRED),
+            ("POST", "/git/{owner}/{repo}/git-receive-pack", REQUIRED),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn websocket_and_media_policies_capture_deferred_and_request_auth() {
         assert_eq!(
             policy(Method::GET, "/"),
             CorporateIdentityRoutePolicy::RequiredAtSessionAuth
@@ -418,7 +474,7 @@ mod tests {
         for method in [Method::GET, Method::HEAD] {
             assert_eq!(
                 policy(method, "/media/{sha256_ext}"),
-                CorporateIdentityRoutePolicy::RequiredWhenMediaReadsProtected
+                CorporateIdentityRoutePolicy::Required
             );
         }
     }

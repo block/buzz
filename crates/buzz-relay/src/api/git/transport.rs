@@ -29,15 +29,25 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
 use super::binding::{resolve_repo_binding, RepoBinding};
-use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
+use super::cas_publish::{
+    cas_publish, publish_pointer_cache, stage_git_publication, CasError, ParentState, PublishLimits,
+};
 use super::hook::install_hook;
 use super::hydrate::{
     hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
     HydrationOptions,
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
+use crate::api::media::{
+    ProtectedPublicationBinding, ProtectedPublicationPlan, ProtectedPublicationReceipt,
+    ProtectedPublicationTarget,
+};
 use crate::state::AppState;
+use buzz_auth::RouteCapability;
 use buzz_core::TenantContext;
+use buzz_db::authorization_admission::{
+    AdmissionCommitError, AdmissionCommitRequest, CanonicalAdmissionCommitter,
+};
 
 /// Timeout for `info/refs` — ref advertisement is fast (essentially `git show-ref`).
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -76,7 +86,12 @@ pub struct GitAuth {
     pub tenant: TenantContext,
     /// Cryptographically verified identity staged until repository policy
     /// authorization succeeds.
-    identity_proof: crate::corporate_identity::CorporateIdentityProof,
+    identity_proof: Option<crate::corporate_identity::CorporateIdentityProof>,
+    canonical_assertion: Option<String>,
+    auth_tag: Option<String>,
+    event_json: String,
+    event_method: String,
+    expected_url: String,
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
@@ -144,6 +159,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                 .unwrap_or(parts.uri.path()),
         )
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "unrecognized git endpoint").into_response())?;
+        if state.config.nip_fi_mode == buzz_auth::NipFiMode::DenyProtected {
+            return Err((StatusCode::UNAUTHORIZED, "protected route unavailable").into_response());
+        }
 
         // Repo-root URL verification.
         //
@@ -214,53 +232,84 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok());
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
-            &parts.headers,
-            &state.config.corporate_identity,
-        );
-        let identity_proof = match crate::corporate_identity::verify_corporate_identity(
-            state,
-            tenant.community(),
-            pubkey,
-            identity_jwt.as_deref(),
-            auth_tag,
-        )
-        .await
-        {
-            Ok(proof) => proof,
-            Err(e) => {
-                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: corporate identity denied");
-                return Err((e.status_code(), e.public_message()).into_response());
+        let (identity_proof, canonical_assertion) = match state.config.nip_fi_mode {
+            buzz_auth::NipFiMode::Off => {
+                let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+                    &parts.headers,
+                    &state.config.corporate_identity,
+                );
+                let proof = crate::corporate_identity::verify_corporate_identity(
+                    state,
+                    tenant.community(),
+                    pubkey,
+                    identity_jwt.as_deref(),
+                    auth_tag,
+                )
+                .await
+                .map_err(|error| {
+                    warn!(pubkey = %pubkey.to_hex(), error = %error, "git: corporate identity denied");
+                    (error.status_code(), error.public_message()).into_response()
+                })?;
+                (Some(proof), None)
+            }
+            buzz_auth::NipFiMode::Enforce => {
+                let assertion = crate::protected_ingress::exact_assertion(
+                    &parts.headers,
+                    state.config.corporate_identity.jwt_header.as_str(),
+                )
+                .map_err(map_protected_git_error)?;
+                (None, Some(assertion))
+            }
+            buzz_auth::NipFiMode::DenyProtected => {
+                return Err(
+                    (StatusCode::UNAUTHORIZED, "protected route unavailable").into_response()
+                );
             }
         };
-        if crate::api::relay_members::enforce_relay_membership(
-            state,
-            tenant.community(),
-            pubkey.as_bytes(),
-            auth_tag,
-        )
-        .await
-        .is_err()
-        {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-            return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
-        }
-        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
-
         Ok(GitAuth {
             pubkey,
             tenant,
             identity_proof,
+            canonical_assertion,
+            auth_tag: auth_tag.map(str::to_owned),
+            event_json,
+            event_method,
+            expected_url,
         })
     }
 }
 
+async fn enforce_git_membership_and_ban(state: &AppState, auth: &GitAuth) -> Result<(), Response> {
+    if crate::api::relay_members::enforce_relay_membership(
+        state,
+        auth.tenant.community(),
+        auth.pubkey.as_bytes(),
+        auth.auth_tag.as_deref(),
+    )
+    .await
+    .is_err()
+    {
+        warn!(pubkey = %auth.pubkey.to_hex(), "git: relay membership denied");
+        return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
+    }
+    deny_banned_git_principal(
+        &state.db,
+        auth.tenant.community(),
+        &auth.pubkey,
+        auth.auth_tag.as_deref(),
+    )
+    .await
+}
+
 async fn finalize_git_corporate_identity(state: &AppState, auth: &GitAuth) -> Result<(), Response> {
+    let proof = auth.identity_proof.clone().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+    })?;
     crate::corporate_identity::finalize_corporate_identity(
         state,
         auth.tenant.community(),
         auth.pubkey,
-        auth.identity_proof.clone(),
+        proof,
     )
     .await
     .map(|_| ())
@@ -268,6 +317,181 @@ async fn finalize_git_corporate_identity(state: &AppState, auth: &GitAuth) -> Re
         warn!(pubkey = %auth.pubkey.to_hex(), error = %e, "git: corporate identity finalization denied");
         (e.status_code(), e.public_message()).into_response()
     })
+}
+
+async fn authorize_git_read_admission(
+    state: &AppState,
+    auth: &GitAuth,
+    owner: &str,
+    repo: &str,
+    repo_name: &str,
+) -> Result<(), Response> {
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            enforce_git_membership_and_ban(state, auth).await?;
+            authorize_git_read(
+                &state.db,
+                auth.tenant.community(),
+                &auth.pubkey,
+                owner,
+                repo_name,
+            )
+            .await?;
+            finalize_git_corporate_identity(state, auth).await
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            let (coordinates, assertion, proof) =
+                canonical_git_authorization(state, auth, owner, repo, RouteCapability::GitRead)
+                    .await?;
+            crate::protected_ingress::authorize_read(state, coordinates, assertion, proof)
+                .await
+                .map_err(map_protected_git_error)?;
+            enforce_git_membership_and_ban(state, auth).await?;
+            authorize_git_read(
+                &state.db,
+                auth.tenant.community(),
+                &auth.pubkey,
+                owner,
+                repo_name,
+            )
+            .await
+        }
+        buzz_auth::NipFiMode::DenyProtected => {
+            Err((StatusCode::UNAUTHORIZED, "protected route unavailable").into_response())
+        }
+    }
+}
+
+async fn prepare_git_write_admission(
+    state: &AppState,
+    auth: &GitAuth,
+    owner: &str,
+    repo: &str,
+) -> Result<Option<AdmissionCommitRequest>, Response> {
+    match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            enforce_git_membership_and_ban(state, auth).await?;
+            Ok(None)
+        }
+        buzz_auth::NipFiMode::Enforce => {
+            let (coordinates, assertion, proof) =
+                canonical_git_authorization(state, auth, owner, repo, RouteCapability::GitWrite)
+                    .await?;
+            let request =
+                crate::protected_ingress::prepare_mutation(state, coordinates, assertion, proof)
+                    .await
+                    .map_err(map_protected_git_error)?;
+            enforce_git_membership_and_ban(state, auth).await?;
+            Ok(Some(request))
+        }
+        buzz_auth::NipFiMode::DenyProtected => {
+            Err((StatusCode::UNAUTHORIZED, "protected route unavailable").into_response())
+        }
+    }
+}
+
+async fn canonical_git_authorization(
+    state: &AppState,
+    auth: &GitAuth,
+    owner: &str,
+    repo: &str,
+    capability: RouteCapability,
+) -> Result<
+    (
+        crate::protected_ingress::ProtectedRequestCoordinates,
+        buzz_auth::VerifiedFederatedAssertion,
+        buzz_auth::VerifiedNostrProof,
+    ),
+    Response,
+> {
+    let target = ProtectedPublicationTarget::repository(auth.tenant.community(), owner, repo)
+        .map_err(map_canonical_git_error)?;
+    let event_digest = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:git-session-event:v1",
+        &[auth.event_json.as_bytes()],
+    );
+    let canonical_repo = match repo.strip_suffix(".git") {
+        Some(repo) => repo,
+        None => repo,
+    };
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:git-session-request:v1",
+        &[
+            auth.tenant.community().as_uuid().as_bytes(),
+            owner.as_bytes(),
+            canonical_repo.as_bytes(),
+            auth.pubkey.as_bytes(),
+            &event_digest,
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:git-session-transport:v1",
+        &[
+            auth.tenant.community().as_uuid().as_bytes(),
+            auth.tenant.host().as_bytes(),
+            auth.expected_url.as_bytes(),
+            &event_digest,
+        ],
+    );
+    let ingress = match capability {
+        RouteCapability::GitRead => crate::authorization_runtime::ProtectedIngress::GitRead,
+        RouteCapability::GitWrite => crate::authorization_runtime::ProtectedIngress::GitWrite,
+        _ => return Err((StatusCode::FORBIDDEN, "authorization denied").into_response()),
+    };
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        ingress,
+        auth.tenant.community(),
+        capability,
+        target.admission_object(),
+        buzz_auth::ProofTransport::GitSmartHttpSession,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )
+    .map_err(map_protected_git_error)?;
+    let assertion_token = auth.canonical_assertion.as_deref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+    })?;
+    let assertion = crate::protected_ingress::verify_assertion(state, assertion_token, coordinates)
+        .await
+        .map_err(map_protected_git_error)?;
+    let proof = buzz_auth::verify_nip98_authorization_proof(
+        &auth.event_json,
+        &auth.expected_url,
+        &auth.event_method,
+        None,
+        &assertion,
+        buzz_auth::ProofTransport::GitSmartHttpSession,
+        request_fingerprint,
+        *target.admission_object().key(),
+        transport_context_fingerprint,
+    )
+    .map_err(|_| (StatusCode::UNAUTHORIZED, "authorization denied").into_response())?;
+    Ok((coordinates, assertion, proof))
+}
+
+fn map_protected_git_error(error: crate::protected_ingress::ProtectedIngressError) -> Response {
+    match error {
+        crate::protected_ingress::ProtectedIngressError::Denied => {
+            (StatusCode::UNAUTHORIZED, "authorization denied").into_response()
+        }
+        crate::protected_ingress::ProtectedIngressError::Expired => {
+            (StatusCode::UNAUTHORIZED, error.code()).into_response()
+        }
+        crate::protected_ingress::ProtectedIngressError::Unavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+        }
+    }
+}
+
+fn map_canonical_git_error(error: AdmissionCommitError) -> Response {
+    match error {
+        AdmissionCommitError::DependencyUnavailable
+        | AdmissionCommitError::AuditUnavailable
+        | AdmissionCommitError::RecordedAuditUnavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+        }
+        _ => (StatusCode::UNAUTHORIZED, "authorization denied").into_response(),
+    }
 }
 
 /// Deny banned principals on every Git HTTP request.
@@ -801,15 +1025,7 @@ pub async fn info_refs(
     // SEC-005: channel-membership gate before any manifest load, hydration,
     // or subprocess work. Both services — the receive-pack advertisement
     // leaks the ref list just like the upload-pack one.
-    authorize_git_read(
-        &state.db,
-        auth.tenant.community(),
-        &auth.pubkey,
-        &params.owner,
-        repo_name,
-    )
-    .await?;
-    finalize_git_corporate_identity(&state, &auth).await?;
+    authorize_git_read_admission(&state, &auth, &params.owner, &params.repo, repo_name).await?;
 
     // Track C fast path: only for clone advertisement. The receive-pack
     // advertisement carries a different capability set (report-status,
@@ -1058,15 +1274,7 @@ pub async fn upload_pack(
     // authorization cannot stand in for POST-time membership — gate this
     // door independently, before body decode work is driven or hydration
     // starts.
-    authorize_git_read(
-        &state.db,
-        auth.tenant.community(),
-        &auth.pubkey,
-        &params.owner,
-        repo_name,
-    )
-    .await?;
-    finalize_git_corporate_identity(&state, &auth).await?;
+    authorize_git_read_admission(&state, &auth, &params.owner, &params.repo, repo_name).await?;
 
     let body = decode_git_request_body(&headers, body, UPLOAD_PACK_MAX_DECODED_BYTES);
     let permit = acquire_git_permit(&state, "upload_pack")?;
@@ -1140,6 +1348,8 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let canonical_admission =
+        prepare_git_write_admission(&state, &auth, &params.owner, &params.repo).await?;
     let body = decode_git_request_body(&headers, body, state.config.git_max_pack_bytes);
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
@@ -1228,6 +1438,7 @@ pub async fn receive_pack(
         pusher: auth.pubkey,
         tenant: auth.tenant,
         identity_proof: auth.identity_proof,
+        canonical_admission,
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
@@ -1820,11 +2031,54 @@ pub(crate) struct PushContext {
     /// any derived kind:30618 event from this push.
     pub tenant: TenantContext,
     /// Identity proof finalized only after the pre-receive policy hook accepts.
-    pub identity_proof: crate::corporate_identity::CorporateIdentityProof,
+    pub identity_proof: Option<crate::corporate_identity::CorporateIdentityProof>,
+    /// Prepared exact canonical authority, present only in Enforce mode.
+    pub canonical_admission: Option<AdmissionCommitRequest>,
     /// The hydrated workspace handle. Held until response construction
     /// (which happens *after* `cas_publish` returns) so the tempdir
     /// outlives the receive-pack subprocess and the CAS publish.
     pub repo_handle: HydratedRepo,
+}
+
+fn git_publication_error_response(owner: &str, repo: &str, error: CasError) -> Response {
+    match error {
+        CasError::Conflict {
+            winner_manifest_key,
+            ..
+        } => {
+            warn!(
+                owner,
+                repo,
+                winner = %winner_manifest_key,
+                "push lost publication race; returning 409"
+            );
+            (
+                StatusCode::CONFLICT,
+                "push superseded by a concurrent writer; pull and retry",
+            )
+                .into_response()
+        }
+        CasError::ManifestInvalid(error) => {
+            warn!(owner, repo, error = %error, "push rejected: manifest validation failed");
+            (
+                StatusCode::BAD_REQUEST,
+                "push produced invalid manifest state",
+            )
+                .into_response()
+        }
+        CasError::ResourceLimit(error) => {
+            warn!(owner, repo, error = %error, "push rejected: repository resource limit");
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "repository exceeds relay resource limits",
+            )
+                .into_response()
+        }
+        error => {
+            error!(owner, repo, error = %error, "push failed before response");
+            (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response()
+        }
+    }
 }
 
 /// Finalize a push request: CAS-commit the new state into the object
@@ -1867,96 +2121,105 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         return response;
     }
 
-    if let Err(error) = crate::corporate_identity::finalize_corporate_identity(
-        state,
-        ctx.tenant.community(),
-        ctx.pusher,
-        ctx.identity_proof.clone(),
-    )
-    .await
-    {
-        warn!(pusher = %ctx.pusher.to_hex(), error = %error, "git: post-policy corporate identity finalization denied");
-        return (error.status_code(), error.public_message()).into_response();
-    }
-
-    // Step 7 (CAS). The PushContext binds `parent_state` (observed at
-    // hydrate) to the CAS predicate here — no re-reading of the pointer
-    // between hydrate and CAS.
-    let success = match cas_publish(
-        &state.git_store,
-        &ctx.tenant,
-        ctx.repo_handle.path(),
-        &ctx.owner,
-        &ctx.repo,
-        &ctx.parent_state,
-        PublishLimits {
-            parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(CasError::Conflict {
-            winner_manifest_key,
-            ..
-        }) => {
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                winner = %winner_manifest_key,
-                "push lost CAS race; tempdir dropped, returning 409"
-            );
-            return (
-                StatusCode::CONFLICT,
-                "push superseded by a concurrent writer; pull and retry",
-            )
-                .into_response();
+    let limits = PublishLimits {
+        parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+    let success = if let Some(request) = ctx.canonical_admission {
+        let staged = match stage_git_publication(
+            &state.git_store,
+            &ctx.tenant,
+            &ctx.owner,
+            &ctx.repo,
+            ctx.repo_handle.path(),
+            &ctx.parent_state,
+            limits,
+        )
+        .await
+        {
+            Ok(staged) => staged,
+            Err(error) => return git_publication_error_response(&ctx.owner, &ctx.repo, error),
+        };
+        let plan = ProtectedPublicationPlan::from(staged);
+        let effect = match plan.application_effect() {
+            Ok(effect) => effect,
+            Err(error) => return map_canonical_git_error(error),
+        };
+        let request = match request.with_application_effect(Box::new(effect)) {
+            Ok(request) => request,
+            Err(error) => return map_canonical_git_error(error),
+        };
+        let committer = match crate::protected_ingress::mutation_committer(state) {
+            Ok(committer) => committer,
+            Err(error) => return map_protected_git_error(error),
+        };
+        let outcome = match committer.commit(request).await {
+            Ok(outcome) => outcome,
+            Err(error) => return map_canonical_git_error(error),
+        };
+        match ProtectedPublicationReceipt::bind(plan, &outcome) {
+            Ok(ProtectedPublicationBinding::Committed(receipt)) => match receipt.into_plan() {
+                ProtectedPublicationPlan::Git(staged) => {
+                    match publish_pointer_cache(&state.git_store, &staged).await {
+                        Ok(update) => {
+                            info!(
+                                owner = %ctx.owner,
+                                repo = %ctx.repo,
+                                cache_update = ?update,
+                                "canonical Git publication committed"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                owner = %ctx.owner,
+                                repo = %ctx.repo,
+                                error = %error,
+                                "canonical Git pointer projection deferred to outbox"
+                            );
+                        }
+                    }
+                    Some(staged.into_success())
+                }
+                ProtectedPublicationPlan::Media(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error")
+                        .into_response();
+                }
+            },
+            Ok(ProtectedPublicationBinding::ExactReplay(_)) => {
+                info!(owner = %ctx.owner, repo = %ctx.repo, "canonical Git publication replay");
+                None
+            }
+            Err(error) => return map_canonical_git_error(error),
         }
-        Err(CasError::ManifestInvalid(e)) => {
-            // 4xx-class: the workspace produced refs/HEAD/oids the
-            // manifest validator rejects (unsafe refname, malformed oid,
-            // empty head, malformed parent). Pre-CAS — no pointer was
-            // written.
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push rejected: manifest validation failed"
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                "push produced invalid manifest state",
-            )
-                .into_response();
+    } else {
+        let Some(identity_proof) = ctx.identity_proof.clone() else {
+            return (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response();
+        };
+        if let Err(error) = crate::corporate_identity::finalize_corporate_identity(
+            state,
+            ctx.tenant.community(),
+            ctx.pusher,
+            identity_proof,
+        )
+        .await
+        {
+            warn!(pusher = %ctx.pusher.to_hex(), error = %error, "git: post-policy corporate identity finalization denied");
+            return (error.status_code(), error.public_message()).into_response();
         }
-        Err(CasError::ResourceLimit(e)) => {
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push rejected: repo exceeds relay resource limits"
-            );
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "repository exceeds relay resource limits",
-            )
-                .into_response();
-        }
-        Err(e) => {
-            // 5xx-class: ManifestReadFailed (parent corruption),
-            // Backend, PackCapture. The tempdir drops on scope exit; no
-            // pointer was written (or, on rare ManifestReadFailed during
-            // winner-fetch, the winner is already installed and the
-            // loser's data is unrelated).
-            error!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push failed pre-response"
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+        match cas_publish(
+            &state.git_store,
+            &ctx.tenant,
+            ctx.repo_handle.path(),
+            &ctx.owner,
+            &ctx.repo,
+            &ctx.parent_state,
+            limits,
+        )
+        .await
+        {
+            Ok(success) => Some(success),
+            Err(error) => return git_publication_error_response(&ctx.owner, &ctx.repo, error),
         }
     };
 
@@ -1977,69 +2240,71 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     // round-trip per pack-only push, which clients don't normally
     // generate. Tightening to refs+head equality is a future
     // micro-optimization only if that dedup cost becomes visible.
-    let parent_digest_str: Option<&str> = ctx.parent_state.parent_digest.as_deref();
-    let after_digest = success.manifest_key.strip_prefix("manifests/");
-    let manifest_changed = match (parent_digest_str, after_digest) {
-        (Some(before), Some(after)) => before != after,
-        _ => true, // first push (parent None) or impossible-shape after key → publish
-    };
-    if manifest_changed {
-        let inputs = RefStateInputs {
-            repo_id: &ctx.repo_id,
-            head: &success.manifest.head,
-            refs: &success.manifest.refs,
-            actor_pubkey_hex: &hex::encode(ctx.pusher.to_bytes()),
+    if let Some(success) = success {
+        let parent_digest_str: Option<&str> = ctx.parent_state.parent_digest.as_deref();
+        let after_digest = success.manifest_key.strip_prefix("manifests/");
+        let manifest_changed = match (parent_digest_str, after_digest) {
+            (Some(before), Some(after)) => before != after,
+            _ => true,
         };
-        match build_ref_state_event(&inputs, &state.relay_keypair) {
-            Ok(event) => {
-                // Relay-signed kind:30618 belongs to the same server-resolved
-                // tenant as the git request that committed the pointer.
-                match state
-                    .db
-                    .insert_event(ctx.tenant.community(), &event, None)
-                    .await
-                {
-                    Ok((stored, true)) => {
-                        // Routed through the guarded send path for uniformity;
-                        // the access gate no-ops for this globally-scoped
-                        // (channel_id = None) ref-state event.
-                        crate::handlers::event::fan_out_event_to_local_subscribers(
-                            state,
-                            ctx.tenant.community(),
-                            &stored,
-                        )
-                        .await;
-                        info!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            manifest = %success.manifest_key,
-                            "kind:30618 published (derived after CAS)"
-                        );
-                    }
-                    Ok((_, false)) => {
-                        info!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            "kind:30618 deduplicated by relay db"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            error = %e,
-                            "kind:30618 insert failed; push remains durable in object store"
-                        );
+        if manifest_changed {
+            let inputs = RefStateInputs {
+                repo_id: &ctx.repo_id,
+                head: &success.manifest.head,
+                refs: &success.manifest.refs,
+                actor_pubkey_hex: &hex::encode(ctx.pusher.to_bytes()),
+            };
+            match build_ref_state_event(&inputs, &state.relay_keypair) {
+                Ok(event) => {
+                    // Relay-signed kind:30618 belongs to the same server-resolved
+                    // tenant as the git request that committed the pointer.
+                    match state
+                        .db
+                        .insert_event(ctx.tenant.community(), &event, None)
+                        .await
+                    {
+                        Ok((stored, true)) => {
+                            // Routed through the guarded send path for uniformity;
+                            // the access gate no-ops for this globally-scoped
+                            // (channel_id = None) ref-state event.
+                            crate::handlers::event::fan_out_event_to_local_subscribers(
+                                state,
+                                ctx.tenant.community(),
+                                &stored,
+                            )
+                            .await;
+                            info!(
+                                owner = %ctx.owner,
+                                repo = %ctx.repo_id,
+                                manifest = %success.manifest_key,
+                                "kind:30618 published (derived after CAS)"
+                            );
+                        }
+                        Ok((_, false)) => {
+                            info!(
+                                owner = %ctx.owner,
+                                repo = %ctx.repo_id,
+                                "kind:30618 deduplicated by relay db"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                owner = %ctx.owner,
+                                repo = %ctx.repo_id,
+                                error = %e,
+                                "kind:30618 insert failed; push remains durable in object store"
+                            );
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo_id,
-                    error = %e,
-                    "kind:30618 build failed; push remains durable in object store"
-                );
+                Err(e) => {
+                    warn!(
+                        owner = %ctx.owner,
+                        repo = %ctx.repo_id,
+                        error = %e,
+                        "kind:30618 build failed; push remains durable in object store"
+                    );
+                }
             }
         }
     }

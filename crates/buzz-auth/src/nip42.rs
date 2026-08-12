@@ -6,14 +6,21 @@
 //!
 //! AUTH events are **never** stored or logged (may contain bearer tokens).
 
+use buzz_core::client_binding_bootstrap::ClientBindingScopeV1;
 use buzz_core::CommunityId;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use nostr::{Event, Kind, TagKind, Timestamp};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::AuthError;
-use crate::foundation::{ProofTransport, VerifiedNostrProof};
+use crate::foundation::{
+    ActiveLocalBinding, AuthorizationError, AuthorizationFinalizer, AuthorizationInput,
+    LocalAuthorizationPolicy, LocalBindingResolution, PreparedAuthorization, ProofTransport,
+    RouteCapability, VerifiedNostrProof,
+};
 
 /// Normalize a relay URL for comparison.
 ///
@@ -140,9 +147,199 @@ pub fn verify_nip42_authorization_proof(
     .ok_or(Nip42AuthorizationProofError::InvalidBinding)
 }
 
+/// Exact server-derived coordinates for one opted-in status connection.
+pub struct Nip42BindingStatusCoordinates {
+    authorization_domain: CommunityId,
+    relay_url: Box<str>,
+    event_id: [u8; 32],
+    actor: nostr::PublicKey,
+    request_fingerprint: [u8; 32],
+    target_fingerprint: [u8; 32],
+    transport_context_fingerprint: [u8; 32],
+}
+
+impl Nip42BindingStatusCoordinates {
+    /// Bind the signed scope to the relay-owned connection generation.
+    pub fn new(
+        authorization_domain: CommunityId,
+        relay_url: &str,
+        connection_id: Uuid,
+        relay_signer: nostr::PublicKey,
+        event: &Event,
+    ) -> Result<Self, Nip42AuthorizationProofError> {
+        let scope = ClientBindingScopeV1::from_verified_auth_event(event)
+            .map_err(|_| Nip42AuthorizationProofError::InvalidBinding)?;
+        let parsed_relay =
+            Url::parse(relay_url).map_err(|_| Nip42AuthorizationProofError::InvalidBinding)?;
+        if authorization_domain.as_uuid().is_nil()
+            || connection_id.is_nil()
+            || event.id.to_bytes() == [0; 32]
+            || scope.relay_signer() != relay_signer
+            || !matches!(parsed_relay.scheme(), "ws" | "wss")
+            || parsed_relay.host_str().is_none()
+            || !parsed_relay.username().is_empty()
+            || parsed_relay.password().is_some()
+            || parsed_relay.query().is_some()
+            || parsed_relay.fragment().is_some()
+        {
+            return Err(Nip42AuthorizationProofError::InvalidBinding);
+        }
+        let event_id = event.id.to_bytes();
+        let target_fingerprint = nip42_status_digest(
+            b"buzz:client-status-connection:v1",
+            &[
+                authorization_domain.as_uuid().as_bytes(),
+                connection_id.as_bytes(),
+                event.pubkey.as_bytes(),
+                relay_signer.as_bytes(),
+                scope.connection_epoch().as_str().as_bytes(),
+            ],
+        );
+        let request_fingerprint = nip42_status_digest(
+            b"buzz:nip-fi:nip42-binding-status-request:v1",
+            &[
+                authorization_domain.as_uuid().as_bytes(),
+                &event_id,
+                &target_fingerprint,
+            ],
+        );
+        let transport_context_fingerprint = nip42_status_digest(
+            b"buzz:nip-fi:nip42-binding-status-transport:v1",
+            &[
+                authorization_domain.as_uuid().as_bytes(),
+                parsed_relay.as_str().as_bytes(),
+                connection_id.as_bytes(),
+                &event_id,
+            ],
+        );
+        Ok(Self {
+            authorization_domain,
+            relay_url: parsed_relay.as_str().into(),
+            event_id,
+            actor: event.pubkey,
+            request_fingerprint,
+            target_fingerprint,
+            transport_context_fingerprint,
+        })
+    }
+
+    /// Exact opaque connection target used by the delivery owner.
+    pub const fn target_fingerprint(&self) -> [u8; 32] {
+        self.target_fingerprint
+    }
+}
+
+impl std::fmt::Debug for Nip42BindingStatusCoordinates {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Nip42BindingStatusCoordinates([REDACTED])")
+    }
+}
+
+/// Purpose-sealed proof for the fixed binding-status capability.
+pub struct VerifiedBindingStatusProof {
+    proof: VerifiedNostrProof,
+}
+
+impl VerifiedBindingStatusProof {
+    /// Server-resolved authorization domain.
+    pub const fn authorization_domain(&self) -> CommunityId {
+        self.proof.authorization_domain()
+    }
+
+    /// Exact directly authenticated author.
+    pub const fn actor_pubkey(&self) -> nostr::PublicKey {
+        self.proof.actor_pubkey()
+    }
+
+    /// Exact connection target sealed into the proof.
+    pub const fn target_fingerprint(&self) -> &[u8; 32] {
+        self.proof.target_fingerprint()
+    }
+
+    /// Exclusive proof lifetime bound.
+    pub const fn expires_at(&self) -> DateTime<Utc> {
+        self.proof.expires_at()
+    }
+
+    /// Prepare the fixed direct binding-status authorization.
+    pub fn prepare_authorization(
+        self,
+        binding: ActiveLocalBinding,
+        policy: LocalAuthorizationPolicy,
+        authoritative_now: DateTime<Utc>,
+    ) -> Result<PreparedAuthorization, AuthorizationError> {
+        let domain = self.proof.authorization_domain();
+        let input = AuthorizationInput::new(
+            domain,
+            Uuid::new_v4(),
+            self.proof,
+            RouteCapability::BindingStatus,
+        )?;
+        AuthorizationFinalizer::prepare(
+            input,
+            LocalBindingResolution::bound_key(binding),
+            policy,
+            authoritative_now,
+        )
+    }
+}
+
+impl std::fmt::Debug for VerifiedBindingStatusProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedBindingStatusProof([REDACTED])")
+    }
+}
+
+/// Verify the exact AUTH event and mint a fixed-purpose status proof.
+pub fn verify_nip42_binding_status_proof(
+    event: &Event,
+    expected_challenge: &str,
+    coordinates: &Nip42BindingStatusCoordinates,
+    authoritative_now: DateTime<Utc>,
+) -> Result<VerifiedBindingStatusProof, Nip42AuthorizationProofError> {
+    verify_nip42_event(event, expected_challenge, &coordinates.relay_url)?;
+    if event.id.to_bytes() != coordinates.event_id
+        || event.pubkey != coordinates.actor
+        || event.created_at.as_secs().abs_diff(
+            u64::try_from(authoritative_now.timestamp())
+                .map_err(|_| Nip42AuthorizationProofError::InvalidBinding)?,
+        ) > TIMESTAMP_TOLERANCE_SECS
+    {
+        return Err(Nip42AuthorizationProofError::InvalidBinding);
+    }
+    let expires_at = authoritative_now
+        .checked_add_signed(TimeDelta::minutes(5))
+        .ok_or(Nip42AuthorizationProofError::InvalidBinding)?;
+    let proof = VerifiedNostrProof::from_verifier(
+        coordinates.authorization_domain,
+        event.pubkey,
+        ProofTransport::Nip42,
+        coordinates.request_fingerprint,
+        coordinates.target_fingerprint,
+        coordinates.transport_context_fingerprint,
+        None,
+        None,
+        expires_at,
+    )
+    .ok_or(Nip42AuthorizationProofError::InvalidBinding)?;
+    Ok(VerifiedBindingStatusProof { proof })
+}
+
+fn nip42_status_digest(label: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update((label.len() as u64).to_be_bytes());
+    digest.update(label);
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part);
+    }
+    digest.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::client_binding_bootstrap::CLIENT_BINDING_SCOPE_TAG;
     use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
     const TEST_RELAY: &str = "wss://relay.example.com";
@@ -152,6 +349,72 @@ mod tests {
         EventBuilder::auth(challenge, url)
             .sign_with_keys(keys)
             .expect("signing failed")
+    }
+
+    fn make_status_auth_event(
+        keys: &Keys,
+        relay: &Keys,
+        challenge: &str,
+        relay_url: &str,
+    ) -> Event {
+        let url = RelayUrl::parse(relay_url).expect("valid relay url");
+        let relay_signer = relay.public_key().to_hex();
+        let epoch = Uuid::new_v4().to_string();
+        EventBuilder::auth(challenge, url)
+            .tag(
+                Tag::parse([
+                    CLIENT_BINDING_SCOPE_TAG,
+                    "1",
+                    epoch.as_str(),
+                    relay_signer.as_str(),
+                ])
+                .expect("status scope"),
+            )
+            .sign_with_keys(keys)
+            .expect("signing failed")
+    }
+
+    #[test]
+    fn binding_status_proof_is_exact_connection_and_relay_bound() {
+        let author = Keys::generate();
+        let relay = Keys::generate();
+        let challenge = generate_challenge();
+        let event = make_status_auth_event(&author, &relay, &challenge, TEST_RELAY);
+        let domain = CommunityId::from_uuid(Uuid::new_v4());
+        let connection = Uuid::new_v4();
+        let coordinates = Nip42BindingStatusCoordinates::new(
+            domain,
+            TEST_RELAY,
+            connection,
+            relay.public_key(),
+            &event,
+        )
+        .expect("coordinates");
+        let other = Nip42BindingStatusCoordinates::new(
+            domain,
+            TEST_RELAY,
+            Uuid::new_v4(),
+            relay.public_key(),
+            &event,
+        )
+        .expect("other coordinates");
+        assert_ne!(coordinates.target_fingerprint(), other.target_fingerprint());
+        let proof = verify_nip42_binding_status_proof(&event, &challenge, &coordinates, Utc::now())
+            .expect("purpose-sealed status proof");
+        assert_eq!(proof.authorization_domain(), domain);
+        assert_eq!(proof.actor_pubkey(), author.public_key());
+        assert_eq!(
+            proof.target_fingerprint(),
+            &coordinates.target_fingerprint()
+        );
+        assert!(Nip42BindingStatusCoordinates::new(
+            domain,
+            TEST_RELAY,
+            connection,
+            Keys::generate().public_key(),
+            &event,
+        )
+        .is_err());
     }
 
     fn make_auth_event_with_tags(keys: &Keys, tags: Vec<Tag>) -> Event {

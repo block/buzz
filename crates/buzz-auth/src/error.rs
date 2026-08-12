@@ -30,6 +30,10 @@ pub enum AuthError {
     #[error("NIP-98 HTTP Auth verification failed: {0}")]
     Nip98Invalid(String),
 
+    /// Blossom transport proof failed closed before canonical authorization.
+    #[error("Blossom authorization proof is invalid")]
+    BlossomInvalid,
+
     /// A NIP-98 event with the same id has already been observed within the
     /// replay-prevention window. The event itself was structurally valid; the
     /// rejection is on freshness, not validity.

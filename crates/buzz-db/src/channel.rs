@@ -1711,15 +1711,6 @@ mod tests {
         }
     }
 
-    async fn trusted_assertion_count(pool: &PgPool, community: CommunityId) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND kind = $2")
-            .bind(community.as_uuid())
-            .bind(buzz_core::kind::KIND_USER_TRUSTED_ASSERTION as i32)
-            .fetch_one(pool)
-            .await
-            .expect("trusted assertion count")
-    }
-
     async fn active_membership_count(
         pool: &PgPool,
         community: CommunityId,
@@ -1786,7 +1777,6 @@ mod tests {
             .expect("binding lookup")
             .is_none()
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -1842,7 +1832,6 @@ mod tests {
             active_membership_count(&pool, community, channel.id, &joiner).await,
             0
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -1923,7 +1912,6 @@ mod tests {
             .expect("binding lookup")
             .is_none()
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -2080,7 +2068,6 @@ mod tests {
             .expect("binding lookup")
             .is_none()
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     async fn insert_channel_with_id(

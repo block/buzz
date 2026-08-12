@@ -15,9 +15,64 @@ pub use crate::handlers::imeta::{validate_imeta_tags, verify_imeta_blobs};
 
 use axum::{http::StatusCode, response::Json};
 
-/// Standard error envelope.
+/// Stable, bounded HTTP error taxonomy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApiErrorCode {
+    InvalidRequest,
+    AuthenticationRequired,
+    AuthorizationDenied,
+    ResourceNotFound,
+    Conflict,
+    RateLimited,
+    DependencyUnavailable,
+    InternalError,
+}
+
+impl ApiErrorCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::AuthenticationRequired => "authentication_required",
+            Self::AuthorizationDenied => "authorization_denied",
+            Self::ResourceNotFound => "resource_not_found",
+            Self::Conflict => "conflict",
+            Self::RateLimited => "rate_limited",
+            Self::DependencyUnavailable => "dependency_unavailable",
+            Self::InternalError => "internal_error",
+        }
+    }
+
+    pub(crate) fn for_status(status: StatusCode) -> Self {
+        match status {
+            StatusCode::UNAUTHORIZED => Self::AuthenticationRequired,
+            StatusCode::FORBIDDEN => Self::AuthorizationDenied,
+            StatusCode::NOT_FOUND => Self::ResourceNotFound,
+            StatusCode::CONFLICT => Self::Conflict,
+            StatusCode::TOO_MANY_REQUESTS => Self::RateLimited,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
+                Self::DependencyUnavailable
+            }
+            status if status.is_server_error() => Self::InternalError,
+            _ => Self::InvalidRequest,
+        }
+    }
+}
+
+/// Standard error envelope with an additive machine-readable code.
 pub(crate) fn api_error(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "error": msg })))
+    coded_api_error(status, ApiErrorCode::for_status(status), msg)
+}
+
+/// Standard error envelope with a specific stable machine-readable code.
+pub(crate) fn coded_api_error(
+    status: StatusCode,
+    code: ApiErrorCode,
+    msg: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "error": msg, "code": code.as_str() })),
+    )
 }
 
 pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -28,6 +83,31 @@ pub(crate) fn internal_error(msg: &str) -> (StatusCode, Json<serde_json::Value>)
 #[allow(dead_code)]
 pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, msg)
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn default_http_errors_expose_stable_codes_without_removing_message() {
+        let (_, Json(body)) = api_error(StatusCode::FORBIDDEN, "access denied");
+        assert_eq!(body["error"], "access denied");
+        assert_eq!(body["code"], "authorization_denied");
+
+        let (_, Json(body)) = api_error(StatusCode::SERVICE_UNAVAILABLE, "try later");
+        assert_eq!(body["code"], "dependency_unavailable");
+    }
+
+    #[test]
+    fn specific_http_error_codes_are_bounded_strings() {
+        let (_, Json(body)) = coded_api_error(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::AuthenticationRequired,
+            "authentication failed",
+        );
+        assert_eq!(body["code"], "authentication_required");
+    }
 }
 
 /// Relay membership enforcement — single gate for all authenticated entry points.

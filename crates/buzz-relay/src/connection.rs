@@ -1,23 +1,33 @@
 //! WebSocket connection lifecycle: semaphore → challenge → recv/send/heartbeat loops → cleanup.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use sha2::Digest;
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext, LimitType};
+use buzz_auth::{
+    generate_challenge, AuthContext, AuthenticatedClientPeer, LimitType, SealedTransportEvidence,
+};
+use buzz_core::client_binding_bootstrap::{
+    ClientBindingBootstrapInputV1, ClientBindingScopeV1, CLIENT_BINDING_BOOTSTRAP_SUB_ID,
+};
 use buzz_core::tenant::TenantContext;
-use nostr::Filter;
+use chrono::{DateTime, Utc};
+use nostr::{Filter, Keys};
 
+use crate::authorization_runtime::{
+    ConnectionLocalStatusContract, CurrentStatusAuthorization, CurrentStatusSink,
+    StatusSessionError, UnchangedBootstrapDelivery,
+};
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::{run_registered_community_connection, AppState};
@@ -25,13 +35,127 @@ use buzz_pubsub::EventTopic;
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
 
+/// Finalized connection authentication plus optional opaque transport peer.
+///
+/// The peer type is generic so provenance verification can supply its sealed
+/// privacy-safe key without teaching the connection layer about proxy headers,
+/// socket addresses, or the key's representation. Raw connection addresses
+/// are deliberately not accepted by this API.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedConnectionContext<Peer = AuthenticatedClientPeer> {
+    authorization: AuthContext,
+    authenticated_client_peer: Option<Peer>,
+}
+
+impl<Peer> AuthenticatedConnectionContext<Peer> {
+    /// Finalize a connection with the optional verifier-produced peer key.
+    pub fn new(authorization: AuthContext, authenticated_client_peer: Option<Peer>) -> Self {
+        Self {
+            authorization,
+            authenticated_client_peer,
+        }
+    }
+
+    /// Existing NIP-42 connection authorization.
+    pub const fn authorization(&self) -> &AuthContext {
+        &self.authorization
+    }
+
+    /// Opaque authenticated end-client peer, when transport provenance supplied one.
+    pub const fn authenticated_client_peer(&self) -> Option<&Peer> {
+        self.authenticated_client_peer.as_ref()
+    }
+
+    /// Consume the context for a downstream authenticated connection owner.
+    pub fn into_parts(self) -> (AuthContext, Option<Peer>) {
+        (self.authorization, self.authenticated_client_peer)
+    }
+}
+
+impl<Peer> std::ops::Deref for AuthenticatedConnectionContext<Peer> {
+    type Target = AuthContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authorization
+    }
+}
+
+impl From<AuthContext> for AuthenticatedConnectionContext {
+    fn from(authorization: AuthContext) -> Self {
+        Self::new(authorization, None)
+    }
+}
+
 /// Request for the writer to flush a restart close and report the result.
 pub(crate) struct RestartClose {
     pub(crate) flushed: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// Exact durable-delivery identity carried through the connection writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusWriteIdentity {
+    pub(crate) delivery_id: Uuid,
+    pub(crate) claim_id: Uuid,
+    pub(crate) payload_digest: [u8; 32],
+    pub(crate) wire_digest: [u8; 32],
+}
+
+/// Proof returned only after the exact status frame reaches `Sink::flush()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StatusWriteAck {
+    pub(crate) identity: Option<StatusWriteIdentity>,
+}
+
+/// One serialized bootstrap or status write owned by the socket task.
+pub(crate) struct StatusWrite {
+    pub(crate) text: String,
+    pub(crate) identity: Option<StatusWriteIdentity>,
+    pub(crate) drain_data_first: bool,
+    pub(crate) deadline: tokio::time::Instant,
+    pub(crate) flushed: oneshot::Sender<Result<StatusWriteAck, ()>>,
+}
+
+/// Cloneable exact-connection handle for the physically acknowledged writer.
+#[derive(Clone)]
+pub(crate) struct StatusWriter {
+    tx: mpsc::Sender<StatusWrite>,
+}
+
+impl StatusWriter {
+    pub(crate) const fn new(tx: mpsc::Sender<StatusWrite>) -> Self {
+        Self { tx }
+    }
+
+    /// Queue one command and await its physical flush acknowledgement.
+    pub(crate) async fn write(
+        &self,
+        text: String,
+        identity: Option<StatusWriteIdentity>,
+        drain_data_first: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<StatusWriteAck, ()> {
+        let (flushed, acknowledgement) = oneshot::channel();
+        let command = StatusWrite {
+            text,
+            identity,
+            drain_data_first,
+            deadline,
+            flushed,
+        };
+        tokio::time::timeout_at(deadline, self.tx.send(command))
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?;
+        tokio::time::timeout_at(deadline, acknowledgement)
+            .await
+            .map_err(|_| ())?
+            .map_err(|_| ())?
+    }
 }
 
 /// Maximum outbound data frames buffered into the websocket sink before one flush.
@@ -46,9 +170,37 @@ pub enum AuthState {
         challenge: String,
     },
     /// Client has successfully authenticated.
-    Authenticated(AuthContext),
+    Authenticated(AuthenticatedConnectionContext),
     /// Authentication attempt was rejected.
     Failed,
+}
+
+/// Exact canonical session grants established by the Enforce AUTH owner.
+#[derive(Clone)]
+pub(crate) struct CanonicalWebsocketSession {
+    read: buzz_auth::FinalizedAuthContext,
+    write: buzz_auth::FinalizedAuthContext,
+}
+
+impl CanonicalWebsocketSession {
+    pub(crate) fn new(
+        read: buzz_auth::FinalizedAuthContext,
+        write: buzz_auth::FinalizedAuthContext,
+    ) -> Self {
+        Self { read, write }
+    }
+
+    fn authorization(
+        &self,
+        ingress: crate::authorization_runtime::ProtectedIngress,
+    ) -> Option<&buzz_auth::FinalizedAuthContext> {
+        match ingress {
+            crate::authorization_runtime::ProtectedIngress::WebSocketEvent => Some(&self.write),
+            crate::authorization_runtime::ProtectedIngress::WebSocketQuery
+            | crate::authorization_runtime::ProtectedIngress::WebSocketCount => Some(&self.read),
+            _ => None,
+        }
+    }
 }
 
 /// Per-connection state split by access pattern:
@@ -62,16 +214,23 @@ pub struct ConnectionState {
     /// host at row zero (before any frame is read) and never overridable by
     /// client-supplied input. Every handler reads tenant scope from here.
     pub tenant: TenantContext,
-    /// Remote socket address of the client.
-    pub remote_addr: SocketAddr,
     /// Optional corporate identity JWT captured from the WebSocket upgrade request.
     pub corporate_identity_jwt: Option<String>,
+    /// Move-only trusted-proxy evidence captured at the Enforce upgrade boundary.
+    pub canonical_transport_evidence: Mutex<Option<SealedTransportEvidence>>,
+    /// Capability-specific canonical session grants installed only by Enforce AUTH.
+    pub(crate) canonical_authorization: RwLock<Option<CanonicalWebsocketSession>>,
     /// Current NIP-42 authentication state.
     pub auth_state: RwLock<AuthState>,
+    /// Verified optional S5 scope. It is inert until a finalized direct
+    /// binding-status lease activates the Enforce-only outbox lane.
+    pub(crate) status_scope: RwLock<Option<ClientBindingScopeV1>>,
     /// Active subscriptions keyed by subscription ID.
     pub subscriptions: ConnectionSubscriptions,
     /// Sender for outbound data messages (EVENT, NOTICE, OK, etc.).
     pub send_tx: mpsc::Sender<WsMessage>,
+    /// Dedicated ordered writer for bootstrap and crash-durable status frames.
+    pub(crate) status_writer: StatusWriter,
     /// Sender for outbound control frames (Pong, Close).
     /// Separate channel with priority drain — if this channel fills too,
     /// the connection is closed (writer is completely stalled).
@@ -82,11 +241,110 @@ pub struct ConnectionState {
     /// Shared with `ConnectionManager::ConnEntry` so both direct sends and
     /// fan-out broadcasts track the same counter.
     pub backpressure_count: Arc<AtomicU8>,
+    /// Sole connection-local owner of the current scoped-AUTH status task.
+    #[cfg(not(test))]
+    pub(crate) client_binding_status_task: tokio::sync::Mutex<Option<ClientBindingStatusTask>>,
     /// Configurable slow-client grace limit (from `Config::slow_client_grace_limit`).
     pub grace_limit: u8,
 }
 
+pub(crate) struct ClientBindingStatusTask {
+    cancel: CancellationToken,
+    join: tokio::task::JoinHandle<()>,
+}
+
+// Unit-test ConnectionState literals predate the production-only owner field
+// and live in unrelated modules. Keep their ephemeral owner slots here so the
+// status lease never expands those modules' path ownership.
+#[cfg(test)]
+static TEST_CLIENT_BINDING_STATUS_TASKS: std::sync::LazyLock<
+    dashmap::DashMap<Uuid, Arc<Mutex<Option<ClientBindingStatusTask>>>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(test)]
+fn test_client_binding_status_slot(conn_id: Uuid) -> Arc<Mutex<Option<ClientBindingStatusTask>>> {
+    Arc::clone(
+        TEST_CLIENT_BINDING_STATUS_TASKS
+            .entry(conn_id)
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .value(),
+    )
+}
+
 impl ConnectionState {
+    async fn cancel_and_join_client_binding_status_task(task: ClientBindingStatusTask) -> bool {
+        let ClientBindingStatusTask { cancel, mut join } = task;
+        cancel.cancel();
+        match tokio::time::timeout(STATUS_TASK_JOIN_TIMEOUT, &mut join).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                join.abort();
+                let _ = join.await;
+                false
+            }
+        }
+    }
+
+    /// Cancel and join the prior AUTH scope before replacement bootstrap.
+    pub(crate) async fn clear_client_binding_status_task(&self) -> bool {
+        #[cfg(not(test))]
+        let previous = self.client_binding_status_task.lock().await.take();
+        #[cfg(test)]
+        let previous = {
+            let slot = test_client_binding_status_slot(self.conn_id);
+            let previous = slot.lock().await.take();
+            previous
+        };
+        if let Some(previous) = previous {
+            if !Self::cancel_and_join_client_binding_status_task(previous).await {
+                self.cancel.cancel();
+                return false;
+            }
+        }
+        #[cfg(test)]
+        TEST_CLIENT_BINDING_STATUS_TASKS.remove(&self.conn_id);
+        !self.cancel.is_cancelled()
+    }
+
+    /// Install the sole status task. Any concurrently installed scope is
+    /// cancelled and joined before this replacement becomes owned.
+    pub(crate) async fn replace_client_binding_status_task(
+        &self,
+        cancel: CancellationToken,
+        join: tokio::task::JoinHandle<()>,
+    ) -> bool {
+        #[cfg(not(test))]
+        let mut installed = self.client_binding_status_task.lock().await;
+        #[cfg(test)]
+        let test_slot = test_client_binding_status_slot(self.conn_id);
+        #[cfg(test)]
+        let mut installed = test_slot.lock().await;
+        if let Some(previous) = installed.take() {
+            if !Self::cancel_and_join_client_binding_status_task(previous).await {
+                drop(installed);
+                let _ = Self::cancel_and_join_client_binding_status_task(ClientBindingStatusTask {
+                    cancel,
+                    join,
+                })
+                .await;
+                self.cancel.cancel();
+                return false;
+            }
+        }
+        if self.cancel.is_cancelled() {
+            drop(installed);
+            let _ = Self::cancel_and_join_client_binding_status_task(ClientBindingStatusTask {
+                cancel,
+                join,
+            })
+            .await;
+            return false;
+        }
+        *installed = Some(ClientBindingStatusTask { cancel, join });
+        true
+    }
+
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
@@ -118,6 +376,104 @@ impl ConnectionState {
     }
 }
 
+/// Exact same-connection current-status delivery boundary. It owns no durable state and
+/// treats any queue ambiguity as terminal for the socket.
+#[derive(Clone)]
+pub struct WebSocketStatusChannel {
+    send_tx: mpsc::Sender<WsMessage>,
+    cancel: CancellationToken,
+}
+
+impl WebSocketStatusChannel {
+    /// Bind the producer to one connection's data queue and close token.
+    pub fn from_connection(connection: &ConnectionState) -> Self {
+        Self {
+            send_tx: connection.send_tx.clone(),
+            cancel: connection.cancel.clone(),
+        }
+    }
+
+    /// Deliver the unchanged validated bootstrap before a status session can
+    /// be constructed. The scope must come from the already verified AUTH
+    /// event and must pin the NIP-11 relay signer.
+    pub async fn deliver_bootstrap(
+        &self,
+        scope: ClientBindingScopeV1,
+        authorization: &CurrentStatusAuthorization,
+        relay_keys: &Keys,
+        issued_at: DateTime<Utc>,
+    ) -> Result<UnchangedBootstrapDelivery, StatusSessionError> {
+        if scope.relay_signer() != relay_keys.public_key() {
+            self.cancel.cancel();
+            return Err(StatusSessionError::ContractUnavailable);
+        }
+        let (domain, author) = authorization.domain_author();
+        let issued_at = u64::try_from(issued_at.timestamp()).map_err(|_| {
+            self.cancel.cancel();
+            StatusSessionError::ContractUnavailable
+        })?;
+        let bootstrap = ClientBindingBootstrapInputV1::new(
+            domain,
+            author,
+            scope.connection_epoch().clone(),
+            issued_at,
+        )
+        .map_err(|_| {
+            self.cancel.cancel();
+            StatusSessionError::ContractUnavailable
+        })?
+        .sign_with_relay_keys(relay_keys)
+        .map_err(|_| {
+            self.cancel.cancel();
+            StatusSessionError::ContractUnavailable
+        })?;
+        if self
+            .send_tx
+            .try_send(WsMessage::Text(
+                RelayMessage::event(CLIENT_BINDING_BOOTSTRAP_SUB_ID, &bootstrap).into(),
+            ))
+            .is_err()
+        {
+            self.cancel.cancel();
+            return Err(StatusSessionError::DeliveryFailed);
+        }
+        Ok(UnchangedBootstrapDelivery::delivered())
+    }
+}
+
+#[async_trait::async_trait]
+impl CurrentStatusSink<ConnectionLocalStatusContract> for WebSocketStatusChannel {
+    async fn send_current(&self, current: &nostr::Event) -> Result<(), StatusSessionError> {
+        self.send_status(current).await
+    }
+
+    async fn send_withdrawal(&self, withdrawal: &nostr::Event) -> Result<(), StatusSessionError> {
+        self.send_status(withdrawal).await
+    }
+
+    async fn close(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl WebSocketStatusChannel {
+    async fn send_status(&self, event: &nostr::Event) -> Result<(), StatusSessionError> {
+        use buzz_core::client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID;
+
+        if self
+            .send_tx
+            .try_send(WsMessage::Text(
+                RelayMessage::event(CLIENT_BINDING_STATUS_SUB_ID, event).into(),
+            ))
+            .is_err()
+        {
+            self.cancel.cancel();
+            return Err(StatusSessionError::DeliveryFailed);
+        }
+        Ok(())
+    }
+}
+
 /// Entry point for a new WebSocket connection.
 ///
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
@@ -125,9 +481,9 @@ impl ConnectionState {
 pub async fn handle_connection(
     socket: WebSocket,
     state: Arc<AppState>,
-    addr: SocketAddr,
     tenant: TenantContext,
     corporate_identity_jwt: Option<String>,
+    canonical_transport_evidence: Option<SealedTransportEvidence>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -145,11 +501,11 @@ pub async fn handle_connection(
             handle_active_connection(
                 socket,
                 run_state,
-                addr,
                 tenant,
                 conn_id,
                 cancel,
                 corporate_identity_jwt,
+                canonical_transport_evidence,
             )
         },
     )
@@ -159,16 +515,16 @@ pub async fn handle_connection(
 async fn handle_active_connection(
     socket: WebSocket,
     state: Arc<AppState>,
-    addr: SocketAddr,
     tenant: TenantContext,
     conn_id: Uuid,
     cancel: CancellationToken,
     corporate_identity_jwt: Option<String>,
+    canonical_transport_evidence: Option<SealedTransportEvidence>,
 ) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
-            warn!("Connection limit reached, rejecting {addr}");
+            warn!("Connection limit reached");
             return;
         }
     };
@@ -184,6 +540,7 @@ async fn handle_active_connection(
     // ordinary control frames unchanged avoids coupling heartbeat/ban traffic
     // to graceful-shutdown delivery tracking.
     let (restart_tx, restart_rx) = mpsc::channel::<RestartClose>(1);
+    let (status_tx, status_rx) = mpsc::channel::<StatusWrite>(8);
 
     let backpressure_count = Arc::new(AtomicU8::new(0));
     let subscriptions = Arc::new(Mutex::new(HashMap::new()));
@@ -191,20 +548,25 @@ async fn handle_active_connection(
     let conn = Arc::new(ConnectionState {
         conn_id,
         tenant,
-        remote_addr: addr,
         corporate_identity_jwt,
+        canonical_transport_evidence: Mutex::new(canonical_transport_evidence),
+        canonical_authorization: RwLock::new(None),
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
         }),
+        status_scope: RwLock::new(None),
         subscriptions: Arc::clone(&subscriptions),
         send_tx: tx.clone(),
+        status_writer: StatusWriter::new(status_tx),
         ctrl_tx: ctrl_tx.clone(),
         cancel: cancel.clone(),
         backpressure_count: Arc::clone(&backpressure_count),
+        #[cfg(not(test))]
+        client_binding_status_task: tokio::sync::Mutex::new(None),
         grace_limit: state.config.slow_client_grace_limit,
     });
 
-    info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
+    info!(conn_id = %conn_id, "WebSocket connection established");
     metrics::counter!(
         "buzz_ws_connections_total",
         "community" => conn.tenant.host().to_owned()
@@ -241,7 +603,14 @@ async fn handle_active_connection(
     let (ws_send, ws_recv) = socket.split();
 
     let send_cancel = cancel.child_token();
-    let send_task = tokio::spawn(send_loop(ws_send, rx, ctrl_rx, restart_rx, send_cancel));
+    let send_task = tokio::spawn(send_loop(
+        ws_send,
+        rx,
+        ctrl_rx,
+        restart_rx,
+        status_rx,
+        send_cancel,
+    ));
 
     let missed_pongs = Arc::new(AtomicU8::new(0));
     let heartbeat_cancel = cancel.clone();
@@ -283,6 +652,9 @@ async fn handle_active_connection(
     )
     .await;
 
+    if !conn.clear_client_binding_status_task().await {
+        warn!(conn_id = %conn.conn_id, "current-binding status task did not stop cleanly");
+    }
     cancel.cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
@@ -308,7 +680,7 @@ async fn handle_active_connection(
         }
     }
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
-    info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
+    info!(conn_id = %conn_id, "WebSocket connection closed");
 
     drop(permit);
 }
@@ -324,16 +696,32 @@ async fn send_loop(
     data_rx: mpsc::Receiver<WsMessage>,
     ctrl_rx: mpsc::Receiver<WsMessage>,
     restart_rx: mpsc::Receiver<RestartClose>,
+    status_rx: mpsc::Receiver<StatusWrite>,
     cancel: CancellationToken,
 ) {
-    send_loop_inner(ws_send, data_rx, ctrl_rx, restart_rx, cancel).await;
+    send_loop_inner_with_status(ws_send, data_rx, ctrl_rx, restart_rx, status_rx, cancel).await;
 }
 
+#[cfg(test)]
 async fn send_loop_inner<S>(
+    ws_send: S,
+    data_rx: mpsc::Receiver<WsMessage>,
+    ctrl_rx: mpsc::Receiver<WsMessage>,
+    restart_rx: mpsc::Receiver<RestartClose>,
+    cancel: CancellationToken,
+) where
+    S: Sink<WsMessage> + Unpin,
+{
+    let (_status_tx, status_rx) = mpsc::channel(1);
+    send_loop_inner_with_status(ws_send, data_rx, ctrl_rx, restart_rx, status_rx, cancel).await;
+}
+
+async fn send_loop_inner_with_status<S>(
     mut ws_send: S,
     mut data_rx: mpsc::Receiver<WsMessage>,
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
     mut restart_rx: mpsc::Receiver<RestartClose>,
+    mut status_rx: mpsc::Receiver<StatusWrite>,
     cancel: CancellationToken,
 ) where
     S: Sink<WsMessage> + Unpin,
@@ -347,9 +735,11 @@ async fn send_loop_inner<S>(
         }
 
         tokio::select! {
-            // Biased: restart > cancel > ordinary control > data. A restart
+            // Biased: restart > status > cancel > ordinary control > data. A restart
             // command owns shutdown delivery and must flush its 1012 before
-            // cancellation can fall back to an unacknowledged close.
+            // cancellation can fall back to an unacknowledged close. A status
+            // command already accepted by its dedicated channel remains ordered
+            // ahead of a concurrent close even if its waiter was dropped.
             biased;
             Some(restart) = restart_rx.recv() => {
                 let sent = ws_send
@@ -361,6 +751,21 @@ async fn send_loop_inner<S>(
                     .is_ok();
                 let _ = restart.flushed.send(sent);
                 break;
+            }
+            Some(status) = status_rx.recv() => {
+                let result = flush_status_write(
+                    &mut ws_send,
+                    &mut data_rx,
+                    &status,
+                ).await;
+                let ack = result.map(|()| StatusWriteAck {
+                    identity: status.identity,
+                });
+                let succeeded = ack.is_ok();
+                let _ = status.flushed.send(ack);
+                if !succeeded {
+                    break;
+                }
             }
             _ = cancel.cancelled() => {
                 // Drain any queued control frames before closing. A ban
@@ -408,6 +813,37 @@ async fn send_loop_inner<S>(
             }
         }
     }
+}
+
+async fn flush_status_write<S>(
+    ws_send: &mut S,
+    data_rx: &mut mpsc::Receiver<WsMessage>,
+    status: &StatusWrite,
+) -> Result<(), ()>
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    tokio::time::timeout_at(status.deadline, async {
+        if status.drain_data_first {
+            while let Ok(message) = data_rx.try_recv() {
+                ws_send.feed(message).await.map_err(|_| ())?;
+            }
+            ws_send.flush().await.map_err(|_| ())?;
+        }
+        if let Some(identity) = status.identity {
+            let actual_wire_digest: [u8; 32] = sha2::Sha256::digest(status.text.as_bytes()).into();
+            if actual_wire_digest != identity.wire_digest {
+                return Err(());
+            }
+        }
+        ws_send
+            .feed(WsMessage::Text(status.text.clone().into()))
+            .await
+            .map_err(|_| ())?;
+        ws_send.flush().await.map_err(|_| ())
+    })
+    .await
+    .map_err(|_| ())?
 }
 
 /// 3 missed pongs → disconnect.
@@ -649,6 +1085,48 @@ async fn enforce_ws_admission(
         }
     };
 
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        let ingress = match msg {
+            ClientMessage::Event(_) => {
+                crate::authorization_runtime::ProtectedIngress::WebSocketEvent
+            }
+            ClientMessage::Req { .. } => {
+                crate::authorization_runtime::ProtectedIngress::WebSocketQuery
+            }
+            ClientMessage::Count { .. } => {
+                crate::authorization_runtime::ProtectedIngress::WebSocketCount
+            }
+            _ => return true,
+        };
+        let admitted = {
+            let authorization = conn.canonical_authorization.read().await;
+            authorization.as_ref().is_some_and(|session| {
+                session.authorization(ingress).is_some_and(|authorization| {
+                    crate::protected_ingress::session_authorizes(
+                        state,
+                        ingress,
+                        authorization,
+                        conn.tenant.community(),
+                        pubkey,
+                    )
+                })
+            })
+        };
+        if !admitted {
+            let sub_id = match msg {
+                ClientMessage::Req { sub_id, .. } | ClientMessage::Count { sub_id, .. } => {
+                    Some(sub_id.as_str())
+                }
+                _ => None,
+            };
+            conn.send(request_rejection_message(
+                sub_id,
+                "restricted: canonical session authorization denied",
+            ));
+            return false;
+        }
+    }
+
     let limits = &state.auth.config().rate_limits;
     let (ws_window_secs, ws_limit) =
         crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
@@ -728,7 +1206,46 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorization_runtime::CurrentStatusContract;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+
+    use buzz_core::client_binding_bootstrap::{
+        CLIENT_BINDING_SCOPE_TAG, CLIENT_BINDING_STATUS_SUB_ID,
+    };
+    use buzz_core::{AuthorizationLeaseFence, CanonicalCurrentBindingEvidence, CommunityId};
+    use nostr::{EventBuilder, Kind, Tag};
+
+    #[test]
+    fn authenticated_context_carries_only_the_verifier_peer_key() {
+        let keys = Keys::generate();
+        let authorization = AuthContext {
+            pubkey: keys.public_key(),
+            scopes: Vec::new(),
+            channel_ids: None,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        };
+        let peer = AuthenticatedClientPeer::for_test([7; 32]);
+
+        let context = AuthenticatedConnectionContext::new(authorization, Some(peer));
+
+        assert_eq!(context.pubkey, keys.public_key());
+        assert_eq!(
+            context
+                .authenticated_client_peer()
+                .map(AuthenticatedClientPeer::admission_key),
+            Some(&[7; 32])
+        );
+        let (authorization, carried_peer) = context.into_parts();
+        assert_eq!(authorization.pubkey, keys.public_key());
+        assert_eq!(
+            carried_peer
+                .as_ref()
+                .map(AuthenticatedClientPeer::admission_key),
+            Some(&[7; 32])
+        );
+    }
 
     #[derive(Debug, Default)]
     struct MockSinkState {
@@ -755,6 +1272,155 @@ mod tests {
                 state,
             )
         }
+    }
+
+    #[tokio::test]
+    async fn reserved_status_channel_delivers_bootstrap_before_current_and_closes_on_ambiguity() {
+        let relay = Keys::generate();
+        let author = Keys::generate();
+        let now = Utc::now();
+        let domain = CommunityId::from_uuid(Uuid::from_u128(1));
+        let evidence = CanonicalCurrentBindingEvidence::new(
+            domain,
+            author.public_key(),
+            Uuid::from_u128(2),
+            3,
+            4,
+            5,
+            6,
+            AuthorizationLeaseFence::from_bytes([7; 32]).unwrap(),
+            now,
+            now + chrono::Duration::seconds(240),
+        )
+        .unwrap();
+        let authorization = CurrentStatusAuthorization::from_test_parts(
+            &evidence,
+            now + chrono::Duration::seconds(240),
+        );
+        let scope_event = EventBuilder::new(Kind::Custom(22242), "")
+            .tags([Tag::parse(vec![
+                CLIENT_BINDING_SCOPE_TAG.to_owned(),
+                "1".to_owned(),
+                "11111111-1111-4111-8111-111111111111".to_owned(),
+                relay.public_key().to_hex(),
+            ])
+            .unwrap()])
+            .sign_with_keys(&author)
+            .unwrap();
+        let scope = ClientBindingScopeV1::from_verified_auth_event(&scope_event).unwrap();
+        let (send_tx, mut send_rx) = mpsc::channel(2);
+        let cancel = CancellationToken::new();
+        let channel = WebSocketStatusChannel {
+            send_tx,
+            cancel: cancel.clone(),
+        };
+
+        let bootstrap = channel
+            .deliver_bootstrap(scope, &authorization, &relay, now)
+            .await
+            .unwrap();
+        let contract =
+            ConnectionLocalStatusContract::new(relay.clone(), relay.public_key()).unwrap();
+        let current = contract.current(&evidence, 1).unwrap();
+        channel.send_current(&current).await.unwrap();
+
+        let first = send_rx.recv().await.unwrap();
+        let second = send_rx.recv().await.unwrap();
+        let subscription_id = |message: WsMessage| match message {
+            WsMessage::Text(text) => serde_json::from_str::<serde_json::Value>(text.as_str())
+                .unwrap()
+                .as_array()
+                .unwrap()[1]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            other => panic!("expected text delivery, got {other:?}"),
+        };
+        assert_eq!(subscription_id(first), CLIENT_BINDING_BOOTSTRAP_SUB_ID);
+        assert_eq!(subscription_id(second), CLIENT_BINDING_STATUS_SUB_ID);
+        let _bootstrap_proof = bootstrap;
+        assert!(!cancel.is_cancelled());
+
+        let (full_tx, _full_rx) = mpsc::channel(1);
+        full_tx
+            .try_send(WsMessage::Text("occupied".into()))
+            .unwrap();
+        let full_cancel = CancellationToken::new();
+        let full = WebSocketStatusChannel {
+            send_tx: full_tx,
+            cancel: full_cancel.clone(),
+        };
+        assert_eq!(
+            full.send_current(&current).await,
+            Err(StatusSessionError::DeliveryFailed)
+        );
+        assert!(full_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn auth_replacement_and_teardown_join_connection_owned_withdrawal() {
+        let (send_tx, _send_rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        let (status_tx, _status_rx) = mpsc::channel(1);
+        let socket_cancel = CancellationToken::new();
+        let conn = ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: TenantContext::resolved(
+                CommunityId::from_uuid(Uuid::from_u128(1)),
+                "status.test",
+            ),
+            corporate_identity_jwt: None,
+            canonical_transport_evidence: tokio::sync::Mutex::new(None),
+            canonical_authorization: RwLock::new(None),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: "challenge".to_owned(),
+            }),
+            status_scope: RwLock::new(None),
+            subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            send_tx,
+            status_writer: StatusWriter::new(status_tx),
+            ctrl_tx,
+            cancel: socket_cancel.clone(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        };
+
+        let first_cancel = socket_cancel.child_token();
+        let first_observed = first_cancel.clone();
+        let first_finished = Arc::new(AtomicBool::new(false));
+        let first_finished_task = Arc::clone(&first_finished);
+        let first_join = tokio::spawn(async move {
+            first_observed.cancelled().await;
+            first_finished_task.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            conn.replace_client_binding_status_task(first_cancel.clone(), first_join,)
+                .await
+        );
+
+        let replacement_cancel = socket_cancel.child_token();
+        let replacement_observed = replacement_cancel.clone();
+        let replacement_finished = Arc::new(AtomicBool::new(false));
+        let replacement_finished_task = Arc::clone(&replacement_finished);
+        let (withdrawal_tx, mut withdrawal_rx) = mpsc::channel(1);
+        let replacement_join = tokio::spawn(async move {
+            replacement_observed.cancelled().await;
+            withdrawal_tx.send("withdrawn").await.unwrap();
+            replacement_finished_task.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            conn.replace_client_binding_status_task(replacement_cancel.clone(), replacement_join,)
+                .await
+        );
+        assert!(first_cancel.is_cancelled());
+        assert!(first_finished.load(Ordering::SeqCst));
+        assert!(!replacement_cancel.is_cancelled());
+
+        assert!(conn.clear_client_binding_status_task().await);
+        assert!(replacement_cancel.is_cancelled());
+        assert!(replacement_finished.load(Ordering::SeqCst));
+        assert_eq!(withdrawal_rx.try_recv().unwrap(), "withdrawn");
+        assert!(!socket_cancel.is_cancelled());
     }
 
     impl Sink<WsMessage> for MockSink {
@@ -893,6 +1559,134 @@ mod tests {
             text_payloads(&state.messages),
             vec!["control", "data-0", "data-1"]
         );
+    }
+
+    #[tokio::test]
+    async fn status_writer_acknowledges_only_the_exact_physically_flushed_frame() {
+        let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH + 2);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = mpsc::channel(1);
+        let writer = StatusWriter::new(status_tx);
+        let cancel = CancellationToken::new();
+        for index in 0..=MAX_WS_SEND_BATCH {
+            data_tx
+                .send(WsMessage::Text(format!("AUTH-OK-{index}").into()))
+                .await
+                .expect("queue auth acknowledgement");
+        }
+        let (sink, state) = MockSink::new(None);
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            send_loop_inner_with_status(sink, data_rx, ctrl_rx, restart_rx, status_rx, task_cancel)
+                .await;
+        });
+        let identity = StatusWriteIdentity {
+            delivery_id: Uuid::new_v4(),
+            claim_id: Uuid::new_v4(),
+            payload_digest: [7; 32],
+            wire_digest: sha2::Sha256::digest(b"STATUS").into(),
+        };
+        let ack = writer
+            .write(
+                "STATUS".to_owned(),
+                Some(identity),
+                true,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect("physical status flush");
+        assert_eq!(ack.identity, Some(identity));
+        {
+            let state = state.lock().expect("mock sink poisoned");
+            assert_eq!(state.flush_count, 2);
+            let payloads = text_payloads(&state.messages);
+            assert_eq!(payloads.len(), MAX_WS_SEND_BATCH + 2);
+            assert_eq!(payloads.first().map(String::as_str), Some("AUTH-OK-0"));
+            assert_eq!(payloads.last().map(String::as_str), Some("STATUS"));
+        }
+        cancel.cancel();
+        task.await.expect("writer task");
+    }
+
+    #[tokio::test]
+    async fn status_writer_never_acknowledges_queueing_when_flush_fails() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = mpsc::channel(1);
+        let writer = StatusWriter::new(status_tx);
+        let (sink, state) = MockSink::new(Some(1));
+        let task = tokio::spawn(async move {
+            send_loop_inner_with_status(
+                sink,
+                data_rx,
+                ctrl_rx,
+                restart_rx,
+                status_rx,
+                CancellationToken::new(),
+            )
+            .await;
+        });
+        let identity = StatusWriteIdentity {
+            delivery_id: Uuid::new_v4(),
+            claim_id: Uuid::new_v4(),
+            payload_digest: [8; 32],
+            wire_digest: sha2::Sha256::digest(b"STATUS").into(),
+        };
+        assert!(writer
+            .write(
+                "STATUS".to_owned(),
+                Some(identity),
+                false,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .is_err());
+        task.await.expect("writer task");
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(text_payloads(&state.messages), vec!["STATUS"]);
+    }
+
+    #[tokio::test]
+    async fn status_writer_rejects_an_ack_identity_bound_to_other_wire_bytes() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let (_restart_tx, restart_rx) = mpsc::channel(1);
+        let (status_tx, status_rx) = mpsc::channel(1);
+        let writer = StatusWriter::new(status_tx);
+        let (sink, state) = MockSink::new(None);
+        let task = tokio::spawn(async move {
+            send_loop_inner_with_status(
+                sink,
+                data_rx,
+                ctrl_rx,
+                restart_rx,
+                status_rx,
+                CancellationToken::new(),
+            )
+            .await;
+        });
+        let identity = StatusWriteIdentity {
+            delivery_id: Uuid::new_v4(),
+            claim_id: Uuid::new_v4(),
+            payload_digest: [9; 32],
+            wire_digest: sha2::Sha256::digest(b"OTHER").into(),
+        };
+        assert!(writer
+            .write(
+                "STATUS".to_owned(),
+                Some(identity),
+                false,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .is_err());
+        task.await.expect("writer task");
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 0);
+        assert!(state.messages.is_empty());
     }
 
     #[tokio::test]

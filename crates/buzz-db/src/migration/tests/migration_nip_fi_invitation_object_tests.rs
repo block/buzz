@@ -5,8 +5,11 @@ use uuid::Uuid;
 
 const INVITATION_OBJECT_MIGRATION: &str =
     include_str!("../../../../../migrations/0036_nip_fi_invitation_object_kind.sql");
+const ACTIVE_OBJECT_KINDS_MIGRATION: &str =
+    include_str!("../../../../../migrations/0040_nip_fi_event_status_object_kinds.sql");
 const DESIRED_SCHEMA: &str = include_str!("../../../../../schema/schema.sql");
-const OBJECT_KIND_EXPRESSION: &str = "object_kind IN (1, 2, 3, 4, 5, 6, 9)";
+const INVITATION_OBJECT_KIND_EXPRESSION: &str = "object_kind IN (1, 2, 3, 4, 5, 6, 9)";
+const FINAL_OBJECT_KIND_EXPRESSION: &str = "object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)";
 const OBJECT_KIND_CHECKS: [(&str, &str); 3] = [
     (
         "authorization_admission_results",
@@ -41,7 +44,12 @@ fn invitation_object_migration_and_desired_schema_are_exact() {
     assert_eq!(executable.matches("ADD CONSTRAINT").count(), 3);
     assert_eq!(executable.matches("NOT VALID").count(), 3);
     assert_eq!(executable.matches("VALIDATE CONSTRAINT").count(), 3);
-    assert_eq!(executable.matches(OBJECT_KIND_EXPRESSION).count(), 3);
+    assert_eq!(
+        executable
+            .matches(INVITATION_OBJECT_KIND_EXPRESSION)
+            .count(),
+        3
+    );
     for forbidden in [
         "CREATE TABLE",
         "DROP TABLE",
@@ -62,7 +70,7 @@ fn invitation_object_migration_and_desired_schema_are_exact() {
     for (table, constraint) in OBJECT_KIND_CHECKS {
         let drop = format!("ALTER TABLE {table}\n    DROP CONSTRAINT {constraint};");
         let add = format!(
-            "ALTER TABLE {table}\n    ADD CONSTRAINT {constraint}\n    CHECK ({OBJECT_KIND_EXPRESSION}) NOT VALID;"
+            "ALTER TABLE {table}\n    ADD CONSTRAINT {constraint}\n    CHECK ({INVITATION_OBJECT_KIND_EXPRESSION}) NOT VALID;"
         );
         let validate = format!("ALTER TABLE {table}\n    VALIDATE CONSTRAINT {constraint};");
         assert_eq!(executable.matches(&drop).count(), 1, "missing {drop}");
@@ -73,7 +81,18 @@ fn invitation_object_migration_and_desired_schema_are_exact() {
             "missing {validate}"
         );
 
-        let desired = format!("CONSTRAINT {constraint} CHECK ({OBJECT_KIND_EXPRESSION})");
+        let final_migration = format!(
+            "ADD CONSTRAINT {constraint}\n    CHECK ({FINAL_OBJECT_KIND_EXPRESSION}) NOT VALID;"
+        );
+        assert_eq!(
+            ACTIVE_OBJECT_KINDS_MIGRATION
+                .matches(&final_migration)
+                .count(),
+            1,
+            "migration 0040 must allocate the final active kinds for {constraint}",
+        );
+
+        let desired = format!("CONSTRAINT {constraint} CHECK ({FINAL_OBJECT_KIND_EXPRESSION})");
         assert_eq!(
             DESIRED_SCHEMA.matches(&desired).count(),
             1,
@@ -83,7 +102,7 @@ fn invitation_object_migration_and_desired_schema_are_exact() {
 
     for rejected in [7_i16, 8, 10] {
         assert!(
-            !OBJECT_KIND_EXPRESSION
+            !INVITATION_OBJECT_KIND_EXPRESSION
                 .split(|character: char| !character.is_ascii_digit())
                 .filter_map(|value| value.parse::<i16>().ok())
                 .any(|value| value == rejected),
@@ -92,7 +111,7 @@ fn invitation_object_migration_and_desired_schema_are_exact() {
     }
 }
 
-async fn assert_exact_catalog(pool: &PgPool) {
+async fn assert_exact_catalog(pool: &PgPool, expected_codes: &[i16]) {
     let rows: Vec<(String, String, bool)> = sqlx::query_as(
         "SELECT c.conrelid::regclass::text,pg_get_constraintdef(c.oid,true),c.convalidated \
          FROM pg_constraint c \
@@ -117,7 +136,7 @@ async fn assert_exact_catalog(pool: &PgPool) {
         .split(|character: char| !character.is_ascii_digit())
         .filter_map(|value| value.parse::<i16>().ok())
         .collect::<Vec<_>>();
-    assert_eq!(codes, vec![1, 2, 3, 4, 5, 6, 9]);
+    assert_eq!(codes, expected_codes);
 }
 
 async fn create_probe_tables(connection: &mut PgConnection) {
@@ -206,20 +225,25 @@ async fn probe_kind(
     Ok(())
 }
 
-async fn assert_kind_behavior(connection: &mut PgConnection, invitation_is_allowed: bool) {
+async fn assert_kind_behavior(
+    connection: &mut PgConnection,
+    allowed_kinds: &[i16],
+    rejected_kinds: &[i16],
+) {
     for table in [
         ProbeTable::AdmissionResults,
         ProbeTable::AuthorityEpochs,
         ProbeTable::ProtectedAuthority,
     ] {
-        let invitation = probe_kind(connection, table, 9).await;
-        assert_eq!(
-            invitation.is_ok(),
-            invitation_is_allowed,
-            "Invitation object kind has the wrong admission behavior: {invitation:?}",
-        );
-        for kind in [7, 8, 10] {
-            let error = probe_kind(connection, table, kind)
+        for kind in allowed_kinds {
+            probe_kind(connection, table, *kind)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("active object kind {kind} was rejected: {error:?}")
+                });
+        }
+        for kind in rejected_kinds {
+            let error = probe_kind(connection, table, *kind)
                 .await
                 .expect_err("unallocated object kind must remain rejected");
             assert_eq!(
@@ -247,7 +271,7 @@ async fn invitation_object_kind_is_exact_on_brownfield_and_fresh_catalogs() {
         .await
         .expect("acquire brownfield probe session");
     create_probe_tables(&mut connection).await;
-    assert_kind_behavior(&mut connection, false).await;
+    assert_kind_behavior(&mut connection, &[], &[7, 8, 9, 10]).await;
     drop_probe_tables(&mut connection).await;
     drop(connection);
 
@@ -256,13 +280,13 @@ async fn invitation_object_kind_is_exact_on_brownfield_and_fresh_catalogs() {
         .await
         .expect("upgrade brownfield catalog through 0036");
     assert_eq!(applied_versions(&pool).await.last().copied(), Some(36));
-    assert_exact_catalog(&pool).await;
+    assert_exact_catalog(&pool, &[1, 2, 3, 4, 5, 6, 9]).await;
     let mut connection = pool
         .acquire()
         .await
         .expect("acquire upgraded probe session");
     create_probe_tables(&mut connection).await;
-    assert_kind_behavior(&mut connection, true).await;
+    assert_kind_behavior(&mut connection, &[9], &[7, 8, 10]).await;
     drop_probe_tables(&mut connection).await;
     drop(connection);
 
@@ -270,5 +294,9 @@ async fn invitation_object_kind_is_exact_on_brownfield_and_fresh_catalogs() {
     run_migrations(&pool)
         .await
         .expect("apply Invitation object kind on a fresh database");
-    assert_exact_catalog(&pool).await;
+    assert_exact_catalog(&pool, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await;
+    let mut connection = pool.acquire().await.expect("acquire final probe session");
+    create_probe_tables(&mut connection).await;
+    assert_kind_behavior(&mut connection, &[7, 8, 9], &[10]).await;
+    drop_probe_tables(&mut connection).await;
 }

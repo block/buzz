@@ -201,7 +201,6 @@ impl fmt::Debug for StagedGitPublication {
     }
 }
 
-#[allow(dead_code)] // Accessed by the pending S5 publication transaction adapter.
 impl StagedGitPublication {
     /// Server-resolved authorization domain bound to this publication.
     pub const fn community_id(&self) -> CommunityId {
@@ -241,6 +240,14 @@ impl StagedGitPublication {
     /// Exact immutable publication digest committed in the operation receipt.
     pub const fn result_digest(&self) -> [u8; 32] {
         self.result_digest
+    }
+
+    /// Consume a canonically committed publication for downstream event derivation.
+    pub(crate) fn into_success(self) -> CasSuccess {
+        CasSuccess {
+            manifest: self.manifest,
+            manifest_key: self.manifest_key,
+        }
     }
 }
 
@@ -1096,7 +1103,6 @@ pub async fn cas_publish(
 ///
 /// The returned digest is suitable for the canonical protected-operation
 /// receipt. This function never reads or writes the raw repository pointer.
-#[allow(dead_code)] // Activated only after S5 freezes the joined publication seam.
 pub(crate) async fn stage_git_publication(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1374,7 +1380,6 @@ async fn stage_git_publication_inner(
 /// domain, owner, and repository target and committed that target-bound digest
 /// as the canonical PostgreSQL witness. They must tolerate
 /// [`PointerCacheUpdate::Stale`].
-#[allow(dead_code)] // Activated only after canonical DB publication succeeds.
 pub(crate) async fn publish_pointer_cache(
     store: &GitStore,
     staged: &StagedGitPublication,

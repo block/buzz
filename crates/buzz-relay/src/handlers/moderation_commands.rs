@@ -46,7 +46,30 @@ pub async fn handle_moderation_command(
     state: &Arc<AppState>,
     event: &Event,
     auth: &IngestAuth,
-) -> Result<(), String> {
+    canonical_admission: Option<AdmissionCommitRequest>,
+) -> Result<ModerationCommandDisposition, String> {
+    if let Some(request) = canonical_admission {
+        if state.config.nip_fi_mode != buzz_auth::NipFiMode::Enforce {
+            return Err(moderation_denied());
+        }
+        let effect = prepare_moderation_application_effect(tenant, event)?;
+        let request =
+            install_moderation_application_effect(request, effect).map_err(admission_error)?;
+        let committer = crate::protected_ingress::mutation_committer(state)
+            .map_err(|_| moderation_unavailable())?;
+        let outcome = committer.commit(request).await.map_err(admission_error)?;
+        let disposition = if matches!(&outcome, AdmissionCommitOutcome::ExactReplay { .. }) {
+            ModerationCommandDisposition::ExactReplay
+        } else {
+            ModerationCommandDisposition::Committed
+        };
+        dispatch_committed_moderation_outcome(tenant, outcome, |action| async move {
+            dispatch_moderation_postcommit(tenant, state, action).await;
+        })
+        .await
+        .map_err(admission_error)?;
+        return Ok(disposition);
+    }
     execute_moderation_command(
         tenant,
         &state.db,
@@ -58,7 +81,18 @@ pub async fn handle_moderation_command(
             dispatch_moderation_postcommit(tenant, state, action).await;
         },
     )
-    .await
+    .await?;
+    Ok(ModerationCommandDisposition::Legacy)
+}
+
+/// Whether this command used legacy ownership, a fresh co-commit, or replay.
+pub enum ModerationCommandDisposition {
+    /// Off-mode command owned by the established moderation transaction.
+    Legacy,
+    /// Fresh provider-verified canonical mutation and application co-commit.
+    Committed,
+    /// Existing typed canonical result returned without repeating the effect.
+    ExactReplay,
 }
 
 async fn execute_moderation_command<F, Fut>(
@@ -1519,6 +1553,100 @@ mod tests {
             .expect("commit authority fixture");
     }
 
+    async fn install_binding_status_authority(
+        pool: &PgPool,
+        domain: CommunityId,
+        actor: nostr::PublicKey,
+    ) -> AdmissionObject {
+        let object = AdmissionObject::binding_status(domain, actor).expect("status object");
+        let (binding_id, binding_version): (Uuid, i64) = sqlx::query_as(
+            "SELECT binding_id,binding_version FROM identity_bindings \
+             WHERE community_id=$1 AND event_author_pubkey=$2 AND binding_state=1",
+        )
+        .bind(domain.as_uuid())
+        .bind(actor.to_bytes().as_slice())
+        .fetch_one(pool)
+        .await
+        .expect("read active status binding");
+        let operation_id = Uuid::new_v4();
+        let request_fingerprint = [61_u8; 32];
+        let fence = [62_u8; 32];
+        let actor_bytes = actor.to_bytes();
+        let mut transaction = pool.begin().await.expect("begin status authority fixture");
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id,operation_id,request_fingerprint,operation_kind,actor_fingerprint, \
+              outcome_code,result_digest) VALUES ($1,$2,$3,11,$4,1,$5)",
+        )
+        .bind(domain.as_uuid())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .bind(actor_bytes.as_slice())
+        .bind([63_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert status receipt");
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id,event_id,event_kind,outcome_code,reason_code,actor_kind, \
+              actor_fingerprint,operation_id,request_fingerprint,correlation_id,attempt_id, \
+              occurred_at,canonical_envelope,envelope_digest) \
+             VALUES ($1,$2,10,1,1,1,$3,$4,$5,$6,$7,transaction_timestamp(),$8,$9)",
+        )
+        .bind(domain.as_uuid())
+        .bind(Uuid::new_v4())
+        .bind(actor_bytes.as_slice())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind([1_u8].as_slice())
+        .bind([64_u8; 32].as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert status audit event");
+        sqlx::query(
+            "INSERT INTO authorization_authority_epochs \
+             (community_id,object_kind,object_key,authority_epoch,fence,operation_id, \
+              request_fingerprint) VALUES ($1,$2,$3,1,$4,$5,$6)",
+        )
+        .bind(domain.as_uuid())
+        .bind(object.kind().database_code())
+        .bind(object.key().as_slice())
+        .bind(fence.as_slice())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert status epoch");
+        sqlx::query(
+            "INSERT INTO protected_object_authority \
+             (community_id,object_kind,object_key,capability,actor_pubkey,owner_pubkey, \
+              binding_id,binding_version,policy_revision,invalidation_generation,authority_epoch, \
+              fence,issued_at,expires_at,operation_id,request_fingerprint) \
+             VALUES ($1,$2,$3,26,$4,NULL,$5,$6,1,0,1,$7, \
+                     transaction_timestamp()-interval '1 second', \
+                     transaction_timestamp()+interval '5 minutes',$8,$9)",
+        )
+        .bind(domain.as_uuid())
+        .bind(object.kind().database_code())
+        .bind(object.key().as_slice())
+        .bind(actor_bytes.as_slice())
+        .bind(binding_id)
+        .bind(binding_version)
+        .bind(fence.as_slice())
+        .bind(operation_id)
+        .bind(request_fingerprint.as_slice())
+        .execute(&mut *transaction)
+        .await
+        .expect("insert status authority");
+        transaction
+            .commit()
+            .await
+            .expect("commit status authority fixture");
+        object
+    }
+
     fn signed_ban(keys: &Keys, target: nostr::PublicKey) -> Event {
         let target_hex = target.to_hex();
         EventBuilder::new(Kind::from(KIND_MODERATION_BAN as u16), "")
@@ -2216,6 +2344,106 @@ mod tests {
 
         drop(db);
         drop_disposable_moderation_database(&database_name, admin, pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL with CREATEDB via BUZZ_TEST_DATABASE_URL"]
+    async fn live_postgres_status_evidence_reads_and_rechecks_committed_authority() {
+        use buzz_auth::{CurrentBindingStatusEvidenceRequest, LocalBindingResolver};
+
+        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .expect("BUZZ_TEST_DATABASE_URL must name a PostgreSQL administrator database");
+        let admin_url = base_url
+            .rsplit_once('/')
+            .map(|(prefix, _)| format!("{prefix}/postgres"))
+            .expect("test database URL has a database name");
+        let admin = PgPool::connect(&admin_url)
+            .await
+            .expect("connect PostgreSQL admin database");
+        let stale_databases: Vec<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'buzz_status_reachability_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .expect("list stale disposable status databases");
+        for stale_database in stale_databases {
+            let suffix = stale_database
+                .strip_prefix("buzz_status_reachability_")
+                .expect("query prefix is exact");
+            if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE \"{stale_database}\" WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await
+            .expect("drop stale disposable status database");
+        }
+        let database_name = format!("buzz_status_reachability_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database_name}\""
+        )))
+        .execute(&admin)
+        .await
+        .expect("create disposable status database");
+        let database_url = base_url
+            .rsplit_once('/')
+            .map(|(prefix, _)| format!("{prefix}/{database_name}"))
+            .expect("derive disposable status database URL");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect disposable PostgreSQL");
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("run migrations");
+        let domain = CommunityId::from_uuid(Uuid::new_v4());
+        let actor = Keys::generate().public_key();
+        install_moderation_authority(&pool, domain, actor, true).await;
+        let object = install_binding_status_authority(&pool, domain, actor).await;
+        assert_eq!(object.kind(), AdmissionObjectKind::BindingStatus);
+
+        let resolver = buzz_db::authorization_resolver::PostgresLocalBindingResolver::new(
+            buzz_db::Db::from_pool(pool.clone()),
+        );
+        let request = CurrentBindingStatusEvidenceRequest::new(domain, actor)
+            .expect("status evidence request");
+        let evidence = resolver
+            .current_status_evidence(&request)
+            .await
+            .expect("read current status evidence");
+        assert_eq!(evidence.authorization_domain(), domain);
+        assert_eq!(evidence.event_author_pubkey(), actor);
+        assert_eq!(evidence.authority_epoch(), 1);
+        let (rechecked, authoritative_now) = resolver
+            .recheck_current_status_evidence(&evidence)
+            .await
+            .expect("recheck current status evidence");
+        assert_eq!(rechecked, evidence);
+        assert!(authoritative_now >= evidence.observed_at());
+
+        sqlx::query(
+            "INSERT INTO identity_enrollment_policies \
+             (community_id,policy_revision,enrollment_mode,policy_digest,effective_at) \
+             VALUES ($1,2,2,$2,transaction_timestamp())",
+        )
+        .bind(domain.as_uuid())
+        .bind([65_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .expect("advance status policy");
+        assert!(resolver
+            .recheck_current_status_evidence(&evidence)
+            .await
+            .is_err());
+        drop(resolver);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE \"{database_name}\" WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop exact disposable status database");
     }
 
     #[test]

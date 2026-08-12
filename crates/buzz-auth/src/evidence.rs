@@ -18,6 +18,44 @@ use crate::ProofTransport;
 pub enum AssertionTransportProfile {
     /// A request-bound `trusted-proxy-hmac-v1` provenance field.
     TrustedProxyHmacV1,
+    /// A request-bound `trusted-proxy-hmac-v2` field with authenticated peer.
+    TrustedProxyHmacV2,
+}
+
+/// Opaque, authenticated end-client peer identity for bounded admission.
+///
+/// The key is a domain-separated keyed digest of the canonical peer address.
+/// It may be used as a status-admission coordinate, but cannot reveal the raw
+/// address or be constructed from an unauthenticated forwarding header.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedClientPeer {
+    admission_key: [u8; 32],
+}
+
+impl AuthenticatedClientPeer {
+    pub(crate) const fn new(admission_key: [u8; 32]) -> Self {
+        Self { admission_key }
+    }
+
+    /// Construct deterministic opaque peer evidence for dev/test harnesses.
+    ///
+    /// This bypasses transport verification and is unavailable unless a test
+    /// build or the explicitly development-only `dev` feature is selected.
+    #[cfg(any(test, feature = "dev"))]
+    pub const fn for_test(admission_key: [u8; 32]) -> Self {
+        Self { admission_key }
+    }
+
+    /// Privacy-safe key for an admission counter.
+    pub const fn admission_key(&self) -> &[u8; 32] {
+        &self.admission_key
+    }
+}
+
+impl fmt::Debug for AuthenticatedClientPeer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthenticatedClientPeer([REDACTED])")
+    }
 }
 
 /// Opaque identity for one trusted-proxy nonce that final admission must claim.
@@ -74,9 +112,45 @@ pub struct SealedTransportEvidence {
     proxy_expires_at: DateTime<Utc>,
     nonce_claim: TrustedProxyNonceClaim,
     profile: AssertionTransportProfile,
+    authenticated_client_peer: Option<AuthenticatedClientPeer>,
 }
 
 impl SealedTransportEvidence {
+    /// Construct origin-shaped opaque evidence for cross-crate dev tests.
+    ///
+    /// The caller supplies only an already opaque peer key; raw addresses are
+    /// deliberately not accepted by this test seam.
+    #[cfg(any(test, feature = "dev"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_test(
+        authorization_domain: CommunityId,
+        assertion: impl Into<Box<str>>,
+        method: &[u8],
+        authority: &[u8],
+        path_and_query: &[u8],
+        body_digest: [u8; 32],
+        transport: ProofTransport,
+        proxy_expires_at: DateTime<Utc>,
+        authenticated_client_peer: AuthenticatedClientPeer,
+    ) -> Self {
+        let assertion = assertion.into();
+        let assertion_digest: [u8; 32] = Sha256::digest(assertion.as_bytes()).into();
+        Self::from_trusted_proxy(
+            authorization_domain,
+            assertion,
+            assertion_digest,
+            method,
+            authority,
+            path_and_query,
+            body_digest,
+            transport,
+            proxy_expires_at,
+            TrustedProxyNonceClaim::new([0x91; 32], proxy_expires_at),
+            AssertionTransportProfile::TrustedProxyHmacV2,
+            Some(authenticated_client_peer),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_trusted_proxy(
         authorization_domain: CommunityId,
@@ -89,27 +163,72 @@ impl SealedTransportEvidence {
         transport: ProofTransport,
         proxy_expires_at: DateTime<Utc>,
         nonce_claim: TrustedProxyNonceClaim,
+        profile: AssertionTransportProfile,
+        authenticated_client_peer: Option<AuthenticatedClientPeer>,
     ) -> Self {
-        let request_fingerprint = framed_fingerprint(
-            b"buzz:nip-fi:trusted-proxy-request:v1",
-            &[
-                authorization_domain.as_uuid().as_bytes(),
-                method,
-                authority,
-                path_and_query,
-                &body_digest,
-                &[proof_transport_code(transport)],
-            ],
-        );
-        let transport_context_fingerprint = framed_fingerprint(
-            b"buzz:nip-fi:assertion-transport:v1",
-            &[
-                b"trusted-proxy-hmac-v1",
-                authorization_domain.as_uuid().as_bytes(),
-                authority,
-                &[proof_transport_code(transport)],
-            ],
-        );
+        let peer_key = authenticated_client_peer
+            .as_ref()
+            .map(AuthenticatedClientPeer::admission_key)
+            .map(<[u8; 32]>::as_slice)
+            .unwrap_or_default();
+        let (request_domain, transport_profile) = match profile {
+            AssertionTransportProfile::TrustedProxyHmacV1 => (
+                b"buzz:nip-fi:trusted-proxy-request:v1".as_slice(),
+                b"trusted-proxy-hmac-v1".as_slice(),
+            ),
+            AssertionTransportProfile::TrustedProxyHmacV2 => (
+                b"buzz:nip-fi:trusted-proxy-request:v2".as_slice(),
+                b"trusted-proxy-hmac-v2".as_slice(),
+            ),
+        };
+        let request_fingerprint = if authenticated_client_peer.is_some() {
+            framed_fingerprint(
+                request_domain,
+                &[
+                    authorization_domain.as_uuid().as_bytes(),
+                    method,
+                    authority,
+                    path_and_query,
+                    &body_digest,
+                    &[proof_transport_code(transport)],
+                    peer_key,
+                ],
+            )
+        } else {
+            framed_fingerprint(
+                request_domain,
+                &[
+                    authorization_domain.as_uuid().as_bytes(),
+                    method,
+                    authority,
+                    path_and_query,
+                    &body_digest,
+                    &[proof_transport_code(transport)],
+                ],
+            )
+        };
+        let transport_context_fingerprint = if authenticated_client_peer.is_some() {
+            framed_fingerprint(
+                b"buzz:nip-fi:assertion-transport:v2",
+                &[
+                    transport_profile,
+                    authorization_domain.as_uuid().as_bytes(),
+                    authority,
+                    &[proof_transport_code(transport)],
+                    peer_key,
+                ],
+            )
+        } else {
+            framed_fingerprint(
+                b"buzz:nip-fi:assertion-transport:v1",
+                &[
+                    transport_profile,
+                    authorization_domain.as_uuid().as_bytes(),
+                    authority,
+                    &[proof_transport_code(transport)],
+                ],
+            )
+        };
         Self {
             authorization_domain,
             assertion,
@@ -119,7 +238,8 @@ impl SealedTransportEvidence {
             transport,
             proxy_expires_at,
             nonce_claim,
-            profile: AssertionTransportProfile::TrustedProxyHmacV1,
+            profile,
+            authenticated_client_peer,
         }
     }
 
@@ -169,6 +289,11 @@ impl SealedTransportEvidence {
     /// Assertion transport profile selected by trusted server configuration.
     pub const fn profile(&self) -> AssertionTransportProfile {
         self.profile
+    }
+
+    /// Authenticated end-client peer key, when the proxy used the v2 profile.
+    pub const fn authenticated_client_peer(&self) -> Option<&AuthenticatedClientPeer> {
+        self.authenticated_client_peer.as_ref()
     }
 }
 

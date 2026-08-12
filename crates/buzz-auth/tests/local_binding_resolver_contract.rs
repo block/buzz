@@ -39,8 +39,9 @@ impl LocalBindingResolver for ExternalPostgresResolver {
     fn recheck_current_status_evidence<'a>(
         &'a self,
         _evidence: &'a CanonicalCurrentBindingEvidence,
-    ) -> impl Future<Output = Result<CanonicalCurrentBindingEvidence, Self::Error>> + Send + 'a
-    {
+    ) -> impl Future<Output = Result<(CanonicalCurrentBindingEvidence, DateTime<Utc>), Self::Error>>
+           + Send
+           + 'a {
         pending()
     }
 }

@@ -303,17 +303,163 @@ impl LocalBindingResolver for PostgresLocalBindingResolver {
         &'a self,
         request: &'a CurrentBindingStatusEvidenceRequest,
     ) -> std::result::Result<CanonicalCurrentBindingEvidence, Self::Error> {
-        let _ = request;
-        Err(AuthorizationResolverError::ContractUnavailable)
+        read_current_status_evidence(&self.db, request).await
     }
 
     async fn recheck_current_status_evidence<'a>(
         &'a self,
         evidence: &'a CanonicalCurrentBindingEvidence,
-    ) -> std::result::Result<CanonicalCurrentBindingEvidence, Self::Error> {
-        let _ = evidence;
-        Err(AuthorizationResolverError::ContractUnavailable)
+    ) -> std::result::Result<(CanonicalCurrentBindingEvidence, DateTime<Utc>), Self::Error> {
+        let request = CurrentBindingStatusEvidenceRequest::new(
+            evidence.authorization_domain(),
+            evidence.event_author_pubkey(),
+        )
+        .map_err(|_| AuthorizationResolverError::ContractUnavailable)?;
+        let current = read_current_status_evidence(&self.db, &request).await?;
+        if !same_status_coordinates(evidence, &current)
+            || !evidence.is_fresh_at(current.observed_at())
+        {
+            return Err(AuthorizationResolverError::BindingUnavailable);
+        }
+        Ok((evidence.clone(), current.observed_at()))
     }
+}
+
+async fn read_current_status_evidence(
+    db: &Db,
+    request: &CurrentBindingStatusEvidenceRequest,
+) -> std::result::Result<CanonicalCurrentBindingEvidence, AuthorizationResolverError> {
+    use crate::authorization_admission::{capability_code, AdmissionObject};
+
+    let object = AdmissionObject::binding_status(
+        request.authorization_domain(),
+        request.event_author_pubkey(),
+    )
+    .ok_or(AuthorizationResolverError::ContractUnavailable)?;
+    let mut transaction = db.pool.begin().await.map_err(DbError::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(DbError::from)?;
+    let row = sqlx::query(
+        "SELECT binding.binding_id,binding.binding_version,policy.policy_revision, \
+                invalidation.current_generation,epoch.authority_epoch,epoch.fence, \
+                protected.authority_epoch AS protected_authority_epoch, \
+                protected.fence AS protected_fence,protected.expires_at AS authority_expires_at, \
+                binding.expires_at AS binding_expires_at,policy.expires_at AS policy_expires_at, \
+                clock_timestamp() AS authoritative_now \
+         FROM protected_object_authority protected \
+         JOIN authorization_authority_epochs epoch \
+           ON epoch.community_id=protected.community_id \
+          AND epoch.object_kind=protected.object_kind AND epoch.object_key=protected.object_key \
+         JOIN identity_bindings binding \
+           ON binding.community_id=protected.community_id \
+          AND binding.binding_id=protected.binding_id \
+          AND binding.binding_version=protected.binding_version \
+          AND binding.event_author_pubkey=protected.actor_pubkey \
+         JOIN identity_enrollment_policies policy \
+           ON policy.community_id=protected.community_id \
+          AND policy.policy_revision=protected.policy_revision \
+         JOIN authorization_invalidation_domains invalidation \
+           ON invalidation.community_id=protected.community_id \
+         WHERE protected.community_id=$1 AND protected.object_kind=$2 \
+           AND protected.object_key=$3 AND protected.capability=$4 \
+           AND protected.actor_pubkey=$5 AND protected.owner_pubkey IS NULL \
+           AND binding.binding_state=1 \
+           AND (binding.expires_at IS NULL OR clock_timestamp() < binding.expires_at) \
+           AND policy.effective_at <= clock_timestamp() \
+           AND (policy.expires_at IS NULL OR clock_timestamp() < policy.expires_at) \
+           AND protected.expires_at > clock_timestamp() \
+           AND policy.policy_revision=( \
+             SELECT MAX(current_policy.policy_revision) \
+             FROM identity_enrollment_policies current_policy \
+             WHERE current_policy.community_id=protected.community_id \
+               AND current_policy.effective_at <= clock_timestamp() \
+               AND (current_policy.expires_at IS NULL \
+                    OR clock_timestamp() < current_policy.expires_at))",
+    )
+    .bind(request.authorization_domain().as_uuid())
+    .bind(object.kind().database_code())
+    .bind(object.key().as_slice())
+    .bind(capability_code(buzz_auth::RouteCapability::BindingStatus))
+    .bind(request.event_author_pubkey().to_bytes().as_slice())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(DbError::from)?;
+    transaction.commit().await.map_err(DbError::from)?;
+    let row = row.ok_or(AuthorizationResolverError::BindingUnavailable)?;
+    let authority_epoch = database_u64(
+        row.try_get("authority_epoch").map_err(DbError::from)?,
+        "status authority epoch",
+    )?;
+    let protected_authority_epoch = database_u64(
+        row.try_get("protected_authority_epoch")
+            .map_err(DbError::from)?,
+        "status protected authority epoch",
+    )?;
+    let fence = parsed_fence(
+        row.try_get("fence").map_err(DbError::from)?,
+        "status authority fence",
+    )?;
+    let protected_fence = parsed_fence(
+        row.try_get("protected_fence").map_err(DbError::from)?,
+        "status protected authority fence",
+    )?;
+    if authority_epoch != protected_authority_epoch || fence != protected_fence {
+        return Err(AuthorizationResolverError::PolicyUnavailable);
+    }
+    let observed_at: DateTime<Utc> = row.try_get("authoritative_now").map_err(DbError::from)?;
+    let mut fresh_until = observed_at + chrono::Duration::seconds(300);
+    for deadline in [
+        row.try_get::<DateTime<Utc>, _>("authority_expires_at")
+            .map(Some)
+            .map_err(DbError::from)?,
+        row.try_get::<Option<DateTime<Utc>>, _>("binding_expires_at")
+            .map_err(DbError::from)?,
+        row.try_get::<Option<DateTime<Utc>>, _>("policy_expires_at")
+            .map_err(DbError::from)?,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        fresh_until = fresh_until.min(deadline);
+    }
+    CanonicalCurrentBindingEvidence::new(
+        request.authorization_domain(),
+        request.event_author_pubkey(),
+        row.try_get("binding_id").map_err(DbError::from)?,
+        database_u64(
+            row.try_get("binding_version").map_err(DbError::from)?,
+            "status binding version",
+        )?,
+        database_u64(
+            row.try_get("policy_revision").map_err(DbError::from)?,
+            "status policy revision",
+        )?,
+        database_u64(
+            row.try_get("current_generation").map_err(DbError::from)?,
+            "status invalidation generation",
+        )?,
+        authority_epoch,
+        fence,
+        observed_at,
+        fresh_until,
+    )
+    .map_err(|_| AuthorizationResolverError::PolicyUnavailable)
+}
+
+fn same_status_coordinates(
+    expected: &CanonicalCurrentBindingEvidence,
+    current: &CanonicalCurrentBindingEvidence,
+) -> bool {
+    expected.authorization_domain() == current.authorization_domain()
+        && expected.event_author_pubkey() == current.event_author_pubkey()
+        && expected.binding_id() == current.binding_id()
+        && expected.binding_version() == current.binding_version()
+        && expected.policy_revision() == current.policy_revision()
+        && expected.invalidation_generation() == current.invalidation_generation()
+        && expected.authority_epoch() == current.authority_epoch()
+        && expected.fence() == current.fence()
 }
 
 #[derive(Clone)]

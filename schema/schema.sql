@@ -5,6 +5,8 @@
 -- Dumped from database version PostgreSQL 17.10
 -- Dumped by pgschema version 1.7.4
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 
 --
 -- Name: approval_status; Type: TYPE; Schema: -; Owner: -
@@ -298,7 +300,7 @@ CREATE TABLE IF NOT EXISTS authorization_admission_results (
     CONSTRAINT authorization_admission_results_application_type_check CHECK (application_type IS NULL OR octet_length(application_type) = 32 AND application_type <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT authorization_admission_results_application_version_check CHECK (application_version > 0),
     CONSTRAINT authorization_admission_results_object_key_check CHECK (octet_length(object_key) = 32 AND object_key <> decode(repeat('00'::text, 32), 'hex'::text)),
-    CONSTRAINT authorization_admission_results_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
+    CONSTRAINT authorization_admission_results_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)),
     CONSTRAINT authorization_admission_results_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32),
     CONSTRAINT authorization_admission_results_semantic_fingerprint_check CHECK (octet_length(semantic_fingerprint) = 32 AND semantic_fingerprint <> decode(repeat('00'::text, 32), 'hex'::text))
 );
@@ -323,7 +325,7 @@ CREATE TABLE IF NOT EXISTS authorization_authority_epochs (
     CONSTRAINT authorization_authority_epochs_authority_epoch_check CHECK (authority_epoch > 0),
     CONSTRAINT authorization_authority_epochs_fence_check CHECK (octet_length(fence) = 32 AND fence <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT authorization_authority_epochs_object_key_check CHECK (octet_length(object_key) = 32),
-    CONSTRAINT authorization_authority_epochs_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
+    CONSTRAINT authorization_authority_epochs_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)),
     CONSTRAINT authorization_authority_epochs_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32)
 );
 
@@ -2900,7 +2902,7 @@ CREATE TABLE IF NOT EXISTS protected_object_authority (
     CONSTRAINT protected_object_authority_fence_check CHECK (octet_length(fence) = 32 AND fence <> decode(repeat('00'::text, 32), 'hex'::text)),
     CONSTRAINT protected_object_authority_invalidation_generation_check CHECK (invalidation_generation >= 0),
     CONSTRAINT protected_object_authority_object_key_check CHECK (octet_length(object_key) = 32),
-    CONSTRAINT protected_object_authority_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 9)),
+    CONSTRAINT protected_object_authority_object_kind_check CHECK (object_kind IN (1, 2, 3, 4, 5, 6, 7, 8, 9)),
     CONSTRAINT protected_object_authority_owner_pubkey_check CHECK (owner_pubkey IS NULL OR octet_length(owner_pubkey) = 32),
     CONSTRAINT protected_object_authority_policy_revision_check CHECK (policy_revision > 0),
     CONSTRAINT protected_object_authority_request_fingerprint_check CHECK (octet_length(request_fingerprint) = 32)
@@ -6057,3 +6059,478 @@ ALTER TABLE ONLY protected_object_authority
 
 ALTER TABLE ONLY push_leases
     ADD CONSTRAINT push_leases_check CHECK (((active AND (app_profile IS NOT NULL) AND (endpoint_hash IS NOT NULL) AND (endpoint_grant IS NOT NULL) AND (max_class IS NOT NULL) AND (subscriptions IS NOT NULL)) OR ((NOT active) AND (app_profile IS NULL) AND (endpoint_hash IS NULL) AND (endpoint_grant IS NULL) AND (max_class IS NULL) AND (subscriptions IS NULL))));
+
+-- NIP-FI status delivery desired state (migration 0038).
+-- Crash-recoverable, privacy-bounded delivery for connection-local kind-24244
+-- status. One authoritative transition may acquire a new target job after a
+-- reconnect, but every dead target receives its own terminal outcome.
+
+CREATE FUNCTION client_status_policy_connection_fence_v1() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM id FROM communities WHERE id=NEW.community_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'client status policy community is unavailable'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER client_status_policy_connection_fence
+    BEFORE INSERT ON identity_enrollment_policies
+    FOR EACH ROW EXECUTE FUNCTION client_status_policy_connection_fence_v1();
+
+CREATE TABLE client_status_transition_heads (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    subject_fingerprint BYTEA NOT NULL CHECK (octet_length(subject_fingerprint) = 32),
+    signer_fingerprint BYTEA NOT NULL CHECK (octet_length(signer_fingerprint) = 32),
+    transition_id UUID NOT NULL,
+    status_revision BIGINT NOT NULL CHECK (status_revision > 0),
+    delivery_kind SMALLINT NOT NULL CHECK (delivery_kind IN (1, 2)),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    connection_fingerprint BYTEA NOT NULL CHECK (
+        octet_length(connection_fingerprint) = 32
+        AND connection_fingerprint <> decode(repeat('00', 32), 'hex')
+    ),
+    PRIMARY KEY (community_id, connection_fingerprint),
+    UNIQUE (community_id, transition_id, connection_fingerprint),
+    CHECK (transition_id <> '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
+CREATE TABLE client_status_transitions (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    transition_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    request_fingerprint BYTEA NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    delivery_kind SMALLINT NOT NULL CHECK (delivery_kind IN (1, 2)),
+    subject_fingerprint BYTEA NOT NULL CHECK (octet_length(subject_fingerprint) = 32),
+    signer_fingerprint BYTEA NOT NULL CHECK (octet_length(signer_fingerprint) = 32),
+    status_revision BIGINT NOT NULL CHECK (status_revision > 0),
+    supersedes_revision BIGINT CHECK (supersedes_revision > 0),
+    signed_payload BYTEA NOT NULL CHECK (octet_length(signed_payload) BETWEEN 1 AND 4096),
+    payload_digest BYTEA NOT NULL CHECK (
+        octet_length(payload_digest) = 32
+        AND payload_digest = digest(signed_payload, 'sha256')
+    ),
+    fresh_until TIMESTAMPTZ NOT NULL,
+    allocated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    signed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    fenced_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    retain_until TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp() + INTERVAL '1 day',
+    connection_fingerprint BYTEA NOT NULL CHECK (
+        octet_length(connection_fingerprint) = 32
+        AND connection_fingerprint <> decode(repeat('00', 32), 'hex')
+    ),
+    evidence_author_pubkey BYTEA CHECK (
+        evidence_author_pubkey IS NULL OR octet_length(evidence_author_pubkey) = 32
+    ),
+    evidence_binding_id UUID,
+    evidence_binding_version BIGINT CHECK (
+        evidence_binding_version IS NULL OR evidence_binding_version > 0
+    ),
+    evidence_policy_revision BIGINT CHECK (
+        evidence_policy_revision IS NULL OR evidence_policy_revision > 0
+    ),
+    evidence_invalidation_generation BIGINT CHECK (
+        evidence_invalidation_generation IS NULL OR evidence_invalidation_generation >= 0
+    ),
+    evidence_authority_epoch BIGINT CHECK (
+        evidence_authority_epoch IS NULL OR evidence_authority_epoch > 0
+    ),
+    evidence_fence BYTEA CHECK (
+        evidence_fence IS NULL
+        OR (octet_length(evidence_fence) = 32
+            AND evidence_fence <> decode(repeat('00', 32), 'hex'))
+    ),
+    evidence_observed_at TIMESTAMPTZ,
+    PRIMARY KEY (community_id, transition_id),
+    UNIQUE (community_id, operation_id),
+    CONSTRAINT client_status_transition_connection_revision
+        UNIQUE (community_id, connection_fingerprint, status_revision),
+    CONSTRAINT client_status_transition_connection_identity
+        UNIQUE (community_id, transition_id, connection_fingerprint,
+                subject_fingerprint, signer_fingerprint, status_revision, delivery_kind),
+    CHECK (transition_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    CHECK (operation_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    CHECK (request_fingerprint <> decode(repeat('00', 32), 'hex')),
+    CHECK (subject_fingerprint <> decode(repeat('00', 32), 'hex')),
+    CHECK (signer_fingerprint <> decode(repeat('00', 32), 'hex')),
+    CHECK (
+        (delivery_kind = 1 AND supersedes_revision IS NULL)
+        OR (delivery_kind = 2 AND supersedes_revision IS NOT NULL
+            AND status_revision > supersedes_revision)
+    ),
+    CHECK (signed_at >= allocated_at AND fenced_at >= signed_at),
+    CHECK (fresh_until > fenced_at),
+    CHECK (retain_until > fresh_until AND retain_until <= fresh_until + INTERVAL '1 day')
+);
+
+ALTER TABLE client_status_transitions
+    ADD CONSTRAINT client_status_transition_private_evidence CHECK (
+        (delivery_kind = 1
+            AND evidence_author_pubkey IS NOT NULL
+            AND evidence_binding_id IS NOT NULL
+            AND evidence_binding_id <> '00000000-0000-0000-0000-000000000000'::uuid
+            AND evidence_binding_version IS NOT NULL
+            AND evidence_policy_revision IS NOT NULL
+            AND evidence_invalidation_generation IS NOT NULL
+            AND evidence_authority_epoch IS NOT NULL
+            AND evidence_fence IS NOT NULL
+            AND evidence_observed_at IS NOT NULL
+            AND evidence_observed_at < fresh_until)
+        OR (delivery_kind = 2
+            AND evidence_author_pubkey IS NULL
+            AND evidence_binding_id IS NULL
+            AND evidence_binding_version IS NULL
+            AND evidence_policy_revision IS NULL
+            AND evidence_invalidation_generation IS NULL
+            AND evidence_authority_epoch IS NULL
+            AND evidence_fence IS NULL
+            AND evidence_observed_at IS NULL)
+    );
+
+ALTER TABLE client_status_transition_heads
+    ADD CONSTRAINT client_status_transition_heads_transition
+    FOREIGN KEY (community_id, transition_id, connection_fingerprint,
+                 subject_fingerprint, signer_fingerprint, status_revision, delivery_kind)
+    REFERENCES client_status_transitions
+        (community_id, transition_id, connection_fingerprint,
+         subject_fingerprint, signer_fingerprint, status_revision, delivery_kind)
+    DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE client_status_delivery_outbox (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    delivery_id UUID NOT NULL,
+    transition_id UUID NOT NULL,
+    connection_fingerprint BYTEA NOT NULL CHECK (
+        octet_length(connection_fingerprint) = 32
+        AND connection_fingerprint <> decode(repeat('00', 32), 'hex')
+    ),
+    delivery_state SMALLINT NOT NULL DEFAULT 1 CHECK (delivery_state IN (1, 2, 3)),
+    attempt_count SMALLINT NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 16),
+    claim_id UUID,
+    completion_claim_id UUID,
+    claimed_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    last_failure_reason SMALLINT NOT NULL DEFAULT 0 CHECK (last_failure_reason BETWEEN 0 AND 7),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    attempt_started_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    terminal_at TIMESTAMPTZ,
+    retain_until TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp() + INTERVAL '1 day',
+    PRIMARY KEY (community_id, delivery_id),
+    UNIQUE (community_id, transition_id, connection_fingerprint),
+    FOREIGN KEY (community_id, transition_id)
+        REFERENCES client_status_transitions (community_id, transition_id),
+    CHECK (delivery_id <> '00000000-0000-0000-0000-000000000000'::uuid),
+    CHECK ((claim_id IS NULL) = (claimed_until IS NULL)),
+    CHECK ((attempt_count = 0) = (attempt_started_at IS NULL)),
+    CHECK (retain_until > created_at AND retain_until <= created_at + INTERVAL '1 day'),
+    CHECK (
+        (delivery_state = 1 AND delivered_at IS NULL AND terminal_at IS NULL
+            AND completion_claim_id IS NULL)
+        OR (delivery_state = 2 AND delivered_at IS NOT NULL AND terminal_at IS NULL
+            AND last_failure_reason = 0 AND claim_id IS NULL
+            AND completion_claim_id IS NOT NULL)
+        OR (delivery_state = 3 AND delivered_at IS NULL AND terminal_at IS NOT NULL
+            AND last_failure_reason BETWEEN 2 AND 7 AND claim_id IS NULL
+            AND completion_claim_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE client_status_delivery_capacity (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    pending_count INTEGER NOT NULL DEFAULT 0 CHECK (pending_count BETWEEN 0 AND 1024),
+    total_count INTEGER NOT NULL DEFAULT 0 CHECK (total_count BETWEEN 0 AND 8192),
+    healthy BOOLEAN NOT NULL DEFAULT TRUE,
+    failure_reason SMALLINT NOT NULL DEFAULT 0 CHECK (failure_reason BETWEEN 0 AND 3),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    CHECK ((healthy AND failure_reason = 0) OR (NOT healthy AND failure_reason BETWEEN 1 AND 3)),
+    CHECK (pending_count <= total_count),
+    PRIMARY KEY (community_id)
+);
+
+CREATE INDEX client_status_delivery_outbox_ready
+    ON client_status_delivery_outbox
+        (community_id, connection_fingerprint, next_attempt_at, created_at, delivery_id)
+    WHERE delivery_state = 1;
+
+CREATE INDEX client_status_delivery_outbox_retention
+    ON client_status_delivery_outbox (community_id, retain_until, delivery_id)
+    WHERE delivery_state IN (2, 3);
+
+CREATE TABLE client_status_delivery_events (
+    community_id UUID NOT NULL,
+    delivery_id UUID NOT NULL,
+    event_sequence SMALLINT NOT NULL CHECK (event_sequence BETWEEN 1 AND 64),
+    event_kind SMALLINT NOT NULL CHECK (event_kind BETWEEN 1 AND 8),
+    reason_code SMALLINT NOT NULL CHECK (reason_code BETWEEN 0 AND 7),
+    attempt_count SMALLINT NOT NULL CHECK (attempt_count BETWEEN 0 AND 16),
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, delivery_id, event_sequence),
+    FOREIGN KEY (community_id, delivery_id)
+        REFERENCES client_status_delivery_outbox (community_id, delivery_id)
+        ON DELETE CASCADE,
+    CHECK ((event_kind BETWEEN 1 AND 5 AND reason_code = 0)
+        OR (event_kind BETWEEN 6 AND 8 AND reason_code BETWEEN 1 AND 7))
+);
+
+CREATE FUNCTION client_status_delivery_capacity_guard_v1() RETURNS TRIGGER AS $$
+DECLARE capacity client_status_delivery_capacity%ROWTYPE;
+BEGIN
+    SELECT * INTO capacity FROM client_status_delivery_capacity
+     WHERE community_id = NEW.community_id FOR UPDATE;
+    IF NOT FOUND OR NOT capacity.healthy THEN
+        RAISE EXCEPTION 'client status delivery audit is unavailable'
+            USING ERRCODE = 'object_not_in_prerequisite_state',
+                  CONSTRAINT = 'client_status_delivery_capacity_health';
+    END IF;
+    IF capacity.pending_count >= 1024 OR capacity.total_count >= 8192 THEN
+        RAISE EXCEPTION 'client status delivery capacity exhausted'
+            USING ERRCODE = 'program_limit_exceeded',
+                  CONSTRAINT = 'client_status_delivery_capacity';
+    END IF;
+    NEW.created_at := transaction_timestamp();
+    NEW.next_attempt_at := transaction_timestamp();
+    NEW.retain_until := transaction_timestamp() + INTERVAL '1 day';
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER client_status_delivery_capacity
+    BEFORE INSERT ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_capacity_guard_v1();
+
+CREATE FUNCTION client_status_delivery_capacity_insert_v1() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE client_status_delivery_capacity SET
+        pending_count = pending_count + 1,
+        total_count = total_count + 1,
+        updated_at = transaction_timestamp()
+     WHERE community_id = NEW.community_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'client status delivery capacity row is missing'
+            USING ERRCODE = 'object_not_in_prerequisite_state',
+                  CONSTRAINT = 'client_status_delivery_capacity_health';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_capacity_insert
+    AFTER INSERT ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_capacity_insert_v1();
+
+CREATE FUNCTION client_status_delivery_capacity_state_v1() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.delivery_state = 1 AND NEW.delivery_state IN (2, 3) THEN
+        UPDATE client_status_delivery_capacity SET
+            pending_count = pending_count - 1,
+            updated_at = transaction_timestamp()
+         WHERE community_id = NEW.community_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'client status delivery capacity row is missing'
+                USING ERRCODE = 'object_not_in_prerequisite_state',
+                      CONSTRAINT = 'client_status_delivery_capacity_health';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_capacity_state
+    AFTER UPDATE ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_capacity_state_v1();
+
+CREATE FUNCTION client_status_delivery_capacity_delete_v1() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE client_status_delivery_capacity SET
+        total_count = total_count - 1,
+        updated_at = transaction_timestamp()
+     WHERE community_id = OLD.community_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'client status delivery capacity row is missing'
+            USING ERRCODE = 'object_not_in_prerequisite_state',
+                  CONSTRAINT = 'client_status_delivery_capacity_health';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_capacity_delete
+    AFTER DELETE ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_capacity_delete_v1();
+
+CREATE FUNCTION client_status_transition_immutable_v1() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'client status transition is immutable'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_transition_immutable';
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_transition_no_update
+    BEFORE UPDATE ON client_status_transitions
+    FOR EACH ROW EXECUTE FUNCTION client_status_transition_immutable_v1();
+CREATE FUNCTION client_status_transition_head_guard_v1() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status_revision <> 1 THEN
+            RAISE EXCEPTION 'client status head must start at revision one'
+                USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_transition_head_revision';
+        END IF;
+    ELSIF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.connection_fingerprint IS DISTINCT FROM OLD.connection_fingerprint
+        OR NEW.subject_fingerprint IS DISTINCT FROM OLD.subject_fingerprint
+        OR NEW.signer_fingerprint IS DISTINCT FROM OLD.signer_fingerprint
+        OR NEW.status_revision <> OLD.status_revision + 1
+        OR NEW.transition_id IS NOT DISTINCT FROM OLD.transition_id
+    THEN
+        RAISE EXCEPTION 'client status head transition is invalid'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_transition_head_revision';
+    END IF;
+    NEW.updated_at := transaction_timestamp();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_transition_head_state
+    BEFORE INSERT OR UPDATE ON client_status_transition_heads
+    FOR EACH ROW EXECUTE FUNCTION client_status_transition_head_guard_v1();
+CREATE FUNCTION client_status_transition_retain_v1() RETURNS TRIGGER AS $$
+BEGIN
+    IF transaction_timestamp() <= OLD.retain_until THEN
+        RAISE EXCEPTION 'client status transition is still retained'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_transition_retention';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_transition_retention
+    BEFORE DELETE ON client_status_transitions
+    FOR EACH ROW EXECUTE FUNCTION client_status_transition_retain_v1();
+
+CREATE FUNCTION client_status_delivery_state_guard_v1() RETURNS TRIGGER AS $$
+DECLARE claim_advance BOOLEAN; retry_advance BOOLEAN; delivered_advance BOOLEAN; terminal_advance BOOLEAN;
+DECLARE expired_transition BOOLEAN; stale_transition BOOLEAN;
+BEGIN
+    IF NEW.community_id IS DISTINCT FROM OLD.community_id
+        OR NEW.delivery_id IS DISTINCT FROM OLD.delivery_id
+        OR NEW.transition_id IS DISTINCT FROM OLD.transition_id
+        OR NEW.connection_fingerprint IS DISTINCT FROM OLD.connection_fingerprint
+        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+        OR NEW.retain_until IS DISTINCT FROM OLD.retain_until
+        OR OLD.delivery_state <> 1
+    THEN
+        RAISE EXCEPTION 'client status delivery transition is invalid'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_delivery_transition';
+    END IF;
+    SELECT EXISTS(SELECT 1 FROM client_status_transitions transition
+        WHERE transition.community_id=OLD.community_id
+          AND transition.transition_id=OLD.transition_id
+          AND transition.fresh_until <= transaction_timestamp())
+      INTO expired_transition;
+    SELECT NOT EXISTS(
+        SELECT 1 FROM client_status_delivery_outbox delivery
+        JOIN client_status_transitions transition
+          ON transition.community_id=delivery.community_id
+         AND transition.transition_id=delivery.transition_id
+        JOIN client_status_transition_heads head
+          ON head.community_id=transition.community_id
+         AND head.connection_fingerprint=delivery.connection_fingerprint
+         AND head.transition_id=transition.transition_id
+        WHERE delivery.community_id=OLD.community_id
+          AND delivery.delivery_id=OLD.delivery_id)
+      INTO stale_transition;
+    claim_advance := NEW.delivery_state = 1 AND NEW.claim_id IS NOT NULL
+        AND NEW.completion_claim_id IS NULL AND NEW.attempt_count = OLD.attempt_count + 1
+        AND NOT stale_transition AND NOT expired_transition
+        AND OLD.next_attempt_at <= transaction_timestamp() AND OLD.attempt_count < 16
+        AND (OLD.claim_id IS NULL OR OLD.claimed_until <= transaction_timestamp())
+        AND NEW.claim_id IS DISTINCT FROM OLD.claim_id
+        AND NEW.claimed_until > transaction_timestamp()
+        AND NEW.claimed_until <= transaction_timestamp() + INTERVAL '5 minutes'
+        AND NEW.attempt_started_at IS NOT NULL
+        AND (NEW.last_failure_reason = OLD.last_failure_reason
+            OR (OLD.claim_id IS NOT NULL AND OLD.claimed_until <= transaction_timestamp()
+                AND NEW.last_failure_reason = 7))
+        AND NEW.next_attempt_at = OLD.next_attempt_at;
+    retry_advance := NEW.delivery_state = 1 AND OLD.claim_id IS NOT NULL AND NEW.claim_id IS NULL
+        AND NEW.completion_claim_id IS NULL AND NEW.attempt_count = OLD.attempt_count
+        AND NEW.attempt_started_at = OLD.attempt_started_at AND NEW.last_failure_reason = 1
+        AND NEW.next_attempt_at > OLD.next_attempt_at;
+    delivered_advance := NEW.delivery_state = 2 AND OLD.claim_id IS NOT NULL
+        AND NEW.claim_id IS NULL AND NEW.completion_claim_id = OLD.claim_id
+        AND NEW.attempt_count = OLD.attempt_count AND NEW.delivered_at IS NOT NULL
+        AND NEW.terminal_at IS NULL AND NEW.last_failure_reason = 0;
+    terminal_advance := NEW.delivery_state = 3 AND NEW.claim_id IS NULL
+        AND NEW.completion_claim_id IS NOT NULL
+        AND NEW.attempt_count = OLD.attempt_count AND NEW.delivered_at IS NULL
+        AND NEW.terminal_at IS NOT NULL
+        AND (
+            (OLD.claim_id IS NOT NULL AND NEW.completion_claim_id = OLD.claim_id
+                AND NEW.last_failure_reason BETWEEN 2 AND 7)
+            OR (NEW.last_failure_reason = 2
+                AND (OLD.claim_id IS NULL OR NEW.completion_claim_id = OLD.claim_id))
+            OR (NEW.last_failure_reason = 3 AND stale_transition
+                AND (OLD.claim_id IS NULL OR OLD.claimed_until <= transaction_timestamp()))
+            OR (NEW.last_failure_reason = 5 AND expired_transition
+                AND (OLD.claim_id IS NULL OR OLD.claimed_until <= transaction_timestamp()))
+            OR (NEW.last_failure_reason = 6 AND OLD.attempt_count >= 16
+                AND (OLD.claim_id IS NULL OR OLD.claimed_until <= transaction_timestamp()))
+        );
+    IF NOT (claim_advance OR retry_advance OR delivered_advance OR terminal_advance) THEN
+        RAISE EXCEPTION 'client status delivery transition is invalid'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_delivery_transition';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER client_status_delivery_state
+    BEFORE UPDATE ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_state_guard_v1();
+
+CREATE FUNCTION client_status_delivery_retain_v1() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.delivery_state = 1 OR transaction_timestamp() <= OLD.retain_until THEN
+        RAISE EXCEPTION 'client status delivery is still retained'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_delivery_retention';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_retention
+    BEFORE DELETE ON client_status_delivery_outbox
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_retain_v1();
+
+CREATE FUNCTION client_status_delivery_event_guard_v1() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'client status delivery event is immutable'
+        USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_delivery_event_immutable';
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_event_no_update
+    BEFORE UPDATE ON client_status_delivery_events
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_event_guard_v1();
+CREATE FUNCTION client_status_delivery_event_retain_v1() RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM client_status_delivery_outbox delivery
+        WHERE delivery.community_id = OLD.community_id
+          AND delivery.delivery_id = OLD.delivery_id
+          AND delivery.delivery_state IN (2, 3)
+          AND transaction_timestamp() > delivery.retain_until
+    ) THEN
+        RAISE EXCEPTION 'client status delivery event is still retained'
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'client_status_delivery_event_retention';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER client_status_delivery_event_retention
+    BEFORE DELETE ON client_status_delivery_events
+    FOR EACH ROW EXECUTE FUNCTION client_status_delivery_event_retain_v1();
+CREATE TRIGGER client_status_delivery_event_no_truncate
+    BEFORE TRUNCATE ON client_status_delivery_events
+    FOR EACH STATEMENT EXECUTE FUNCTION client_status_delivery_event_guard_v1();
+CREATE TRIGGER client_status_transition_no_truncate
+    BEFORE TRUNCATE ON client_status_transitions
+    FOR EACH STATEMENT EXECUTE FUNCTION client_status_delivery_event_guard_v1();
+CREATE TRIGGER client_status_delivery_no_truncate
+    BEFORE TRUNCATE ON client_status_delivery_outbox
+    FOR EACH STATEMENT EXECUTE FUNCTION client_status_delivery_event_guard_v1();

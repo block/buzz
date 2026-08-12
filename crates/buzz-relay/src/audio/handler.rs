@@ -97,10 +97,18 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
-    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
-        &headers,
-        &state.config.corporate_identity,
-    );
+    let corporate_identity_jwt = if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        crate::protected_ingress::exact_assertion(
+            &headers,
+            &state.config.corporate_identity.jwt_header,
+        )
+        .ok()
+    } else {
+        crate::corporate_identity::identity_jwt_from_headers(
+            &headers,
+            &state.config.corporate_identity,
+        )
+    };
 
     // Keep the parser boundary at the largest message this route accepts. The
     // checks in the receive loop still distinguish text from binary policy, but
@@ -234,8 +242,20 @@ async fn handle_active_audio_connection(
         }
     };
 
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::DenyProtected {
+        let _ = ws_send
+            .send(WsMessage::Text(
+                serde_json::json!({"type":"error","message":"protected ingress denied"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+
     // Extract NIP-OA auth tag before verify_auth_event consumes the event.
     let auth_tag_json = crate::handlers::auth::extract_auth_tag_json(&auth_msg.event);
+    let canonical_auth_event = auth_msg.event.clone();
 
     let relay_url = crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
     let auth_ctx = match state
@@ -262,28 +282,65 @@ async fn handle_active_audio_connection(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
-    let identity_proof = match crate::corporate_identity::verify_corporate_identity(
-        &state,
-        tenant.community(),
-        pubkey,
-        corporate_identity_jwt.as_deref(),
-        auth_tag_json.as_deref(),
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(e) => {
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity denied");
+    let identity_proof = match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            match crate::corporate_identity::verify_corporate_identity(
+                &state,
+                tenant.community(),
+                pubkey,
+                corporate_identity_jwt.as_deref(),
+                auth_tag_json.as_deref(),
+            )
+            .await
+            {
+                Ok(proof) => Some(proof),
+                Err(e) => {
+                    warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity denied");
+                    let _ = ws_send
+                        .send(WsMessage::Text(
+                            serde_json::json!({"type": "error", "message": e.public_message()})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+        }
+        buzz_auth::NipFiMode::Enforce => None,
+        buzz_auth::NipFiMode::DenyProtected => return,
+    };
+
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce {
+        if let Err(error) = authorize_canonical_audio_join(
+            &state,
+            &tenant,
+            channel_id,
+            &canonical_auth_event,
+            &challenge,
+            &relay_url,
+            corporate_identity_jwt.as_deref(),
+        )
+        .await
+        {
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, ?error, "audio: canonical authorization denied");
+            let message = match error {
+                crate::protected_ingress::ProtectedIngressError::Denied => "authorization denied",
+                crate::protected_ingress::ProtectedIngressError::Expired => "nip_fi_auth_expired",
+                crate::protected_ingress::ProtectedIngressError::Unavailable => {
+                    "authorization unavailable"
+                }
+            };
             let _ = ws_send
                 .send(WsMessage::Text(
-                    serde_json::json!({"type": "error", "message": e.public_message()})
+                    serde_json::json!({"type":"error","message":message})
                         .to_string()
                         .into(),
                 ))
                 .await;
             return;
         }
-    };
+    }
 
     if crate::api::relay_members::enforce_relay_membership(
         &state,
@@ -329,41 +386,64 @@ async fn handle_active_audio_connection(
         }
     };
 
+    if state.config.nip_fi_mode == buzz_auth::NipFiMode::Enforce && auto_add_member_by.is_some() {
+        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio: canonical admission requires existing membership");
+        let _ = ws_send
+            .send(WsMessage::Text(
+                serde_json::json!({"type":"error","message":"not a member"})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+
     // Existing members and open channels retain the established identity path.
     // Private-huddle auto-add is deferred until room admission succeeds, then
     // membership and direct identity binding commit in one database transaction.
-    let deferred_private_admission = if let Some(added_by) = auto_add_member_by {
-        Some((added_by, identity_proof))
-    } else {
-        let identity_decision = match crate::corporate_identity::finalize_corporate_identity(
-            &state,
-            tenant.community(),
-            pubkey,
-            identity_proof,
-        )
-        .await
-        {
-            Ok(decision) => decision,
-            Err(e) => {
-                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity finalization denied");
-                let _ = ws_send
-                    .send(WsMessage::Text(
-                        serde_json::json!({"type": "error", "message": e.public_message()})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await;
-                return;
+    let deferred_private_admission = match state.config.nip_fi_mode {
+        buzz_auth::NipFiMode::Off => {
+            let identity_proof = match identity_proof {
+                Some(proof) => proof,
+                None => return,
+            };
+            if let Some(added_by) = auto_add_member_by {
+                Some((added_by, identity_proof))
+            } else {
+                let identity_decision =
+                    match crate::corporate_identity::finalize_corporate_identity(
+                        &state,
+                        tenant.community(),
+                        pubkey,
+                        identity_proof,
+                    )
+                    .await
+                    {
+                        Ok(decision) => decision,
+                        Err(e) => {
+                            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity finalization denied");
+                            let _ = ws_send
+                            .send(WsMessage::Text(
+                                serde_json::json!({"type": "error", "message": e.public_message()})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
+                            return;
+                        }
+                    };
+                crate::corporate_identity::spawn_session_revalidation(
+                    Arc::clone(&state),
+                    tenant.community(),
+                    pubkey,
+                    identity_decision,
+                    cancel.clone(),
+                );
+                None
             }
-        };
-        crate::corporate_identity::spawn_session_revalidation(
-            Arc::clone(&state),
-            tenant.community(),
-            pubkey,
-            identity_decision,
-            cancel.clone(),
-        );
-        None
+        }
+        buzz_auth::NipFiMode::Enforce => None,
+        buzz_auth::NipFiMode::DenyProtected => return,
     };
 
     // Huddle cross-pod routing (mesh) OR single-pod guardrail.
@@ -1060,6 +1140,78 @@ async fn handle_active_audio_connection(
         pubkey = %pubkey_hex,
         "audio peer left"
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn authorize_canonical_audio_join(
+    state: &AppState,
+    tenant: &TenantContext,
+    channel_id: Uuid,
+    event: &nostr::Event,
+    challenge: &str,
+    relay_url: &str,
+    assertion_token: Option<&str>,
+) -> Result<(), crate::protected_ingress::ProtectedIngressError> {
+    let domain = tenant.community();
+    let target_key = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:audio-session-target:v1",
+        &[domain.as_uuid().as_bytes(), channel_id.as_bytes()],
+    );
+    let object = buzz_db::authorization_admission::AdmissionObject::new(
+        buzz_db::authorization_admission::AdmissionObjectKind::AudioSession,
+        target_key,
+    )
+    .ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+    let event_id = event.id.to_bytes();
+    let request_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:audio-join-request:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            channel_id.as_bytes(),
+            event.pubkey.as_bytes(),
+            &event_id,
+            challenge.as_bytes(),
+        ],
+    );
+    let transport_context_fingerprint = crate::protected_ingress::fingerprint(
+        b"buzz:nip-fi:audio-join-transport:v1",
+        &[
+            domain.as_uuid().as_bytes(),
+            tenant.host().as_bytes(),
+            relay_url.as_bytes(),
+            challenge.as_bytes(),
+        ],
+    );
+    let coordinates = crate::protected_ingress::ProtectedRequestCoordinates::new(
+        crate::authorization_runtime::ProtectedIngress::AudioJoin,
+        domain,
+        buzz_auth::RouteCapability::AudioJoin,
+        object,
+        buzz_auth::ProofTransport::Nip42,
+        request_fingerprint,
+        transport_context_fingerprint,
+    )?;
+    let assertion_token =
+        assertion_token.ok_or(crate::protected_ingress::ProtectedIngressError::Denied)?;
+    let assertion =
+        crate::protected_ingress::verify_assertion(state, assertion_token, coordinates).await?;
+    let (_, assertion_expires_at) = assertion.time_bounds();
+    let proof = buzz_auth::verify_nip42_authorization_proof(
+        event,
+        challenge,
+        relay_url,
+        domain,
+        request_fingerprint,
+        *object.key(),
+        transport_context_fingerprint,
+        Some(*assertion.assertion_fingerprint()),
+        None,
+        assertion_expires_at,
+    )
+    .map_err(|_| crate::protected_ingress::ProtectedIngressError::Denied)?;
+    crate::protected_ingress::authorize_read(state, coordinates, assertion, proof)
+        .await
+        .map(|_| ())
 }
 
 /// React to a non-owner huddle teardown signal read off the owner's control

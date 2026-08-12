@@ -35,6 +35,7 @@ use crate::{
 };
 
 const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+const GIT_SMART_HTTP_SESSION_SECS: u64 = 300;
 
 /// Verify a NIP-98 HTTP Auth event (kind:27235).
 ///
@@ -133,6 +134,81 @@ pub fn verify_nip98_event(
 
     // 8. Return the authenticated pubkey.
     Ok(event.pubkey)
+}
+
+/// Verify NIP-98 transport and bind it to one canonical federated assertion.
+///
+/// The assertion and Nostr event are verified independently, then required to
+/// name byte-identical request, target, transport, and context coordinates.
+/// Git Smart HTTP may select its closed session transport because one signed
+/// NIP-98 credential is intentionally reused across the bounded Git exchange.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_nip98_authorization_proof(
+    event_json: &str,
+    expected_url: &str,
+    expected_method: &str,
+    body: Option<&[u8]>,
+    assertion: &VerifiedFederatedAssertion,
+    transport: ProofTransport,
+    request_fingerprint: [u8; 32],
+    target_fingerprint: [u8; 32],
+    transport_context_fingerprint: [u8; 32],
+) -> Result<VerifiedNostrProof, AuthError> {
+    if !matches!(
+        transport,
+        ProofTransport::Nip98 | ProofTransport::GitSmartHttpSession
+    ) {
+        return Err(AuthError::Nip98Invalid(
+            "invalid canonical NIP-98 transport".to_owned(),
+        ));
+    }
+    let actor = verify_nip98_event(event_json, expected_url, expected_method, body)?;
+    let event: Event = serde_json::from_str(event_json)
+        .map_err(|_| AuthError::Nip98Invalid("invalid canonical NIP-98 event".to_owned()))?;
+    let event_expiry_seconds = event
+        .created_at
+        .as_secs()
+        .checked_add(match transport {
+            ProofTransport::GitSmartHttpSession => GIT_SMART_HTTP_SESSION_SECS,
+            ProofTransport::Nip98 => TIMESTAMP_TOLERANCE_SECS,
+            _ => {
+                return Err(AuthError::Nip98Invalid(
+                    "invalid canonical NIP-98 transport".to_owned(),
+                ))
+            }
+        })
+        .ok_or_else(|| AuthError::Nip98Invalid("invalid canonical NIP-98 expiry".to_owned()))?;
+    let event_expiry_seconds = i64::try_from(event_expiry_seconds)
+        .map_err(|_| AuthError::Nip98Invalid("invalid canonical NIP-98 expiry".to_owned()))?;
+    let event_expires_at = DateTime::<Utc>::from_timestamp(event_expiry_seconds, 0)
+        .ok_or_else(|| AuthError::Nip98Invalid("invalid canonical NIP-98 expiry".to_owned()))?;
+    let (_, assertion_expires_at) = assertion.time_bounds();
+    let expires_at = event_expires_at.min(assertion_expires_at);
+    let (assertion_transport, assertion_request, assertion_target, assertion_context) =
+        assertion.request_binding();
+    if assertion.authorization_domain().as_uuid().is_nil()
+        || assertion_transport != transport
+        || assertion_request != &request_fingerprint
+        || assertion_target != &target_fingerprint
+        || assertion_context != &transport_context_fingerprint
+        || expires_at <= Utc::now()
+    {
+        return Err(AuthError::Nip98Invalid(
+            "canonical NIP-98 binding mismatch".to_owned(),
+        ));
+    }
+    VerifiedNostrProof::from_verifier(
+        assertion.authorization_domain(),
+        actor,
+        transport,
+        request_fingerprint,
+        target_fingerprint,
+        transport_context_fingerprint,
+        Some(*assertion.assertion_fingerprint()),
+        None,
+        expires_at,
+    )
+    .ok_or_else(|| AuthError::Nip98Invalid("invalid canonical NIP-98 binding".to_owned()))
 }
 
 /// Exact server-derived coordinates for one body-bound invite claim.
