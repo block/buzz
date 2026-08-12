@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
+  useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
@@ -14,8 +15,8 @@ import {
 import {
   collectRuntimeWarnings,
   getDefaultPersonaRuntime,
-  resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
+import { runtimeForTeamPersonaDeploy } from "@/features/agents/lib/teamDeployRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
@@ -54,6 +55,7 @@ export function AddTeamToChannelDialog({
   const { globalConfig } = useGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
+  const managedAgentsQuery = useManagedAgentsQuery();
   const [channelId, setChannelId] = React.useState("");
   const [role, setRole] = React.useState<Exclude<ChannelRole, "owner">>("bot");
   const deployMutation = useCreateChannelManagedAgentsMutation(
@@ -127,20 +129,25 @@ export function AddTeamToChannelDialog({
       // runtime selector, so the fallback is `defaultProvider` (first
       // available runtime). Warnings are computed separately via the
       // `runtimeWarnings` memo and rendered as inline alerts above.
-      const inputs = resolved.map((persona) => {
-        const { runtime: personaRuntime } = resolvePersonaRuntime(
-          persona.runtime,
+      const managedAgents = managedAgentsQuery.data ?? [];
+      const inputs = [];
+      for (const persona of resolved) {
+        const deployRuntime = runtimeForTeamPersonaDeploy({
+          persona,
           runtimes,
           defaultProvider,
-        );
-        const runtimeToUse = personaRuntime ?? defaultProvider;
-        return {
+          managedAgents,
+        });
+        if (!deployRuntime) {
+          continue;
+        }
+        inputs.push({
           runtime: {
-            id: runtimeToUse.id,
-            label: runtimeToUse.label,
-            command: runtimeToUse.command,
-            defaultArgs: runtimeToUse.defaultArgs,
-            mcpCommand: runtimeToUse.mcpCommand,
+            id: deployRuntime.runtime.id,
+            label: deployRuntime.runtime.label,
+            command: deployRuntime.runtime.command,
+            defaultArgs: deployRuntime.runtime.defaultArgs,
+            mcpCommand: deployRuntime.runtime.mcpCommand,
           },
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,
@@ -148,11 +155,15 @@ export function AddTeamToChannelDialog({
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,
+          harnessOverride: deployRuntime.harnessOverride,
           // One persona can be deployed under multiple teams with different instructions.
           forceNewInstance: true,
           role,
-        };
-      });
+        });
+      }
+      if (inputs.length === 0) {
+        return;
+      }
 
       const result = await deployMutation.mutateAsync(inputs);
       onDeployed(selectedChannel, result);
