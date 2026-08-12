@@ -26,7 +26,9 @@ const MAX_PENDING_PER_CHANNEL: usize = 500;
 /// Maximum events drained into a single batch.
 const MAX_BATCH_EVENTS: usize = 50;
 
-/// Maximum retry attempts before a batch is dead-lettered.
+/// Default maximum retry attempts before a batch is dead-lettered.
+/// Configurable via `--queue-max-retries` / `BUZZ_ACP_QUEUE_MAX_RETRIES`
+/// ([`Config::queue_max_retries`](crate::config::Config::queue_max_retries)).
 pub(crate) const MAX_RETRIES: u32 = 10;
 
 /// Base retry delay in seconds (doubled each attempt).
@@ -168,6 +170,10 @@ pub struct EventQueue {
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
     in_flight_deadline: Duration,
+    /// Maximum retry attempts before a batch is dead-lettered. Defaults to
+    /// [`MAX_RETRIES`]; overridden via
+    /// [`with_max_retries`](Self::with_max_retries).
+    max_retries: u32,
 }
 
 impl EventQueue {
@@ -189,6 +195,7 @@ impl EventQueue {
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
+            max_retries: MAX_RETRIES,
         }
     }
 
@@ -197,6 +204,13 @@ impl EventQueue {
     pub fn with_in_flight_deadline(mut self, max_turn_duration_secs: u64) -> Self {
         self.in_flight_deadline =
             Duration::from_secs(max_turn_duration_secs + IN_FLIGHT_DEADLINE_BUFFER_SECS);
+        self
+    }
+
+    /// Override the maximum retry attempts before a batch is dead-lettered.
+    /// Defaults to [`MAX_RETRIES`] (10) when not called.
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
         self
     }
 
@@ -434,13 +448,13 @@ impl EventQueue {
             *count
         };
 
-        if attempt > MAX_RETRIES {
+        if attempt > self.max_retries {
             tracing::error!(
                 channel_id = %channel_id,
                 attempt,
                 events = batch.events.len(),
                 "dead-lettering batch after {} retries — discarding {} events",
-                MAX_RETRIES,
+                self.max_retries,
                 batch.events.len(),
             );
             self.retry_counts.remove(&channel_id);
@@ -466,7 +480,7 @@ impl EventQueue {
         tracing::warn!(
             channel_id = %channel_id,
             attempt,
-            max = MAX_RETRIES,
+            max = self.max_retries,
             delay_secs = delay.as_secs_f64(),
             events = batch.events.len(),
             "requeueing failed batch with backoff"
@@ -3119,6 +3133,34 @@ mod tests {
         // Retry state is cleared so fresh traffic isn't throttled.
         assert!(!q.retry_counts.contains_key(&ch));
         assert!(!q.retry_after.contains_key(&ch));
+    }
+
+    #[test]
+    fn test_requeue_dead_letters_after_custom_max_retries() {
+        let custom_max_retries = 2;
+        let mut q = EventQueue::new(DedupMode::Queue).with_max_retries(custom_max_retries);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "poison"));
+        for attempt in 1..=custom_max_retries {
+            q.retry_after
+                .insert(ch, Instant::now() - Duration::from_secs(1));
+            let batch = q.flush_next().expect("flush");
+            assert!(
+                q.requeue(batch).is_none(),
+                "attempt {attempt} should requeue, not dead-letter"
+            );
+            q.mark_complete(ch);
+        }
+
+        // The (custom_max_retries + 1)'th failure dead-letters: batch is returned.
+        q.retry_after
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        let batch = q.flush_next().expect("flush");
+        let dead = q
+            .requeue(batch)
+            .expect("should dead-letter at custom threshold");
+        assert_eq!(dead.channel_id, ch);
     }
 
     #[test]

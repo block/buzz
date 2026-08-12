@@ -373,6 +373,12 @@ pub struct CliArgs {
           value_parser = clap::value_parser!(u32))]
     pub max_turns_per_session: u32,
 
+    /// Maximum retry attempts before a stuck event batch is dead-lettered.
+    #[arg(long, env = "BUZZ_ACP_QUEUE_MAX_RETRIES",
+          default_value_t = crate::queue::MAX_RETRIES,
+          value_parser = clap::value_parser!(u32).range(1..))]
+    pub queue_max_retries: u32,
+
     /// Disable automatic presence (online/offline) status.
     #[arg(long, env = "BUZZ_ACP_NO_PRESENCE")]
     pub no_presence: bool,
@@ -531,6 +537,9 @@ pub struct Config {
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    /// Maximum retry attempts before a stuck event batch is dead-lettered.
+    /// Defaults to [`crate::queue::MAX_RETRIES`] (10).
+    pub queue_max_retries: u32,
     pub presence_enabled: bool,
     pub typing_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
@@ -1101,6 +1110,7 @@ impl Config {
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
+            queue_max_retries: args.queue_max_retries,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
@@ -1143,7 +1153,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} queue_max_retries={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1159,6 +1169,7 @@ impl Config {
             self.ignore_self,
             self.context_message_limit,
             self.max_turns_per_session,
+            self.queue_max_retries,
             self.presence_enabled,
             self.typing_enabled,
             self.memory_enabled,
@@ -1476,6 +1487,7 @@ mod tests {
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
+            queue_max_retries: crate::queue::MAX_RETRIES,
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: true,
