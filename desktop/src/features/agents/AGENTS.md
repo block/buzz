@@ -171,6 +171,12 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Provider-backed edits re-deploy immediately.** `update_managed_agent`
+    persists the Desktop record, completes any required relay profile sync, and
+    then calls the provider's idempotent deploy operation with the revised
+    launch payload. Never require a local Stop/Start transition to apply a
+    remote agent's updated instruction, model, harness, or policy: provider
+    agents have no local runtime pair to restart.
 
 ## The tests that enforce this
 

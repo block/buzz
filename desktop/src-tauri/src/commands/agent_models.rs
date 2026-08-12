@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 
+use super::agent_model_process::run_agent_models_command;
 use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
-
-use super::agent_model_process::run_agent_models_command;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -13,7 +12,6 @@ use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
-
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -727,9 +725,9 @@ fn apply_model_provider_prompt_update(
 
 /// Update mutable fields on an existing managed agent record.
 ///
-/// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
-/// Name changes are synced to the relay immediately via a kind:0 re-publish.
+/// Local runtime config changes take effect on the next spawn. Provider-backed
+/// agents are re-deployed after a successful save. Name changes are synced to
+/// the relay immediately via a kind:0 re-publish.
 #[tauri::command]
 pub async fn update_managed_agent(
     input: UpdateManagedAgentRequest,
@@ -930,6 +928,8 @@ pub async fn update_managed_agent(
             ));
         }
     }
+
+    super::agent_update_deploy::apply_update(&app, &state, &input.pubkey).await?;
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,

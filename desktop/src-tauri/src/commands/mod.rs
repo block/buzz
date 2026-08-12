@@ -9,6 +9,7 @@ mod agent_models;
 mod agent_models_env;
 mod agent_providers;
 mod agent_settings;
+mod agent_update_deploy;
 mod agent_update_rollback;
 mod agents;
 mod canvas;
