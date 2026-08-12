@@ -544,6 +544,114 @@ class RequiredGate(unittest.TestCase):
         self.assertIsNone(json.loads(out)["required_gate"]["configured"])
 
 
+class NearestRules(unittest.TestCase):
+    """STEP 7 — both rules files, resolved against the PR's head tree.
+
+    ``resolve`` drives the pure resolver with a real recorded tree and a list of
+    changed paths, because the paths a control needs to exercise are not all in
+    one PR's diff. The tree — the thing whose shape could be wrong — is always
+    recorded.
+    """
+
+    def resolve(self, paths: list[str], tree_name: str = "pr86-tree.json", tree=None):
+        skips = core.Skips()
+        resolved = core.build_nearest_rules(
+            core.Read("tree", data=tree if tree is not None else fixture(tree_name), endpoint=ENDPOINTS["tree"]),
+            {"files": [{"path": p} for p in paths]},
+            skips,
+        )
+        return resolved, skips
+
+    def test_a_launchpad_path_gets_launchpad_agents_and_the_root_claude(self):
+        """First-wins would hide the root CLAUDE.md from every launchpad/ path."""
+        resolved, skips = self.resolve(["launchpad/AGENTS.md"])
+        self.assertEqual(
+            resolved["launchpad/AGENTS.md"],
+            {"AGENTS.md": "launchpad/AGENTS.md", "CLAUDE.md": "CLAUDE.md"},
+        )
+        self.assertEqual(skips.entries, [])
+
+    def test_a_desktop_source_path_gets_both_root_files(self):
+        resolved, _ = self.resolve(["desktop/src/main.tsx"])
+        self.assertEqual(
+            resolved["desktop/src/main.tsx"],
+            {"AGENTS.md": "AGENTS.md", "CLAUDE.md": "CLAUDE.md"},
+        )
+
+    def test_the_nearest_wins_over_an_ancestor(self):
+        """desktop/src/features/agents/ has its own AGENTS.md in the recorded tree."""
+        resolved, _ = self.resolve(["desktop/src/features/agents/AgentCard.tsx"])
+        self.assertEqual(
+            resolved["desktop/src/features/agents/AgentCard.tsx"]["AGENTS.md"],
+            "desktop/src/features/agents/AGENTS.md",
+        )
+
+    def test_a_lookalike_filename_is_not_a_rules_file(self):
+        """VISION_REMOTE_AGENTS.md ends with AGENTS.md and is not one."""
+        self.assertIn("VISION_REMOTE_AGENTS.md", {e["path"] for e in fixture("pr86-tree.json")["tree"]})
+        resolved, _ = self.resolve(["README.md"])
+        self.assertEqual(resolved["README.md"]["AGENTS.md"], "AGENTS.md")
+
+    def test_a_deleted_rules_file_falls_back_to_the_root_one(self):
+        """The head tree, not the worktree: launchpad/AGENTS.md exists locally."""
+        local = os.path.join(os.path.dirname(TESTDATA), "..", "AGENTS.md")
+        self.assertTrue(
+            os.path.exists(os.path.abspath(local)),
+            "this control is only meaningful while the file really is on disk here",
+        )
+        resolved, skips = self.resolve(["launchpad/README.md"], "prdelete-tree.json")
+        self.assertEqual(
+            resolved["launchpad/README.md"],
+            {"AGENTS.md": "AGENTS.md", "CLAUDE.md": "CLAUDE.md"},
+            "a resolver reading the local checkout answers launchpad/AGENTS.md here",
+        )
+        self.assertEqual(skips.entries, [])
+
+    def test_an_added_rules_file_is_picked_up_from_the_head_tree(self):
+        """PR 14 adds launchpad/AGENTS.md; before it, launchpad/ had none."""
+        added = [
+            f["filename"] for f in fixture("pr14-compare.json")["files"] if f["status"] == "added"
+        ]
+        self.assertIn("launchpad/AGENTS.md", added)
+        resolved, _ = self.resolve(["launchpad/README.md"], "pr14-tree.json")
+        self.assertEqual(resolved["launchpad/README.md"]["AGENTS.md"], "launchpad/AGENTS.md")
+
+    def test_resolution_never_reads_the_filesystem(self):
+        """A tree naming a file that exists nowhere on disk still resolves."""
+        invented = {
+            "sha": "0" * 40,
+            "truncated": False,
+            "tree": [{"path": "made/up/dir/AGENTS.md", "type": "blob"}],
+        }
+        resolved, _ = self.resolve(["made/up/dir/thing.py"], tree=invented)
+        self.assertEqual(resolved["made/up/dir/thing.py"]["AGENTS.md"], "made/up/dir/AGENTS.md")
+        self.assertIsNone(resolved["made/up/dir/thing.py"]["CLAUDE.md"])
+
+    def test_a_path_with_no_ancestor_rules_file_is_skip_only(self):
+        """A real answer, not a failure — so the run still exits 0."""
+        recorded = fixture("pr86-tree.json")
+        # The input, not the response shape: the same recorded tree with its two
+        # root rules files taken out, which is the only way to reach a path that
+        # has no ancestor at all in a repository that has them at the root.
+        stripped = {
+            **recorded,
+            "tree": [e for e in recorded["tree"] if e["path"] not in ("AGENTS.md", "CLAUDE.md")],
+        }
+        resolved, skips = self.resolve(["desktop/src/main.tsx"], tree=stripped)
+        self.assertEqual(resolved["desktop/src/main.tsx"], {"AGENTS.md": None, "CLAUDE.md": None})
+        entry = skips.entries[0]
+        self.assertEqual(entry["field"], "nearest_rules[desktop/src/main.tsx]")
+        self.assertEqual(entry["reason"], core.EMPTY)
+        self.assertFalse(core.is_fatal(entry), "having no rules file is a fact, not a failure")
+
+    def test_every_changed_path_in_a_real_run_is_resolved(self):
+        record = core.build_record(reads())
+        self.assertEqual(
+            sorted(record["nearest_rules"]),
+            sorted(f["path"] for f in record["diff"]["files"]),
+        )
+
+
 class CliShell(unittest.TestCase):
     """STEP 3 — the CLI prints a record, and refuses to print a broken one."""
 
