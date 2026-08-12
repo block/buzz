@@ -333,11 +333,11 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
     .filter({ hasText: "Hey team — checking in." });
   const ownerTreatment = aliceMessage.getByTestId("message-agent-owner");
 
-  await expect(ownerTreatment.locator("svg")).toBeVisible();
+  await expect(ownerTreatment.locator("svg")).toHaveCount(0);
   await expect(
     ownerTreatment.getByText("managed by", { exact: true }),
   ).toBeVisible();
-  await expect(ownerTreatment.locator(".font-semibold")).toHaveText("bob");
+  await expect(ownerTreatment.locator(".font-medium")).toHaveText("bob");
   await expect(ownerTreatment.getByRole("button")).toHaveAccessibleName("bob");
   await expect(ownerTreatment.locator(".sr-only")).toHaveText(
     "Agent managed by",
