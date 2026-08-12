@@ -16,6 +16,8 @@ Re-record with `launchpad/scripts/testdata/record.sh` and read the diff.
 | `pr86-tree.json` | `GET /git/trees/{head}?recursive=1` | the head tree nearest-rules resolves against |
 | `pr92-meta.json` | a PR whose body carries `Closes #n` in visible text | the keyword-present case |
 | `upstream5695-meta.json` | a PR whose **only** `Fixes #n` sits inside `<!-- -->` | an unfilled template placeholder is not a closing reference |
+| `pr86-review-decision.json` | `reviewDecision` on a PR based on `launchpad` | `REVIEW_REQUIRED` — a review gate exists, readable without `admin:org` |
+| `pr92-review-decision.json` | the same field on a PR based on a topic branch | `""` — gh renders GraphQL null as an empty string, and review is not required there |
 | `pr-notfound.json` | `GET /pulls/999999` | a 404 body; the exit code is in `pr-notfound.exit` |
 | `rules-branches-launchpad.json` | `GET /repos/{o}/{r}/rules/branches/launchpad` | `[]` — readable **and** empty, which is a fact, not a failure |
 | `orgs-rulesets-forbidden.json` | `GET /orgs/launchpad-26/rulesets` | this token cannot see org rulesets |

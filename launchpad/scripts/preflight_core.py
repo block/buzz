@@ -18,7 +18,8 @@ to the record means adding it to this list in the same commit.**
                     text_issue_numbers
 ``diff``            merge_base_sha, head_sha, files[path, added, removed, status]
 ``checks``          [name, workflow, status, conclusion, required, details_url]
-``required_gate``   configured, source_endpoint
+``required_gate``   configured, source_endpoint, review_required,
+                    review_decision, review_source_endpoint
 ``nearest_rules``   per changed path, the resolved AGENTS.md and CLAUDE.md
 ``skips``           [field, reason, detail, endpoint]
 ==================  ========================================================
@@ -78,6 +79,9 @@ criterion this script has.
     repo-level rules for the base branch. Readable and empty is a *fact*: it
     means no gate is configured, reported as ``configured: false`` naming the
     endpoint that said so, never as a silent zero
+``review_decision``
+    whether a review gate exists on this base. The only gate signal readable
+    without ``admin:org``; unreadable yields ``review_required: None``, never False
 ``closing_refs``
     GitHub's own answer to what the PR closes. Unreadable yields
     ``closing_issue.present: None`` — unknown, never False, because "we could not
@@ -142,7 +146,7 @@ SKIP_REASONS: dict[str, str] = {
 REQUIRED_INPUTS = ("pr", "meta", "compare", "checks", "tree")
 
 #: Inputs whose absence is a reportable state, not a failure.
-SKIP_ONLY_INPUTS = ("branch_rules", "org_rulesets", "closing_refs")
+SKIP_ONLY_INPUTS = ("branch_rules", "org_rulesets", "closing_refs", "review_decision")
 
 #: The record's top-level fields, in order. STEP 2 of the plan fixes this list.
 RECORD_FIELDS = (
@@ -502,6 +506,7 @@ def build_checks(checks: Read, skips: Skips) -> list[dict[str, Any]] | None:
 def build_required_gate(
     branch_rules: Read,
     org_rulesets: Read,
+    review_decision: Read,
     checks_section: Iterable[Mapping[str, Any]] | None,
     skips: Skips,
 ) -> dict[str, Any]:
@@ -509,11 +514,27 @@ def build_required_gate(
 
     An empty required set is reported as ``configured: false`` **naming the
     endpoint that answered**, never as a silent zero — a zero is
-    indistinguishable from a scope failure, and this repository is currently in
-    exactly the state where that matters: three endpoints report no protection on
-    ``launchpad`` while ``launchpad/AGENTS.md`` §6 says the branch is protected.
-    Reporting the absence is this script's job; resolving the contradiction is a
-    cohort decision.
+    indistinguishable from a scope failure.
+
+    **Two different gates, asked separately, because only one is invisible.**
+    ``launchpad/AGENTS.md`` §6 states the position and it is not a contradiction
+    to report: the ``launchpad`` branch requires *at least two approving reviews*,
+    the ruleset enforcing it is unreadable without ``admin:org`` — three endpoints
+    report nothing — but **a live PR's ``reviewDecision`` confirms that review is
+    required**, without exposing the count.
+
+    So this record asks for both:
+
+    ``configured`` / ``source_endpoint``
+        whether a required *status check* gate is visible, and what answered.
+    ``review_required`` / ``review_decision`` / ``review_source_endpoint``
+        whether a *review* gate exists, from the one signal this token can read.
+
+    Reporting `configured: false` while never asking `reviewDecision` would have
+    told a consumer that nothing gates this branch, on a branch that needs two
+    approvals — an absence published as an answer while the evidence was one call
+    away. ``reviewDecision`` carries no count, so the count stays unknown rather
+    than being inferred.
 
     **What ``configured: false`` does and does not mean.** It means nothing
     *visible to this token* requires a check. Two blind spots survive, and both
@@ -532,6 +553,8 @@ def build_required_gate(
     if not org_rulesets.ok:
         # SKIP-ONLY. Never "no org rulesets exist" — this token cannot tell.
         skips.add("required_gate.org_rulesets", org_rulesets)
+
+    review = _review_gate(review_decision, skips)
 
     required_by_check = [
         c.get("name") for c in (checks_section or []) if c.get("required") is True
@@ -560,6 +583,7 @@ def build_required_gate(
         return {
             "configured": True if required_by_check else None,
             "source_endpoint": "graphql:isRequired" if required_by_check else branch_rules.endpoint,
+            **review,
         }
 
     rules = branch_rules.data
@@ -567,12 +591,54 @@ def build_required_gate(
     by_rules = "required_status_checks" in rule_types
 
     if by_rules:
-        return {"configured": True, "source_endpoint": branch_rules.endpoint}
+        return {"configured": True, "source_endpoint": branch_rules.endpoint, **review}
     if required_by_check:
         # The rules probe saw nothing but GraphQL marks contexts required, which
         # is what an org-level ruleset looks like from underneath.
-        return {"configured": True, "source_endpoint": "graphql:isRequired"}
-    return {"configured": False, "source_endpoint": branch_rules.endpoint}
+        return {"configured": True, "source_endpoint": "graphql:isRequired", **review}
+    return {"configured": False, "source_endpoint": branch_rules.endpoint, **review}
+
+
+def _review_gate(review_decision: Read, skips: Skips) -> dict[str, Any]:
+    """The review half of the gate, from the one signal this token can read.
+
+    ``gh`` renders a GraphQL null as an EMPTY STRING for a string field, so ``""``
+    and None both mean "GitHub reports no review requirement for this base" —
+    verified: PR 86, whose base is ``launchpad``, answers ``REVIEW_REQUIRED``
+    while PR 92, whose base was a topic branch, answers ``""``. Treating ``""`` as
+    an unrecognised value would turn "not required" into a malformed read.
+
+    The COUNT is deliberately absent. §6 says two approving reviews, and
+    ``reviewDecision`` does not carry the number, so the number is not inferred
+    here from a document that could drift.
+    """
+    unknown = {
+        "review_required": None,
+        "review_decision": None,
+        "review_source_endpoint": review_decision.endpoint,
+    }
+    if not review_decision.ok:
+        skips.add("required_gate.review_decision", review_decision)
+        return unknown
+
+    decision = _get(review_decision.data, "reviewDecision", default="")
+    if not isinstance(decision, str):
+        skips.add(
+            "required_gate.review_decision",
+            Read(
+                "review_decision",
+                skip=MALFORMED,
+                detail=f"reviewDecision is {type(decision).__name__}, not a string",
+                endpoint=review_decision.endpoint,
+            ),
+        )
+        return unknown
+
+    return {
+        "review_required": bool(decision),
+        "review_decision": decision or None,
+        "review_source_endpoint": review_decision.endpoint,
+    }
 
 
 def _nearest(path: str, filename: str, tree_paths: frozenset[str]) -> str | None:
@@ -701,6 +767,7 @@ def build_record(reads: Mapping[str, Read]) -> dict[str, Any]:
     gate = build_required_gate(
         reads.get("branch_rules", Read("branch_rules", skip=UNREACHABLE, detail="not attempted")),
         reads.get("org_rulesets", Read("org_rulesets", skip=UNREACHABLE, detail="not attempted")),
+        reads.get("review_decision", Read("review_decision", skip=UNREACHABLE, detail="not attempted")),
         checks_section,
         skips,
     )
@@ -736,6 +803,7 @@ FATAL_FIELDS = ("pr", "closing_issue", "diff", "checks", "nearest_rules")
 NEVER_FATAL_FIELDS = (
     "required_gate",
     "required_gate.org_rulesets",
+    "required_gate.review_decision",
     "closing_issue.closing_refs",
 )
 

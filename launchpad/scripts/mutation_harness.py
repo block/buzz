@@ -48,9 +48,20 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+#: This stage's own controls, named explicitly rather than discovered.
+#:
+#: `launchpad/scripts/` is a SHARED directory: #126 merged pr_body_check.py and
+#: test_pr_body_check.py into it, so plain discovery there runs 156 tests, not the
+#: pre-flight's own. That matters in both directions. A regression in a module
+#: this branch does not own aborts the harness with "the suite is already
+#: failing" and reports it as the pre-flight's; and if one of those foreign
+#: controls is red, every pre-flight mutant registers as "killed" while proving
+#: nothing at all about the pre-flight.
+OWN_TESTS = ["test_preflight_core.py", "test_no_model.py"]
+
 SUITE = [
-    sys.executable, "-m", "unittest", "discover",
-    "-s", "launchpad/scripts", "-t", "launchpad/scripts",
+    sys.executable, "-m", "unittest",
+    *(f"{name[:-3]}" for name in OWN_TESTS),
 ]
 
 #: (module, qualified function name, the constant its body becomes).
@@ -78,6 +89,7 @@ TARGETS: list[tuple[str, str, str]] = [
     # Kept because a reviewer asked why it was absent, and the honest answer is
     # that it belongs in the list with its weakness named.
     ("preflight_core.py", "RecordError.__init__", "self.skips = []"),
+    ("preflight_core.py", "_review_gate", "return {'review_required': None, 'review_decision': None, 'review_source_endpoint': 'stubbed'}"),
     # preflight_fetch — the fetch layer and the exit contract
     ("preflight_fetch.py", "_classify_failure", "return (UNREACHABLE, 'stubbed')"),
     ("preflight_fetch.py", "_read", "return Read(name, data={}, endpoint=endpoint)"),
@@ -180,6 +192,18 @@ BRANCH_MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "preflight_core.py",
+        "an unreadable review decision becomes 'not required'",
+        "    if not review_decision.ok:",
+        "    if False:",
+    ),
+    (
+        "preflight_core.py",
+        "a null review decision stops being distinguishable from a required one",
+        '        "review_required": bool(decision),',
+        '        "review_required": True,',
+    ),
+    (
+        "preflight_core.py",
         "a malformed rules probe is coerced to empty again",
         "    if not isinstance(branch_rules.data, list):",
         "    if False:",
@@ -211,12 +235,14 @@ INJECTIONS: list[tuple[str, str, str]] = [
     ("preflight_core.py", "module", '__import__("anthropic")'),
     ("preflight_fetch.py", "module", "import httpx"),
     ("preflight_fetch.py", "gh_runner", "import openai"),
+    # The entry point. It was absent from the allowlist for three commits, so an
+    # inference call here passed every control; these two are what would have
+    # failed.
+    ("pr-preflight.py", "module", "import openai"),
+    ("pr-preflight.py", "module", 'importlib.import_module("anthropic")'),
 ]
 
-NO_MODEL_ONLY = [
-    sys.executable, "-m", "unittest", "discover",
-    "-s", "launchpad/scripts", "-t", "launchpad/scripts", "-p", "test_no_model.py",
-]
+NO_MODEL_ONLY = [sys.executable, "-m", "unittest", "test_no_model"]
 
 
 def find_function(tree: ast.Module, qualified: str) -> ast.FunctionDef:
@@ -269,7 +295,7 @@ def inject(source: str, where: str, line: str) -> str:
 def run(command: list[str]) -> tuple[bool, str]:
     """Run a test command. Returns (red, last line of output)."""
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    proc = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    proc = subprocess.run(command, cwd=HERE, capture_output=True, text=True, env=env)
     tail = (proc.stderr or proc.stdout).strip().splitlines()
     return proc.returncode != 0, tail[-1] if tail else "(no output)"
 
@@ -285,7 +311,11 @@ def no_model_is_red() -> tuple[bool, str]:
 def main() -> int:
     originals = {
         name: open(os.path.join(HERE, name), encoding="utf-8").read()
-        for name in {module for module, _, _ in TARGETS}
+        for name in (
+            {module for module, _, _ in TARGETS}
+            | {module for module, _, _ in INJECTIONS}
+            | {module for module, _, _, _ in BRANCH_MUTATIONS}
+        )
     }
 
     red, summary = suite_is_red()

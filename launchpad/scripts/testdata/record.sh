@@ -101,6 +101,19 @@ gh api graphql -f owner=block -f repo=buzz -F pr=5695 \
   -f query="$CLOSING_QUERY" > upstream5695-closing-refs.json
 say upstream5695-closing-refs.json "GitHub: a commented-out keyword closes nothing"
 
+# ------------------------------------- the ONE gate signal readable without
+# admin:org. launchpad/AGENTS.md §6: the ruleset requiring two approving reviews
+# is invisible to this token, but a live PR's reviewDecision confirms that review
+# is REQUIRED. Two PRs, because the signal genuinely differs:
+#   86  base launchpad (protected)   -> "REVIEW_REQUIRED"
+#   92  base a topic branch          -> ""  (gh renders GraphQL null as an empty
+#                                            string; review is not required there)
+gh pr view 86 --repo "$REPO" --json reviewDecision > pr86-review-decision.json
+say pr86-review-decision.json "reviewDecision: review IS required on launchpad"
+
+gh pr view 92 --repo "$REPO" --json reviewDecision > pr92-review-decision.json
+say pr92-review-decision.json "reviewDecision: empty on an unprotected base"
+
 # --------------------------------------------------------------- fixture (iv)
 # A PR number that does not exist. `gh api` prints the error body on stdout and
 # exits 1; both halves are the fixture, so the exit code is recorded beside it.

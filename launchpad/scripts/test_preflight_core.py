@@ -41,6 +41,7 @@ ENDPOINTS = {
     "branch_rules": "GET /repos/{o}/{r}/rules/branches/{base}",
     "org_rulesets": "GET /orgs/{o}/rulesets",
     "closing_refs": "graphql:closingIssuesReferences",
+    "review_decision": "gh pr view {n} --json reviewDecision",
 }
 
 #: PR 86, everything readable. The baseline every degradation is measured against.
@@ -52,6 +53,7 @@ PR86_FIXTURES = {
     "tree": "pr86-tree.json",
     "branch_rules": "rules-branches-launchpad.json",
     "closing_refs": "pr86-closing-refs.json",
+    "review_decision": "pr86-review-decision.json",
 }
 
 
@@ -109,12 +111,14 @@ class FakeGh:
         "tree": "pr86-tree.json",
         "branch_rules": "rules-branches-launchpad.json",
         "closing_refs": "pr86-closing-refs.json",
+        "review_decision": "pr86-review-decision.json",
     }
 
     @staticmethod
     def classify(argv: list[str]) -> str:
         if argv[1:3] == ["pr", "view"]:
-            return "meta"
+            # Two `gh pr view` calls now; the --json fields tell them apart.
+            return "review_decision" if "reviewDecision" in argv else "meta"
         target = argv[2] if len(argv) > 2 else ""
         if target == "graphql":
             query = " ".join(argv)
@@ -515,7 +519,79 @@ class RequiredGate(unittest.TestCase):
         gate = core.build_record(reads())["required_gate"]
         self.assertIs(gate["configured"], False)
         self.assertIn("/rules/branches/", gate["source_endpoint"])
-        self.assertEqual(sorted(gate), ["configured", "source_endpoint"])
+        self.assertEqual(
+            sorted(gate),
+            [
+                "configured",
+                "review_decision",
+                "review_required",
+                "review_source_endpoint",
+                "source_endpoint",
+            ],
+        )
+
+    def test_the_review_gate_is_read_even_though_the_ruleset_is_invisible(self):
+        """launchpad/AGENTS.md §6: the ruleset needs admin:org, reviewDecision does not.
+
+        Reporting `configured: false` while never asking reviewDecision told a
+        consumer that nothing gates this branch — on a branch that requires two
+        approving reviews, with the confirmation one call away. That is this
+        record's own governing property broken: an absence published as an answer
+        while the evidence was cheap.
+        """
+        gate = core.build_record(reads())["required_gate"]
+        self.assertIs(gate["review_required"], True)
+        self.assertEqual(gate["review_decision"], "REVIEW_REQUIRED")
+        self.assertIn("reviewDecision", gate["review_source_endpoint"])
+        self.assertIs(gate["configured"], False, "no required STATUS CHECK is visible")
+
+    def test_an_empty_review_decision_means_not_required_not_malformed(self):
+        """gh renders a GraphQL null as "". PR 92's base was not protected."""
+        self.assertEqual(fixture("pr92-review-decision.json"), {"reviewDecision": ""})
+        gate = core.build_record(
+            reads(
+                review_decision=core.Read(
+                    "review_decision",
+                    data=fixture("pr92-review-decision.json"),
+                    endpoint=ENDPOINTS["review_decision"],
+                )
+            )
+        )["required_gate"]
+        self.assertIs(gate["review_required"], False)
+        self.assertIsNone(gate["review_decision"])
+        self.assertEqual(
+            [s for s in core.build_record(reads())["skips"] if "review" in s["field"]],
+            [],
+            "a readable answer is not a skip",
+        )
+
+    def test_the_two_recorded_review_decisions_really_do_differ(self):
+        """Otherwise the control above and the one before it prove the same thing."""
+        self.assertEqual(
+            fixture("pr86-review-decision.json")["reviewDecision"], "REVIEW_REQUIRED"
+        )
+        self.assertEqual(fixture("pr92-review-decision.json")["reviewDecision"], "")
+
+    def test_an_unreadable_review_decision_is_unknown_never_false(self):
+        record = core.build_record(
+            reads(review_decision=unreadable("review_decision", core.FORBIDDEN))
+        )
+        gate = record["required_gate"]
+        self.assertIsNone(gate["review_required"], "unknown, not 'no review needed'")
+        self.assertIsNone(gate["review_decision"])
+        skips = {s["field"]: s["reason"] for s in record["skips"]}
+        self.assertEqual(skips.get("required_gate.review_decision"), core.FORBIDDEN)
+
+    def test_an_unreadable_review_decision_still_exits_zero(self):
+        code, out, err = run_cli(["86"], FakeGh(fail={"review_decision": FORBIDDEN_RESULT}))
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(json.loads(out)["required_gate"]["review_required"])
+
+    def test_the_review_count_is_not_invented(self):
+        """§6 says two; reviewDecision does not carry a number, so neither do we."""
+        gate = core.build_record(reads())["required_gate"]
+        self.assertNotIn("review_count", gate)
+        self.assertNotIn("2", str(gate.get("review_decision")))
 
     def test_false_is_never_published_without_the_org_ruleset_skip_beside_it(self):
         """The token cannot see org rulesets, so false means "nothing visible"."""
@@ -1241,7 +1317,7 @@ class NoNetwork(unittest.TestCase):
         fake = FakeGh()
         run_cli(["86"], fake)
         self.assertEqual(set(fake.binaries), {"gh"})
-        self.assertEqual(len(fake.calls), 8, "eight reads, and no call made twice")
+        self.assertEqual(len(fake.calls), 9, "nine reads, and no call made twice")
 
 
 if __name__ == "__main__":

@@ -62,7 +62,34 @@ ALLOWLIST: dict[str, frozenset[str]] = {
             "preflight_core",
         }
     ),
+    # The entry point — the file the issue calls "the script", and the first one a
+    # reader opens. It was missing from this list for three commits: an inference
+    # call placed here left every control green, on precisely the file anyone
+    # checking the no-model claim would look at.
+    "pr-preflight.py": frozenset({"__future__", "os", "sys", "preflight_fetch"}),
 }
+
+
+def preflight_sources() -> set[str]:
+    """Every file this stage owns, from the directory rather than from a list.
+
+    The allowlist above is deliberately written by hand — that is what makes an
+    unanticipated import fail — but *which files it must cover* cannot also be
+    hand-written, or a new module simply never gets checked. That is how
+    ``pr-preflight.py`` went unguarded.
+
+    Scoped to this stage's own files, not to everything in ``launchpad/scripts/``:
+    ``pr_body_check.py`` is another task's script (#126) and its imports are not
+    this suite's business to police.
+    """
+    return {
+        name
+        for name in os.listdir(HERE)
+        if name.endswith(".py")
+        and not name.startswith("test_")
+        and name != "mutation_harness.py"
+        and (name.startswith("preflight") or name == "pr-preflight.py")
+    }
 
 #: Calls that load code by name, bypassing every import statement.
 FORBIDDEN_CALLS = frozenset({"importlib.import_module", "__import__", "eval", "exec"})
@@ -112,6 +139,30 @@ def loader_calls(source: str) -> set[str]:
 
 
 class NoModelCall(unittest.TestCase):
+    def test_every_file_this_stage_owns_is_on_the_allowlist(self):
+        """A new pre-flight module must fail this, not silently skip the check.
+
+        The entry point was absent from ALLOWLIST for three commits while the
+        suite reported the no-model property as proved. Enumerating the directory
+        is what makes a missing entry a failure instead of a blind spot.
+        """
+        found = preflight_sources()
+        self.assertIn("pr-preflight.py", found, "the entry point must be discovered")
+        self.assertEqual(
+            found,
+            set(ALLOWLIST),
+            f"unchecked: {sorted(found - set(ALLOWLIST))}; "
+            f"listed but absent from disk: {sorted(set(ALLOWLIST) - found)}",
+        )
+
+    def test_the_scope_excludes_another_task_s_script(self):
+        """#126's pr_body_check.py shares this directory and is not ours to police."""
+        self.assertTrue(
+            os.path.exists(os.path.join(HERE, "pr_body_check.py")),
+            "this control is only meaningful while that file is really here",
+        )
+        self.assertNotIn("pr_body_check.py", preflight_sources())
+
     def test_every_import_is_on_the_allowlist(self):
         for name, allowed in ALLOWLIST.items():
             with self.subTest(module=name):
@@ -123,6 +174,15 @@ class NoModelCall(unittest.TestCase):
                     "An import this check did not anticipate fails it by default — that is the point. "
                     "If the import is legitimate, add it here and say why in the commit.",
                 )
+
+    def test_the_entry_point_only_wires_the_cli_up(self):
+        """It may touch sys.path; it may not fetch, decide, or call a model."""
+        source = source_of("pr-preflight.py")
+        found = imported_modules(source)
+        self.assertEqual(found, ALLOWLIST["pr-preflight.py"] & found)
+        for banned in ("subprocess", "socket", "http", "urllib", "requests", "httpx", "openai"):
+            self.assertNotIn(banned, found)
+        self.assertEqual(loader_calls(source), set())
 
     def test_the_record_module_performs_no_io_at_all(self):
         """No subprocess, no socket, no filesystem: the record is pure."""

@@ -12,8 +12,8 @@ answers from recorded fixtures, so the whole surface — including each way a fe
 can fail — is exercisable with no network. Hardcoding ``subprocess.run(["gh",
 ...])` at each call site would make that impossible without a rewrite.
 
-Eight reads, five of them required
-=================================
+Nine reads, five of them required
+================================
 
 ============  ======================================================  =========
 name          call                                                    kind
@@ -26,7 +26,12 @@ tree          ``GET /repos/{o}/{r}/git/trees/{head}?recursive=1``      required
 branch_rules  ``GET /repos/{o}/{r}/rules/branches/{base}``             skip-only
 org_rulesets  ``GET /orgs/{o}/rulesets``                              skip-only
 closing_refs  GraphQL ``closingIssuesReferences``                      skip-only
+review_decis  ``gh pr view {n} --json reviewDecision``                  skip-only
 ============  ======================================================  =========
+
+``review_decision`` is the only gate signal this token can read: §6's ruleset is
+invisible without ``admin:org``, and ``reviewDecision`` confirms review is
+*required* without exposing the count.
 
 ``compare`` is taken **by SHA**, ``base.sha...head.sha``, never by base branch
 name: a name resolves to the tip today, and for a merged PR that tip already
@@ -272,6 +277,16 @@ def fetch_all(number: int, repo: str, runner: Runner) -> dict[str, Read]:
         runner,
     )
 
+    # The one gate signal readable without admin:org. launchpad/AGENTS.md §6: the
+    # ruleset requiring two approving reviews is invisible to this token, but a
+    # live PR's reviewDecision confirms review IS required — and it differs by
+    # base, so it cannot be assumed from the repository alone.
+    reads["review_decision"] = _read(
+        "review_decision",
+        f"gh pr view {number} --json reviewDecision",
+        [BINARY, "pr", "view", str(number), "--repo", repo, "--json", "reviewDecision"],
+        runner,
+    )
     reads["closing_refs"] = _read(
         "closing_refs",
         "graphql:closingIssuesReferences",
