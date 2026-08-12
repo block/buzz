@@ -42,6 +42,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { listManagedAgentReferences } from "@/shared/api/agentReferences";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
   setManagedAgentAutoRestart,
@@ -122,6 +123,9 @@ export const managedAgentLogFocusRefetchPolicy = {
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
+export const managedAgentReferencesQueryKey = [
+  "managed-agent-references",
+] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
@@ -374,6 +378,14 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
         : false;
     },
     ...agentsFocusRefetchPolicy,
+  });
+}
+
+export function useManagedAgentReferencesQuery() {
+  return useQuery({
+    queryKey: managedAgentReferencesQueryKey,
+    queryFn: listManagedAgentReferences,
+    staleTime: 5_000,
   });
 }
 
