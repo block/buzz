@@ -2020,7 +2020,7 @@ test("connected first-community profile keeps Back bottom-left and balances the 
   );
   expect(nameKeyStyles).toMatchObject({
     borderRadius: "16px",
-    fontSize: "14px",
+    fontSize: "15px",
   });
   await expect(page.getByText("Your username", { exact: true })).toBeVisible();
   await expect(page.getByTestId("community-onboarding-flow")).toHaveAttribute(
