@@ -1,5 +1,10 @@
 import { useEffect, useEffectEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -17,7 +22,6 @@ import {
 import {
   projectChannelWindowMessages,
   refreshChannelWindowMessages,
-  shouldRefreshChannelWindowAfterSubscribe,
 } from "@/features/messages/lib/projectChannelWindow";
 import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
 import {
@@ -235,26 +239,46 @@ export function useChannelWindowQuery(channel: Channel | null) {
   });
 }
 
+export function reconcileFetchedChannelWindow(
+  queryClient: QueryClient,
+  channelId: string,
+  events: Awaited<ReturnType<typeof getChannelWindowEvents>>,
+  previousMessages: RelayEvent[],
+  signal: AbortSignal,
+): RelayEvent[] {
+  // Tauri invokes cannot be canceled after dispatch. A replacement refetch can
+  // therefore win while this older request is still in flight. Never let that
+  // canceled request commit its stale page into the authoritative window.
+  signal.throwIfAborted();
+  const windowKey = channelWindowKey(channelId);
+  const page = parseChannelWindowResponse(events, channelId, null);
+  const current =
+    queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+    emptyChannelWindowStore();
+  const next = replaceNewestChannelWindow(current, page);
+  queryClient.setQueryData(windowKey, next);
+  return reconcileChannelWindowMessages(next, previousMessages);
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
-  const windowKey = channelWindowKey(channel?.id ?? "none");
 
   return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
     queryKey,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const events = await getChannelWindowEvents(channel.id);
-      const page = parseChannelWindowResponse(events, channel.id, null);
-      const current =
-        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
-        emptyChannelWindowStore();
-      const next = replaceNewestChannelWindow(current, page);
-      queryClient.setQueryData(windowKey, next);
-      return reconcileChannelWindowMessages(next, previousMessages);
+      return reconcileFetchedChannelWindow(
+        queryClient,
+        channel.id,
+        events,
+        previousMessages,
+        signal,
+      );
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -382,9 +406,10 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-        if (!shouldRefreshChannelWindowAfterSubscribe(queryClient, channelId)) {
-          return;
-        }
+        // The live subscription starts at "now", so it cannot close the gap
+        // between the last page snapshot and subscription establishment. Always
+        // refresh after the subscription is active; freshness alone is not a
+        // proof that no relay events landed in that interval.
         void refreshNewestWindow().catch((error) => {
           if (!isDisposed) {
             console.error(
@@ -406,7 +431,7 @@ export function useChannelSubscription(channel: Channel | null) {
         void cleanup();
       }
     };
-  }, [channelId, channelType, queryClient]);
+  }, [channelId, channelType]);
 }
 
 export function useSendMessageMutation(
