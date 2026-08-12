@@ -701,9 +701,11 @@ test("fresh existing-identity path leads with private-key recovery", async ({
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Sign in to an existing account" })
+    .click();
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
   await expect(
     page.getByText("Paste your private key to sign in to Buzz."),
@@ -792,7 +794,9 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Sign in to an existing account" })
+    .click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
   await page.getByTestId("nostr-import-submit").click();
@@ -814,7 +818,9 @@ test("imported-key users can skip out of harness setup", async ({ page }) => {
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Sign in to an existing account" })
+    .click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
   await page.getByTestId("nostr-import-submit").click();
@@ -838,7 +844,9 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Sign in to an existing account" })
+    .click();
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
@@ -846,7 +854,7 @@ test("first-launch encrypted backup import asks for a passphrase and continues",
     .getByTestId("nostr-import-nsec-input")
     .fill(mockNcryptsec.slice(0, -1));
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
   await expect(page.getByTestId("nostr-import-passphrase")).toHaveCount(0);
 
@@ -892,7 +900,9 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   });
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await page
+    .getByRole("button", { name: "Sign in to an existing account" })
+    .click();
 
   // The spotlight variant must expose a file path: a wiped user returns with
   // exactly the identity.ncryptsec our own save dialog produced. The accept

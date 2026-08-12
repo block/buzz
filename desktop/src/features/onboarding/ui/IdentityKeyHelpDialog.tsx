@@ -60,7 +60,7 @@ export function IdentityKeyHelpDialog() {
             type="button"
             variant="link"
           >
-            What’s an identity key?
+            How do Buzz accounts work?
           </Button>
         </DialogTrigger>
       </OnboardingFooter>
@@ -74,7 +74,7 @@ export function IdentityKeyHelpDialog() {
       >
         <div className="mx-auto w-full max-w-[35rem] py-14 text-left max-sm:py-6">
           <DialogTitle className="text-balance pr-8 text-3xl font-normal text-foreground">
-            What’s an identity key?
+            How Buzz accounts work
           </DialogTitle>
           <DialogDescription
             asChild
@@ -82,18 +82,20 @@ export function IdentityKeyHelpDialog() {
           >
             <div>
               <p>
-                Buzz uses an identity key instead of a traditional account. It’s
-                created on your device and represents you whenever you use Buzz.
+                A Buzz account is backed by a private identity key created on
+                your device. The key signs you in to communities, Desktop,
+                agents, and command-line tools as the same person.
               </p>
               <p>
-                Your identity belongs to you, not Buzz. There’s no password to
-                reset, and Buzz can’t recover your key if you lose it. Keep a
-                backup somewhere safe and never share it. Anyone with your key
-                can act as you.
+                Your backup password encrypts a recovery file on your computer;
+                it is never sent to a Buzz relay. Keep both the file and its
+                password safe. Buzz cannot reset that password or recover a lost
+                identity key.
               </p>
               <p>
-                If you’re new to Buzz, create a new identity key. If you already
-                have a Nostr identity, use your existing key.
+                Never share your private key. Anyone with it can act as your
+                account. Administrators manage community access through member
+                roles and invitation links, without receiving your key.
               </p>
             </div>
           </DialogDescription>

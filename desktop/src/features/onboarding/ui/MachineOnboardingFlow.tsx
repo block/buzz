@@ -270,8 +270,8 @@ export function MachineOnboardingFlow({
                   {isPending
                     ? "Loading identity…"
                     : selectedPubkey
-                      ? "Continue setup"
-                      : "Create a new identity key"}
+                      ? "Continue account setup"
+                      : "Create an account"}
                 </Button>
                 <Button
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
@@ -285,8 +285,8 @@ export function MachineOnboardingFlow({
                   variant="ghost"
                 >
                   {selectedPubkey
-                    ? "Use a different key instead"
-                    : "Use an existing key"}
+                    ? "Sign in to a different account"
+                    : "Sign in to an existing account"}
                 </Button>
               </div>
               <IdentityKeyHelpDialog />
@@ -311,15 +311,14 @@ export function MachineOnboardingFlow({
                 <h1 className="text-title font-normal text-foreground">
                   {keyImportStage === "backup-password"
                     ? "Unlock your account"
-                    : "Enter your private key"}
+                    : "Sign in to Buzz"}
                 </h1>
                 <div className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
                   {keyImportStage === "backup-password" ? (
                     "Enter your backup password to restore your identity."
                   ) : (
                     <p>
-                      Paste your private key to sign in to Buzz. You can also
-                      use a{" "}
+                      Sign in with your password-protected{" "}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-file-button"
@@ -329,7 +328,7 @@ export function MachineOnboardingFlow({
                       >
                         backup file
                       </button>
-                      , or{" "}
+                      . You can also paste your private key below, or{" "}
                       <button
                         className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
                         data-testid="nostr-import-phone-link"
@@ -420,7 +419,7 @@ export function MachineOnboardingFlow({
                     <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
                       {identityLost
                         ? "Recover from your phone"
-                        : "Use your Buzz identity"}
+                        : "Use your Buzz account"}
                     </DialogTitle>
                     <DialogDescription className="mt-4 text-sm leading-6 text-foreground/80">
                       {phoneRecoveryStep === "loading" ||

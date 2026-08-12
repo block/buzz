@@ -13,7 +13,7 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
     skipOnboardingSeed: true,
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create an account" }).click();
 }
 
 async function openBackupOptions(page: import("@playwright/test").Page) {
@@ -56,7 +56,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
   // Perceived-loading intro: the animated logo and "Creating" title show
   // first, then the finished state replaces them after the hold.
   await expect(
-    page.getByRole("heading", { name: "Creating your identity key" }),
+    page.getByRole("heading", { name: "Creating your Buzz account" }),
   ).toBeVisible();
   await expect(page.getByTestId("backup-intro-logo")).toBeVisible();
   await expect(page.getByTestId("onboarding-next")).toBeVisible();
@@ -65,7 +65,7 @@ test("backup step appears on fresh-key path after profile submit", async ({
 
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Your Buzz account is ready",
     }),
   ).toBeVisible();
   await expect(page.getByTestId("backup-intro-logo")).toHaveCount(0);
@@ -339,10 +339,10 @@ test("backup step back button returns to machine identity choice", async ({
   // Backing out preserves the loaded key — primary CTA continues setup rather
   // than minting another identity (#2318).
   await expect(
-    page.getByRole("button", { name: "Continue setup" }),
+    page.getByRole("button", { name: "Continue account setup" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Use a different key instead" }),
+    page.getByRole("button", { name: "Sign in to a different account" }),
   ).toBeVisible();
 });
 
@@ -359,7 +359,7 @@ test("reveal shows inline error when get_nsec fails and Next still advances", as
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create an account" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
   await page.getByTestId("backup-key-reveal-toggle").click();
@@ -380,7 +380,7 @@ test("reveal retry succeeds after initial failure", async ({ page }) => {
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create an account" }).click();
 
   await page.getByTestId("backup-key-reveal-toggle").click();
   await expect(page.getByTestId("backup-copy-error")).toBeVisible();

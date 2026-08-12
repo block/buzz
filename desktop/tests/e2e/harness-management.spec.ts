@@ -671,7 +671,7 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
 
   // Reach setup by creating a new identity key and continuing past the
   // created-key page without opening the optional backup options.
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create an account" }).click();
   await passThroughBackupStep(page);
 
   // Now on the setup page.

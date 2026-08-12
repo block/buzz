@@ -1128,14 +1128,12 @@ export async function cancelPairing(): Promise<void> {
 export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
-  token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
-    token: token ?? null,
     reposDir: reposDir ?? null,
     agentManagedProfiles: agentManagedProfiles ?? false,
   });

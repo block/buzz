@@ -117,7 +117,7 @@ export function useCommunityInit(
   // actual relay boundary must clear both the queue and its presentation probe.
   const appliedRelayUrlRef = useRef<string | null>(null);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
 
@@ -228,7 +228,6 @@ export function useCommunityInit(
         await applyCommunity(
           activeCommunity.relayUrl,
           undefined,
-          activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
         );
@@ -298,7 +297,6 @@ export function useCommunityInit(
   }, [
     activeCommunity?.id,
     activeCommunity?.relayUrl,
-    activeCommunity?.token,
     activeCommunity?.reposDir,
     isSharedIdentity,
     suppressAutoConnect,

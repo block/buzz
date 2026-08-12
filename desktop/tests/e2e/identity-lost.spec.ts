@@ -21,13 +21,13 @@ test("normal first launch uses the already-persisted identity", async ({
   await expect(gate).toHaveCSS("background-image", /radial-gradient/);
   await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
   await expect(
-    page.getByRole("button", { name: "Create a new identity key" }),
+    page.getByRole("button", { name: "Create an account" }),
   ).toHaveCSS("background-color", "rgb(23, 23, 23)");
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
+  await page.getByRole("button", { name: "Create an account" }).click();
 
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Your Buzz account is ready",
     }),
   ).toBeVisible();
   // Non-landing pages layer the dot grid over the chartreuse→light-blue gradient.
@@ -62,7 +62,7 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
 
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
   await page.waitForTimeout(1_000);
   await page.screenshot({
@@ -287,7 +287,7 @@ test("phone recovery continues to harness setup without creating or restarting",
   await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
   await expect(
     page.getByRole("heading", {
-      name: "Your unique identity key has been created",
+      name: "Your Buzz account is ready",
     }),
   ).toHaveCount(0);
 });
@@ -354,7 +354,7 @@ test("importing a key from lost mode shows the relaunch-required screen", async 
   );
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
 
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
@@ -375,7 +375,7 @@ test("start-new-identity from lost mode persists the ephemeral key after confirm
   );
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
 
   page.on("dialog", (dialog) => dialog.accept());
@@ -408,7 +408,7 @@ test("cancelling start-new-identity in lost mode stays on the import screen", as
   );
   await page.goto("/");
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
 
   page.on("dialog", (dialog) => dialog.dismiss());
@@ -416,7 +416,7 @@ test("cancelling start-new-identity in lost mode stays on the import screen", as
 
   // Still on the import screen — no navigation, no persist
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toBeVisible();
   await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
 });
@@ -434,7 +434,7 @@ test("locked boot shows the keyring-locked screen without the onboarding gate or
   await expect(page.getByTestId("keyring-locked")).toBeVisible();
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    page.getByRole("heading", { name: "Sign in to Buzz" }),
   ).toHaveCount(0);
 });
 

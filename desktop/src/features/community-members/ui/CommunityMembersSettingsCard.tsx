@@ -304,11 +304,11 @@ export function CommunityMembersSettingsCard({
             data-testid="community-invite-dialog-trigger"
             onClick={() => setInviteDialogOpen(true)}
           >
-            Invite to community
+            Create invite
           </Button>
         }
-        title="Invites"
-        description="Manage members and community access."
+        title="Members & access"
+        description="Manage accounts, roles, invitations, and community access."
       />
 
       <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/70 shadow-xs">

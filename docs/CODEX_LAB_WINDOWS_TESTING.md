@@ -33,8 +33,9 @@ verify the exact file before continuing.
 ## First Run
 
 1. Install and open Buzz Codex Lab.
-2. Create a new Buzz identity or import the tester's own existing identity.
-   Never send an `nsec` private key to another person.
+2. Select **Create an account**. In **Account recovery**, create a locked
+   backup file and save its password separately. Returning testers can select
+   **Sign in to an existing account** and use that file and password.
 3. Join the evaluation community using the URL or invite supplied privately.
 4. Fully quit Codex Desktop.
 5. In Buzz, open Agents or Settings and select **Enable shared runtime**.
@@ -46,6 +47,20 @@ verify the exact file before continuing.
 Only one model turn can run on a Codex task at a time. If Codex Desktop is
 already running a turn, Buzz should show that the task is busy; wait for it to
 finish or intentionally steer the active turn.
+
+## Accounts And Access
+
+- A Buzz account is a device-generated identity key, not a server-held
+  username/password record. Its display name is not a login credential.
+- The recovery password encrypts the tester's backup file locally. It is never
+  sent to the relay and cannot be reset by an administrator.
+- The relay admits an account only after its public identity is on the member
+  roster. Owners and admins can create expiring, use-limited invites, change
+  roles, and remove members under **Settings > Members & access**.
+- There is no community API token field. Desktop, agents, CLI, media, and Git
+  authenticate with the same account identity through NIP-42/NIP-98.
+- Never send an `nsec` private key, backup file, or backup password to another
+  person. Administrators need only the public identity or an invite claim.
 
 ## Smoke Test
 

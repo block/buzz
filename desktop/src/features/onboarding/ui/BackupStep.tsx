@@ -190,12 +190,11 @@ export function BackupStep({
       >
         <div className="flex w-full max-w-140 shrink-0 flex-col text-center">
           <h1 className="text-title font-normal text-foreground">
-            Backup options
+            Account recovery
           </h1>
           <p className="mt-5 text-sm leading-6 text-foreground/75">
-            Your identity key works like a password for your Buzz account. Keep
-            a copy somewhere safe. You can create a backup file and lock it with
-            a password you can remember.
+            Your identity key signs in to Buzz. Keep it in your system keychain
+            and create a recovery file protected by a password you can remember.
           </p>
         </div>
 
@@ -308,8 +307,8 @@ export function BackupStep({
           key={created ? "created" : "creating"}
         >
           {created
-            ? "Your unique identity key has been created"
-            : "Creating your identity key"}
+            ? "Your Buzz account is ready"
+            : "Creating your Buzz account"}
         </h1>
         {created ? (
           <p
@@ -318,16 +317,17 @@ export function BackupStep({
               REVEAL_ANIMATION_CLASS,
             )}
           >
-            {introStorageDescription} You can continue now, or{" "}
+            {introStorageDescription} Before inviting teammates, protect it with
+            a password-locked backup in{" "}
             <button
               className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               data-testid="backup-options-link"
               onClick={onShowOptions}
               type="button"
             >
-              review backup options
-            </button>{" "}
-            for ways to restore your account.
+              account recovery
+            </button>
+            .
           </p>
         ) : null}
       </div>
@@ -338,7 +338,7 @@ export function BackupStep({
           data-testid="backup-intro-logo"
         >
           <FuzzyLogo
-            ariaLabel="Creating your identity key"
+            ariaLabel="Creating your Buzz account"
             className="w-20! text-foreground"
             fuzz
             loop

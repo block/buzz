@@ -30,7 +30,7 @@ test("identity key help explains the first-run choice", async ({ page }) => {
   await expect(dialog).toBeVisible();
   await waitForAnimations(page);
   await expect(
-    dialog.getByRole("heading", { name: "What’s an identity key?" }),
+    dialog.getByRole("heading", { name: "How Buzz accounts work" }),
   ).toBeVisible();
   await expect(dialog).toHaveClass(/shadow-none/);
   await expect(page.getByTestId("dialog-overlay")).toHaveCSS(
@@ -88,6 +88,6 @@ test("identity key help stays readable when the app resolves dark mode", async (
   // dark theme flips --foreground to near-white and the title disappears
   // against the white card.
   await expect(
-    dialog.getByRole("heading", { name: "What’s an identity key?" }),
+    dialog.getByRole("heading", { name: "How Buzz accounts work" }),
   ).toHaveCSS("color", "rgb(23, 23, 23)");
 });

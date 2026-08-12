@@ -75,16 +75,17 @@ export function loadCommunities(): Community[] {
     if (parsed.length > 0) {
       removeStorageItem(COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY);
     }
-    // Migration: older builds stored the user's `nsec` in localStorage and
-    // re-applied it to the backend on every reload, which silently overwrote
-    // any `import_identity` result with the original generated key. The
-    // on-disk `identity.key` file is the only source of truth now. Strip
-    // any lingering `nsec` from existing entries on read and persist the
-    // cleaned list back so it cannot leak into future sessions.
+    // Migration: older builds stored `nsec` and a non-functional community
+    // `token` in localStorage. Identity keys now live in the OS keyring and
+    // relay access is enforced by NIP-42/NIP-98 plus relay membership.
     let didStrip = false;
     const cleaned = (parsed as Array<Record<string, unknown>>).map((entry) => {
-      if (entry && typeof entry === "object" && "nsec" in entry) {
-        const { nsec: _nsec, ...rest } = entry;
+      if (
+        entry &&
+        typeof entry === "object" &&
+        ("nsec" in entry || "token" in entry)
+      ) {
+        const { nsec: _nsec, token: _token, ...rest } = entry;
         didStrip = true;
         return rest;
       }

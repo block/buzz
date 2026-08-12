@@ -105,6 +105,32 @@ test("loading an existing community clears stale final-leave discovery", () => {
   assert.equal(loadCommunityDiscoveryAfterLeave(storage), false);
 });
 
+test("loading communities scrubs legacy identity and API token fields", () => {
+  const storage = createMemoryStorage({
+    "buzz-communities": JSON.stringify([
+      {
+        id: "legacy",
+        name: "Legacy",
+        relayUrl: "wss://relay.example.com",
+        nsec: "nsec1do-not-keep",
+        token: "buzz_do-not-keep",
+      },
+    ]),
+  });
+  globalThis.localStorage = storage;
+  globalThis.window = { localStorage: storage };
+
+  assert.deepEqual(loadCommunities(), [
+    {
+      id: "legacy",
+      name: "Legacy",
+      relayUrl: "wss://relay.example.com",
+    },
+  ]);
+  assert.equal(storage.getItem("buzz-communities")?.includes("token"), false);
+  assert.equal(storage.getItem("buzz-communities")?.includes("nsec"), false);
+});
+
 test("completed final leave persists discovery until a community is saved", () => {
   const storage = createMemoryStorage();
   globalThis.localStorage = storage;

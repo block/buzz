@@ -24,9 +24,7 @@ type EditCommunityDialogProps = {
   onOpenChange: (open: boolean) => void;
   onSave: (
     id: string,
-    updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
-    >,
+    updates: Partial<Pick<Community, "name" | "relayUrl" | "reposDir">>,
   ) => void;
   showIconEditor?: boolean;
 };
@@ -40,7 +38,6 @@ export function EditCommunityDialog({
 }: EditCommunityDialogProps) {
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
-  const [token, setToken] = React.useState("");
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
   const membershipQuery = useMyRelayMembershipLookupQuery();
@@ -56,7 +53,6 @@ export function EditCommunityDialog({
     if (community && open) {
       setName(community.name);
       setRelayUrl(community.relayUrl);
-      setToken(community.token ?? "");
       setReposDir(community.reposDir ?? "");
       setReposDirError(null);
     }
@@ -74,7 +70,7 @@ export function EditCommunityDialog({
       }
 
       const updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "token" | "reposDir">
+        Pick<Community, "name" | "relayUrl" | "reposDir">
       > = {};
 
       const trimmedName = name.trim();
@@ -85,11 +81,6 @@ export function EditCommunityDialog({
       const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
       if (normalizedUrl !== community.relayUrl) {
         updates.relayUrl = normalizedUrl;
-      }
-
-      const trimmedToken = token.trim() || undefined;
-      if (trimmedToken !== community.token) {
-        updates.token = trimmedToken;
       }
 
       // Expand `~` to an absolute path before save — the backend rejects
@@ -115,7 +106,7 @@ export function EditCommunityDialog({
 
       handleClose();
     },
-    [community, name, relayUrl, token, reposDir, onSave, handleClose],
+    [community, name, relayUrl, reposDir, onSave, handleClose],
   );
 
   if (!community) {
@@ -175,24 +166,6 @@ export function EditCommunityDialog({
               placeholder="wss://relay.example.com"
               type="text"
               value={relayUrl}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label
-              className="text-sm font-medium text-foreground"
-              htmlFor="edit-ws-token"
-            >
-              API Token
-              <span className="ml-1 text-xs font-normal text-muted-foreground">
-                (optional)
-              </span>
-            </label>
-            <Input
-              id="edit-ws-token"
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="buzz_..."
-              type="password"
-              value={token}
             />
           </div>
           <div className="flex flex-col gap-1.5">
