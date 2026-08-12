@@ -1,0 +1,66 @@
+name: launchpad — ADR boundary check
+
+# DELIBERATELY UNFILTERED BY PATH.
+#
+# This check is intended to be REQUIRED. A required check that does not run stays
+# pending forever and blocks the merge it was meant to guard, so a `paths:` filter
+# would turn "this PR does not touch the ADR" into "this PR can never merge". The
+# checker is pure text comparison over two files and finishes in milliseconds, so
+# running it on every pull request costs nothing worth filtering for.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# Read-only. This check reports; it never writes to the repository or the PR.
+permissions:
+  contents: read
+
+jobs:
+  adr-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      # `on: pull_request` runs this workflow from the PR's own merge ref, forks
+      # included, so a fork PR owns every step in this file — the same property
+      # documented at length in launchpad-pr-check.yml. That is acceptable for the
+      # same reason: a fork-triggered run gets a read-only GITHUB_TOKEN with no
+      # repository secrets, and merging needs approving reviews from people with
+      # write access. A defeated check misleads a reviewer; it cannot merge
+      # anything. Do NOT "harden" this by switching to pull_request_target — ADR
+      # #110 decided against it, and that trigger would hand fork-authored code a
+      # privileged token.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # FAIL CLOSED ON A MISSING PIECE, matching launchpad-pr-check.yml.
+      #
+      # A deleted checker, a deleted ADR, or a partial checkout must not read as a
+      # passing boundary — that is the fail-open this check exists to prevent, and
+      # it would be silent. Note the expected transitional case: a branch created
+      # before ADR-0005 landed genuinely lacks these files and fails here until it
+      # rebases onto launchpad. That is a rebase, not a defect.
+      - name: Confirm the checker and the documents exist
+        run: |
+          missing=0
+          for f in launchpad/scripts/adr_boundary_check.py \
+                   launchpad/decisions/ADR-0005-launchpad-deployment-boundary.md \
+                   launchpad/AGENTS.md; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is missing from the commit under check."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::If this branch predates ADR-0005, rebase it onto launchpad."
+            exit 1
+          fi
+
+      # The controls run first. If the checker's own logic is broken, its verdict
+      # on the documents is worth nothing, and a green boundary check built on a
+      # broken comparison is worse than no check — it reports safety it did not
+      # measure.
+      - name: Run the checker's controls
+        run: python3 -m unittest discover -s launchpad/scripts
+
+      - name: Check the ADR boundary
+        run: python3 launchpad/scripts/adr_boundary_check.py .
