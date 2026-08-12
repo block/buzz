@@ -1,5 +1,9 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
+  # Device pairing (NIP-AB) goes to the auth-less sidecar, not the main relay:
+  # a device mid-pairing is not a relay member yet and would be refused.
+  reverse_proxy /pair* pairing-relay:5000
+
   reverse_proxy relay:3000
 }

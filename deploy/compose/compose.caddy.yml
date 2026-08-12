@@ -2,10 +2,15 @@ services:
   relay:
     ports: !reset []
 
+  pairing-relay:
+    ports: !reset []
+
   caddy:
     image: caddy:2-alpine
     depends_on:
       relay:
+        condition: service_healthy
+      pairing-relay:
         condition: service_healthy
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
