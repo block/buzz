@@ -59,10 +59,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let admin_router = admin_enabled
         .then(|| Router::new().nest("/api/admin/v1", api::admin::router(state.clone())));
 
-    let api_router = Router::new()
-        // WebSocket + NIP-11
+    // NIP-11 relay information document — public by design. NIP-11 requires
+    // relays to answer CORS requests ("Relays MUST accept CORS requests by
+    // sending Access-Control-Allow-Origin, Access-Control-Allow-Headers, and
+    // Access-Control-Allow-Methods headers"), so the document (`GET /` with
+    // `Accept: application/nostr+json`, and `GET /info`) is always served with
+    // permissive CORS, independent of `BUZZ_CORS_ORIGINS`. The allowlist
+    // applied further down governs the authenticated REST surface only; the
+    // document contains no private data (capabilities, limits, public key).
+    let nip11_router = Router::new()
         .route("/", get(nip11_or_ws_handler))
         .route("/info", get(relay_info_handler))
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    let api_router = Router::new()
         .route("/.well-known/nostr.json", get(api::nip05::nostr_nip05))
         // Health endpoints
         .route("/health", get(health_handler))
@@ -131,15 +142,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone());
 
-    // Merge — each sub-router carries its own body limit.
-    // Metrics → Trace → CORS applied once over the combined router.
-    let mut merged = api_router
+    // Merge — each sub-router carries its own body limit. The CORS allowlist
+    // (BUZZ_CORS_ORIGINS) is applied to the non-NIP-11 surface only; the
+    // public NIP-11 document keeps permissive CORS (see `nip11_router`
+    // above), so an allowlist configured for the REST surface cannot make the
+    // relay non-conformant with the NIP-11 CORS requirement.
+    let mut rest = api_router
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);
     if let Some(admin_router) = admin_router {
-        merged = merged.merge(admin_router);
+        rest = rest.merge(admin_router);
     }
+    let rest = rest.layer(build_cors_layer(&state.config.cors_origins));
+
+    let mut merged = nip11_router.merge(rest);
 
     // Serve both bundles from one fallback. The admin host is checked first so
     // it can never fall through to the public web bundle.
@@ -189,7 +206,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     merged
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
-        .layer(build_cors_layer(&state.config.cors_origins))
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
@@ -606,6 +622,192 @@ mod tests {
         assert!(
             !handler_receives_message_with_limit(limit, limit + 1).await,
             "oversized messages must be rejected by the WebSocket parser before the handler sees them"
+        );
+    }
+
+    /// Build a minimal `AppState` with a fixed CORS allowlist and no live
+    /// Postgres/Redis: the pools are lazy and the NIP-11 path fails open when
+    /// the tenant lookup errors (host-scoped `icon` is simply omitted), so
+    /// these tests exercise the router's CORS layering without any infra.
+    ///
+    /// `Config::from_env()` is retried on error because `config.rs` tests
+    /// briefly mutate the shared process env (they restore values afterwards);
+    /// the only observable effect on this helper is a transient
+    /// `ConfigError`, so retrying a few times is enough to stay deterministic.
+    async fn cors_test_state(cors_origins: &[&str]) -> Arc<AppState> {
+        let mut config = loop {
+            match crate::config::Config::from_env() {
+                Ok(config) => break config,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        };
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.cors_origins = cors_origins
+            .iter()
+            .map(|origin| (*origin).to_string())
+            .collect();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            // No Postgres in unit-test CI: cap the pool's connect-retry
+            // backoff (sqlx 0.9 retries creation up to `acquire_timeout`,
+            // default 30s) so each NIP-11 tenant lookup fails in ~0ms.
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy(&config.database_url)
+            .expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn nip11_document_keeps_permissive_cors_when_allowlist_is_configured() {
+        // BUZZ_CORS_ORIGINS set — the documented deployment path that used to
+        // break NIP-11 conformance.
+        let state = cors_test_state(&["https://allowed.example"]).await;
+        let router = build_router(state);
+
+        // Actual GET / with the NIP-11 Accept header from a NON-allowlisted
+        // origin: must still be readable cross-origin (NIP-11 MUST).
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/")
+                    .header(axum::http::header::HOST, "relay.example")
+                    .header(axum::http::header::ACCEPT, "application/nostr+json")
+                    .header(
+                        axum::http::header::ORIGIN,
+                        "https://unlisted-client.example",
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "NIP-11 document must be CORS-readable from any origin even when \
+             BUZZ_CORS_ORIGINS is set; response headers: {:?}",
+            response.headers()
+        );
+
+        // Preflight on /info from a NON-allowlisted origin: NIP-11 requires
+        // Allow-Origin/Headers/Methods on CORS responses.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/info")
+                    .header(axum::http::header::HOST, "relay.example")
+                    .header(
+                        axum::http::header::ORIGIN,
+                        "https://unlisted-client.example",
+                    )
+                    .header("access-control-request-method", "GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        for header in [
+            "access-control-allow-origin",
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+        ] {
+            assert!(
+                response.headers().contains_key(header),
+                "NIP-11 preflight must answer with `{header}`; response headers: {:?}",
+                response.headers()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_allowlist_still_governs_the_authenticated_rest_surface() {
+        let state = cors_test_state(&["https://allowed.example"]).await;
+        let router = build_router(state);
+
+        // POST /events from a NON-allowlisted origin: no CORS header.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header(axum::http::header::HOST, "relay.example")
+                    .header(
+                        axum::http::header::ORIGIN,
+                        "https://unlisted-client.example",
+                    )
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "BUZZ_CORS_ORIGINS must keep governing /events; response headers: {:?}",
+            response.headers()
+        );
+
+        // Same request from the ALLOWLISTED origin: header present and echoed.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header(axum::http::header::HOST, "relay.example")
+                    .header(axum::http::header::ORIGIN, "https://allowed.example")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("https://allowed.example"),
+            "allowlisted origin must still get its origin echoed on the REST surface"
         );
     }
 }
