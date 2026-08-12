@@ -46,6 +46,7 @@ async function installChannelRevisitPaintTracking(page: Page) {
   await page.evaluate(() => {
     const tracking = {
       cachedRowSeen: false,
+      cachedRowSeenAt: null as number | null,
       cachedRowRemovedAfterPaint: false,
       skeletonSeen: false,
       disconnect: () => {},
@@ -54,7 +55,10 @@ async function installChannelRevisitPaintTracking(page: Page) {
       const cachedRow = document.querySelector(
         '[data-message-id^="mock-deep-history-"]',
       );
-      if (cachedRow) tracking.cachedRowSeen = true;
+      if (cachedRow && !tracking.cachedRowSeen) {
+        tracking.cachedRowSeen = true;
+        tracking.cachedRowSeenAt = performance.now();
+      }
       if (tracking.cachedRowSeen && !cachedRow) {
         tracking.cachedRowRemovedAfterPaint = true;
       }
@@ -80,6 +84,7 @@ async function readChannelRevisitPaintTracking(page: Page) {
       window as typeof window & {
         __MESSAGE_REVISIT_PAINT__?: {
           cachedRowSeen: boolean;
+          cachedRowSeenAt: number | null;
           cachedRowRemovedAfterPaint: boolean;
           disconnect: () => void;
           skeletonSeen: boolean;
@@ -121,17 +126,34 @@ test("cold channel load keeps its skeleton; fresh and stale revisits keep cached
   await clearMessageRequests(page);
   await installChannelRevisitPaintTracking(page);
 
-  // A fresh warm revisit is cache-only: paint immediately with no skeleton or
-  // initial-window request.
+  // A fresh warm revisit paints its settled cache immediately with no skeleton,
+  // then remains painted across the required post-subscription reconciliation.
   await page.getByTestId("channel-deep-history").click();
   await expect(
     page.locator('[data-message-id^="mock-deep-history-"]').first(),
   ).toBeVisible();
+  await expect
+    .poll(() => readMessageRequests(page, "get_channel_window"))
+    .toHaveLength(1);
+  await expect
+    .poll(async () =>
+      (await readMessageRequests(page, "get_channel_window")).every(
+        (request) => request.endedAt !== null,
+      ),
+    )
+    .toBe(true);
+  await expect(
+    page.locator('[data-message-id^="mock-deep-history-"]').first(),
+  ).toBeVisible();
+  const freshRequests = await readMessageRequests(page, "get_channel_window");
   const freshRevisit = await readChannelRevisitPaintTracking(page);
   expect(freshRevisit.cachedRowSeen).toBe(true);
+  expect(freshRevisit.cachedRowSeenAt).not.toBeNull();
+  expect(freshRevisit.cachedRowSeenAt).toBeLessThan(
+    Math.min(...freshRequests.map((request) => request.endedAt ?? Infinity)),
+  );
   expect(freshRevisit.cachedRowRemovedAfterPaint).toBe(false);
   expect(freshRevisit.skeletonSeen).toBe(false);
-  expect(await readMessageRequests(page, "get_channel_window")).toHaveLength(0);
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -156,6 +178,7 @@ test("cold channel load keeps its skeleton; fresh and stale revisits keep cached
   }, DEEP_HISTORY_CHANNEL_ID);
   await clearMessageRequests(page);
   await installChannelRevisitPaintTracking(page);
+  const staleRevisitStartedAt = await page.evaluate(() => performance.now());
 
   // A >5-minute stale revisit also paints cache without a skeleton while one
   // delayed initial-window reconciliation runs behind it.
@@ -168,17 +191,29 @@ test("cold channel load keeps its skeleton; fresh and stale revisits keep cached
   expect(staleRevisit.cachedRowRemovedAfterPaint).toBe(false);
   expect(staleRevisit.skeletonSeen).toBe(false);
   await expect
-    .poll(() => readMessageRequests(page, "get_channel_window"))
-    .toHaveLength(1);
-  const [staleRevalidation] = await readMessageRequests(
-    page,
-    "get_channel_window",
+    .poll(async () => {
+      const requests = await readMessageRequests(page, "get_channel_window");
+      return requests.some(
+        (request) =>
+          request.startedAt >= staleRevisitStartedAt &&
+          request.endedAt === null,
+      );
+    })
+    .toBe(true);
+  const staleRevalidation = (
+    await readMessageRequests(page, "get_channel_window")
+  ).find(
+    (request) =>
+      request.startedAt >= staleRevisitStartedAt && request.endedAt === null,
   );
-  expect(staleRevalidation.endedAt).toBeNull();
+  expect(staleRevalidation).toBeDefined();
+  expect(staleRevalidation?.endedAt).toBeNull();
   await expect
     .poll(
       async () =>
-        (await readMessageRequests(page, "get_channel_window"))[0]?.endedAt,
+        (await readMessageRequests(page, "get_channel_window")).find(
+          (request) => request.requestId === staleRevalidation?.requestId,
+        )?.endedAt,
     )
     .not.toBeNull();
 });
