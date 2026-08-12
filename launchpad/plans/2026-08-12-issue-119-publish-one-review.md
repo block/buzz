@@ -233,6 +233,19 @@ STEP 1  Record what the review-lifecycle API actually does.                [inde
         was written for — this agent would be able to overwrite other people's review
         bodies — and it reopens STEP 2 rather than being worked around. Either
         outcome is worth a single call.
+        TWO IDENTITY FACTS ARE RECORDED HERE TOO, for the same reason and at the same
+        price. STEP 2 compares each review's `user.login` against a supplied login,
+        so both the field and the credential's own answer are worth capturing:
+          the `user.login` of the review this step POSTs, from the POST response
+            already being saved — which fixes the shape of the field STEP 2 filters
+            on rather than assuming it.
+          what `GET /user` returns under the token in use, status and body verbatim.
+            STEP 2 rejects that call as the identity mechanism on the grounds that an
+            installation token cannot use it; this step holds a HUMAN token, so it
+            will succeed here, and recording it makes the contrast explicit instead
+            of leaving a reader to wonder why the plan refuses a call that plainly
+            works. The Actions answer cannot be obtained here at all and is not
+            claimed — see STEP 9, which runs where the real credential exists.
         This is first because the whole strategy rests on PUT working and DELETE
         not. If PUT turns out to be refused, the answer recorded above ("update in
         place") is not implementable and the plan changes at STEP 2, not at STEP
@@ -274,7 +287,10 @@ STEP 1  Record what the review-lifecycle API actually does.                [inde
         DELETE entry's status are both recorded verbatim whatever they are; the
         cross-author PUT entry records its status verbatim and the fixture states in
         one line whether GitHub refused it, with STEP 2's author filter cited as what
-        depends on the answer;
+        depends on the answer; the POST entry's `user.login` is recorded, and the
+        `GET /user` status and body under this step's token are recorded beside a
+        one-line note that this is a human token and says nothing about the Actions
+        credential;
         fixtures/reviews-listing.json exists, holds the recorded single-page
         response AND a constructed two-page listing whose page one holds 30 entries,
         each artefact labelled recorded or constructed in the file itself, and no
@@ -334,13 +350,43 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
             pull request, permanently, presenting as an HTTP error rather than as an
             attack. #119's own criterion calls silence "indistinguishable from a
             crashed agent"; marker-only matching puts that silence on demand.
-            THE IDENTITY IS RESOLVED AT RUNTIME, NOT HARDCODED — once at startup
-            from `GET /user`, compared against each review's `user.login`. That
-            preserves the whole point of identifying by marker rather than by a
-            literal author name: #110 commits to revisiting the credential, and a
-            hardcoded `github-actions[bot]` would break on the day it moves, which
-            is the failure the marker-over-author choice was made to avoid. Marker
-            for "this is our kind of review", author for "this one is ours".
+            THE IDENTITY IS SUPPLIED AND VERIFIED, NOT DISCOVERED — find_existing
+            takes the expected login as a PARAMETER and compares it against each
+            review's `user.login`. The `--as <login>` flag that supplies it, and its
+            `github-actions[bot]` default, belong to STEP 7: a flag needs the
+            argument parsing that `main` provides, and `main` does not exist until
+            then, so this step takes an argument and STEP 7 wires the flag to it.
+            A default VALUE on a flag is not a hardcoded comparison: #110 commits to
+            revisiting the credential, and moving it is then one flag rather than a
+            code change, which keeps the portability the marker-over-author choice
+            was made for. Marker for "this is our kind of review", author for "this
+            one is ours".
+            NOT `GET /user`, and an earlier revision of this bullet said exactly
+            that. `GITHUB_TOKEN` is an installation credential; GitHub's REST
+            documentation for "Get the authenticated user" lists OAuth app tokens
+            and personal access tokens (classic) as what it supports, and
+            installation access tokens are not among them. **This plan does not
+            claim the 403 as proved** — an installation token exists only inside a
+            real Actions run, so it cannot be tested from a worktree, and STEP 1
+            records it rather than asserting it.
+            The change does not depend on settling that. If `GET /user` is refused
+            under Actions, resolving the identity that way fails on EVERY pull
+            request under the credential it was written for — worse than the attack
+            the filter prevents, and invisible locally because STEPs 1 and 3 run
+            under a human token where the call succeeds. If it is not refused, a
+            runtime call is still a needless failure mode for a value that is known
+            before the run starts. Supply-and-verify is correct either way, which is
+            why it is not waiting on the measurement.
+            The default is evidence-based rather than assumed: every bot comment in
+            this fork is authored by `github-actions[bot]` — 153 of them across the
+            paginated issue-comments listing, with no other bot login present.
+            AN UNRESOLVED IDENTITY ABORTS, and never degrades to matching on the
+            marker alone. If no login is configured and no default applies,
+            find_existing raises and publish.py exits non-zero. Falling back to
+            marker-only would silently restore the vector the filter exists to
+            close, and a loud failure to publish is strictly better than a quiet
+            invitation: one is visible in a job log, the other is available to
+            anyone who can open a pull request.
             NEWEST AMONG OUR OWN, not oldest, and the two rules are not in tension
             once the filter exists. A submitted COMMENT review cannot be deleted, so
             once two of the agent's own markers exist neither can be retired and one
@@ -414,10 +460,13 @@ STEP 2  launchpad/review-agent/publish.py — the single-review lifecycle.      
         returning that id is the denial-of-publication vector; a listing carrying a
         foreign marked review submitted AFTER the agent's own returns the agent's
         own id, not the newer foreign one, so the author filter is proven to run
-        before the newest-wins rule rather than after it; the identity is read from
-        `GET /user` through the injected transport and `grep -n
-        "github-actions\[bot\]" publish.py` returns nothing, so no login is
-        hardcoded; with the injected transport
+        before the newest-wins rule rather than after it; the SAME listing passed a
+        DIFFERENT expected login returns None, so the parameter is honoured rather
+        than ignored in favour of a constant baked into the comparison; find_existing
+        called with an empty or missing login RAISES rather than matching anything,
+        so an unresolved identity cannot degrade to marker-only; `grep -n "GET
+        /user\|api user" publish.py` returns nothing, so no runtime identity call
+        exists to fail under an installation token; with the injected transport
         serving page two only on `--paginate`, find_existing returns the marked id
         from page two, and the same transport with `--paginate` absent from the
         argv returns None — so the two cases differ and the assertion can fail;
@@ -778,6 +827,13 @@ STEP 7  Wire the renderer into the CLI.                                  [needs 
         that it does not have to. #117's contract quotes this shape back — "`reports`
         and `containment` mean here exactly what they mean there" — so the six keys
         are fixed by agreement between two plans and are not #119's to extend.
+        `--as <login>` IS WIRED HERE, defaulting to `github-actions[bot]`, and passed
+        into find_existing as the expected-login parameter STEP 2 defined. The flag
+        lives in this step because argument parsing lives in `main`; the comparison
+        lives in STEP 2 because that is where the listing is read. STEP 9's identity
+        control is what proves the default is still the truth under the live
+        credential — this step only has to pass the value through, and to fail
+        non-zero rather than defaulting to nothing if the flag is given empty.
         `repo` IS NOT ONE OF THEM, and it has to come from somewhere. `find_existing`
         and `post_or_update` both take it, #117's merged document does not carry it,
         and adding it to the stdin document would break the shape #117 documents. So
@@ -851,12 +907,30 @@ STEP 8  .github/workflows/launchpad-review-agent-publish.yml.                [ne
         that never executes.
 
 STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control. [needs 8]
-        Two assertions, because either alone is weak.
+        Three assertions, because each alone is weak.
           STATIC — parse the workflow YAML and assert the permissions mapping
             equals exactly {contents: read, pull-requests: write}, that no job
             overrides it, and that the file does not mention
             pull_request_target. This runs anywhere, needs no token, and catches
             a later widening in review.
+          IDENTITY — inside the publish workflow, assert that the login STEP 2 was
+            configured with is the login the credential actually posts as. This is
+            the ONLY place in the plan where that can be checked: the configured
+            value is a flag default, the real identity exists only under the
+            workflow token, and STEP 1's measurement is of a human token and proves
+            nothing about this one. Read it from the review the run just published —
+            `user.login` on the POST or PUT response — and FAIL when it differs from
+            the configured value, naming both.
+            This is what catches a stale default when #110 moves the credential.
+            Without it the author filter degrades quietly rather than loudly: a
+            configured login that no longer matches means find_existing matches
+            nothing, every run POSTs, and the pull request accumulates one review per
+            push — the exact failure #119 exists to prevent, arriving through the fix
+            for a different one. A control that only asserts the flag was READ, as
+            STEP 2's offline assertions do, cannot see this; it needs the live
+            identity.
+            Outside the publish workflow it reports SKIP with a reason and never
+            PASS, on the same `GITHUB_WORKFLOW` guard as the live half below.
           LIVE — with the workflow's own token, attempt one contents write:
             create the ref `refs/heads/scope-probe-<run id>`, where the run id is
             read from `os.environ["GITHUB_RUN_ID"]` and the control FAILS with a
@@ -908,7 +982,12 @@ STEP 9  launchpad/review-agent/check_publish_scope.py — the credential control
         real Actions run of the PUBLISH workflow on this pull request shows the live
         half reporting PASS with the 403 response body AND the value of
         `GITHUB_WORKFLOW` pasted into the PR together, so a reader can see which
-        credential was measured rather than taking it on trust.
+        credential was measured rather than taking it on trust; the identity
+        assertion fails when handed a configured login that differs from the one on
+        the recorded response, naming both values; and that same real Actions run
+        reports the identity assertion PASS with the observed `user.login` pasted
+        into the PR, which is the measurement STEP 2's flag default rests on and the
+        only one taken under the credential that ships.
 
 STEP 10 launchpad/review-agent/check_publish_single.py — the behaviour controls. [needs 7]
         Recorded inputs, no network, no model. SEVEN assertions covering #119's
@@ -1014,11 +1093,16 @@ STEP 12 launchpad/review-agent/PUBLISHING.md, and the cross-references.     [nee
         Normative, a sibling to CONTAINMENT.md and in the same voice. States: that
         a review is identified by MARKER AND AUTHOR — the marker says "this is our
         kind of review", the author says "this one is ours" — that the author login
-        is resolved at runtime from `GET /user` and never hardcoded, and that a
-        marked review under any other login is counted as foreign and never
-        updated, because a review body is attacker-writable and marker-only
-        matching hands an outsider a way to silence the agent on a pull request of
-        their choosing; that the live credential control PASSes only from the
+        is SUPPLIED via `--as` and VERIFIED against the live identity by STEP 9's
+        control, never discovered at runtime and never written into a comparison,
+        because `GET /user` is an OAuth-and-PAT endpoint that an installation token
+        cannot be assumed to reach and a login frozen into the source breaks when
+        #110 moves the credential; that an unresolved identity aborts and never
+        degrades to matching on the marker alone; and that a marked review under any
+        other login is counted as foreign and never updated, because a review body is
+        attacker-writable and marker-only matching hands an outsider a way to silence
+        the agent on a pull request of their choosing; that the live credential
+        control PASSes only from the
         publish workflow and SKIPs everywhere else, so a PASS from the read-only
         controls runner is not evidence about the publish token; and that
         publish.py owns it while publish_render receives it; that exactly one
