@@ -1003,6 +1003,8 @@ pub struct ContextMessage {
 pub struct PromptChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description from the kind-39000 `about` tag, if present.
+    pub description: Option<String>,
 }
 
 /// Minimal profile fields needed to label users in ACP prompts.
@@ -1231,6 +1233,48 @@ fn resolve_reply_anchor(
     )
 }
 
+/// Maximum length (in characters) of a channel description rendered into `[Context]`.
+///
+/// Limits prompt bloat from unusually long descriptions; a raw embedded newline
+/// in a description must not be able to spoof another `[Context]` field, so
+/// multiline text is collapsed to single-space-joined lines before truncation.
+const MAX_DESCRIPTION_LEN: usize = 500;
+
+/// Append a `Description: …` line to a `[Context]` block when non-empty.
+///
+/// Collapses internal newlines (any `\r\n`, `\r`, or `\n`) to a single space
+/// so a multi-line description cannot inject a fake `[Context]` field line.
+/// Truncates at [`MAX_DESCRIPTION_LEN`] characters with a `…` marker.
+fn append_channel_description(s: &mut String, channel_info: Option<&PromptChannelInfo>) {
+    let desc = match channel_info.and_then(|ci| ci.description.as_deref()) {
+        Some(d) if !d.is_empty() => d,
+        _ => return,
+    };
+    // Collapse newlines to spaces so the description can never spoof another field.
+    let collapsed: String = desc
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return;
+    }
+    // Truncate at a character boundary (not byte boundary) to avoid splitting
+    // multi-byte sequences.
+    let truncated = if collapsed.chars().count() > MAX_DESCRIPTION_LEN {
+        let end = collapsed
+            .char_indices()
+            .nth(MAX_DESCRIPTION_LEN)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
+        format!("{}…", &collapsed[..end])
+    } else {
+        collapsed
+    };
+    s.push_str(&format!("\nDescription: {truncated}"));
+}
+
 /// Format a `[Context]` hints section based on event scope.
 ///
 /// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
@@ -1301,9 +1345,10 @@ fn format_context_hints(
         let mut s = format!(
             "[Context]\n\
              Scope: thread\n\
-             Channel: {channel_display}\n\
-             Thread root: {root}"
+             Channel: {channel_display}"
         );
+        append_channel_description(&mut s, channel_info);
+        s.push_str(&format!("\nThread root: {root}"));
         if let Some(ref parent) = thread_tags.parent_event_id {
             if parent != root {
                 s.push_str(&format!("\nParent: {parent}"));
@@ -1318,8 +1363,11 @@ fn format_context_hints(
         let mut s = format!(
             "[Context]\n\
              Scope: channel\n\
-             Channel: {channel_display}\n\
-             Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
+             Channel: {channel_display}"
+        );
+        append_channel_description(&mut s, channel_info);
+        s.push_str(
+            "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
         );
         if let Some(event_id) = reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
@@ -3087,6 +3135,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "engineering".into(),
             channel_type: "stream".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -3118,6 +3167,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -3230,6 +3280,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
@@ -3488,6 +3539,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
@@ -3587,6 +3639,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let trigger_only_prompt = format_prompt(
@@ -3635,6 +3688,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         // No context fetched — hints only.
@@ -4130,6 +4184,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -4193,6 +4248,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            description: None,
         };
 
         let prompt = format_prompt(
@@ -4959,6 +5015,256 @@ mod tests {
         assert!(
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
+        );
+    }
+
+    // ── channel description delivery ─────────────────────────────────────────
+
+    #[test]
+    fn test_append_channel_description_adds_description_line() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions".into()),
+        };
+        let mut s = "[Context]\nScope: channel\nChannel: team (#abc)".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            s.contains("\nDescription: Engineering discussions"),
+            "description must be appended; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_absent_when_none() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: None,
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            !s.contains("Description:"),
+            "no description must be appended when None; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_absent_when_channel_info_none() {
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, None);
+        assert!(
+            !s.contains("Description:"),
+            "no description must be appended when channel_info is None; got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_collapses_newlines_spoof_prevention() {
+        // A multiline description must not be able to inject a fake [Context] field.
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("Line one\nScope: injected\nLine two".into()),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        // The whole description is on a single Description line — no injected field.
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        assert_eq!(
+            desc_line, "Description: Line one Scope: injected Line two",
+            "multiline description must collapse to one line, never a fake field"
+        );
+        assert_eq!(
+            s.lines().filter(|l| l.starts_with("Description:")).count(),
+            1,
+            "exactly one Description line is rendered"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_truncates_at_cap() {
+        let long_desc = "x".repeat(600);
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some(long_desc),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        assert!(
+            desc_line.ends_with('…'),
+            "truncated description must end with '…'; got: {desc_line}"
+        );
+        // Value = first MAX_DESCRIPTION_LEN chars + the "…" marker.
+        let value = desc_line.strip_prefix("Description: ").unwrap();
+        assert_eq!(
+            value.chars().count(),
+            MAX_DESCRIPTION_LEN + 1,
+            "truncated value is exactly the cap plus the ellipsis marker"
+        );
+    }
+
+    #[test]
+    fn test_append_channel_description_multibyte_truncation_is_char_safe() {
+        // Truncation must land on a char boundary, never split a multi-byte code point.
+        let long_desc = "é".repeat(600);
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some(long_desc),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        let desc_line = s.lines().find(|l| l.starts_with("Description:")).unwrap();
+        let value = desc_line.strip_prefix("Description: ").unwrap();
+        assert_eq!(value.chars().count(), MAX_DESCRIPTION_LEN + 1);
+    }
+
+    #[test]
+    fn test_append_channel_description_whitespace_only_is_absent() {
+        let ci = PromptChannelInfo {
+            name: "team".into(),
+            channel_type: "stream".into(),
+            description: Some("\n  \r\n \n".into()),
+        };
+        let mut s = "[Context]\nScope: channel".to_string();
+        append_channel_description(&mut s, Some(&ci));
+        assert!(
+            !s.contains("Description:"),
+            "a whitespace-only description collapses to empty and is not rendered; got: {s}"
+        );
+    }
+
+    fn description_batch(ch: Uuid, event: Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_format_prompt_includes_description_in_context_for_channel_turn() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("what should we build?"));
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions and planning.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: channel"),
+            "channel-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Description: Engineering discussions and planning."),
+            "description must appear in [Context] for channel turns; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_includes_description_in_context_for_thread_turn() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "reply in thread",
+            vec![vec![
+                "e".into(),
+                "root123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let batch = description_batch(ch, event);
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+            description: Some("Engineering discussions and planning.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: thread"),
+            "thread-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Description: Engineering discussions and planning."),
+            "description must appear in [Context] for thread turns; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_excludes_description_for_dm_turn() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("hey"));
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+            description: Some("This should not appear.".into()),
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: dm"),
+            "dm-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Description:"),
+            "DM turn must not include a Description field; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_description_when_channel_metadata_unresolved() {
+        let ch = Uuid::new_v4();
+        let batch = description_batch(ch, make_event("what should we build?"));
+        // channel_info None models unresolved metadata: no name, no description.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: None,
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("Scope: channel"),
+            "channel-scope turn expected; got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Description:"),
+            "unresolved metadata must not render a Description field; got: {prompt}"
         );
     }
 }
