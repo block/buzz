@@ -45,6 +45,8 @@ mod tray_menu;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
+#[cfg(target_os = "linux")]
+mod webkit_startup_recovery;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
@@ -77,6 +79,8 @@ use mesh_llm_stubs::*;
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+#[cfg(target_os = "linux")]
+use tauri::webview::PageLoadEvent;
 #[cfg(target_os = "macos")]
 use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
@@ -112,6 +116,25 @@ pub fn run() {
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "linux")]
+    let webkit_startup_data_dir =
+        dirs::data_dir().map(|dir| dir.join(&context.config().identifier));
+    #[cfg(target_os = "linux")]
+    if let Some(data_dir) = webkit_startup_data_dir.as_deref() {
+        match webkit_startup_recovery::prepare(data_dir) {
+            Ok(outcome) if outcome.quarantined_cache => {
+                eprintln!(
+                    "buzz-desktop: prior WebKit startup was incomplete; quarantined disposable WebKitCache"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("buzz-desktop: WebKit startup recovery failed: {error}");
+            }
+        }
+    }
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
@@ -293,6 +316,16 @@ pub fn run() {
     };
 
     let app = app_menu::install(builder)
+        .on_page_load(move |webview, payload| {
+            #[cfg(target_os = "linux")]
+            if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Some(data_dir) = webkit_startup_data_dir.as_deref() {
+                    if let Err(error) = webkit_startup_recovery::mark_ready(data_dir) {
+                        eprintln!("buzz-desktop: WebKit startup recovery cleanup failed: {error}");
+                    }
+                }
+            }
+        })
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -915,7 +948,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
