@@ -318,11 +318,45 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
                             missing `containment` as an incomplete review, which is
                             the right reading and must be reserved for the case
                             where this stage genuinely could not produce one.
-        This is deliberately the document #119 already reads, minus the one key it
-        adds itself. #119's STEP 7 takes `{pr, head_sha, merge_base_sha, stages,
-        reports, containment}` on stdin, where `stages` is its own manifest covering
-        stages that emit no envelope. So `reports` and `containment` mean here
-        exactly what they mean there, and #119 wraps rather than restates.
+          nonce             the run nonce, once, at the top level — the same value
+                            contain.render wrapped every surface with and every
+                            report's completion_marker embeds. See below for what
+                            it does and does not prove.
+        WHY THE NONCE IS A KEY, AND WHAT IT DOES NOT DO. Without it the nonce exists
+        only INSIDE each report's completion_marker string, so a downstream stage
+        can compare markers to each other and nothing more. #119's STEP 5 makes a
+        review incomplete when a report's marker "carries the wrong dimension or
+        nonce" — a condition its own input could not support, because no nonce
+        reached it. This key is what makes that check implementable, and it is the
+        reason it exists. It is NOT an authentication token for the document:
+        anyone fabricating the whole document sets the key and the markers
+        consistently, and no value carried in plaintext beside the thing it
+        authenticates can prevent that. What it catches is the threat the marker was
+        designed against — a forged marker COPIED OUT OF THE AUTHOR'S DIFF by a
+        reviewer that echoed it — because that marker carries whatever nonce the
+        author typed and not this run's. Stated plainly because "the document now
+        carries a nonce" reads like a stronger claim than it is, and an overclaimed
+        control is worse than an absent one.
+        The trust boundary, named rather than assumed: #117, #118 and #119 run in
+        one CI job, so the merged document does not cross an untrusted boundary. The
+        untrusted text is the model output each dimension returns, and that is where
+        the marker check bites. If a later phase ever moves a stage to a separate
+        job or a separate machine, this key stops being sufficient and the boundary
+        needs signing, not a shared plaintext value.
+        The nonce must NOT be rendered into the published review body. #119 has no
+        use for it beyond the check, and printing a per-run secret into a public
+        comment teaches a reader it is not one. Leaking it after the run is harmless
+        — it is fresh per run and that run has ended — but there is no reason to.
+        STEP 8's recordings carry a nonce, and a COMMITTED recording's nonce must be
+        seed-derived via `contain.make_nonce(seed)` rather than copied from a live
+        run, so a fixture value is never mistaken for a production one.
+        This is deliberately the document #119 already reads, plus the nonce it
+        needs and minus the one key it adds itself. #119's STEP 7 takes
+        `{pr, head_sha, merge_base_sha, stages, reports, containment}` on stdin,
+        where `stages` is its own manifest covering stages that emit no envelope. So
+        `reports` and `containment` mean here exactly what they mean there, #119
+        wraps rather than restates, and `nonce` is a sixth key it should add to that
+        document and check.
         `outcome: clean` is how "a dimension that finds nothing says so
         explicitly" is distinguished from `status: failed`. Both are legitimate
         outputs; neither is an empty findings array standing alone, which is
@@ -340,12 +374,22 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
         unforgeable by anyone who has not seen it, on the same reasoning
         CONTAINMENT.md gives for the envelope delimiter. `contain.make_nonce` is
         reused, including its refusal to accept a caller-supplied nonce.
+        One nonce per RUN, not per dimension — all three reports embed the same
+        value. So "carries another dimension's nonce" is not an input this contract
+        can produce, and a check written against that phrasing tests nothing. The
+        checks that do bite are: a marker whose nonce differs from the merged
+        document's `nonce`, and markers that disagree with each other. Both are
+        stated here because a downstream stage phrasing the condition the other way
+        would build a fixture no run can generate.
         `findings_count` must equal len(findings). A report truncated mid-array
         fails that equality even if it somehow parses.
         CONTRACT CHANGES SINCE REVISION 3 — for #118 and #119 to diff. #119's plan
         is committed against revision 3 and names its field list explicitly, so
         this block exists so its author can diff old against new without reading a
-        review. Five changes:
+        review. Six changes, and number 6 was raised BY #119's own review — its
+        finding that the nonce half of its completion-marker check could not be
+        implemented from the input this contract supplied. It was right, and the fix
+        belongs here rather than there:
           1. Containment findings are a top-level `containment` sibling key
              carrying raw contain.Finding (severity, kind, entry_point, evidence)
              plus a seven-key `states` map. Revision 3 converted them into
@@ -366,12 +410,27 @@ STEP 1  launchpad/review-agent/FINDINGS.md — the output contract,        [inde
              lists nine and states "#117's envelope carries neither kind nor
              evidence" — the `kind` half stays true (kind lives on the containment
              block, not the finding record), the `evidence` half does not.
+          6. The merged document carries a top-level `nonce` key. Revision 3 carried
+             the nonce only inside each report's completion_marker, so #119's
+             STEP 5 condition "a report's completion_marker carries the wrong
+             dimension or nonce" was unimplementable from its input. #119 should add
+             `nonce` to its STEP 7 stdin document as a sixth key and check each
+             marker against it. Two corrections come with it: the nonce is ONE PER
+             RUN, so "another dimension's nonce" is not an input this contract can
+             produce and a fixture built on that phrasing tests nothing — check a
+             marker against the document's nonce instead; and the key is not an
+             authentication token for the document, only for a marker echoed out of
+             author text, so it must not be described as making the document
+             unforgeable.
         The ten finding fields and eleven envelope fields are otherwise unchanged,
         and no field is renamed. #119's OPEN correctly predicted that a rename would
         cost it STEPs 4, 5, 6, 10 and 12; nothing here renames one.
         done when: FINDINGS.md exists under launchpad/review-agent/; it states all
-        ten finding fields, all eleven envelope fields and all five merged-document
-        keys by the names above; it states that `entry_point` is required on an
+        ten finding fields, all eleven envelope fields and all six merged-document
+        keys by the names above; it states that the nonce is one per run, that a
+        marker is checked against the document's `nonce` rather than against another
+        dimension's, and that the key authenticates an echoed marker and NOT the
+        document; it states that `entry_point` is required on an
         injection finding and `evidence` required with it and RAW; it states that
         containment findings travel in the `containment` sibling key and NOT in any
         dimension's findings array, that `states` carries all seven entry points,
@@ -399,7 +458,10 @@ STEP 2  launchpad/review-agent/findings.py — the contract in code.          [n
         no dimension slug equal to "containment"; on the merged document, a
         `containment` key present whose `states` map carries all seven entry points
         and whose every finding has a `kind` in the three CONTAINMENT.md kinds — a
-        six-key states map is a violation, not a shorter map; and — the rule
+        six-key states map is a violation, not a shorter map; a top-level `nonce`
+        present and equal to the nonce embedded in EVERY report's completion_marker,
+        so a single report carrying a marker copied out of author text is rejected
+        while the other two still validate; and — the rule
         the first revision was missing — `outcome` CROSS-CHECKED AGAINST THE
         FINDINGS ARRAY: "clean" requires findings to be empty, "findings" requires
         it non-empty. Without that rule a report reading status "complete", outcome
@@ -421,7 +483,10 @@ STEP 2  launchpad/review-agent/findings.py — the contract in code.          [n
         with no `entry_point` is rejected, and one with an `entry_point` but no
         `evidence` is rejected; a merged document whose `containment.states` names
         six entry points is rejected; a dimension slug of "containment" is rejected;
-        and `findings.SEVERITY_ORDER is review.SEVERITY_ORDER` is true.
+        a merged document with no top-level `nonce` is rejected, and one where a
+        single report's marker nonce differs from the document's is rejected NAMING
+        THAT REPORT rather than failing the document wholesale; and
+        `findings.SEVERITY_ORDER is review.SEVERITY_ORDER` is true.
 
 STEP 3  launchpad/review-agent/run_dimensions.py — the concurrent  [needs 2]  <- RUNS HERE
         runner. The CLI shell, demonstrable before a single prompt is written.
@@ -545,7 +610,11 @@ STEP 3  launchpad/review-agent/run_dimensions.py — the concurrent  [needs 2]  
         not one message; and a payload carrying a delimiter_forge yields that finding
         in the top-level `containment.findings` array with its `kind` and
         `entry_point` intact and its evidence byte-identical to the author's text,
-        alongside a `containment.states` map of seven keys.
+        alongside a `containment.states` map of seven keys; and the document carries
+        a top-level `nonce` equal to the nonce inside all three completion markers
+        and equal to the one `contain.render` wrapped the surfaces with, asserted by
+        reading it back out of the rendered document rather than from the variable
+        the module already holds — comparing a value to itself proves nothing.
 
 STEP 4  The three dimension definitions, each naming what it must NOT    [needs 1, 3]
         review. Tagged against 3 as well as 1 because its done-when runs
@@ -704,7 +773,13 @@ STEP 8  Recorded reviewer outputs for the deterministic suite.        [needs 3, 
         The model used and the date are recorded in each file. That is provenance,
         not a model choice: #117 puts choosing the model out of scope, and the
         runner still never names one.
+        Each recording's nonce is SEED-DERIVED, via `contain.make_nonce(seed)` with
+        the seed recorded beside the model id. A committed fixture carrying a nonce
+        copied from a live run is a per-run value published in a public repository
+        that reads like a production one, and CONTAINMENT.md reserves the seed flag
+        for exactly this.
         done when: fifteen recordings exist (five fixtures x three dimensions);
+        each carries a seed-derived nonce and the seed that produced it;
         each is valid against `findings.validate`; each carries the model id and
         date it was recorded; a control asserts the replay path makes no network
         call, by injecting a runner that raises if the real `gh` binary or any HTTP
@@ -725,7 +800,15 @@ STEP 9  The control suite — one control per done-criterion.           [needs 5
         control per #117 done-criterion, plus:
           a truncated report — completion marker removed — read as truncated and
             never as clean, asserted for each of the three dimensions
-          a marker present but carrying the WRONG NONCE, rejected
+          a marker present but carrying the WRONG NONCE, rejected — the wrong nonce
+            being one that differs from the merged document's top-level `nonce`, not
+            "another dimension's", since one nonce serves the whole run. The control
+            feeds a nonce lifted from a fixture's diff, which is the real shape of
+            this attack: a reviewer echoing a marker the author wrote
+          the merged document's `nonce` present and equal to the nonce inside all
+            three markers; and a document where exactly ONE report's marker nonce
+            differs is rejected while the validator still names the other two as
+            valid, so a single echoed marker does not discard two good reports
           outcome "clean" distinguished from status "failed" in both directions:
             neither is ever read as the other
           findings_count disagreeing with len(findings), rejected
@@ -923,6 +1006,19 @@ GATES  No verify gate is installed in this checkout — .claude/settings.json is
   revision 3 of this contract and earlier revisions of this plan did not say so.
   This revision is once-reviewed at the margin in the same way its predecessors
   were: the third pass's own fixes have not been reviewed, and the settlement in
+  One change here came from #119's review, not from any pass on this plan. #119's
+  first review found that its STEP 5 condition "a report's completion_marker carries
+  the wrong dimension or nonce" could not be implemented, because the nonce reached
+  it only inside the marker string it was meant to check. That is a defect in THIS
+  contract, surfaced by a review of a different issue, and the merged document now
+  carries a top-level `nonce`. Recorded here because the finding's provenance
+  matters: three passes on this plan did not find it, and the stage that had to
+  consume the contract did. Two overclaims were avoided in fixing it — the nonce is
+  one per RUN, so "another dimension's nonce" is not an input this contract can
+  produce and a check written that way tests nothing; and the key authenticates a
+  marker echoed out of author text, NOT the document, which anyone fabricating the
+  whole document sets consistently. The nonce is on the merged document only, not on
+  the per-report envelope, which stays eleven fields.
   STEP 1 is a decision rather than a correction. A fourth pass is available and was
   not run.
   Then serina:review-code and serina:review-tests after STEP 11, then
