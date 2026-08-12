@@ -212,9 +212,18 @@ gh pr create --base launchpad
 - **Conventional commit titles**: `feat(deploy): ...`, `fix(ci): ...`, `docs(...): ...`.
   We squash-merge, so the **PR title** becomes the commit subject on `launchpad`.
 - **One issue, one PR.** Use a closing keyword — `Closes #12` — so the board updates on
-  merge.
-- **The `launchpad` branch is protected.** PRs require an approving review from another
-  collaborator. You cannot approve your own.
+  merge. If the PR genuinely completes nothing — a plan, one step of a larger task, a
+  docs correction — use `Refs #12` instead. Both satisfy the PR body check; only
+  `Closes` moves the board, so do not reach for it to make a check go green.
+  **Write the reference as plain text, not inside backticks or a code block.** GitHub
+  creates no link from a reference inside code, so one written there closes nothing.
+- **The `launchpad` branch is protected.** PRs require **at least two approving reviews
+  from reviewers with write access**, and you cannot approve your own. The ruleset that
+  enforces this is not readable without `admin:org` — `rules/branches/launchpad`,
+  `rulesets` and `branches/launchpad/protection` all report nothing. A live PR's
+  `reviewDecision` confirms that review is *required* (`REVIEW_REQUIRED`) but exposes no
+  count; the figure of two comes from GitHub's merge box on an open PR, which is the only
+  place it is stated without admin.
 - **Do not force-push during review.** Push new commits instead — force-pushing hides
   what changed from the reviewer.
 

@@ -2,79 +2,76 @@ name: launchpad — PR body check
 
 on:
   pull_request:
-    types: [opened, edited, reopened, labeled, unlabeled, synchronize]
+    types: [opened, edited, reopened, labeled, unlabeled, synchronize, ready_for_review]
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # THIS CHECK IS NOT A SECURITY BOUNDARY, AND MUST NOT BE DESCRIBED AS ONE.
+      #
+      # An earlier version of this file pinned the checkout to the base commit and
+      # claimed that stopped a fork from supplying the checker that judges it. That
+      # was wrong. `on: pull_request` runs the workflow from the PR's own merge ref
+      # — for forks too — so a fork PR already owns every step in this file and can
+      # overwrite or skip the script whichever commit is checked out. Pinning the
+      # ref bought nothing and made a change to the checker unable to test itself.
+      # (Running the BASE workflow for forks is `pull_request_target` behaviour,
+      # which this workflow deliberately does not use.)
+      #
+      # The real boundary is elsewhere, and it is enough: a fork-triggered run gets
+      # a read-only GITHUB_TOKEN with no repository secrets, and merging needs two
+      # approving reviews from people with write access. A defeated body check
+      # misleads a reviewer; it cannot merge anything or write anywhere.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # A missing checker is not a passing body. Cheap insurance against a partial
+      # checkout, or a branch that predates the script.
+      - name: Confirm the checker exists
+        run: |
+          test -f launchpad/scripts/pr_body_check.py || {
+            echo "::error::launchpad/scripts/pr_body_check.py is missing from the commit under check."
+            exit 1
+          }
+
+      # GitHub already knows whether this PR will close an issue. Asking it is the
+      # only reliable answer: a regex over the body cannot tell a real reference
+      # from one written inside code, and CommonMark has more code forms than a
+      # pattern enumerates — four of them defeated the previous version (#125).
+      #
+      # On failure CLOSING_REFS stays empty, which the script reads as "unknown"
+      # rather than "none", and it says so in its output instead of guessing.
+      - name: Ask GitHub which issues this PR closes
+        id: closing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          refs="$(gh api graphql \
+            -f query='query($owner:String!,$repo:String!,$num:Int!){
+                repository(owner:$owner,name:$repo){
+                  pullRequest(number:$num){
+                    closingIssuesReferences(first:50){nodes{number}}}}}' \
+            -F owner="$OWNER" -F repo="$REPO" -F num="$NUMBER" \
+            --jq '[.data.repository.pullRequest.closingIssuesReferences.nodes[].number]' \
+            2>/dev/null)" || refs=""
+          echo "refs=${refs}" >> "$GITHUB_OUTPUT"
+          if [ -z "$refs" ]; then
+            echo "::warning::Could not read closingIssuesReferences; the check will degrade to a text search and will not verify that the board updates on merge."
+          fi
+
       - name: Validate PR body
         env:
           BODY: ${{ github.event.pull_request.body }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: |
-          python3 - <<'PY'
-          import json, os, re, sys
-
-          body = os.environ.get("BODY") or ""
-          labels = json.loads(os.environ.get("LABELS") or "[]")
-          is_agent = "by:agent" in labels
-          errors = []
-
-          # Strip HTML comments so unfilled placeholders never count as content.
-          visible = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-
-          def section(name):
-              """Text under a '### name' heading, up to the next heading."""
-              m = re.search(rf"^#+\s*{re.escape(name)}\s*$(.*?)(?=^#+\s|\Z)",
-                            visible, flags=re.M | re.S)
-              return m.group(1).strip() if m else None
-
-          if not visible.strip():
-              errors.append("PR body is empty. Use the PR template.")
-
-          if not re.search(r"\b(Closes|Fixes|Resolves)\s+#\d+", visible, re.I):
-              errors.append(
-                  "No closing keyword found. Add 'Closes #<n>' so the board updates on merge.")
-
-          itype = section("Issue type")
-          valid = {"PRD", "Task", "Enhancement", "Bug", "ADR"}
-          if not itype:
-              errors.append("Missing '### Issue type' section.")
-          elif not any(v.lower() in itype.lower() for v in valid):
-              errors.append(
-                  f"Issue type must be one of {sorted(valid)}. Found: {itype!r}")
-
-          if is_agent:
-              for field in ("Harness / provider", "Model", "Initiating human"):
-                  # Table rows: | Field | Value |
-                  m = re.search(rf"\|\s*{re.escape(field)}\s*\|(.*?)\|", visible)
-                  if not m or not m.group(1).strip():
-                      errors.append(
-                          f"by:agent PR missing provenance value for '{field}'.")
-
-              nv = section("Not verified")
-              if not nv:
-                  errors.append("by:agent PR missing '### Not verified' section.")
-              elif nv.lower().strip(" .") in {"nothing", "none", "n/a", ""}:
-                  errors.append(
-                      "'Not verified' must name something specific. "
-                      "There is always something that was not checked.")
-
-              if "```" not in visible:
-                  errors.append(
-                      "by:agent PR must paste raw command output in a fenced code block.")
-
-          if errors:
-              print("PR body check failed:\n")
-              for e in errors:
-                  print(f"  - {e}")
-              print("\nHuman PRs: .github/PULL_REQUEST_TEMPLATE.md")
-              print("Agent PRs: launchpad/AGENT_PR_TEMPLATE.md")
-              sys.exit(1)
-
-          print("PR body check passed." + (" (agent)" if is_agent else " (human)"))
-          PY
+          CLOSING_REFS: ${{ steps.closing.outputs.refs }}
+        run: python3 launchpad/scripts/pr_body_check.py
