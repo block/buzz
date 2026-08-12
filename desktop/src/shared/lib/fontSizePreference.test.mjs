@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import config from "../../../tailwind.config.js";
+
 const values = new Map();
 const attributes = new Map();
 const styleValues = new Map();
@@ -24,6 +26,18 @@ globalThis.document = {
 };
 
 const preference = await import("./fontSizePreference.ts");
+
+test("scales fixed line-height utilities with the typography rem", () => {
+  assert.deepEqual(config.theme.extend.lineHeight, {
+    3: "calc(var(--buzz-type-rem) * 0.75)",
+    4: "var(--buzz-type-rem)",
+    5: "calc(var(--buzz-type-rem) * 1.25)",
+    6: "calc(var(--buzz-type-rem) * 1.5)",
+    7: "calc(var(--buzz-type-rem) * 1.75)",
+    8: "calc(var(--buzz-type-rem) * 2)",
+    "message-author": "var(--conversation-author-line-height)",
+  });
+});
 
 test("defaults invalid and missing font sizes to default", () => {
   assert.equal(preference.parseFontSize(null), "default");

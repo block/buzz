@@ -33,6 +33,15 @@ export default {
         ],
       },
       lineHeight: {
+        // Keep fixed Tailwind line-height utilities in the typography scale so
+        // Cmd +/- cannot enlarge glyphs inside an unchanged line box. Single-
+        // line surfaces keep their existing truncate/overflow behavior.
+        3: "calc(var(--buzz-type-rem) * 0.75)",
+        4: "var(--buzz-type-rem)",
+        5: "calc(var(--buzz-type-rem) * 1.25)",
+        6: "calc(var(--buzz-type-rem) * 1.5)",
+        7: "calc(var(--buzz-type-rem) * 1.75)",
+        8: "calc(var(--buzz-type-rem) * 2)",
         "message-author": "var(--conversation-author-line-height)",
       },
       boxShadow: {
