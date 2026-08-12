@@ -2,8 +2,14 @@ import * as React from "react";
 
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useCanvasQuery, useChannelsQuery } from "@/features/channels/hooks";
+import {
+  type ChannelViewMode,
+  resolveChannelViewMode,
+} from "@/features/channels/lib/canvasBoard";
+import { ChannelBoardScreen } from "@/features/channels/ui/ChannelBoardScreen";
 import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
+import { ChannelViewModeProvider } from "@/features/channels/ui/ChannelViewModeContext";
 import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import {
@@ -19,6 +25,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
+  hasStreamRouteIntent: boolean;
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
@@ -99,6 +106,7 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   autoSendDraftKey,
   channelId,
+  hasStreamRouteIntent,
   selectedPostId,
   targetMessageId,
   targetReplyId,
@@ -112,6 +120,39 @@ export function ChannelRouteScreen({
   const channels = channelsQuery.data ?? [];
   const activeChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
+  const canvasQuery = useCanvasQuery(
+    activeChannel?.id ?? null,
+    activeChannel !== null && activeChannel.channelType !== "dm",
+  );
+  const [viewSelection, setViewSelection] = React.useState<{
+    channelId: string;
+    mode: ChannelViewMode;
+  } | null>(null);
+  const hasRouteTarget = Boolean(
+    hasStreamRouteIntent ||
+      selectedPostId ||
+      targetMessageId ||
+      targetThreadRootId,
+  );
+  const explicitView =
+    viewSelection?.channelId === channelId ? viewSelection.mode : null;
+  const channelView = resolveChannelViewMode({
+    channelName: activeChannel?.name ?? null,
+    channelType: activeChannel?.channelType ?? null,
+    explicitView,
+    hasCanvas: Boolean(canvasQuery.data?.content?.trim()),
+    hasRouteTarget,
+  });
+  const handleViewModeChange = React.useCallback(
+    (mode: ChannelViewMode) => setViewSelection({ channelId, mode }),
+    [channelId],
+  );
+
+  React.useEffect(() => {
+    if (hasRouteTarget) {
+      setViewSelection({ channelId, mode: "stream" });
+    }
+  }, [channelId, hasRouteTarget]);
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -201,21 +242,39 @@ export function ChannelRouteScreen({
   }
 
   return (
-    <ChannelScreen
-      activeChannel={activeChannel}
-      autoSendDraftKey={autoSendDraftKey}
-      currentIdentity={identityQuery.data}
-      currentProfile={profileQuery.data}
-      onCloseForumPost={() => {
-        void closeForumPost(channelId);
+    <ChannelViewModeProvider
+      value={{
+        boardAvailable: channelView.boardAvailable && !hasRouteTarget,
+        mode: channelView.mode,
+        onModeChange: handleViewModeChange,
       }}
-      onSelectForumPost={(postId) => {
-        void goForumPost(channelId, postId);
-      }}
-      selectedForumPostId={selectedPostId}
-      targetForumReplyId={targetReplyId}
-      targetMessageEvents={targetMessageEvents}
-      targetMessageId={targetMessageId}
-    />
+    >
+      {channelView.mode === "board" && activeChannel ? (
+        <ChannelBoardScreen
+          canvas={canvasQuery.data}
+          canvasError={canvasQuery.error}
+          canvasLoading={canvasQuery.isLoading}
+          channel={activeChannel}
+          currentPubkey={identityQuery.data?.pubkey}
+        />
+      ) : (
+        <ChannelScreen
+          activeChannel={activeChannel}
+          autoSendDraftKey={autoSendDraftKey}
+          currentIdentity={identityQuery.data}
+          currentProfile={profileQuery.data}
+          onCloseForumPost={() => {
+            void closeForumPost(channelId);
+          }}
+          onSelectForumPost={(postId) => {
+            void goForumPost(channelId, postId);
+          }}
+          selectedForumPostId={selectedPostId}
+          targetForumReplyId={targetReplyId}
+          targetMessageEvents={targetMessageEvents}
+          targetMessageId={targetMessageId}
+        />
+      )}
+    </ChannelViewModeProvider>
   );
 }
